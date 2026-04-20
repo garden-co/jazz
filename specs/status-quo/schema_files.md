@@ -66,9 +66,9 @@ Migrations are a separate workflow from validation.
 The current mental model is:
 
 - schemas are stored on the server and identified by hash
-- `jazz-tools migrations create --fromHash <fromHash> --toHash <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
+- `jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
 - the developer reviews and edits that file
-- `jazz-tools migrations push <fromHash> <toHash>` publishes the reviewed migration edge back to the server
+- `jazz-tools migrations push <appId> <fromHash> <toHash>` publishes the reviewed migration edge back to the server
 
 Merge-strategy-only schema changes count as structural schema changes for hashing and migration
 generation, but they do not require row transforms because they reinterpret future conflict

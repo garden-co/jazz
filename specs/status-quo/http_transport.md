@@ -1,33 +1,27 @@
-# HTTP/SSE Transport Protocol — Status Quo
+# HTTP/WebSocket Transport Protocol — Status Quo
 
-Jazz uses a deliberately small HTTP transport surface:
+Jazz uses a deliberately small transport surface:
 
-- `POST /sync` for client-to-server batches
-- `GET /events` for server-to-client streaming updates
+- `GET /apps/:app_id/ws` for bidirectional sync over WebSocket
+- `GET /apps/:app_id/schemas` and `GET /apps/:app_id/schema/:hash` for schema catalogue reads
+- `POST /apps/:app_id/admin/...` for admin publication flows
+- `GET /health` at the server root
 
 That is enough because the interesting structure lives inside the typed sync payloads, not in a sprawling list of special-purpose endpoints.
 
-## The Two Channels
+## The Main Channel
 
-### `/sync`
+### `/apps/:app_id/ws`
 
-Clients POST a `SyncBatchRequest`:
-
-- one `client_id`
-- an ordered list of `SyncPayload`s
-
-The server applies them in order and returns a `SyncBatchResponse` with one success/error result per payload.
-
-### `/events`
-
-Clients open a long-lived stream and receive `ServerEvent`s such as:
+Clients open one WebSocket and exchange framed sync messages carrying payloads such as:
 
 - `Connected`
 - `SyncUpdate`
 - `Error`
 - `Heartbeat`
 
-The stream uses length-prefixed binary frames containing JSON payloads. That keeps parsing simple without turning the SSE body into newline-escaped JSON soup.
+The connection is app-scoped, so every non-health server interaction uses the same `/apps/<app_id>/...`
+prefix as the cloud server.
 
 ## What Actually Travels
 
@@ -79,13 +73,11 @@ can all use the same transport vocabulary instead of inventing a query-only side
 
 The in-repo server keeps a small route set:
 
-- `/events`
-- `/sync`
-- `/schemas`
-- `/schema/:hash`
+- `/apps/:app_id/ws`
+- `/apps/:app_id/schemas`
+- `/apps/:app_id/schema/:hash`
+- `/apps/:app_id/admin/...`
 - `/health`
-
-The cloud server exposes equivalent app-scoped routes under `/apps/:app_id/...` while preserving the same transport semantics.
 
 ## Key Files
 
