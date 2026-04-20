@@ -703,12 +703,26 @@ type EnforceReferenceColumnNames<T extends Record<string, ColumnBuilder>> = {
 export function table<const T extends Record<string, ColumnBuilder>>(
   name: string,
   columns: EnforceReferenceColumnNames<T>,
+  options?: { requiresTransaction?: boolean },
 ): void {
   if (arguments.length > 2) {
-    throw new Error(
-      "Inline table permissions are no longer supported in schema.ts. " +
-        "Define policies in permissions.ts with definePermissions(...).",
-    );
+    const invalidOptions =
+      options === null ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      Object.keys(options).some((key) => key !== "requiresTransaction");
+    if (invalidOptions) {
+      throw new Error(
+        "Inline table permissions are no longer supported in schema.ts. " +
+          "Define policies in permissions.ts with definePermissions(...).",
+      );
+    }
+    if (
+      options.requiresTransaction !== undefined &&
+      typeof options.requiresTransaction !== "boolean"
+    ) {
+      throw new Error("table(..., options) requires requiresTransaction to be a boolean.");
+    }
   }
 
   const cols: Column[] = [];
@@ -720,6 +734,7 @@ export function table<const T extends Record<string, ColumnBuilder>>(
   collectedTables.push({
     name,
     columns: cols,
+    requiresTransaction: options?.requiresTransaction,
   });
 }
 

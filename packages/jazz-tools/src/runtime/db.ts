@@ -347,6 +347,19 @@ function resolveSchemaWithTable(
   return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
 }
 
+function assertDirectWritesAllowed<T, Init>(
+  table: TableProxy<T, Init>,
+  runtimeSchema: WasmSchema,
+  operation: string,
+): void {
+  const resolvedSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+  if (resolvedSchema[table._table]?.requiresTransaction) {
+    throw new Error(
+      `${operation} cannot target table "${table._table}" because the schema requires transactional writes.`,
+    );
+  }
+}
+
 function assertTableBelongsToClient<T, Init>(
   table: TableProxy<T, Init>,
   expectedClient: JazzClient,
@@ -594,6 +607,11 @@ export class DbDirectBatch {
   }
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -608,6 +626,11 @@ export class DbDirectBatch {
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -620,6 +643,11 @@ export class DbDirectBatch {
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -634,6 +662,11 @@ export class DbDirectBatch {
     data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -648,6 +681,11 @@ export class DbDirectBatch {
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     this.assertOwnsTable(table, "DbDirectBatch");
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     this.runtimeBatch.delete(id);
   }
 
@@ -657,6 +695,11 @@ export class DbDirectBatch {
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
     this.assertOwnsTable(table, "DbDirectBatch");
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.client.getSchema()),
+      "DbDirectBatch",
+    );
     const pendingWrite = this.runtimeBatch.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,
@@ -2114,6 +2157,7 @@ export class Db {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(table, normalizeRuntimeSchema(client.getSchema()), "Db.insert");
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
@@ -2137,6 +2181,11 @@ export class Db {
     options: CreateDurabilityOptions,
   ): Promise<T> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.insertDurable",
+    );
     const inputSchema = resolveSchemaWithTable(
       table._schema,
       normalizeRuntimeSchema(client.getSchema()),
@@ -2154,6 +2203,11 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.insertPersisted",
+    );
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const pendingWrite = client.createPersisted(table._table, values, options);
     return this.wrapPersistedWrite(
@@ -2168,6 +2222,7 @@ export class Db {
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(table, normalizeRuntimeSchema(client.getSchema()), "Db.upsert");
     const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.upsert(table._table, values, options);
   }
@@ -2181,6 +2236,11 @@ export class Db {
     options: UpsertDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.upsertDurable",
+    );
     const inputSchema = resolveSchemaWithTable(
       table._schema,
       normalizeRuntimeSchema(client.getSchema()),
@@ -2201,6 +2261,7 @@ export class Db {
     options?: UpdateOptions,
   ): void {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(table, normalizeRuntimeSchema(client.getSchema()), "Db.update");
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.update(id, updates, options);
   }
@@ -2215,6 +2276,11 @@ export class Db {
     options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.updateDurable",
+    );
     const inputSchema = resolveSchemaWithTable(
       table._schema,
       normalizeRuntimeSchema(client.getSchema()),
@@ -2232,6 +2298,11 @@ export class Db {
     options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.updatePersisted",
+    );
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     const pendingWrite = client.updatePersisted(id, updates, options);
     return this.wrapPersistedWrite(
@@ -2246,6 +2317,7 @@ export class Db {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(table, normalizeRuntimeSchema(client.getSchema()), "Db.delete");
     client.delete(id);
   }
 
@@ -2258,6 +2330,11 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.deleteDurable",
+    );
     await this.ensureBridgeReady();
     await client.deleteDurable(id, options);
   }
@@ -2268,6 +2345,11 @@ export class Db {
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.deletePersisted",
+    );
     const pendingWrite = client.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       client,
@@ -2293,6 +2375,11 @@ export class Db {
 
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.getClient(table._schema);
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.beginDirectBatch",
+    );
     return new DbDirectBatch(
       client,
       client.beginDirectBatchInternal(),
@@ -2700,6 +2787,7 @@ class ClientBackedDb extends Db {
 
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.insert");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = this.runtimeClient.createInternal(
@@ -2718,6 +2806,7 @@ class ClientBackedDb extends Db {
     options: CreateDurabilityOptions,
   ): Promise<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.insertDurable");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await this.runtimeClient.createDurableInternal(
@@ -2736,6 +2825,7 @@ class ClientBackedDb extends Db {
     options: UpsertOptions,
   ): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.upsert");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     this.runtimeClient.upsertInternal(
@@ -2754,6 +2844,7 @@ class ClientBackedDb extends Db {
     options: UpsertDurabilityOptions,
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.upsertDurable");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await this.runtimeClient.upsertDurableInternal(
@@ -2772,6 +2863,7 @@ class ClientBackedDb extends Db {
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.insertPersisted");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const pendingWrite = this.runtimeClient.createPersistedInternal(
@@ -2795,6 +2887,7 @@ class ClientBackedDb extends Db {
     options?: UpdateOptions,
   ): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.update");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     this.runtimeClient.updateInternal(
@@ -2814,6 +2907,7 @@ class ClientBackedDb extends Db {
     options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.updateDurable");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await this.runtimeClient.updateDurableInternal(
@@ -2833,6 +2927,7 @@ class ClientBackedDb extends Db {
     options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    assertDirectWritesAllowed(table, runtimeSchema, "Db.updatePersisted");
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     const pendingWrite = this.runtimeClient.updatePersistedInternal(
@@ -2851,23 +2946,38 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
+  override delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+      "Db.delete",
+    );
     this.runtimeClient.deleteInternal(id, this.session, this.attribution);
   }
 
   override async deleteDurable<T, Init>(
-    _table: TableProxy<T, Init>,
+    table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+      "Db.deleteDurable",
+    );
     await this.runtimeClient.deleteDurableInternal(id, this.session, this.attribution, options);
   }
 
   override deletePersisted<T, Init>(
-    _table: TableProxy<T, Init>,
+    table: TableProxy<T, Init>,
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+      "Db.deletePersisted",
+    );
     const pendingWrite = this.runtimeClient.deletePersistedInternal(
       id,
       this.session,
@@ -2894,6 +3004,11 @@ class ClientBackedDb extends Db {
 
   override beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.runtimeClient;
+    assertDirectWritesAllowed(
+      table,
+      normalizeRuntimeSchema(client.getSchema()),
+      "Db.beginDirectBatch",
+    );
     return new DbDirectBatch(
       client,
       client.beginDirectBatchInternal(this.session, this.attribution),

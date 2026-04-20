@@ -17,8 +17,8 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V4 as u8;
-const LENS_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V5 as u8;
+const LENS_VERSION: u8 = 3;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
@@ -34,6 +34,8 @@ enum SchemaEncodingVersion {
     V3 = 3,
     // v4 schemas include column defaults.
     V4 = 4,
+    // v5 schemas include table-level transaction requirements.
+    V5 = 5,
 }
 
 impl SchemaEncodingVersion {
@@ -43,6 +45,7 @@ impl SchemaEncodingVersion {
             2 => Some(Self::V2),
             3 => Some(Self::V3),
             4 => Some(Self::V4),
+            5 => Some(Self::V5),
             _ => None,
         }
     }
@@ -56,7 +59,11 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4)
+        matches!(self, Self::V4 | Self::V5)
+    }
+
+    fn has_requires_transaction(self) -> bool {
+        matches!(self, Self::V5)
     }
 }
 
@@ -114,7 +121,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V4;
+    let version = SchemaEncodingVersion::V5;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -160,6 +167,9 @@ fn encode_table_entry_with_version(
     if version.has_table_policies() {
         encode_table_policies(buf, &schema.policies);
     }
+    if version.has_requires_transaction() {
+        buf.push(if schema.requires_transaction { 1 } else { 0 });
+    }
 }
 
 fn decode_table_entry_with_version(
@@ -175,12 +185,18 @@ fn decode_table_entry_with_version(
         // separately.
         decode_table_policies(data, offset)?;
     }
+    let requires_transaction = if version.has_requires_transaction() {
+        read_u8(data, offset)? != 0
+    } else {
+        false
+    };
 
     Ok((
         TableName::new(name),
         TableSchema {
             columns: descriptor,
             policies: TablePolicies::default(),
+            requires_transaction,
         },
     ))
 }
@@ -506,7 +522,8 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     let version = data[0];
     match version {
         1 => decode_lens_transform_v1(data),
-        LENS_VERSION => decode_lens_transform_v2(data),
+        2 => decode_lens_transform_v2(data),
+        LENS_VERSION => decode_lens_transform_v3(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
@@ -659,6 +676,24 @@ fn decode_lens_transform_v2(data: &[u8]) -> Result<LensTransform, CatalogueEncod
     let op_count = read_u32(data, &mut offset)?;
     let mut ops = Vec::with_capacity(op_count as usize);
     for _ in 0..op_count {
+        ops.push(decode_lens_op_v2(data, &mut offset)?);
+    }
+
+    let draft_count = read_u32(data, &mut offset)?;
+    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    for _ in 0..draft_count {
+        draft_ops.push(read_u32(data, &mut offset)? as usize);
+    }
+
+    Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_transform_v3(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+    let mut offset = 1;
+
+    let op_count = read_u32(data, &mut offset)?;
+    let mut ops = Vec::with_capacity(op_count as usize);
+    for _ in 0..op_count {
         ops.push(decode_lens_op(data, &mut offset)?);
     }
 
@@ -669,6 +704,65 @@ fn decode_lens_transform_v2(data: &[u8]) -> Result<LensTransform, CatalogueEncod
     }
 
     Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_op_v2(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
+    let tag = read_u8(data, offset)?;
+    match tag {
+        OP_RENAME_TABLE => {
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameTable { old_name, new_name })
+        }
+        OP_ADD_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_REMOVE_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::RemoveColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_RENAME_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameColumn {
+                table,
+                old_name,
+                new_name,
+            })
+        }
+        OP_ADD_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v2(data, offset)?;
+            Ok(LensOp::AddTable { table, schema })
+        }
+        OP_REMOVE_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v2(data, offset)?;
+            Ok(LensOp::RemoveTable { table, schema })
+        }
+        _ => Err(CatalogueEncodingError::InvalidTypeTag {
+            tag,
+            context: "lens_op",
+        }),
+    }
 }
 
 fn decode_lens_op_v1(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
@@ -727,6 +821,7 @@ fn decode_lens_op_v1(data: &[u8], offset: &mut usize) -> Result<LensOp, Catalogu
 
 fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
     encode_row_descriptor(buf, &schema.columns);
+    buf.push(if schema.requires_transaction { 1 } else { 0 });
 }
 
 fn decode_table_schema(
@@ -737,6 +832,19 @@ fn decode_table_schema(
     Ok(TableSchema {
         columns: descriptor,
         policies: TablePolicies::default(),
+        requires_transaction: read_u8(data, offset)? != 0,
+    })
+}
+
+fn decode_table_schema_v2(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<TableSchema, CatalogueEncodingError> {
+    let descriptor = decode_row_descriptor(data, offset)?;
+    Ok(TableSchema {
+        columns: descriptor,
+        policies: TablePolicies::default(),
+        requires_transaction: false,
     })
 }
 
@@ -749,6 +857,7 @@ fn decode_table_schema_v1(
     Ok(TableSchema {
         columns: descriptor,
         policies: TablePolicies::default(),
+        requires_transaction: false,
     })
 }
 

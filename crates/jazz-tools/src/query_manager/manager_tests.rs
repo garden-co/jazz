@@ -10433,6 +10433,7 @@ fn e2e_permissions_prevent_sync() {
             ]),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            requires_transaction: false,
         },
     );
 
@@ -10521,6 +10522,7 @@ fn e2e_permissions_prevent_new_row_sync() {
             ]),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            requires_transaction: false,
         },
     );
 
@@ -10685,6 +10687,7 @@ fn sync_backed_session_subscription_keeps_local_rows_when_server_scope_is_empty(
             ]),
             policies: TablePolicies::new()
                 .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+            requires_transaction: false,
         },
     );
 
@@ -10775,6 +10778,7 @@ fn sync_backed_exists_rel_session_subscription_keeps_local_rows_when_server_scop
                     ]),
                 },
             }),
+            requires_transaction: false,
         },
     );
     schema.insert(
@@ -10873,6 +10877,7 @@ fn sync_backed_exists_session_subscription_keeps_local_rows_when_server_scope_is
                     PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
                 ])),
             }),
+            requires_transaction: false,
         },
     );
     schema.insert(
@@ -10990,6 +10995,7 @@ fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_serv
                     ]),
                 },
             }),
+            requires_transaction: false,
         },
     );
     schema.insert(
@@ -11106,6 +11112,7 @@ fn fail_closed_server_does_not_emit_scope_snapshot_before_permissions_head() {
                     ]),
                 },
             }),
+            requires_transaction: false,
         },
     );
     schema.insert(
@@ -11236,6 +11243,7 @@ fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
                     ]),
                 },
             }),
+            requires_transaction: false,
         },
     );
     schema.insert(

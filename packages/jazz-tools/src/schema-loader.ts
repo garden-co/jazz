@@ -100,6 +100,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     name,
     columns: table.columns.map(wasmColumnToAst),
     policies: table.policies as TablePolicies | undefined,
+    requiresTransaction: table.requiresTransaction,
   };
 }
 

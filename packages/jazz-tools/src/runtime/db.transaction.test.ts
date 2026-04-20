@@ -39,8 +39,33 @@ function todoSchema(): WasmSchema {
   };
 }
 
+function transactionRequiredTodoSchema(): WasmSchema {
+  return {
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      ],
+      requiresTransaction: true,
+    },
+  };
+}
+
 function todoTable() {
   const schema = todoSchema();
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: {} as { id: string; title: string; done: boolean },
+    _initType: {} as { title: string; done: boolean },
+  } satisfies TableProxy<
+    { id: string; title: string; done: boolean },
+    { title: string; done: boolean }
+  >;
+}
+
+function transactionRequiredTodoTable() {
+  const schema = transactionRequiredTodoSchema();
   return {
     _table: "todos",
     _schema: schema,
@@ -452,5 +477,67 @@ describe("Db transactions", () => {
       /cannot be used with table "todos" from a different schema\/client/,
     );
     expect(runtimeBatch.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects direct db writes for tables that require transactions", () => {
+    const table = transactionRequiredTodoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-required-transaction"),
+      create: vi.fn(() => ({
+        id: "todo-required-1",
+        values: [
+          { type: "Text", value: "Transactional only" },
+          { type: "Boolean", value: false },
+        ],
+      })),
+      createPersisted: vi.fn(),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      commit: vi.fn(() => "batch-required-transaction"),
+      localBatchRecord: vi.fn((batchId = "batch-required-transaction") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-required-transaction")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const create = vi.fn();
+    const createPersisted = vi.fn();
+    const beginDirectBatchInternal = vi.fn();
+    const beginTransactionInternal = vi.fn(() => runtimeTransaction);
+    const client = {
+      getSchema: () => new Map(Object.entries(transactionRequiredTodoSchema())),
+      create,
+      createPersisted,
+      beginDirectBatchInternal,
+      beginTransactionInternal,
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    expect(() => db.insert(table, { title: "Transactional only", done: false })).toThrow(
+      /requires transactional writes/i,
+    );
+    expect(() => db.insertPersisted(table, { title: "Transactional only", done: false })).toThrow(
+      /requires transactional writes/i,
+    );
+    expect(() => db.beginDirectBatch(table)).toThrow(/requires transactional writes/i);
+    expect(create).not.toHaveBeenCalled();
+    expect(createPersisted).not.toHaveBeenCalled();
+    expect(beginDirectBatchInternal).not.toHaveBeenCalled();
+
+    const tx = db.beginTransaction(table);
+    expect(tx.insert(table, { title: "Transactional only", done: false })).toEqual({
+      id: "todo-required-1",
+      title: "Transactional only",
+      done: false,
+    });
+    expect(beginTransactionInternal).toHaveBeenCalledWith();
+    expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Transactional only" },
+      done: { type: "Boolean", value: false },
+    });
   });
 });

@@ -61,6 +61,10 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
+    /// Table requires transactional write mode.
+    TransactionRequired {
+        table: TableName,
+    },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -94,6 +98,9 @@ impl std::fmt::Display for QueryError {
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
+            }
+            QueryError::TransactionRequired { table } => {
+                write!(f, "table {} requires transactional writes", table)
             }
             QueryError::UnknownSchema(hash) => {
                 write!(
@@ -260,6 +267,7 @@ pub(super) struct WriteTableCacheEntry {
     pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
     pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
     pub(super) select_policy: Option<Arc<PolicyExpr>>,
+    pub(super) requires_transaction: bool,
 }
 
 /// Server-side query subscription state.

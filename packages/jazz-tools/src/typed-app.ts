@@ -24,6 +24,10 @@ export interface TableIndex<TColumns extends TableDefinition = TableDefinition> 
   readonly columns: readonly Extract<keyof TColumns, string>[];
 }
 
+export interface TableOptions {
+  readonly requiresTransaction?: boolean;
+}
+
 // Wrap table columns so we can hang chained modifiers like .index(...) off tables
 // without changing the column-level schema representation the runtime uses today.
 export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
@@ -32,6 +36,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   constructor(
     public readonly columns: TColumns,
     public readonly indexes: readonly TableIndex[] = [],
+    public readonly options: TableOptions = {},
   ) {}
 
   index<
@@ -53,13 +58,24 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, [
-      ...this.indexes,
-      {
-        name: normalizedName,
-        columns: normalizedColumns,
-      },
-    ]);
+    return new DefinedTable(
+      this.columns,
+      [
+        ...this.indexes,
+        {
+          name: normalizedName,
+          columns: normalizedColumns,
+        },
+      ],
+      this.options,
+    );
+  }
+
+  requireTransaction(): DefinedTable<TColumns> {
+    return new DefinedTable(this.columns, this.indexes, {
+      ...this.options,
+      requiresTransaction: true,
+    });
   }
 }
 
@@ -1188,6 +1204,26 @@ export function unwrapTableDefinition<const TColumns extends TableDefinition>(
   return definition;
 }
 
+export function resolveTableOptions<const TColumns extends TableDefinition>(
+  definition: TColumns | DefinedTable<TColumns>,
+): TableOptions {
+  if (definition instanceof DefinedTable) {
+    return definition.options;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      options?: TableOptions;
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.options ?? {};
+    }
+  }
+
+  return {};
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1205,6 +1241,7 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => ({
       name: tableName,
       columns: definitionToColumns(tableDefinition),
+      requiresTransaction: resolveTableOptions(tableDefinition).requiresTransaction,
     })),
   };
 }

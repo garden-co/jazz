@@ -122,6 +122,24 @@ describe("schema default DSL", () => {
   });
 });
 
+describe("table transactionality DSL", () => {
+  it("marks side-effect tables as transaction-required", () => {
+    resetCollectedState();
+    table(
+      "audit_logs",
+      {
+        message: col.string(),
+      },
+      { requiresTransaction: true },
+    );
+
+    expect(getCollectedSchema().tables[0]).toMatchObject({
+      name: "audit_logs",
+      requiresTransaction: true,
+    });
+  });
+});
+
 describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();
