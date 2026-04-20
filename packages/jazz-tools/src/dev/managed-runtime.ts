@@ -4,6 +4,10 @@ import { join } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
+function defaultPersistentDataDir(projectRoot: string): string {
+  return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
+}
+
 const LOG_PREFIX = "[jazz]";
 
 export type ManagedRuntime = {
@@ -211,6 +215,13 @@ export class ManagedDevRuntime {
             options.appId ??
             randomUUID();
 
+          let dataDir = serverConfig.dataDir;
+          if (dataDir === undefined && serverConfig.inMemory !== true) {
+            const projectRoot = options.envDir ?? schemaDir;
+            dataDir = defaultPersistentDataDir(projectRoot);
+            await mkdir(dataDir, { recursive: true });
+          }
+
           const { startLocalJazzServer } = await import("./dev-server.js");
           this.serverHandle = await startLocalJazzServer({
             appId,
@@ -218,7 +229,7 @@ export class ManagedDevRuntime {
             adminSecret,
             backendSecret: options.backendSecret,
             allowLocalFirstAuth: serverConfig.allowLocalFirstAuth,
-            dataDir: serverConfig.dataDir,
+            dataDir,
             inMemory: serverConfig.inMemory,
             jwksUrl: serverConfig.jwksUrl,
             catalogueAuthority: serverConfig.catalogueAuthority,
