@@ -313,13 +313,9 @@ function readFragmentConfig(): DbConfigFormValues | null {
   if (!raw) return null;
 
   const params = new URLSearchParams(raw);
-  const hasKnownPrefillParam = [
-    "serverUrl",
-    "appId",
-    "adminSecret",
-    "env",
-    "branch",
-  ].some((key) => params.has(key));
+  const hasKnownPrefillParam = ["serverUrl", "appId", "adminSecret", "env", "branch"].some((key) =>
+    params.has(key),
+  );
 
   if (!hasKnownPrefillParam) {
     return null;
