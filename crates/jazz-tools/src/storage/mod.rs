@@ -120,7 +120,7 @@ const BRANCH_ORD_NEXT_ORD_KEY: &str = "next_ord";
 pub(crate) const STORE_MANIFEST_KEY: &str = "__jazz_store_manifest";
 const STORE_MANIFEST_MAGIC: &[u8; 10] = b"JAZZSTORE1";
 const STORE_FORMAT_V3: i32 = 3;
-const ROW_STORAGE_FORMAT_V2: i32 = 2;
+const ROW_STORAGE_FORMAT_V3: i32 = 3;
 const ROW_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
 const EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
 const CATALOGUE_STORAGE_FORMAT_V1: i32 = 1;
@@ -260,7 +260,7 @@ impl RawTableHeader {
         let table_name: SharedString = table_name.into().into();
         Self {
             storage_kind: kind.storage_kind().into(),
-            storage_format_version: ROW_STORAGE_FORMAT_V2,
+            storage_format_version: ROW_STORAGE_FORMAT_V3,
             logical_table_name: Some(table_name),
             schema_hash: Some(schema_hash),
             row_descriptor_bytes: Some(
@@ -959,7 +959,7 @@ fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageEr
         STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
         STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
         STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),
-        "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V2),
+        "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V3),
         other => Err(StorageError::IoError(format!(
             "unknown raw table header storage_kind '{other}'"
         ))),

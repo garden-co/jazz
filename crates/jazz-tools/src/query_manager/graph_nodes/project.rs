@@ -114,6 +114,7 @@ impl ProjectNode {
                         nullable: source_column.nullable,
                         references: source_column.references,
                         default: source_column.default.clone(),
+                        merge_strategy: source_column.merge_strategy,
                     }
                 }
                 ProjectionSource::RowId { .. } => ColumnDescriptor {
@@ -122,6 +123,7 @@ impl ProjectNode {
                     nullable: false,
                     references: None,
                     default: None,
+                    merge_strategy: None,
                 },
             };
 
