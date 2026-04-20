@@ -1,6 +1,6 @@
 {
   "name": "create-jazz",
-  "version": "0.0.1",
+  "version": "0.0.2-alpha.0",
   "description": "Scaffold a new Jazz app from a starter template.",
   "bin": {
     "create-jazz": "bin/create-jazz.js"
