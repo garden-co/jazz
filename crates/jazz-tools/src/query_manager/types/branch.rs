@@ -132,6 +132,17 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+
+    if let Some(strategy) = col.merge_strategy {
+        hasher.update(&[1]);
+        match strategy {
+            ColumnMergeStrategy::Counter => {
+                hasher.update(&[1]);
+            }
+        }
+    } else {
+        hasher.update(&[0]);
+    }
     hasher.update(&[0]); // delimiter
 }
 

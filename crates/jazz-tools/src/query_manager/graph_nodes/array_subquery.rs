@@ -125,6 +125,7 @@ impl ArraySubqueryNode {
             nullable: false,
             references: None,
             default: None,
+            merge_strategy: None,
         });
 
         let output_descriptor = RowDescriptor::new(output_columns);

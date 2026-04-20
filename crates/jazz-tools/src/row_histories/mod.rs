@@ -12,7 +12,7 @@ use crate::digest::Digest32;
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowBytes, RowDescriptor, SharedString, Value,
 };
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
@@ -323,6 +323,7 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new("_jazz_worker_winner_ordinals", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_edge_winner_ordinals", ColumnType::Bytea).nullable(),
         ColumnDescriptor::new("_jazz_global_winner_ordinals", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_merge_artifacts", ColumnType::Bytea).nullable(),
     ]);
     columns
 }
@@ -356,6 +357,11 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
         optional_winner_ordinals_to_value(entry.worker_winner_ordinals.as_deref()),
         optional_winner_ordinals_to_value(entry.edge_winner_ordinals.as_deref()),
         optional_winner_ordinals_to_value(entry.global_winner_ordinals.as_deref()),
+        entry
+            .merge_artifacts
+            .as_ref()
+            .map(|bytes| Value::Bytea(bytes.clone()))
+            .unwrap_or(Value::Null),
     ]);
     values
 }
@@ -1022,6 +1028,8 @@ pub(crate) fn decode_flat_visible_row_entry_with_codecs(
             "global_winner_ordinals",
             codecs.user_descriptor.columns.len(),
         )?,
+        merge_artifacts: column_bytes_with_layout(descriptor, layout, data, 17)?
+            .map(|bytes| bytes.to_vec()),
     })
 }
 
@@ -1260,6 +1268,7 @@ pub struct VisibleRowEntry {
     pub worker_winner_ordinals: Option<Vec<u16>>,
     pub edge_winner_ordinals: Option<Vec<u16>>,
     pub global_winner_ordinals: Option<Vec<u16>>,
+    pub merge_artifacts: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1281,6 +1290,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: None,
         }
     }
 
@@ -1307,6 +1317,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: None,
         }
     }
 
@@ -1374,6 +1385,7 @@ impl VisibleRowEntry {
             worker_winner_ordinals,
             edge_winner_ordinals,
             global_winner_ordinals,
+            merge_artifacts: None,
         }))
     }
 
@@ -1626,6 +1638,99 @@ fn current_winner_batch_id(
         .unwrap_or_else(|| fallback.batch_id())
 }
 
+#[derive(Clone, Copy)]
+struct ColumnContender<'a> {
+    row: &'a StoredRowBatch,
+    value: &'a Value,
+}
+
+fn merge_column_with_strategy<'a>(
+    column: &ColumnDescriptor,
+    ancestor_value: &Value,
+    contenders: &[ColumnContender<'a>],
+) -> Result<(Value, Option<&'a StoredRowBatch>), EncodingError> {
+    match column.merge_strategy {
+        Some(ColumnMergeStrategy::Counter) => {
+            let ancestor = match ancestor_value {
+                Value::Integer(value) => *value,
+                Value::Null => 0,
+                other => {
+                    return Err(malformed(format!(
+                        "counter merge expected INTEGER ancestor for column '{}', got {:?}",
+                        column.name_str(),
+                        other
+                    )));
+                }
+            };
+
+            let mut delta_sum = 0i32;
+            let mut latest_contributor: Option<&StoredRowBatch> = None;
+            for contender in contenders {
+                let contender_value = match contender.value {
+                    Value::Integer(value) => *value,
+                    other => {
+                        return Err(malformed(format!(
+                            "counter merge expected INTEGER contender for column '{}', got {:?}",
+                            column.name_str(),
+                            other
+                        )));
+                    }
+                };
+                let delta = contender_value.checked_sub(ancestor).ok_or_else(|| {
+                    malformed(format!(
+                        "counter merge delta overflow for column '{}'",
+                        column.name_str()
+                    ))
+                })?;
+                delta_sum = delta_sum.checked_add(delta).ok_or_else(|| {
+                    malformed(format!(
+                        "counter merge overflow for column '{}'",
+                        column.name_str()
+                    ))
+                })?;
+                if delta != 0
+                    && latest_contributor
+                        .map(|current| {
+                            (contender.row.updated_at, contender.row.batch_id())
+                                > (current.updated_at, current.batch_id())
+                        })
+                        .unwrap_or(true)
+                {
+                    latest_contributor = Some(contender.row);
+                }
+            }
+
+            let merged = ancestor.checked_add(delta_sum).ok_or_else(|| {
+                malformed(format!(
+                    "counter merge overflow for column '{}'",
+                    column.name_str()
+                ))
+            })?;
+
+            Ok((Value::Integer(merged), latest_contributor))
+        }
+        None => {
+            let mut latest_changed: Option<&StoredRowBatch> = None;
+            let mut merged_value = ancestor_value.clone();
+
+            for contender in contenders {
+                if latest_changed
+                    .map(|current| {
+                        (contender.row.updated_at, contender.row.batch_id())
+                            > (current.updated_at, current.batch_id())
+                    })
+                    .unwrap_or(true)
+                {
+                    latest_changed = Some(contender.row);
+                    merged_value = contender.value.clone();
+                }
+            }
+
+            Ok((merged_value, latest_changed))
+        }
+    }
+}
+
 fn assign_winner_ordinals(
     winner_batch_ids: Option<&[BatchId]>,
     winner_batch_pool: &mut Vec<BatchId>,
@@ -1734,24 +1839,22 @@ fn build_computed_visible_preview(
 
     for column_index in 0..user_descriptor.columns.len() {
         let ancestor_value = ancestor_values[column_index].clone();
-        let mut best_changed: Option<&StoredRowBatch> = None;
-        let mut best_value = ancestor_value.clone();
-
-        for (row, row_values) in frontier.iter().zip(frontier_values.iter()) {
-            let candidate_value = row_values[column_index].clone();
-            if candidate_value == ancestor_value {
-                continue;
-            }
-            if best_changed
-                .map(|current| {
-                    (row.updated_at, row.batch_id()) > (current.updated_at, current.batch_id())
+        let changed_contenders = frontier
+            .iter()
+            .zip(frontier_values.iter())
+            .filter_map(|(row, row_values)| {
+                let candidate_value = &row_values[column_index];
+                (candidate_value != &ancestor_value).then_some(ColumnContender {
+                    row,
+                    value: candidate_value,
                 })
-                .unwrap_or(true)
-            {
-                best_changed = Some(*row);
-                best_value = candidate_value;
-            }
-        }
+            })
+            .collect::<Vec<_>>();
+        let (best_value, best_changed) = merge_column_with_strategy(
+            &user_descriptor.columns[column_index],
+            &ancestor_value,
+            &changed_contenders,
+        )?;
 
         merged_values.push(best_value);
         let winner_row = best_changed.or(ancestor).unwrap_or(latest_tip);
@@ -2276,6 +2379,7 @@ mod tests {
             worker_winner_ordinals: None,
             edge_winner_ordinals: None,
             global_winner_ordinals: None,
+            merge_artifacts: Some(vec![1, 2, 3, 4]),
         };
 
         let encoded =
@@ -2311,6 +2415,7 @@ mod tests {
         assert_eq!(decoded.worker_batch_id, entry.worker_batch_id);
         assert_eq!(decoded.edge_batch_id, entry.edge_batch_id);
         assert_eq!(decoded.global_batch_id, entry.global_batch_id);
+        assert_eq!(decoded.merge_artifacts, entry.merge_artifacts);
     }
 
     #[test]
@@ -2322,6 +2427,7 @@ mod tests {
         assert_eq!(entry.worker_batch_id, None);
         assert_eq!(entry.edge_batch_id, None);
         assert_eq!(entry.global_batch_id, None);
+        assert_eq!(entry.merge_artifacts, None);
     }
 
     #[test]
@@ -2473,6 +2579,184 @@ mod tests {
         assert_eq!(
             entry.branch_frontier,
             vec![left.batch_id(), right.batch_id()]
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_applies_counter_merge_strategy_per_column() {
+        let descriptor = counter_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Integer(5)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let left = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("alice-title".into()), Value::Integer(7)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let right = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Integer(4)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &descriptor,
+            &[base, left.clone(), right.clone()],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+
+        assert_eq!(
+            decode_row(&descriptor, &entry.current_row.data).unwrap(),
+            vec![Value::Text("alice-title".into()), Value::Integer(6)]
+        );
+        assert_eq!(entry.current_row.batch_id(), right.batch_id());
+        assert_eq!(entry.current_row.updated_by.as_str(), "bob");
+        assert_eq!(
+            entry.branch_frontier,
+            vec![left.batch_id(), right.batch_id()]
+        );
+        assert_eq!(
+            entry.winner_batch_pool,
+            vec![left.batch_id(), right.batch_id()]
+        );
+        assert_eq!(entry.current_winner_ordinals, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn visible_row_entry_uses_consumer_schema_merge_strategy() {
+        let counter_descriptor = counter_descriptor();
+        let lww_descriptor = lww_integer_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &counter_descriptor,
+                &[Value::Text("task".into()), Value::Integer(5)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let left = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &counter_descriptor,
+                &[Value::Text("alice-title".into()), Value::Integer(7)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let right = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &counter_descriptor,
+                &[Value::Text("task".into()), Value::Integer(4)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let history = vec![base, left, right];
+
+        let counter_entry = VisibleRowEntry::rebuild_with_descriptor(&counter_descriptor, &history)
+            .unwrap()
+            .expect("counter merged visible entry");
+        let lww_entry = VisibleRowEntry::rebuild_with_descriptor(&lww_descriptor, &history)
+            .unwrap()
+            .expect("lww merged visible entry");
+
+        assert_eq!(
+            decode_row(&counter_descriptor, &counter_entry.current_row.data).unwrap(),
+            vec![Value::Text("alice-title".into()), Value::Integer(6)]
+        );
+        assert_eq!(
+            decode_row(&lww_descriptor, &lww_entry.current_row.data).unwrap(),
+            vec![Value::Text("alice-title".into()), Value::Integer(4)]
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_errors_when_counter_merge_overflows() {
+        let descriptor = counter_only_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(&descriptor, &[Value::Integer(i32::MAX - 1)]).unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let left = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(&descriptor, &[Value::Integer(i32::MAX)]).unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let right = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(&descriptor, &[Value::Integer(i32::MAX)]).unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+
+        let error = VisibleRowEntry::rebuild_with_descriptor(&descriptor, &[base, left, right])
+            .expect_err("counter overflow should fail");
+
+        assert!(
+            error.to_string().contains("overflow"),
+            "expected overflow error, got {error}"
         );
     }
 
@@ -2832,6 +3116,28 @@ mod tests {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("title", ColumnType::Text),
             ColumnDescriptor::new("done", ColumnType::Boolean),
+        ])
+    }
+
+    fn lww_integer_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("count", ColumnType::Integer),
+        ])
+    }
+
+    fn counter_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("count", ColumnType::Integer)
+                .merge_strategy(ColumnMergeStrategy::Counter),
+        ])
+    }
+
+    fn counter_only_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("count", ColumnType::Integer)
+                .merge_strategy(ColumnMergeStrategy::Counter),
         ])
     }
 

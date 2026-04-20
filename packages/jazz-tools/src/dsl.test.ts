@@ -7,6 +7,7 @@ import {
   resetCollectedState,
   table,
 } from "./dsl.js";
+import { schemaToWasm } from "./codegen/schema-reader.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -119,6 +120,91 @@ describe("schema default DSL", () => {
     col.ref("users").default(123);
     // @ts-expect-error array defaults must match the element type
     col.array(col.int()).default(["1"]);
+  });
+});
+
+describe("column merge strategy DSL", () => {
+  it("stores counter merge strategy on integer columns and exports it to wasm schema", () => {
+    resetCollectedState();
+    table("counters", {
+      value: col.int().merge("counter"),
+      label: col.string(),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns).toEqual([
+      {
+        name: "value",
+        sqlType: "INTEGER",
+        nullable: false,
+        mergeStrategy: "counter",
+      },
+      {
+        name: "label",
+        sqlType: "TEXT",
+        nullable: false,
+      },
+    ]);
+
+    expect(schemaToWasm(schema)).toEqual({
+      counters: {
+        columns: [
+          {
+            name: "value",
+            column_type: { type: "Integer" },
+            nullable: false,
+            merge_strategy: "Counter",
+          },
+          {
+            name: "label",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+        ],
+      },
+    });
+  });
+
+  it("normalizes explicit lww away", () => {
+    resetCollectedState();
+    table("todos", {
+      title: col.string().merge("lww"),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns).toEqual([
+      {
+        name: "title",
+        sqlType: "TEXT",
+        nullable: false,
+      },
+    ]);
+    expect(schemaToWasm(schema)).toEqual({
+      todos: {
+        columns: [
+          {
+            name: "title",
+            column_type: { type: "Text" },
+            nullable: false,
+          },
+        ],
+      },
+    });
+  });
+
+  it("rejects counter merge strategy on non-integer columns", () => {
+    expect(() => col.string().merge("counter")).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+    );
+  });
+
+  it("rejects counter merge strategy on nullable integer columns in either chaining order", () => {
+    expect(() => col.int().optional().merge("counter")).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+    );
+    expect(() => col.int().merge("counter").optional()).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+    );
   });
 });
 
