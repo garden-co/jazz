@@ -1685,6 +1685,10 @@ pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value
         return Some(Value::Text(session.user_id.clone()));
     }
 
+    if is_auth_mode_path(path) {
+        return session.get_string(path).map(|s| Value::Text(s.to_string()));
+    }
+
     // For claims paths, convert JSON to Value
     let json_value = session.get_path(path)?;
     json_to_value(json_value)
@@ -1692,6 +1696,10 @@ pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value
 
 fn is_user_id_path(path: &[String]) -> bool {
     matches!(path, [segment] if segment == "user_id" || segment == "userId")
+}
+
+fn is_auth_mode_path(path: &[String]) -> bool {
+    matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
 }
 
 fn json_to_value(json: &serde_json::Value) -> Option<Value> {
@@ -2858,6 +2866,33 @@ mod tests {
             &desc,
             &session,
         ));
+    }
+
+    #[test]
+    fn test_resolve_session_value_auth_mode() {
+        use super::super::session::AuthMode;
+
+        let external = Session::new("u").with_auth_mode(AuthMode::External);
+        assert_eq!(
+            resolve_session_value(&["authMode".into()], &external),
+            Some(Value::Text("external".into())),
+        );
+        assert_eq!(
+            resolve_session_value(&["auth_mode".into()], &external),
+            Some(Value::Text("external".into())),
+        );
+
+        let local_first = Session::new("u").with_auth_mode(AuthMode::LocalFirst);
+        assert_eq!(
+            resolve_session_value(&["authMode".into()], &local_first),
+            Some(Value::Text("local-first".into())),
+        );
+
+        let anonymous = Session::new("u").with_auth_mode(AuthMode::Anonymous);
+        assert_eq!(
+            resolve_session_value(&["authMode".into()], &anonymous),
+            Some(Value::Text("anonymous".into())),
+        );
     }
 
     #[test]
