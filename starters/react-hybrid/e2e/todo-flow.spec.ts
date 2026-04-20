@@ -4,6 +4,7 @@ const TODO_INPUT_LABEL = "New todo";
 const TIMEOUT = 20_000;
 
 async function signUp(page: Page, email: string, password: string, name: string) {
+  await page.getByRole("button", { name: "Sign up" }).click();
   await page.getByLabel("Name").fill(name);
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
