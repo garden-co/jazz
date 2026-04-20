@@ -95,6 +95,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     Some(Session {
         user_id: user_id.to_string(),
         claims: claims.claims,
+        ..Session::new(user_id)
     })
 }
 

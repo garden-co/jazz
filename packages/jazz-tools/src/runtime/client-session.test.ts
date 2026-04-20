@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "./context.js";
-import { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
+import {
+  resolveClientSessionSync,
+  resolveClientSessionStateSync,
+  resolveJwtSession,
+  LOCAL_FIRST_JWT_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
+} from "./client-session.js";
 
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
@@ -25,6 +31,7 @@ describe("client session resolution", () => {
         subject: "subject-123",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     };
 
     expect(
@@ -55,10 +62,10 @@ describe("client session resolution", () => {
       user_id: "principal-123",
       claims: {
         role: "editor",
-        auth_mode: "external",
         subject: "user-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
   });
 
@@ -77,9 +84,9 @@ describe("client session resolution", () => {
       user_id: "user-subject",
       claims: {
         team: "eng",
-        auth_mode: "external",
         subject: "user-subject",
       },
+      authMode: "external",
     });
   });
 
@@ -89,5 +96,31 @@ describe("client session resolution", () => {
       transport: null,
       session: null,
     });
+  });
+});
+
+describe("resolveJwtSession — authMode derivation", () => {
+  function jwt(payload: Record<string, unknown>): string {
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return `${header}.${body}.sig`;
+  }
+
+  it("local-first issuer → authMode 'local-first' and no synthetic claim", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }))!;
+    expect(session.authMode).toBe("local-first");
+    expect(session.claims.auth_mode).toBeUndefined();
+  });
+
+  it("anonymous issuer → authMode 'anonymous'", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }))!;
+    expect(session.authMode).toBe("anonymous");
+    expect(session.claims.auth_mode).toBeUndefined();
+  });
+
+  it("any other issuer → authMode 'external'", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: "https://auth.example.com" }))!;
+    expect(session.authMode).toBe("external");
+    expect(session.claims.auth_mode).toBeUndefined();
   });
 });

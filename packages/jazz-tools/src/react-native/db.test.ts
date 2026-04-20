@@ -47,14 +47,14 @@ describe("createDb", () => {
     vi.clearAllMocks();
   });
 
-  it("RNDB-U06 mints a JWT from localFirstSecret and passes it to Db when auth is set", async () => {
+  it("RNDB-U06 mints a JWT from secret and passes it to Db when secret is set", async () => {
     const jazzRn = (await import("jazz-rn")).default;
     const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
     mintMock.mockReturnValue("minted-jwt");
 
     const config: DbConfig = {
       appId: "test-app",
-      auth: { localFirstSecret: "base64url-seed-32bytes" },
+      secret: "base64url-seed-32bytes",
     };
     const db = await createDb(config);
 

@@ -96,7 +96,7 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
     this.storage = options.storage ?? globalThis.localStorage;
   }
 
-  private static getDefault(options: BrowserAuthSecretStoreOptions = {}): BrowserAuthSecretStore {
+  static getDefault(options: BrowserAuthSecretStoreOptions = {}): BrowserAuthSecretStore {
     const storage = options.storage;
     const key = resolveBrowserAuthSecretKey(options);
 
@@ -167,3 +167,5 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
     return BrowserAuthSecretStore.getDefault(options).getOrCreateSecret();
   }
 }
+
+export const browserAuthSecretStore: AuthSecretStore = BrowserAuthSecretStore.getDefault();

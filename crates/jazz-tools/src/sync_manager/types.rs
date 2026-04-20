@@ -403,6 +403,7 @@ mod query_subscription_session_serde {
             Ok(Session {
                 user_id: session_wire.user_id,
                 claims,
+                auth_mode: Default::default(),
             })
         })
         .transpose()

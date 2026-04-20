@@ -1,6 +1,6 @@
 import * as React from "react";
-import { type DbConfig, BrowserAuthSecretStore } from "jazz-tools";
-import { JazzProvider, useDb } from "jazz-tools/react";
+import { type DbConfig } from "jazz-tools";
+import { JazzProvider, useDb, useAuthState } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -18,10 +18,8 @@ type ChatShellProps = {
 
 function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
   const db = useDb();
-  const authState = db.getAuthState();
-  const session = authState.session;
-
-  const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
+  const { authMode, claims, userId } = useAuthState();
+  const role = typeof claims.role === "string" ? claims.role : null;
 
   async function handleSignIn(email: string, password: string) {
     const session = await requestSignIn(email, password);
@@ -42,8 +40,7 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
 
   React.useEffect(() => {
     return db.onAuthChanged((state) => {
-      // React to sync-server 401s
-      if (state.status === "unauthenticated") {
+      if (state.error) {
         clearStoredAuthSession(DEFAULT_APP_ID);
         onStoredAuthSessionChange(null);
       }
@@ -54,7 +51,7 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={authState.status === "authenticated" && session?.claims.auth_mode !== "local"}
+          loggedIn={authMode !== "anonymous"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -65,7 +62,7 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
           chatId={ANNOUNCEMENTS_CHAT_ID}
           title="Announcements"
           canSend={role === "admin"}
-          authorName={session?.user_id ?? null}
+          authorName={userId ?? null}
           readOnlyNotice="Only admins can post announcements."
         />
 
@@ -73,7 +70,7 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
           chatId={CHAT_ID}
           title={CHAT_ID}
           canSend={role === "admin" || role === "member"}
-          authorName={session?.user_id ?? null}
+          authorName={userId ?? null}
           readOnlyNotice="Sign in as admin or member to participate."
         />
       </section>
@@ -84,9 +81,6 @@ function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
 export function App() {
   const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
     readStoredAuthSession(DEFAULT_APP_ID),
-  );
-  const localFirstSecret = React.use(
-    BrowserAuthSecretStore.getOrCreateSecret({ appId: DEFAULT_APP_ID }),
   );
 
   const config = React.useMemo((): DbConfig => {
@@ -105,11 +99,8 @@ export function App() {
       };
     }
 
-    return {
-      ...sharedConfig,
-      auth: { localFirstSecret },
-    };
-  }, [localFirstSecret, storedAuthSession]);
+    return sharedConfig;
+  }, [storedAuthSession]);
 
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>

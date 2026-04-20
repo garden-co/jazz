@@ -1200,6 +1200,7 @@ impl SyncManager {
                             Some(Session {
                                 user_id: client_session.user_id.clone(),
                                 claims: merged_claims,
+                                auth_mode: client_session.auth_mode,
                             })
                         }
                     }

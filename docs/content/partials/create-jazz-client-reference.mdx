@@ -2,7 +2,7 @@
 | ---------------- | -------- | --------------------------------------------------------------------------- |
 | `appId`          | yes      | Application identifier. Isolates storage between apps.                      |
 | `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.                    |
-| `auth`           | no       | Local-first auth config: `{ localFirstSecret: string }`.                    |
+| `secret`         | no       | Local-first auth secret. Jazz derives a stable identity from it.            |
 | `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration.          |
 | `adminSecret`    | no       | Admin secret for privileged sync and `/admin/*` catalogue operations.       |
 | `runtimeSources` | no       | Runtime source overrides for browser workers, Wasm URLs, or Wasm input.     |

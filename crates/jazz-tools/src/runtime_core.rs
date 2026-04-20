@@ -132,6 +132,10 @@ pub enum RuntimeError {
     QueryError(String),
     WriteError(String),
     NotFound,
+    AnonymousWriteDenied {
+        table: crate::query_manager::types::TableName,
+        operation: crate::query_manager::policy::Operation,
+    },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -140,6 +144,13 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::QueryError(s) => write!(f, "Query error: {}", s),
             RuntimeError::WriteError(s) => write!(f, "Write error: {}", s),
             RuntimeError::NotFound => write!(f, "Not found"),
+            RuntimeError::AnonymousWriteDenied { table, operation } => {
+                write!(
+                    f,
+                    "anonymous session cannot {} on table {}",
+                    operation, table
+                )
+            }
         }
     }
 }
@@ -148,7 +159,12 @@ impl std::error::Error for RuntimeError {}
 
 impl From<QueryError> for RuntimeError {
     fn from(e: QueryError) -> Self {
-        RuntimeError::QueryError(e.to_string())
+        match e {
+            QueryError::AnonymousWriteDenied { table, operation } => {
+                RuntimeError::AnonymousWriteDenied { table, operation }
+            }
+            other => RuntimeError::QueryError(other.to_string()),
+        }
     }
 }
 

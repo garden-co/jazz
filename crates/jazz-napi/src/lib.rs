@@ -54,6 +54,21 @@ fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
 }
 
+fn runtime_error_to_napi(
+    err: jazz_tools::runtime_core::RuntimeError,
+    fallback_prefix: &str,
+) -> napi::Error {
+    match err {
+        jazz_tools::runtime_core::RuntimeError::AnonymousWriteDenied { table, operation } => {
+            napi::Error::from_reason(format!(
+                "anonymous session cannot {} on table {}",
+                operation, table
+            ))
+        }
+        other => napi::Error::from_reason(format!("{fallback_prefix}: {other}")),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "value")]
 enum FfiValue {
@@ -841,7 +856,7 @@ impl NapiRuntime {
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
                 .insert_persisted_with_id(&table, values.0, object_id, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
+                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
                 core.current_schema(),
@@ -885,7 +900,7 @@ impl NapiRuntime {
                     write_context.as_ref(),
                     persistence_tier,
                 )
-                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
                 core.current_schema(),
@@ -923,7 +938,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?
+                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
         };
 
         let _ = receiver.await;
@@ -953,7 +968,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
         };
 
         let _ = receiver.await;
@@ -974,7 +989,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.delete_persisted(oid, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
         };
 
         let _ = receiver.await;
@@ -1001,7 +1016,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
+                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
         };
 
         let _ = receiver.await;
@@ -1235,8 +1250,13 @@ impl NapiRuntime {
         ttl_seconds: u32,
     ) -> napi::Result<String> {
         let seed = napi_decode_seed(&seed_b64)?;
-        identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
-            .map_err(napi::Error::from_reason)
+        identity::mint_jazz_self_signed_token(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &audience,
+            ttl_seconds as u64,
+        )
+        .map_err(napi::Error::from_reason)
     }
 
     #[napi(js_name = "getPublicKeyBase64url")]
@@ -1707,8 +1727,13 @@ pub fn mint_local_first_token(
     ttl_seconds: u32,
 ) -> napi::Result<String> {
     let seed = decode_seed_napi(&seed_b64)?;
-    identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
-        .map_err(napi::Error::from_reason)
+    identity::mint_jazz_self_signed_token(
+        &seed,
+        identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        ttl_seconds as u64,
+    )
+    .map_err(napi::Error::from_reason)
 }
 
 #[napi(object)]
@@ -1733,7 +1758,7 @@ pub fn verify_local_first_identity_proof_napi(
             };
         }
     };
-    match identity::verify_local_first_identity_proof(&token, &expected_audience) {
+    match identity::verify_jazz_self_signed_proof(&token, &expected_audience) {
         Ok(verified) => VerifyTokenResult {
             ok: true,
             id: verified.user_id,

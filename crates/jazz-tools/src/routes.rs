@@ -1694,7 +1694,13 @@ mod tests {
 
     fn mint_test_token(audience: &str) -> String {
         let seed = [42u8; 32];
-        crate::identity::mint_local_first_token(&seed, audience, 3600).unwrap()
+        crate::identity::mint_jazz_self_signed_token(
+            &seed,
+            crate::identity::LOCAL_FIRST_ISSUER,
+            audience,
+            3600,
+        )
+        .unwrap()
     }
 
     /// Spin up a server state backed by an in-process runtime.

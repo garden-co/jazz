@@ -131,17 +131,13 @@ describe("Db auth refresh browser integration", () => {
     });
 
     await waitForCondition(
-      async () => {
-        const authState = writer.getAuthState();
-        return authState.status === "unauthenticated" && authState.reason === "invalid";
-      },
+      async () => writer.getAuthState().error === "invalid",
       20_000,
       "writer should transition to unauthenticated after invalid JWT auth failure",
     );
 
     expect(writer.getAuthState()).toMatchObject({
-      status: "unauthenticated",
-      reason: "invalid",
+      error: "invalid",
       session: {
         user_id: "alice",
       },
@@ -150,7 +146,7 @@ describe("Db auth refresh browser integration", () => {
     writer.updateAuthToken(validJwt);
 
     await waitForCondition(
-      async () => writer.getAuthState().status === "authenticated",
+      async () => writer.getAuthState().error === undefined,
       20_000,
       "writer should return to authenticated after updateAuthToken",
     );

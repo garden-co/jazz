@@ -493,7 +493,7 @@ describe("TS Query API", () => {
       const db = await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
-        auth: { localFirstSecret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" },
+        secret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       });
 
       const { id: projectId } = insertProject(db, "Announcements");
