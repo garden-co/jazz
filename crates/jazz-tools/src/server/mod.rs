@@ -623,10 +623,7 @@ mod tests {
         // alice reconnects AFTER drain — fresh state created, new connection added
         let _ = state.runtime.ensure_client_with_session(
             alice,
-            crate::query_manager::session::Session {
-                user_id: "alice".into(),
-                claims: serde_json::Value::Null,
-            },
+            crate::query_manager::session::Session::new("alice"),
         );
         let _conn2 = add_connection(&state, alice).await;
         // on_client_connected is a no-op here (alice was already drained)
@@ -760,10 +757,7 @@ mod tests {
 
         let state = build_test_state().await;
         let alice = ClientId::new();
-        let session = Session {
-            user_id: "alice".into(),
-            claims: serde_json::Value::Null,
-        };
+        let session = Session::new("alice");
 
         // Connect, register with session
         let _ = state.runtime.add_client(alice, None);

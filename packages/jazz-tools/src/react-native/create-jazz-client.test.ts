@@ -107,7 +107,8 @@ describe("react-native/create-jazz-client", () => {
   it("RNC-U01 initializes client session + manager and shuts down cleanly", async () => {
     const session: Session = {
       user_id: "local:rn-user",
-      claims: { auth_mode: "local-first" },
+      claims: {},
+      authMode: "local-first",
     };
     const resolvedConfig: DbConfig = {
       appId: "rn-create-client-happy",
@@ -163,7 +164,8 @@ describe("react-native/create-jazz-client", () => {
     };
     const session: Session = {
       user_id: "local:rn-user-4",
-      claims: { auth_mode: "local-first" },
+      claims: {},
+      authMode: "local-first",
     };
     const {
       createJazzClient,

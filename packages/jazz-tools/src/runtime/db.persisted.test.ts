@@ -147,6 +147,7 @@ describe("Db persisted writes", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external",
     };
     const insertPending = makePendingWrite("batch-session-insert", {
       id: "todo-2",

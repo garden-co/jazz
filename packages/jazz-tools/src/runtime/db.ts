@@ -43,7 +43,7 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import { resolveClientSessionSync, ANONYMOUS_JWT_ISSUER } from "./client-session.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -119,7 +119,7 @@ export interface DbConfig {
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
   /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
-  auth?: { localFirstSecret: string };
+  secret?: string;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -382,8 +382,7 @@ export interface TableProxy<T, Init> {
 
 function backendScopedAuthState(session?: Session | null): AuthState {
   return {
-    status: "authenticated",
-    transport: "backend",
+    authMode: session?.authMode ?? "external",
     session: session ?? null,
   };
 }
@@ -1005,8 +1004,9 @@ export class Db {
 
       const ttlSeconds = 3600;
       const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-      const newToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+      const newToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
         this._localFirstSecret,
+        "urn:jazz:local-first",
         this.config.appId,
         BigInt(ttlSeconds),
         nowSeconds,
@@ -2146,8 +2146,9 @@ export class Db {
     const audience = options?.audience ?? this.config.appId;
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
 
-    return wasmModule.WasmRuntime.mintLocalFirstToken(
+    return wasmModule.WasmRuntime.mintJazzSelfSignedToken(
       this._localFirstSecret,
+      "urn:jazz:local-first",
       audience,
       BigInt(ttl),
       nowSeconds,
@@ -3106,6 +3107,30 @@ function isBrowser(): boolean {
 }
 
 /**
+ * Generate a 32-byte ephemeral seed for anonymous auth.
+ *
+ * INTENTIONALLY NOT CRYPTOGRAPHICALLY SECURE. We pick Math.random over
+ * crypto.getRandomValues on purpose: we want one implementation that runs on
+ * every target (browser, Node ESM, React Native, edge workers) without a
+ * `crypto` import or WASM dependency, and we're willing to trade CSPRNG-grade
+ * unpredictability for that portability.
+ *
+ * Safe because anonymous sessions cannot own or write anything — the server
+ * denies writes at the middleware layer regardless of identity — so a
+ * predictable seed has no confidentiality or integrity consequence. Do NOT
+ * reuse this helper for anything that touches writable state.
+ */
+function generateEphemeralSeedBase64Url(): string {
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = Math.floor(Math.random() * 256);
+  }
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the WASM module.
@@ -3127,8 +3152,8 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  if (config.auth && (config.jwtToken || config.cookieSession)) {
-    throw new Error("DbConfig error: auth, jwtToken, and cookieSession are mutually exclusive");
+  if (config.secret && (config.jwtToken || config.cookieSession)) {
+    throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
   }
   if (config.jwtToken && config.cookieSession) {
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
@@ -3138,14 +3163,28 @@ export async function createDb(config: DbConfig): Promise<Db> {
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
-  if (config.auth) {
-    const secret = config.auth.localFirstSecret;
+  if (config.secret) {
+    const secret = config.secret;
     localFirstSecret = secret;
 
     const wasmModule = await loadWasmModule(config.runtimeSources);
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    const jwtToken = wasmModule.WasmRuntime.mintLocalFirstToken(
+    const jwtToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
       secret,
+      "urn:jazz:local-first",
+      config.appId,
+      BigInt(3600),
+      nowSeconds,
+    );
+    resolvedConfig = { ...resolvedConfig, jwtToken };
+  } else if (!config.jwtToken) {
+    // Anonymous: mint an ephemeral keypair + anonymous JWT.
+    const wasmModule = await loadWasmModule(config.runtimeSources);
+    const ephemeralSeed = generateEphemeralSeedBase64Url();
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const jwtToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
+      ephemeralSeed,
+      ANONYMOUS_JWT_ISSUER,
       config.appId,
       BigInt(3600),
       nowSeconds,

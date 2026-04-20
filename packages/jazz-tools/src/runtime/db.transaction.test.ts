@@ -170,6 +170,7 @@ describe("Db transactions", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external",
     };
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-session-tx"),

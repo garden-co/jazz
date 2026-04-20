@@ -2,6 +2,8 @@ import { definePermissions } from "jazz-tools/permissions";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "./constants.js";
 import { app } from "./schema.js";
 
+// How about having these as server-only permissions and move the shared permissions in the schema?
+// Actually, how about moving permissions in the schema, and making it possible to have server-only schema & permissions
 export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
   const isMemberOrAdmin = session.where({ "claims.role": { in: ["admin", "member"] } });

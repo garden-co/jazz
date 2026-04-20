@@ -14,7 +14,11 @@ import {
   type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
-import { resolveClientSessionStateSync } from "./client-session.js";
+import {
+  resolveClientSessionStateSync,
+  LOCAL_FIRST_JWT_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
+} from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
@@ -23,6 +27,7 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -626,7 +631,7 @@ export function sessionFromRequest(request: RequestLike): Session {
     throw new Error("Invalid JWT payload");
   }
 
-  const typedPayload = payload as { sub?: unknown; claims?: unknown };
+  const typedPayload = payload as { sub?: unknown; iss?: unknown; claims?: unknown };
   if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
     throw new Error("JWT payload missing sub");
   }
@@ -638,7 +643,18 @@ export function sessionFromRequest(request: RequestLike): Session {
       ? (typedPayload.claims as Record<string, unknown>)
       : {};
 
-  return { user_id: typedPayload.sub, claims };
+  // Derive authMode from the issuer claim
+  const issuer = typeof typedPayload.iss === "string" ? typedPayload.iss.trim() : undefined;
+  let authMode: Session["authMode"];
+  if (issuer === LOCAL_FIRST_JWT_ISSUER) {
+    authMode = "local-first";
+  } else if (issuer === ANONYMOUS_JWT_ISSUER) {
+    authMode = "anonymous";
+  } else {
+    authMode = "external";
+  }
+
+  return { user_id: typedPayload.sub, claims, authMode };
 }
 
 function isObjectAlreadyExistsError(error: unknown): boolean {
@@ -1880,25 +1896,40 @@ export class JazzClient {
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const row =
-      effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
-        ? options?.id
-          ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(effectiveSession, attribution, undefined, options.updatedAt),
-              tier,
-              options.id,
-            )
-          : await this.requireSessionWriteMethod("insertDurableWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
-              tier,
-            )
-        : options?.id
-          ? await this.runtime.insertDurable(table, values, tier, options.id)
-          : await this.runtime.insertDurable(table, values, tier);
+    let row;
+    try {
+      row =
+        effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
+          ? options?.id
+            ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+                table,
+                values,
+                this.encodeWriteContext(
+                  effectiveSession,
+                  attribution,
+                  undefined,
+                  options.updatedAt,
+                ),
+                tier,
+                options.id,
+              )
+            : await this.requireSessionWriteMethod("insertDurableWithSession")(
+                table,
+                values,
+                this.encodeWriteContext(
+                  effectiveSession,
+                  attribution,
+                  undefined,
+                  options?.updatedAt,
+                ),
+                tier,
+              )
+          : options?.id
+            ? await this.runtime.insertDurable(table, values, tier, options.id)
+            : await this.runtime.insertDurable(table, values, tier);
+    } catch (error) {
+      throw normalizeRuntimeWriteError(error);
+    }
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -2084,16 +2115,20 @@ export class JazzClient {
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-      await this.requireSessionWriteMethod("updateDurableWithSession")(
-        objectId,
-        updates,
-        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-        tier,
-      );
-      return;
+    try {
+      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
+        await this.requireSessionWriteMethod("updateDurableWithSession")(
+          objectId,
+          updates,
+          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
+          tier,
+        );
+        return;
+      }
+      await this.runtime.updateDurable(objectId, updates, tier);
+    } catch (error) {
+      throw normalizeRuntimeWriteError(error);
     }
-    await this.runtime.updateDurable(objectId, updates, tier);
   }
 
   updatePersisted(
@@ -2175,15 +2210,19 @@ export class JazzClient {
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-      await this.requireSessionWriteMethod("deleteDurableWithSession")(
-        objectId,
-        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-        tier,
-      );
-      return;
+    try {
+      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
+        await this.requireSessionWriteMethod("deleteDurableWithSession")(
+          objectId,
+          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
+          tier,
+        );
+        return;
+      }
+      await this.runtime.deleteDurable(objectId, tier);
+    } catch (error) {
+      throw normalizeRuntimeWriteError(error);
     }
-    await this.runtime.deleteDurable(objectId, tier);
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {

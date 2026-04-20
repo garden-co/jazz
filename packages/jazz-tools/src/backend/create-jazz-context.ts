@@ -215,8 +215,7 @@ export class JazzContext {
       attribution,
       backendScoped
         ? {
-            status: "authenticated",
-            transport: "backend",
+            authMode: session?.authMode ?? "external",
             session: session ?? null,
           }
         : undefined,

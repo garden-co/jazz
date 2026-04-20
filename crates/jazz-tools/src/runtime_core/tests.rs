@@ -8529,3 +8529,26 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
         "bob should be preserved"
     );
 }
+
+#[test]
+fn query_error_anonymous_write_denied_maps_to_structured_runtime_error() {
+    use crate::query_manager::manager::QueryError;
+    use crate::query_manager::policy::Operation;
+    use crate::query_manager::types::TableName;
+
+    let err: RuntimeError = QueryError::AnonymousWriteDenied {
+        table: TableName::new("todos"),
+        operation: Operation::Insert,
+    }
+    .into();
+    match err {
+        RuntimeError::AnonymousWriteDenied {
+            ref table,
+            operation,
+        } => {
+            assert_eq!(table.as_str(), "todos");
+            assert_eq!(operation, Operation::Insert);
+        }
+        other => panic!("expected AnonymousWriteDenied, got {other:?}"),
+    }
+}

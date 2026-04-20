@@ -2,11 +2,11 @@ import { describe, it, expect } from "vitest";
 import type { DbConfig } from "./db.js";
 
 describe("DbConfig auth validation", () => {
-  it("rejects setting both auth.localFirstSecret and jwtToken", async () => {
+  it("rejects setting both secret and jwtToken", async () => {
     const { createDb } = await import("./db.js");
     const config: DbConfig = {
       appId: "test-app",
-      auth: { localFirstSecret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       jwtToken: "some-jwt",
     };
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
@@ -20,9 +20,20 @@ describe("DbConfig auth validation", () => {
       cookieSession: {
         user_id: "alice",
         claims: { role: "reader" },
+        authMode: "external",
       },
     };
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
+  });
+
+  it("accepts flat secret field", async () => {
+    const { createDb } = await import("./db.js");
+    const db = await createDb({
+      appId: "test-app",
+      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    });
+    expect(db).toBeDefined();
+    await db.shutdown();
   });
 });
 
@@ -31,7 +42,7 @@ describe("getLocalFirstIdentityProof", () => {
     const { createDb } = await import("./db.js");
     const db = await createDb({
       appId: "test-app",
-      auth: { localFirstSecret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     });
 
     const token = await db.getLocalFirstIdentityProof({ audience: "test-audience" });

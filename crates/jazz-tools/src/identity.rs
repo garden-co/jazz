@@ -12,6 +12,10 @@ const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
 const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 
 pub const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
+pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
+
+const KNOWN_SELF_SIGNED_ISSUERS: &[&str] = &[LOCAL_FIRST_ISSUER, ANONYMOUS_ISSUER];
+
 const DEFAULT_MAX_TTL_SECONDS: u64 = 3600;
 
 #[derive(serde::Serialize)]
@@ -20,7 +24,6 @@ struct LocalFirstClaims<'a> {
     sub: &'a str,
     aud: &'a str,
     jazz_pub_key: &'a str,
-    auth_mode: &'a str,
     iat: u64,
     exp: u64,
 }
@@ -32,7 +35,6 @@ struct LocalFirstClaimsRaw {
     sub: Option<String>,
     aud: Option<String>,
     jazz_pub_key: Option<String>,
-    auth_mode: Option<String>,
     iat: Option<u64>,
     exp: Option<u64>,
 }
@@ -49,25 +51,28 @@ struct JwtHeaderRaw {
 }
 
 #[derive(Debug)]
-pub struct VerifiedLocalFirst {
+pub struct VerifiedSelfSigned {
     pub user_id: String,
     pub public_key_bytes: [u8; 32],
+    pub issuer: &'static str,
 }
 
-/// Mint a local-first token using the current system time.
+/// Mint a self-signed JWT using the current system time.
 /// Panics on platforms where `SystemTime` is unavailable (e.g. wasm32).
-pub fn mint_local_first_token(
+pub fn mint_jazz_self_signed_token(
     seed: &[u8; 32],
+    issuer: &'static str,
     audience: &str,
     ttl_seconds: u64,
 ) -> Result<String, String> {
     let now = current_unix_timestamp_secs()?;
-    mint_local_first_token_at(seed, audience, ttl_seconds, now)
+    mint_jazz_self_signed_token_at(seed, issuer, audience, ttl_seconds, now)
 }
 
-/// Mint a local-first token with an explicit timestamp (for WASM or testing).
-pub fn mint_local_first_token_at(
+/// Mint a self-signed JWT with an explicit timestamp (for WASM or testing).
+pub fn mint_jazz_self_signed_token_at(
     seed: &[u8; 32],
+    issuer: &'static str,
     audience: &str,
     ttl_seconds: u64,
     now_seconds: u64,
@@ -97,11 +102,10 @@ pub fn mint_local_first_token_at(
     let exp = now + ttl_seconds;
 
     let claims = LocalFirstClaims {
-        iss: LOCAL_FIRST_ISSUER,
+        iss: issuer,
         sub: &user_id_str,
         aud: &normalized_aud,
         jazz_pub_key: &pub_key_b64,
-        auth_mode: "local-first",
         iat: now,
         exp,
     };
@@ -115,11 +119,11 @@ pub fn mint_local_first_token_at(
     Ok(format!("{}.{}", signing_input, signature_b64))
 }
 
-pub fn verify_local_first_identity_proof(
+pub fn verify_jazz_self_signed_proof(
     token: &str,
     expected_audience: &str,
-) -> Result<VerifiedLocalFirst, String> {
-    verify_local_first_identity_proof_with_max_ttl_at(
+) -> Result<VerifiedSelfSigned, String> {
+    verify_jazz_self_signed_proof_with_max_ttl_at(
         token,
         expected_audience,
         DEFAULT_MAX_TTL_SECONDS,
@@ -127,12 +131,12 @@ pub fn verify_local_first_identity_proof(
     )
 }
 
-pub fn verify_local_first_identity_proof_with_max_ttl(
+pub fn verify_jazz_self_signed_proof_with_max_ttl(
     token: &str,
     expected_audience: &str,
     max_ttl_seconds: u64,
-) -> Result<VerifiedLocalFirst, String> {
-    verify_local_first_identity_proof_with_max_ttl_at(
+) -> Result<VerifiedSelfSigned, String> {
+    verify_jazz_self_signed_proof_with_max_ttl_at(
         token,
         expected_audience,
         max_ttl_seconds,
@@ -140,12 +144,12 @@ pub fn verify_local_first_identity_proof_with_max_ttl(
     )
 }
 
-pub fn verify_local_first_identity_proof_at(
+pub fn verify_jazz_self_signed_proof_at(
     token: &str,
     expected_audience: &str,
     now_seconds: u64,
-) -> Result<VerifiedLocalFirst, String> {
-    verify_local_first_identity_proof_with_max_ttl_at(
+) -> Result<VerifiedSelfSigned, String> {
+    verify_jazz_self_signed_proof_with_max_ttl_at(
         token,
         expected_audience,
         DEFAULT_MAX_TTL_SECONDS,
@@ -153,12 +157,12 @@ pub fn verify_local_first_identity_proof_at(
     )
 }
 
-pub fn verify_local_first_identity_proof_with_max_ttl_at(
+pub fn verify_jazz_self_signed_proof_with_max_ttl_at(
     token: &str,
     expected_audience: &str,
     max_ttl_seconds: u64,
     now_seconds: u64,
-) -> Result<VerifiedLocalFirst, String> {
+) -> Result<VerifiedSelfSigned, String> {
     // Normalize expected audience the same way as minting
     let normalized_expected = match Uuid::parse_str(expected_audience) {
         Ok(uuid) => uuid.to_string(),
@@ -188,19 +192,17 @@ pub fn verify_local_first_identity_proof_with_max_ttl_at(
     let claims: LocalFirstClaimsRaw =
         serde_json::from_slice(&claims_bytes).map_err(|e| format!("claims parse: {e}"))?;
 
-    if claims.iss.as_deref() != Some(LOCAL_FIRST_ISSUER) {
-        return Err(format!("invalid issuer: {:?}", claims.iss));
-    }
+    let issuer_str = claims.iss.as_deref().unwrap_or("");
+    let matched_issuer = KNOWN_SELF_SIGNED_ISSUERS
+        .iter()
+        .copied()
+        .find(|known| *known == issuer_str)
+        .ok_or_else(|| format!("invalid issuer: {:?}", claims.iss))?;
+
     if claims.aud.as_deref() != Some(normalized_expected.as_str()) {
         return Err(format!(
             "audience mismatch: expected {normalized_expected:?}, got {:?}",
             claims.aud
-        ));
-    }
-    if claims.auth_mode.as_deref() != Some("local-first") {
-        return Err(format!(
-            "invalid auth_mode: expected \"local-first\", got {:?}",
-            claims.auth_mode
         ));
     }
 
@@ -264,9 +266,10 @@ pub fn verify_local_first_identity_proof_with_max_ttl_at(
         return Err(format!("token ttl {ttl}s exceeds max {max_ttl_seconds}s"));
     }
 
-    Ok(VerifiedLocalFirst {
+    Ok(VerifiedSelfSigned {
         user_id: derived_user_id.to_string(),
         public_key_bytes: pub_key_bytes,
+        issuer: matched_issuer,
     })
 }
 
@@ -350,22 +353,25 @@ mod tests {
     fn mint_and_verify_local_first_identity_proof() {
         let seed = alice_seed();
         let user_id = derive_user_id(&seed);
-        let token = mint_local_first_token(&seed, "my-app", 3600).unwrap();
-        let verified = verify_local_first_identity_proof(&token, "my-app").unwrap();
+        let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, "my-app", 3600).unwrap();
+        let verified = verify_jazz_self_signed_proof(&token, "my-app").unwrap();
         assert_eq!(verified.user_id, user_id.to_string());
+        assert_eq!(verified.issuer, LOCAL_FIRST_ISSUER);
     }
 
     #[test]
     fn reject_wrong_audience() {
-        let token = mint_local_first_token(&alice_seed(), "app-a", 3600).unwrap();
-        let result = verify_local_first_identity_proof(&token, "app-b");
+        let token =
+            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "app-a", 3600).unwrap();
+        let result = verify_jazz_self_signed_proof(&token, "app-b");
         assert!(result.is_err());
     }
 
     #[test]
     fn reject_excessive_ttl() {
-        let token = mint_local_first_token(&alice_seed(), "my-app", 3600).unwrap();
-        let result = verify_local_first_identity_proof_with_max_ttl(&token, "my-app", 1800);
+        let token =
+            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "my-app", 3600).unwrap();
+        let result = verify_jazz_self_signed_proof_with_max_ttl(&token, "my-app", 1800);
         assert!(result.is_err());
     }
 
@@ -390,7 +396,6 @@ mod tests {
             "sub": user_id.to_string(),
             "aud": "my-app",
             "jazz_pub_key": pub_key_b64,
-            "auth_mode": "local-first",
             "iat": now,
             "exp": now + 3600,
             "role": "admin",
@@ -402,7 +407,7 @@ mod tests {
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
         let token = format!("{}.{}", signing_input, sig_b64);
 
-        let result = verify_local_first_identity_proof(&token, "my-app");
+        let result = verify_jazz_self_signed_proof(&token, "my-app");
         assert!(
             result.is_err(),
             "token with extra 'role' claim must be rejected"
@@ -414,49 +419,57 @@ mod tests {
     }
 
     #[test]
-    fn reject_token_with_wrong_auth_mode() {
-        let seed = alice_seed();
-        let signing_key = derive_signing_key(&seed, SIGN_DOMAIN);
-        let verifying_key = signing_key.verifying_key();
-        let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
-        let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
-
-        let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
-        let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let claims = serde_json::json!({
-            "iss": LOCAL_FIRST_ISSUER,
-            "sub": user_id.to_string(),
-            "aud": "my-app",
-            "jazz_pub_key": pub_key_b64,
-            "auth_mode": "external",
-            "iat": now,
-            "exp": now + 3600,
-        });
-        let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
-
-        let signing_input = format!("{}.{}", header_b64, claims_b64);
-        let signature = signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
-        let token = format!("{}.{}", signing_input, sig_b64);
-
-        let result = verify_local_first_identity_proof(&token, "my-app");
-        assert!(
-            result.is_err(),
-            "token with auth_mode 'external' must be rejected"
-        );
+    fn different_seeds_produce_different_tokens() {
+        let t1 =
+            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "app", 3600).unwrap();
+        let t2 = mint_jazz_self_signed_token(&bob_seed(), LOCAL_FIRST_ISSUER, "app", 3600).unwrap();
+        let v1 = verify_jazz_self_signed_proof(&t1, "app").unwrap();
+        let v2 = verify_jazz_self_signed_proof(&t2, "app").unwrap();
+        assert_ne!(v1.user_id, v2.user_id);
     }
 
     #[test]
-    fn different_seeds_produce_different_tokens() {
-        let t1 = mint_local_first_token(&alice_seed(), "app", 3600).unwrap();
-        let t2 = mint_local_first_token(&bob_seed(), "app", 3600).unwrap();
-        let v1 = verify_local_first_identity_proof(&t1, "app").unwrap();
-        let v2 = verify_local_first_identity_proof(&t2, "app").unwrap();
-        assert_ne!(v1.user_id, v2.user_id);
+    fn mint_and_verify_roundtrip_has_no_auth_mode_claim() {
+        let seed = [1u8; 32];
+        let token =
+            mint_jazz_self_signed_token_at(&seed, LOCAL_FIRST_ISSUER, "test-app", 3600, 1_000_000)
+                .unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let claims_json: serde_json::Value = serde_json::from_slice(&claims_bytes).unwrap();
+        assert!(
+            claims_json.get("auth_mode").is_none(),
+            "auth_mode must not appear in signed payload: {claims_json}"
+        );
+
+        let verified = verify_jazz_self_signed_proof_at(&token, "test-app", 1_000_100).unwrap();
+        assert!(!verified.user_id.is_empty());
+    }
+
+    #[test]
+    fn mint_and_verify_anonymous_roundtrip() {
+        let seed = [42u8; 32];
+        let token =
+            mint_jazz_self_signed_token_at(&seed, ANONYMOUS_ISSUER, "test-app", 3600, 1_000_000)
+                .unwrap();
+        let verified = verify_jazz_self_signed_proof_at(&token, "test-app", 1_000_050).unwrap();
+        assert_eq!(verified.issuer, ANONYMOUS_ISSUER);
+        assert!(!verified.user_id.is_empty());
+    }
+
+    #[test]
+    fn verify_rejects_unknown_issuer() {
+        let seed = [42u8; 32];
+        let token = mint_jazz_self_signed_token_at(
+            &seed,
+            "urn:jazz:not-a-real-issuer",
+            "test-app",
+            3600,
+            1_000_000,
+        )
+        .unwrap();
+        let err = verify_jazz_self_signed_proof_at(&token, "test-app", 1_000_050)
+            .expect_err("unknown issuer must be rejected");
+        assert!(err.contains("issuer"), "expected issuer error, got {err}");
     }
 }

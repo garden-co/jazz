@@ -1160,6 +1160,11 @@ pub fn mint_local_first_token(
     let seed: [u8; 32] = bytes.try_into().map_err(|_| JazzRnError::Internal {
         message: "seed must be exactly 32 bytes".to_string(),
     })?;
-    jazz_tools::identity::mint_local_first_token(&seed, &audience, ttl_seconds as u64)
-        .map_err(|e| JazzRnError::Internal { message: e })
+    jazz_tools::identity::mint_jazz_self_signed_token(
+        &seed,
+        jazz_tools::identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        ttl_seconds as u64,
+    )
+    .map_err(|e| JazzRnError::Internal { message: e })
 }
