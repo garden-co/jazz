@@ -74,6 +74,8 @@ pub struct SyncManager {
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
+    /// Pending query rejections waiting for QueryManager to fail local subscriptions.
+    pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
     /// Pending replayable batch settlements for RuntimeCore to process.
     pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
@@ -115,6 +117,7 @@ impl std::fmt::Debug for SyncManager {
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
+            .field("pending_query_rejections", &self.pending_query_rejections)
             .field("pending_batch_settlements", &self.pending_batch_settlements)
             .field("received_row_batch_acks", &self.received_row_batch_acks)
             .finish()
@@ -212,6 +215,7 @@ impl SyncManager {
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
+            pending_query_rejections: Vec::new(),
             pending_batch_settlements: Vec::new(),
             received_row_batch_acks: Vec::new(),
         }
@@ -260,6 +264,11 @@ impl SyncManager {
     /// Return this node's local durability identities.
     pub fn local_durability_tiers(&self) -> HashSet<DurabilityTier> {
         self.my_tiers.clone()
+    }
+
+    /// True when this runtime currently has at least one upstream server.
+    pub fn has_connected_servers(&self) -> bool {
+        !self.servers.is_empty()
     }
 
     /// Return the strongest durability tier this node can attest to locally.
@@ -771,6 +780,11 @@ impl SyncManager {
         self.pending_query_settled.extend(pending);
     }
 
+    /// Take pending query rejections for QueryManager to process.
+    pub fn take_pending_query_rejections(&mut self) -> Vec<PendingQueryRejection> {
+        std::mem::take(&mut self.pending_query_rejections)
+    }
+
     /// Return the union of latest upstream scope snapshots for this query.
     pub fn remote_query_scope(&self, query_id: QueryId) -> HashSet<(ObjectId, BranchName)> {
         self.remote_query_scopes
@@ -847,12 +861,14 @@ impl SyncManager {
         &mut self,
         client_id: ClientId,
         query_id: QueryId,
+        code: impl Into<String>,
         reason: impl Into<String>,
     ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::Error(SyncError::QuerySubscriptionRejected {
                 query_id,
+                code: code.into(),
                 reason: reason.into(),
             }),
         });

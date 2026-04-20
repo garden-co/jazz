@@ -17,26 +17,21 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       setConfig(null);
       return;
     }
+    if (!APP_ID || !SERVER_URL) {
+      const missing = [
+        !APP_ID && "NEXT_PUBLIC_JAZZ_APP_ID",
+        !SERVER_URL && "NEXT_PUBLIC_JAZZ_SERVER_URL",
+      ]
+        .filter((v) => !!v)
+        .join(" & ");
+      throw new Error(
+        `${missing} not set. The withJazz Next plugin injects these at dev time; in production, set them explicitly in your environment.`,
+      );
+    }
     let cancelled = false;
     authClient.token().then(({ data, error }) => {
       if (cancelled || error || !data?.token) return;
-      const { token: jwtToken } = data;
-      if (!APP_ID || !SERVER_URL) {
-        const missing = [
-          !APP_ID && "NEXT_PUBLIC_JAZZ_APP_ID",
-          !SERVER_URL && "NEXT_PUBLIC_JAZZ_SERVER_URL",
-        ]
-          .filter((v) => !!v)
-          .join(" & ");
-        throw new Error(
-          `${missing} not set. The withJazz Next plugin injects these at dev time; in production, set them explicitly in your environment.`,
-        );
-      }
-      setConfig({
-        appId: APP_ID,
-        serverUrl: SERVER_URL,
-        jwtToken,
-      });
+      setConfig({ appId: APP_ID, serverUrl: SERVER_URL, jwtToken: data.token });
     });
     return () => {
       cancelled = true;
@@ -61,7 +56,7 @@ function JwtRefresh() {
   useEffect(
     () =>
       db.onAuthChanged((state) => {
-        if (state.status !== "unauthenticated") return;
+        if (state.error !== "expired") return;
         authClient.token().then(({ data, error }) => {
           if (!error && data?.token) db.updateAuthToken(data.token);
         });

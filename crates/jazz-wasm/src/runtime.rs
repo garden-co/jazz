@@ -73,7 +73,9 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
-use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{
+    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
+};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -111,6 +113,20 @@ struct WasmSchemaStateDebug {
 struct WasmLensEdgeDebug {
     source_hash: String,
     target_hash: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmInsertResult {
+    id: String,
+    values: Vec<Value>,
+    batch_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmMutationResult {
+    batch_id: String,
 }
 
 fn runtime_error_to_js(
@@ -187,12 +203,27 @@ struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
     strict_transactions: Option<bool>,
+    transaction_overlay: Option<QueryTransactionOverlayWire>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct QueryTransactionOverlayWire {
+    batch_id: String,
+    branch_name: String,
+    row_ids: Vec<String>,
 }
 
 fn parse_read_durability_options(
     tier: Option<String>,
     options_json: Option<String>,
-) -> Result<(ReadDurabilityOptions, QueryPropagation), JsError> {
+) -> Result<
+    (
+        ReadDurabilityOptions,
+        QueryPropagation,
+        Option<QueryLocalOverlay>,
+    ),
+    JsError,
+> {
     let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
         return Ok((
@@ -202,6 +233,7 @@ fn parse_read_durability_options(
                 strict_transactions: false,
             },
             QueryPropagation::Full,
+            None,
         ));
     };
 
@@ -226,6 +258,24 @@ fn parse_read_durability_options(
         ))),
     }?;
 
+    let transaction_overlay = match options.transaction_overlay {
+        None => None,
+        Some(overlay) => Some(QueryLocalOverlay {
+            batch_id: parse_batch_id_input(&overlay.batch_id)
+                .map_err(|err| JsError::new(&format!("Invalid query batch id: {err}")))?,
+            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
+            row_ids: overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    parse_external_object_id(Some(&row_id))
+                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
+                        .map_err(|err| JsError::new(&format!("Invalid query row id: {err}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+    };
+
     Ok((
         ReadDurabilityOptions {
             tier: parsed_tier,
@@ -233,6 +283,7 @@ fn parse_read_durability_options(
             strict_transactions: options.strict_transactions.unwrap_or(false),
         },
         propagation,
+        transaction_overlay,
     ))
 }
 
@@ -253,7 +304,8 @@ fn parse_subscription_inputs(
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+    let (durability, propagation, _overlay) =
+        parse_read_durability_options(settled_tier, options_json)?;
     Ok((query, session, durability, propagation))
 }
 
@@ -722,7 +774,7 @@ impl WasmRuntime {
     /// Insert a row into a table.
     ///
     /// # Returns
-    /// The inserted row as `{ id, values }`.
+    /// The inserted row as `{ id, values, batchId }`.
     #[wasm_bindgen]
     pub fn insert(
         &self,
@@ -736,13 +788,14 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
-        let (object_id, row_values) = core
+        let ((object_id, row_values), batch_id) = core
             .insert_with_id(table, named_values, object_id, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
 
-        let row = SubscriptionRow {
+        let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
             values: row_values,
+            batch_id: batch_id.to_string(),
         };
         tracing::debug!(object_id = %row.id, "inserted");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -766,13 +819,14 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
-        let (object_id, row_values) = core
+        let ((object_id, row_values), batch_id) = core
             .insert_with_id(table, named_values, object_id, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
-        let row = SubscriptionRow {
+        let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
             values: row_values,
+            batch_id: batch_id.to_string(),
         };
         tracing::debug!(object_id = %row.id, "inserted_with_session");
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -795,11 +849,17 @@ impl WasmRuntime {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+        let (durability, propagation, overlay) =
+            parse_read_durability_options(settled_tier, options_json)?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_propagation(query, session, durability, propagation)
+            match overlay {
+                Some(overlay) => {
+                    core.query_with_local_overlay(query, session, durability, propagation, overlay)
+                }
+                None => core.query_with_propagation(query, session, durability, propagation),
+            }
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -829,7 +889,7 @@ impl WasmRuntime {
 
     /// Update a row by ObjectId.
     #[wasm_bindgen]
-    pub fn update(&self, object_id: &str, values: JsValue) -> Result<(), JsError> {
+    pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
@@ -839,11 +899,17 @@ impl WasmRuntime {
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut core = self.core.borrow_mut();
-        core.update(oid, updates, None)
+        let batch_id = core
+            .update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
 
         tracing::debug!(object_id, "updated");
-        Ok(())
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Update a row by ObjectId as an explicit session principal.
@@ -858,7 +924,7 @@ impl WasmRuntime {
         object_id: &str,
         values: JsValue,
         write_context_json: Option<String>,
-    ) -> Result<(), JsError> {
+    ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -870,27 +936,39 @@ impl WasmRuntime {
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut core = self.core.borrow_mut();
-        core.update(oid, updates, write_context.as_ref())
+        let batch_id = core
+            .update(oid, updates, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
 
         tracing::debug!(object_id, "updated_with_session");
-        Ok(())
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
-    pub fn delete(&self, object_id: &str) -> Result<(), JsError> {
+    pub fn delete(&self, object_id: &str) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
         let mut core = self.core.borrow_mut();
-        core.delete(oid, None)
+        let batch_id = core
+            .delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "deleted");
-        Ok(())
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Delete a row by ObjectId as an explicit session principal.
@@ -899,7 +977,7 @@ impl WasmRuntime {
         &self,
         object_id: &str,
         write_context_json: Option<String>,
-    ) -> Result<(), JsError> {
+    ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -908,11 +986,17 @@ impl WasmRuntime {
         let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self.core.borrow_mut();
-        core.delete(oid, write_context.as_ref())
+        let batch_id = core
+            .delete(oid, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "deleted_with_session");
-        Ok(())
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        WasmMutationResult {
+            batch_id: batch_id.to_string(),
+        }
+        .serialize(&serializer)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     // =========================================================================
@@ -1310,8 +1394,13 @@ impl WasmRuntime {
             .local_batch_record(batch_id)
             .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
         match record {
-            Some(record) => serde_wasm_bindgen::to_value(&serialize_local_batch_record(&record))
-                .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e))),
+            Some(record) => {
+                let serializer =
+                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                serialize_local_batch_record(&record)
+                    .serialize(&serializer)
+                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+            }
             None => Ok(JsValue::null()),
         }
     }
@@ -1322,7 +1411,9 @@ impl WasmRuntime {
         let records = core
             .local_batch_records()
             .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
-        serde_wasm_bindgen::to_value(&serialize_local_batch_records(&records))
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        serialize_local_batch_records(&records)
+            .serialize(&serializer)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 

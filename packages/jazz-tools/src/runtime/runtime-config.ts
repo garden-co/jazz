@@ -5,6 +5,14 @@ function isHttpUrl(moduleUrl: string): boolean {
   return protocol === "http:" || protocol === "https:";
 }
 
+// Turbopack/webpack spawn workers from blob:http(s): URLs; they're opaque bases
+// for `new URL(path, href)`, so we treat them as bundled contexts on par with
+// http(s): pages and let the bundler-resolved wasm URL win.
+function isBundledPageContext(locationHref: string): boolean {
+  const protocol = new URL(locationHref).protocol;
+  return protocol === "http:" || protocol === "https:" || protocol === "blob:";
+}
+
 function resolveBrowserAssetBase(locationHref: string): string {
   return new URL("/", locationHref).href;
 }
@@ -36,7 +44,7 @@ function resolveDerivedWasmUrl(
   if (
     !locationHref ||
     isHttpUrl(runtimeModuleUrl) ||
-    (!allowHttpPageFallback && isHttpUrl(locationHref))
+    (!allowHttpPageFallback && isBundledPageContext(locationHref))
   ) {
     return null;
   }

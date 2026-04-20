@@ -41,7 +41,7 @@ type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1]
 function seedScenario(context: JazzContext): void {
   const db = context.db(reproApp);
 
-  const directTeam = db.insert(reproApp.teams, {
+  const { value: directTeam } = db.insert(reproApp.teams, {
     name: "Direct Membership",
     route_key: "base-direct",
     corporation_id: "corp",
@@ -50,7 +50,7 @@ function seedScenario(context: JazzContext): void {
     system_owned: false,
     archived: false,
   });
-  const relationTeam = db.insert(reproApp.teams, {
+  const { value: relationTeam } = db.insert(reproApp.teams, {
     name: "Relation Membership",
     route_key: "relation-direct",
     corporation_id: "corp",
@@ -58,7 +58,7 @@ function seedScenario(context: JazzContext): void {
     system_owned: false,
     archived: false,
   });
-  const qualifiedTeam = db.insert(reproApp.teams, {
+  const { value: qualifiedTeam } = db.insert(reproApp.teams, {
     name: "Qualified Predicate",
     route_key: "qualified-predicate",
     corporation_id: "corp",
@@ -66,7 +66,7 @@ function seedScenario(context: JazzContext): void {
     system_owned: false,
     archived: false,
   });
-  const opsTeam = db.insert(reproApp.teams, {
+  const { value: opsTeam } = db.insert(reproApp.teams, {
     name: "Operations",
     route_key: "gather-target",
     corporation_id: "corp",
@@ -74,7 +74,7 @@ function seedScenario(context: JazzContext): void {
     system_owned: false,
     archived: false,
   });
-  const grantTargetTeam = db.insert(reproApp.teams, {
+  const { value: grantTargetTeam } = db.insert(reproApp.teams, {
     name: "Incident Desk",
     route_key: "grant-target",
     corporation_id: "corp",
@@ -413,7 +413,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     );
 
     const db = context.asBackend(reproApp);
-    const aliceTeam = db.insert(reproApp.teams, {
+    const { value: aliceTeam } = db.insert(reproApp.teams, {
       name: "Alice",
       route_key: "alice",
       corporation_id: "corp",
@@ -422,7 +422,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       system_owned: false,
       archived: false,
     });
-    const bobTeam = db.insert(reproApp.teams, {
+    const { value: bobTeam } = db.insert(reproApp.teams, {
       name: "Bob",
       route_key: "bob",
       corporation_id: "corp",
@@ -431,7 +431,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       system_owned: false,
       archived: false,
     });
-    const internTeam = db.insert(reproApp.teams, {
+    const { value: internTeam } = db.insert(reproApp.teams, {
       name: "Intern",
       route_key: "intern",
       corporation_id: "corp",
@@ -440,7 +440,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       system_owned: false,
       archived: false,
     });
-    const opsTeam = db.insert(reproApp.teams, {
+    const { value: opsTeam } = db.insert(reproApp.teams, {
       name: "Ops",
       route_key: "ops",
       corporation_id: "corp",
@@ -448,7 +448,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       system_owned: false,
       archived: false,
     });
-    const regionalTeam = db.insert(reproApp.teams, {
+    const { value: regionalTeam } = db.insert(reproApp.teams, {
       name: "Regional",
       route_key: "regional",
       corporation_id: "corp",

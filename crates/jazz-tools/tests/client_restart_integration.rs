@@ -16,9 +16,14 @@ use jazz_tools::{
     QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
+
+mod support;
+
+use support::publish_allow_all_permissions;
 
 const APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
@@ -370,6 +375,18 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
+    let publish_schema_response = Client::new()
+        .post(format!("{}/admin/schemas", server.base_url()))
+        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+        .json(&json!({ "schema": test_schema(), "permissions": null }))
+        .send()
+        .await
+        .expect("publish schema");
+    assert_eq!(
+        publish_schema_response.status(),
+        reqwest::StatusCode::CREATED
+    );
+    publish_allow_all_permissions(&server.base_url(), ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
     let client = JazzClient::connect(make_context(
@@ -380,11 +397,10 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     ))
     .await
     .expect("connect client");
-
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     client
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 (
@@ -393,6 +409,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create before restart");
@@ -432,7 +449,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     );
 
     client
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 (
@@ -441,6 +458,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create after restart");

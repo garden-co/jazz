@@ -29,7 +29,7 @@
       if (authenticated) {
         const resolved = await jazzClient;
         unsubRefresh = resolved.db.onAuthChanged(async (state) => {
-          if (state.status !== "unauthenticated") return;
+          if (state.error !== "expired") return;
           const fresh = await getToken();
           if (fresh) resolved.db.updateAuthToken(fresh);
         });
@@ -54,7 +54,7 @@
       );
       return Promise.resolve(null);
     }
-    const base: Omit<DbConfig, "jwtToken" | "auth"> = { appId, serverUrl };
+    const base: Omit<DbConfig, "jwtToken" | "secret"> = { appId, serverUrl };
 
     if (auth) {
       return getToken().then((token) =>
@@ -64,7 +64,7 @@
 
     return BrowserAuthSecretStore.getOrCreateSecret().then((secret) => ({
       ...base,
-      auth: { localFirstSecret: secret },
+      secret,
     }));
   }
 </script>

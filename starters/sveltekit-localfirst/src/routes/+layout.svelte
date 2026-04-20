@@ -29,7 +29,7 @@
       const config: DbConfig = {
         appId,
         serverUrl,
-        auth: { localFirstSecret: secret },
+        secret,
       };
       client = createJazzClient(config);
     })();

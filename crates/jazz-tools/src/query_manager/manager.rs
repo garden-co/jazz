@@ -196,6 +196,9 @@ pub(crate) struct QuerySubscription {
     /// Row ids that should use the local current version as an overlay while
     /// waiting for a stricter settled tier.
     pub(crate) pending_local_row_ids: HashSet<ObjectId>,
+    /// Optional one-shot overlay keyed by row id for a specific local batch.
+    /// When present, reads must not fall back to unrelated pending local rows.
+    pub(crate) local_overlay_rows: HashMap<ObjectId, RowBatchKey>,
     /// True once the initial upstream query frontier has been replayed.
     pub(crate) query_frontier_complete: bool,
     /// Current ordered IDs for ordered delta construction.
@@ -248,6 +251,7 @@ pub struct QueryUpdate {
 #[derive(Debug, Clone)]
 pub struct QuerySubscriptionFailure {
     pub subscription_id: QuerySubscriptionId,
+    pub code: String,
     pub reason: String,
 }
 
@@ -864,6 +868,7 @@ impl QueryManager {
                 .unwrap_or(QueryPropagation::Full);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
+                code: "query_recompile_failed".to_string(),
                 reason: reason.clone(),
             });
             if propagation == QueryPropagation::Full {
@@ -873,7 +878,8 @@ impl QueryManager {
             }
         }
 
-        let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
+        let mut failed_server: Vec<(ClientId, QueryId, String, String, QueryPropagation)> =
+            Vec::new();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
@@ -914,13 +920,19 @@ impl QueryManager {
                             error = %reason,
                             "server subscription stale recompile failed; dropping subscription"
                         );
-                        failed_server.push((*client_id, *query_id, reason, sub.propagation));
+                        failed_server.push((
+                            *client_id,
+                            *query_id,
+                            "query_recompile_failed".to_string(),
+                            reason,
+                            sub.propagation,
+                        ));
                     }
                 }
             }
         }
 
-        for (client_id, query_id, reason, propagation) in failed_server {
+        for (client_id, query_id, code, reason, propagation) in failed_server {
             self.server_subscriptions.remove(&(client_id, query_id));
             self.sync_manager
                 .drop_client_query_subscription(client_id, query_id);
@@ -931,6 +943,7 @@ impl QueryManager {
             self.sync_manager.emit_query_subscription_rejected(
                 client_id,
                 query_id,
+                code,
                 format!(
                     "query recompilation failed for query_id {}: {}",
                     query_id.0, reason
@@ -942,6 +955,28 @@ impl QueryManager {
     /// Get the schema context.
     pub fn schema_context(&self) -> &SchemaContext {
         &self.schema_context
+    }
+
+    fn process_pending_query_rejections(&mut self) {
+        for rejection in self.sync_manager.take_pending_query_rejections() {
+            let sub_id = QuerySubscriptionId(rejection.query_id.0);
+            if !self.subscriptions.contains_key(&sub_id) {
+                tracing::warn!(
+                    sub_id = sub_id.0,
+                    code = %rejection.code,
+                    error = %rejection.reason,
+                    "received rejection for unknown local subscription"
+                );
+                continue;
+            }
+
+            self.unsubscribe_with_sync(sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                code: rejection.code,
+                reason: rejection.reason,
+            });
+        }
     }
 
     /// Get the current branch name for writes.
@@ -1092,6 +1127,8 @@ impl QueryManager {
             }
         }
 
+        self.process_pending_query_rejections();
+
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.
 
@@ -1144,10 +1181,13 @@ impl QueryManager {
                         } else {
                             subscription.durability_tier
                         };
-                        let local_pending_version = (subscription.local_updates
-                            == LocalUpdates::Immediate)
-                            .then(|| self.pending_local_row_batches.get(&id).copied())
-                            .flatten();
+                        let local_pending_version = if !subscription.local_overlay_rows.is_empty() {
+                            subscription.local_overlay_rows.get(&id).copied()
+                        } else {
+                            (subscription.local_updates == LocalUpdates::Immediate)
+                                .then(|| self.pending_local_row_batches.get(&id).copied())
+                                .flatten()
+                        };
                         Self::load_visible_row_for_query(
                             storage_ref,
                             id,
@@ -1155,6 +1195,7 @@ impl QueryManager {
                             &branches,
                             durability_tier,
                             local_pending_version,
+                            !subscription.local_overlay_rows.is_empty(),
                             include_deleted,
                             schema_context,
                             branch_schema_map,
@@ -2006,6 +2047,7 @@ impl QueryManager {
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         local_pending_version: Option<RowBatchKey>,
+        prefer_local_overlay: bool,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -2013,16 +2055,7 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
-            storage,
-            row_id,
-            table_hint,
-            branches,
-            durability_tier,
-            schema_context,
-            branch_schema_map,
-        )
-        .or_else(|| {
+        let exact_pending_visible_row = || {
             let pending_version = local_pending_version?;
             let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
                 storage,
@@ -2037,8 +2070,8 @@ impl QueryManager {
             (row.batch_id == pending_version.batch_id
                 && row.branch.as_str() == pending_version.branch_name.as_str())
             .then_some(resolved)
-        })
-        .or_else(|| {
+        };
+        let pending_staged_row = || {
             let pending_version = local_pending_version?;
             let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
                 storage,
@@ -2051,7 +2084,27 @@ impl QueryManager {
                 && row.branch.as_str() == pending_version.branch_name.as_str()
                 && matches!(row.state, RowState::StagingPending))
             .then_some(resolved)
-        })?;
+        };
+        let best_visible_row = || {
+            Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                branches,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
+        };
+        let resolved = if prefer_local_overlay {
+            exact_pending_visible_row()
+                .or_else(pending_staged_row)
+                .or_else(best_visible_row)
+        } else {
+            best_visible_row()
+                .or_else(exact_pending_visible_row)
+                .or_else(pending_staged_row)
+        }?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {

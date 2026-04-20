@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import { TodoWidget } from "@/components/todo-widget";
+import { AuthBackup } from "@/components/auth-backup";
 
 export default function Page() {
   return (
@@ -18,6 +19,7 @@ export default function Page() {
         />
       </header>
       <TodoWidget />
+      <AuthBackup />
     </main>
   );
 }

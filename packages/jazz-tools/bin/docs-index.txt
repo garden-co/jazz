@@ -2,12 +2,15 @@
 TITLE:Authentication
 DESCRIPTION:"How and when to use Jazz's auth modes, and how to manage JWT auth over the lifetime of a live client."
 
-Jazz has two auth modes: `local-first` and `external`. Local-first auth derives a stable identity from a device secret — no server needed. Most multi-user apps will also use `external` authentication for production accounts.
+Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
 | Mode          | What it does                                           | When to use it                                   |
 | ------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `anonymous`   | Ephemeral read-only identity, no secret, no server     | Public/marketing surfaces, try-before-anything   |
 | `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
 | `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
+
+Anonymous sessions can subscribe to queries but are **structurally denied writes** — every insert, update, and delete path checks the session's auth mode before any policy evaluation runs, and surfaces an `AnonymousWriteDeniedError` to the client. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
 
 ## Local-first auth
 
@@ -89,7 +92,9 @@ For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config
 
 ```tsx
 const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
-const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+const { secret, isLoading } = useLocalFirstAuth();
+
+if (!jwtToken && (isLoading || !secret)) return <p>Loading…</p>;
 
 const config = jwtToken
   ? {
@@ -100,7 +105,7 @@ const config = jwtToken
   : {
       appId: "my-app",
       serverUrl: "https://sync.example.com",
-      auth: { localFirstSecret: secret },
+      secret: secret!,
     };
 
 ;
@@ -120,14 +125,42 @@ recommended path for login, logout, and any principal change.
 
 ### Reacting to expiry and unauthenticated responses
 
-Jazz exposes first-class auth state on `Db`:
+Auth state is flat:
+
+```ts
+interface AuthState {
+  authMode: "anonymous" | "local-first" | "external";
+  session: Session | null;
+  error?: "expired" | "missing" | "invalid" | "disabled";
+}
+```
+
+Presence of `error` indicates trouble; `authMode` and the last-known `session` are always available.
+
+#### React: `onJWTExpired` prop
+
+For JWT refresh, pass `onJWTExpired` to `JazzProvider`. Jazz calls it when the sync server rejects
+the current token as expired, serialized so concurrent failed writes trigger a single refresh:
+
+```tsx
+ await fetchFreshJwt()}
+>
+
+```
+
+Read auth state from any component with `useAuthState()`:
+
+```ts
+const { authMode, userId, claims, error } = useAuthState();
+```
+
+#### TypeScript: `db.onAuthChanged`
+
+Outside React, subscribe to auth-state changes on `Db`:
 
 ```ts
 const stop = db.onAuthChanged(async (state) => {
-  if (state.status !== "unauthenticated") return;
-
-  console.log(state.reason);
-  // "expired" | "missing" | "invalid" | "disabled"
+  if (state.error !== "expired") return;
 
   const freshJwt = await getFreshJwtForCurrentUser().catch(() => null);
   if (freshJwt) {
@@ -140,22 +173,19 @@ const stop = db.onAuthChanged(async (state) => {
 });
 ```
 
-You can also read the current snapshot synchronously with `db.getAuthState()`.
+Read the current snapshot synchronously with `db.getAuthState()`.
 
 When Jazz receives a structured unauthenticated response from the sync server, it:
 
-- transitions the client to `status: "unauthenticated"`
+- sets `error` on the auth state
 - preserves the last known `session`
 - pauses authenticated sync and reconnects until the app either refreshes the same user's JWT with
   `db.updateAuthToken(...)` or recreates the client with a new auth config
 
-This means app code should treat `authState.status` as the source of truth for whether Jazz is
-currently authenticated.
-
-  `useSession()` and `db.getAuthState().session` can still return the last known session while the
-  auth state is unauthenticated. That's intentional: it keeps user-scoped UI and local authorship
-  stable while your app refreshes or replaces the JWT. For signed-in vs signed-out UI, check
-  `db.getAuthState().status` instead of only checking whether a session exists.
+  `useSession()` and `db.getAuthState().session` can still return the last known session while
+  `error` is set. That's intentional: it keeps user-scoped UI and local authorship stable while your
+  app refreshes or replaces the JWT. For signed-in vs signed-out UI, check whether `error` is set
+  (or the `authMode` you expect) instead of only whether a session exists.
 
 ### Server configuration
 
@@ -210,12 +240,14 @@ Local-first auth lets users start using your app immediately — no sign-up, no 
 
 ## Client setup
 
-Use `BrowserAuthSecretStore` to persist the user's secret across sessions. On first load it generates a new identity; on subsequent loads it reuses the stored one.
+Use `useLocalFirstAuth()` to manage the user's secret. On first load it generates a new identity; on subsequent loads it reuses the stored one. It also exposes `login` and `signOut` for switching or clearing the local identity.
 
 ```tsx
 
 function App() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return <p>Loading…</p>;
 
   return (
 
@@ -349,36 +381,54 @@ On the server, a BetterAuth middleware hook intercepts sign-up requests, verifie
 The app switches between local-first auth and external JWT based on whether the user has a BetterAuth session:
 
 ```tsx
-function App() {
-  const { data: authSession, isPending } = authClient.useSession();
-  const [config, setConfig] = useState(null);
+function useBetterAuthJWT() {
+  const { data, isPending } = authClient.useSession();
+  const [jwt, setJwt] = useState<string | null>(null);
+  const [isFetching, setIsFetching] = useState(false);
 
   useEffect(() => {
     if (isPending) return;
-
-    async function resolveConfig() {
-      const sharedConfig = {
-        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
-        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-      };
-
-      if (authSession?.session) {
-        // User is signed in with BetterAuth — use their JWT
-        const jwtToken = await getJwtFromBetterAuth();
-        setConfig({ ...sharedConfig, jwtToken: jwtToken! });
-      } else {
-        // No external session — use local-first auth
-        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-        setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
-      }
+    if (!data?.session) {
+      setJwt(null);
+      return;
     }
+    setIsFetching(true);
+    void getJwtFromBetterAuth().then((token) => {
+      setJwt(token ?? null);
+      setIsFetching(false);
+    });
+  }, [isPending, data?.session?.id]);
 
-    void resolveConfig();
-  }, [isPending, authSession?.session]);
+  return {
+    isLoading: isPending || isFetching,
+    jwt,
+    getRefreshedJWT: () => getJwtFromBetterAuth(),
+  };
+}
 
-  if (isPending || !config) return null;
+function App() {
+  const betterAuth = useBetterAuthJWT();
+  const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
+
+  // Only mint a local-first secret when there's no BetterAuth session.
+  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
+
+  const config = useMemo(
+    () => ({
+      appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
+      jwtToken: betterAuth.jwt ?? undefined,
+      secret,
+    }),
+    [betterAuth.jwt, secret],
+  );
+
+  if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) return <p>Loading auth…</p>;
 
   return (
+     betterAuth.getRefreshedJWT()}
+      fallback={<p>Loading Jazz DB…</p>}
+    >
 
   );
 }
@@ -409,7 +459,7 @@ The BetterAuth example above uses a framework-specific middleware hook. With any
 1. Accepts `proofToken` alongside the sign-up credentials
 2. Verifies it with `verifyLocalFirstIdentityProof` from `jazz-napi`
 3. Stores the proven Jazz user ID linked to the new user account
-4. Issues JWTs with either `sub: jazzId` or `jazz_principal_id: jazzId`
+4. Issues JWTs with `sub: jazzId`
 
 ```ts title="server.ts"
 
@@ -427,8 +477,7 @@ app.post("/signup", async (req, res) => {
   );
   if (!ok) return res.status(400).json({ error });
 
-  // Store jazzUserId so you can include it in future JWTs as `sub`
-  // or, for managed providers with provider-owned `sub`, as `jazz_principal_id`
+  // Store jazzUserId so you can mint future JWTs with it as `sub`.
   const user = await db.users.create({ email, password, jazzId: jazzUserId });
 
   res.json({ token: issueJwt({ sub: user.jazzId /* ... */ }) });
@@ -437,7 +486,7 @@ app.post("/signup", async (req, res) => {
 
 The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
 
-If your provider lets you control the JWT subject, you can set `sub` directly to the Jazz ID. Many managed providers keep `sub` fixed to their own user ID. In that case, call a dedicated `/link-jazz-identity` endpoint immediately after sign-up, store the Jazz ID in provider metadata or your own database, and mint or refresh JWTs with `jazz_principal_id: <jazzId>`. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
+Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub` fixed to its own user ID, add a `/link-jazz-identity` endpoint that stores the Jazz ID and mint the JWT with `sub: <jazzId>` yourself — either via a custom `getSubject` hook on your provider or by issuing the JWT directly.
 
 ## Under the hood
 
@@ -906,6 +955,7 @@ edit metadata. Use the attribution helpers for this:
 
   const syntheticSession = {
     user_id: "user_123",
+    authMode: "external" as const,
     claims: {},
   };
 
@@ -3105,7 +3155,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz derives `session.user_id` from `jazz_principal_id` when present, otherwise from the JWT's `sub` claim.
+4. On success, Jazz uses the JWT's `sub` claim as `session.user_id`.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -3252,7 +3302,7 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-By default, the `sub` claim identifies the user. If your provider supports custom claims but keeps `sub` fixed to its own user ID, include `jazz_principal_id` in the JWT instead. Jazz uses `jazz_principal_id` as `session.user_id` when present and falls back to `sub` otherwise.
+Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub` fixed to its own user ID, mint the JWT with `sub` set to the Jazz user ID yourself — either via a custom `getSubject` hook on the provider or by issuing the JWT directly from your server.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
 
@@ -3734,11 +3784,11 @@ See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detail
 
 Read durability controls when the **first result** of a query or subscription is delivered.
 
-| Option         | Values                               | Default        | What it does                                                                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Option         | Values                              | Default        | What it does                                                                                                                                                                                                                                                                     |
+| -------------- | ----------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tier`         | `"local"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
-| `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
-| `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
+| `localUpdates` | `"immediate"` \| `"deferred"`       | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
+| `propagation`  | `"full"` \| `"local-only"`          | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
 These options apply to:
 
@@ -5353,7 +5403,7 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
-| `local` | Persisted to local OPFS             | Browser/client |
+| `local`  | Persisted to local OPFS             | Browser/client |
 | `edge`   | Acknowledged by nearest sync server | Backend/server |
 | `global` | Propagated to global core           | —              |
 

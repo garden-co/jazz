@@ -127,6 +127,7 @@ impl MagicColumnsNode {
                         ),
                         references: None,
                         default: None,
+                        merge_strategy: None,
                     });
                 }
 

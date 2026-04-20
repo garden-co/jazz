@@ -1348,18 +1348,14 @@ async fn authenticate_ws_handshake(
     }
 
     // 3. JWT / session-impersonation path.
-    let session = {
-        let external_identities = state.external_identities.read().await;
-        extract_session(
-            &headers,
-            state.app_id,
-            &state.auth_config,
-            Some(&external_identities),
-            state.jwt_verifier.as_deref(),
-        )
-        .await
-        .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?
-    };
+    let session = extract_session(
+        &headers,
+        state.app_id,
+        &state.auth_config,
+        state.jwt_verifier.as_deref(),
+    )
+    .await
+    .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?;
 
     let session =
         session.ok_or_else(|| "Session required. Provide JWT or backend secret.".to_string())?;

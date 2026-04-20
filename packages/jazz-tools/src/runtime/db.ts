@@ -18,6 +18,7 @@ import {
   DirectBatch as RuntimeDirectBatch,
   JazzClient,
   type LocalBatchRecord,
+  type MutationErrorEvent,
   loadWasmModule,
   PersistedWrite as RuntimePersistedWrite,
   Transaction as RuntimeTransaction,
@@ -386,6 +387,39 @@ function backendScopedAuthState(session?: Session | null): AuthState {
   };
 }
 
+/**
+ * Returned by upsert, update, and delete operations. Allows waiting for the
+ * write to be persisted at a given durability tier.
+ */
+export class WriteHandle {
+  readonly #client: JazzClient;
+
+  constructor(
+    readonly batchId: string,
+    client: JazzClient,
+  ) {
+    this.#client = client;
+  }
+
+  async wait(options: { tier: DurabilityTier }): Promise<void> {
+    return this.#client.waitForPersistedBatch(this.batchId, options.tier);
+  }
+}
+
+/**
+ * Returned by insert operations. Allows getting the inserted value and
+ * waiting for the write to be persisted at a given durability tier.
+ */
+export class InsertHandle<T> extends WriteHandle {
+  constructor(
+    readonly value: T,
+    batchId: string,
+    client: JazzClient,
+  ) {
+    super(batchId, client);
+  }
+}
+
 export class DbPersistedWrite<T> {
   constructor(
     private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
@@ -427,7 +461,7 @@ export class DbTransaction {
     ) => void,
   ) {}
 
-  private ensureWritable(): void {
+  private ensureActive(): void {
     if (this.committed) {
       throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already committed`);
     }
@@ -440,6 +474,10 @@ export class DbTransaction {
       normalizeRuntimeSchema(this.client.getSchema()),
       table._table,
     );
+  }
+
+  private assertOwnsQuery<T>(query: QueryBuilder<T>): void {
+    this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
   }
 
   private wrapPersistedWrite<T>(
@@ -467,15 +505,19 @@ export class DbTransaction {
     return batchId;
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
-    this.ensureWritable();
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+    this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
     const row = this.runtimeTransaction.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return new InsertHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.client,
+    );
   }
 
   insertPersisted<T, Init>(
@@ -483,7 +525,7 @@ export class DbTransaction {
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
-    this.ensureWritable();
+    this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -495,14 +537,15 @@ export class DbTransaction {
     );
   }
 
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.ensureWritable();
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
+    this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    this.runtimeTransaction.update(id, updates);
+    const result = this.runtimeTransaction.update(id, updates);
+    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
   }
 
   updatePersisted<T, Init>(
@@ -511,7 +554,7 @@ export class DbTransaction {
     data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
-    this.ensureWritable();
+    this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -524,10 +567,11 @@ export class DbTransaction {
     );
   }
 
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    this.ensureWritable();
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+    this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
-    this.runtimeTransaction.delete(id);
+    const result = this.runtimeTransaction.delete(id);
+    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
   }
 
   deletePersisted<T, Init>(
@@ -535,13 +579,35 @@ export class DbTransaction {
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
-    this.ensureWritable();
+    this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,
       () => undefined,
     );
+  }
+
+  async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    this.ensureActive();
+    this.assertOwnsQuery(query);
+    const runtimeSchema = normalizeRuntimeSchema(this.client.getSchema());
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await this.runtimeTransaction.query(
+      translateQuery(builderJson, planningSchema),
+      options,
+    );
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+  }
+
+  async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    const results = await this.all(query, options);
+    return results[0] ?? null;
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -592,14 +658,18 @@ export class DbDirectBatch {
     return this.runtimeBatch.batchId();
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
     const row = this.runtimeBatch.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return new InsertHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.client,
+    );
   }
 
   insertPersisted<T, Init>(
@@ -618,13 +688,14 @@ export class DbDirectBatch {
     );
   }
 
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    this.runtimeBatch.update(id, updates);
+    const result = this.runtimeBatch.update(id, updates);
+    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
   }
 
   updatePersisted<T, Init>(
@@ -645,9 +716,10 @@ export class DbDirectBatch {
     );
   }
 
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.assertOwnsTable(table, "DbDirectBatch");
-    this.runtimeBatch.delete(id);
+    const result = this.runtimeBatch.delete(id);
+    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
   }
 
   deletePersisted<T, Init>(
@@ -843,7 +915,7 @@ function isLeaderDebugEnabled(): boolean {
  * const db = await createDb({ appId: "my-app", driver });
  *
  * // Mutations
- * const inserted = db.insert(app.todos, { title: "Buy milk", done: false });
+ * const { value: inserted } = db.insert(app.todos, { title: "Buy milk", done: false });
  * db.update(app.todos, inserted.id, { done: true });
  * db.delete(app.todos, inserted.id);
  *
@@ -890,6 +962,16 @@ export class Db {
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
+  /**
+   * Listeners attached with {@link Db.onMutationError} that are notified when a write operation
+   * (insert, update, delete) is rejected. Errors from all {@link Db.clients} (including those
+   * added after the listeners are attached) are forwarded to all Db listeners.
+   */
+  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
+  /**
+   * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
+   */
+  private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -1142,6 +1224,7 @@ export class Db {
         this.attachWorkerBridge(key, client);
       }
 
+      this.attachMutationErrorHandler(client);
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
       if (!this.worker && this.config.serverUrl) {
@@ -1155,12 +1238,33 @@ export class Db {
         );
       }
 
+      this.attachMutationErrorHandler(client);
       this.clients.set(key, client);
     }
 
     return this.clients.get(key)!;
   }
 
+  /**
+   * Attaches a mutation error handler to the given client, ensuring all listeners in
+   * {@link Db.mutationErrorListeners} are notified.
+   */
+  private attachMutationErrorHandler(client: JazzClient): void {
+    if (this.mutationErrorListeners.size === 0) {
+      return;
+    }
+    if (this.clientMutationErrorUnsubscribers.has(client)) {
+      return;
+    }
+    this.clientMutationErrorUnsubscribers.set(
+      client,
+      client.onMutationError((event) => {
+        for (const listener of this.mutationErrorListeners) {
+          listener(event);
+        }
+      }),
+    );
+  }
   /**
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
@@ -2083,6 +2187,31 @@ export class Db {
     });
   }
 
+  /**
+   * Attach a fallback listener to be notified when a write operation
+   * (insert, update, delete) is rejected.
+   * This callback is only called if the write error is not surfaced by
+   * {@link WriteHandle.wait}.
+   * This callback is called even after app restarts (which does not
+   * happen with {@link WriteHandle.wait}).
+   */
+  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.mutationErrorListeners.add(listener);
+    for (const client of this.clients.values()) {
+      this.attachMutationErrorHandler(client);
+    }
+    return () => {
+      this.mutationErrorListeners.delete(listener);
+      if (this.mutationErrorListeners.size > 0) {
+        return;
+      }
+      for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
+        unsubscribe();
+      }
+      this.clientMutationErrorUnsubscribers.clear();
+    };
+  }
+
   getConfig(): DbConfig {
     // Return a copy of the config to avoid editing the original config.
     return structuredClone(this.config);
@@ -2111,9 +2240,13 @@ export class Db {
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @returns Inserted row
+   * @returns Insert handle containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): InsertHandle<T> {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
@@ -2121,7 +2254,7 @@ export class Db {
     const row = options
       ? client.create(table._table, values, options)
       : client.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    return new InsertHandle(transformRow(row, table._schema, table._table), row.batchId, client);
   }
 
   /**
@@ -2167,10 +2300,14 @@ export class Db {
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): WriteHandle {
     const client = this.getClient(table._schema);
     const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.upsert(table._table, values, options);
+    return new WriteHandle(client.upsert(table._table, values, options).batchId, client);
   }
 
   /**
@@ -2200,10 +2337,10 @@ export class Db {
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
-  ): void {
+  ): WriteHandle {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.update(id, updates, options);
+    return new WriteHandle(client.update(id, updates, options).batchId, client);
   }
 
   /**
@@ -2245,9 +2382,9 @@ export class Db {
   /**
    * Delete a row without waiting for durability.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
-    client.delete(id);
+    return new WriteHandle(client.delete(id).batchId, client);
   }
 
   /**
@@ -2546,6 +2683,11 @@ export class Db {
       this.workerBridge = null;
     }
 
+    for (const unsubscribe of this.clientMutationErrorUnsubscribers.values()) {
+      unsubscribe();
+    }
+    this.clientMutationErrorUnsubscribers.clear();
+    this.mutationErrorListeners.clear();
     for (const client of this.clients.values()) {
       await client.shutdown();
     }
@@ -2652,6 +2794,10 @@ export class Db {
   }
 }
 
+/**
+ * A Db implementation that delegates all operations to an existing {@link JazzClient}.
+ * Used only for tests.
+ */
 class ClientBackedDb extends Db {
   private readonly hasScopedAuthState: boolean;
 
@@ -2687,6 +2833,9 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
   }
 
+  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    return this.runtimeClient.onMutationError(listener);
+  }
   override updateCookieSession(cookieSession: Session | null): void {
     if (this.hasScopedAuthState) {
       return;
@@ -2699,7 +2848,11 @@ class ClientBackedDb extends Db {
     this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
   }
 
-  override insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
+  override insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): InsertHandle<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
@@ -2710,7 +2863,11 @@ class ClientBackedDb extends Db {
       this.attribution,
       options,
     );
-    return transformRow(row, table._schema, table._table);
+    return new InsertHandle(
+      transformRow(row, table._schema, table._table),
+      row.batchId,
+      this.runtimeClient,
+    );
   }
 
   override async insertDurable<T, Init>(
@@ -2735,11 +2892,11 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     data: Partial<Init>,
     options: UpsertOptions,
-  ): void {
+  ): WriteHandle {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.upsertInternal(
+    const batchId = this.runtimeClient.upsertInternal(
       table._table,
       values,
       options.id,
@@ -2747,6 +2904,7 @@ class ClientBackedDb extends Db {
       this.attribution,
       options.updatedAt,
     );
+    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async upsertDurable<T, Init>(
@@ -2794,11 +2952,11 @@ class ClientBackedDb extends Db {
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
-  ): void {
+  ): WriteHandle {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.updateInternal(
+    const batchId = this.runtimeClient.updateInternal(
       id,
       updates,
       this.session,
@@ -2806,6 +2964,7 @@ class ClientBackedDb extends Db {
       undefined,
       options?.updatedAt,
     );
+    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async updateDurable<T, Init>(
@@ -2852,8 +3011,9 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
-    this.runtimeClient.deleteInternal(id, this.session, this.attribution);
+  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): WriteHandle {
+    const batchId = this.runtimeClient.deleteInternal(id, this.session, this.attribution).batchId;
+    return new WriteHandle(batchId, this.runtimeClient);
   }
 
   override async deleteDurable<T, Init>(
@@ -2975,22 +3135,12 @@ function isBrowser(): boolean {
 /**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
- * INTENTIONALLY NOT CRYPTOGRAPHICALLY SECURE. We pick Math.random over
- * crypto.getRandomValues on purpose: we want one implementation that runs on
- * every target (browser, Node ESM, React Native, edge workers) without a
- * `crypto` import or WASM dependency, and we're willing to trade CSPRNG-grade
- * unpredictability for that portability.
- *
- * Safe because anonymous sessions cannot own or write anything — the server
- * denies writes at the middleware layer regardless of identity — so a
- * predictable seed has no confidentiality or integrity consequence. Do NOT
- * reuse this helper for anything that touches writable state.
+ * Uses `globalThis.crypto.getRandomValues`, which is available in all
+ * supported environments (browser, Node ≥15, React Native, edge workers).
  */
 function generateEphemeralSeedBase64Url(): string {
   const bytes = new Uint8Array(32);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
+  globalThis.crypto.getRandomValues(bytes);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -3043,7 +3193,7 @@ export async function createDb(config: DbConfig): Promise<Db> {
       nowSeconds,
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
-  } else if (!config.jwtToken) {
+  } else if (!config.jwtToken && !config.cookieSession) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     const wasmModule = await loadWasmModule(config.runtimeSources);
     const ephemeralSeed = generateEphemeralSeedBase64Url();

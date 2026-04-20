@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Row, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  type DirectInsertResult,
+  type DirectMutationResult,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
 
 const schemaWithTodos = {
@@ -28,8 +33,12 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-function mockRow(id = "todo-1"): Row {
-  return { id, values: [] };
+function mockRow(id = "todo-1"): DirectInsertResult {
+  return { id, values: [], batchId: `batch-${id}` };
+}
+
+function mockMutation(batchId = "batch-id"): DirectMutationResult {
+  return { batchId };
 }
 
 function makeClient() {
@@ -43,9 +52,17 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
-    update: () => {},
-    delete: () => {},
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -122,9 +139,17 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
-    update: () => {},
-    delete: () => {},
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async () => [],
     subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
@@ -435,6 +460,86 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
   });
 
+  it("passes transaction overlay options to runtime query for transaction reads", async () => {
+    const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
+      [];
+    let writeContextJson: string | null | undefined;
+
+    const runtime: Runtime = {
+      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
+      insertWithSession: (_table, _values, contextJson) => {
+        writeContextJson = contextJson;
+        return mockRow("00000000-0000-0000-0000-000000000001");
+      },
+      update: () => mockMutation(),
+      updateWithSession: () => mockMutation(),
+      delete: () => mockMutation(),
+      deleteWithSession: () => mockMutation(),
+      query: async (
+        queryJson: string,
+        sessionJson?: string | null,
+        tier?: string | null,
+        optionsJson?: string | null,
+      ) => {
+        queryCalls.push([
+          queryJson,
+          sessionJson ?? undefined,
+          tier ?? undefined,
+          optionsJson ?? undefined,
+        ]);
+        return [];
+      },
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "00000000-0000-0000-0000-000000000001",
+      getSchema: () => ({}),
+      getSchemaHash: () => "schema-hash",
+    };
+
+    const JazzClientCtor = JazzClient as unknown as {
+      new (
+        runtime: Runtime,
+        context: AppContext,
+        defaultDurabilityTier: "local" | "edge" | "global",
+      ): JazzClient;
+    };
+    const client = new JazzClientCtor(
+      runtime,
+      {
+        appId: "test-app",
+        schema: {},
+        serverUrl: "http://localhost:1625",
+        backendSecret: "test-backend-secret",
+      },
+      "edge",
+    );
+
+    const tx = client.beginTransaction();
+    tx.create("todos", { done: { type: "Boolean", value: false } });
+    await tx.query('{"table":"todos"}');
+
+    const writeContext = JSON.parse(writeContextJson ?? "{}");
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({
+        local_updates: "deferred",
+        transaction_overlay: {
+          batch_id: writeContext.batch_id,
+          branch_name: writeContext.target_branch_name,
+          row_ids: ["00000000-0000-0000-0000-000000000001"],
+        },
+      }),
+    );
+  });
+
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {}, {
@@ -506,8 +611,12 @@ describe("JazzClient schema order", () => {
     const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
       insert,
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 0,
@@ -578,8 +687,12 @@ describe("JazzClient schema order", () => {
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -661,8 +774,12 @@ describe("JazzClient schema order", () => {
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -768,8 +885,12 @@ describe("JazzClient schema order", () => {
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -915,8 +1036,12 @@ describe("JazzClient schema order", () => {
   it("keeps magic projection values ahead of included rows during schema alignment", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -1065,8 +1190,12 @@ describe("JazzClient schema order", () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 1,

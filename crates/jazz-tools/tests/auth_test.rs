@@ -39,8 +39,6 @@ struct JwtClaims {
     sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     iss: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    jazz_principal_id: Option<String>,
     claims: serde_json::Value,
     exp: u64,
 }
@@ -54,7 +52,7 @@ fn future_exp() -> u64 {
 }
 
 fn make_jwt(sub: &str, claims: serde_json::Value, secret: &str) -> String {
-    make_jwt_with_exp(sub, claims, secret, future_exp(), None, None)
+    make_jwt_with_exp(sub, claims, secret, future_exp(), None)
 }
 
 fn make_jwt_with_exp(
@@ -63,12 +61,10 @@ fn make_jwt_with_exp(
     secret: &str,
     exp: u64,
     issuer: Option<&str>,
-    principal_id: Option<&str>,
 ) -> String {
     let jwt_claims = JwtClaims {
         sub: sub.to_string(),
         iss: issuer.map(str::to_string),
-        jazz_principal_id: principal_id.map(str::to_string),
         claims,
         exp,
     };
@@ -532,7 +528,6 @@ mod integration_tests {
         let jwt_claims = JwtClaims {
             sub: sub.to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: json!({}),
             exp,
         };

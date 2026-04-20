@@ -177,7 +177,54 @@ pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>
 #[serde(untagged)]
 enum WriteContextWire {
     Session(Session),
-    Context(WriteContext),
+    Context(WriteContextPayloadWire),
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteContextPayloadWire {
+    #[serde(default)]
+    session: Option<Session>,
+    #[serde(default)]
+    attribution: Option<String>,
+    #[serde(default)]
+    updated_at: Option<u64>,
+    #[serde(default)]
+    batch_mode: Option<String>,
+    #[serde(default)]
+    batch_id: Option<String>,
+    #[serde(default)]
+    target_branch_name: Option<String>,
+}
+
+impl TryFrom<WriteContextPayloadWire> for WriteContext {
+    type Error = String;
+
+    fn try_from(value: WriteContextPayloadWire) -> Result<Self, Self::Error> {
+        let batch_mode = match value.batch_mode.as_deref() {
+            None => None,
+            Some("direct") | Some("Direct") => Some(BatchMode::Direct),
+            Some("transactional") | Some("Transactional") => Some(BatchMode::Transactional),
+            Some(other) => {
+                return Err(format!(
+                    "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
+                ));
+            }
+        };
+        let batch_id = value
+            .batch_id
+            .as_deref()
+            .map(parse_batch_id_input)
+            .transpose()?;
+
+        Ok(WriteContext {
+            session: value.session,
+            attribution: value.attribution,
+            updated_at: value.updated_at,
+            batch_mode,
+            batch_id,
+            target_branch_name: value.target_branch_name,
+        })
+    }
 }
 
 pub fn parse_write_context_input(
@@ -186,7 +233,7 @@ pub fn parse_write_context_input(
     match write_context_json {
         Some(json) => match serde_json::from_str::<WriteContextWire>(json) {
             Ok(WriteContextWire::Session(session)) => Ok(Some(WriteContext::from_session(session))),
-            Ok(WriteContextWire::Context(context)) => Ok(Some(context)),
+            Ok(WriteContextWire::Context(context)) => context.try_into().map(Some),
             Err(err) => Err(err.to_string()),
         },
         None => Ok(None),
@@ -283,7 +330,6 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
     json!({
         "batchId": record.batch_id.to_string(),
         "mode": serialize_batch_mode(record.mode),
-        "requestedTier": serialize_durability_tier(record.requested_tier),
         "sealed": record.sealed,
         "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
     })
@@ -433,9 +479,10 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, parse_runtime_schema_input,
+        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
         query_rows_can_be_schema_aligned,
     };
+    use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
     use crate::query_manager::types::{
@@ -594,5 +641,70 @@ mod tests {
 
         assert!(!input.loaded_policy_bundle);
         assert!(input.schema.contains_key(&TableName::new("todos")));
+    }
+
+    #[test]
+    fn parse_write_context_accepts_ts_batch_id_strings() {
+        let batch_id = "0123456789abcdef0123456789abcdef";
+        let input = format!(
+            r#"{{
+                "session": {{
+                    "user_id": "alice",
+                    "claims": {{}},
+                    "authMode": "external"
+                }},
+                "batch_mode": "transactional",
+                "batch_id": "{batch_id}",
+                "target_branch_name": "dev-123456789abc-main"
+            }}"#
+        );
+
+        let context = parse_write_context_input(Some(&input))
+            .expect("parse write context")
+            .expect("write context");
+
+        assert_eq!(
+            context
+                .batch_id()
+                .map(|parsed| parsed.to_string())
+                .as_deref(),
+            Some(batch_id)
+        );
+        assert_eq!(context.target_branch_name(), Some("dev-123456789abc-main"));
+    }
+
+    #[test]
+    fn parse_write_context_rejects_legacy_batch_id_arrays() {
+        let input = r#"{
+            "session": {
+                "user_id": "alice",
+                "claims": {},
+                "authMode": "external"
+            },
+            "batch_mode": "transactional",
+            "batch_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            "target_branch_name": "dev-123456789abc-main"
+        }"#;
+
+        let error =
+            parse_write_context_input(Some(input)).expect_err("legacy batch_id should fail");
+        assert!(error.contains("WriteContextWire"));
+    }
+
+    #[test]
+    fn write_context_accepts_lowercase_transactional_batch_mode() {
+        let context = parse_write_context_input(Some(
+            r#"{
+                "batch_mode": "transactional",
+                "batch_id": "0196721ac2617f10a4bebbc7f7ffdb3f",
+                "target_branch_name": "dev-111111111111-main"
+            }"#,
+        ))
+        .expect("parse write context")
+        .expect("write context present");
+
+        assert_eq!(context.batch_mode(), BatchMode::Transactional);
+        assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
+        assert!(context.batch_id().is_some());
     }
 }

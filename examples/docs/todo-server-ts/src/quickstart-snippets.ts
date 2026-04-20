@@ -25,7 +25,7 @@ api.post("/api/todos", async (c) => {
   const db = await context.forRequest(c.req);
   const { title } = await c.req.json();
 
-  const todo = db.insert(schemaApp.todos, {
+  const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
     owner_id: "system",

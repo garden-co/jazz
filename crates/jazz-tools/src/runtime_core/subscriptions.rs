@@ -317,6 +317,46 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> QueryFuture {
+        self.query_with_overlay_rows(query, session, durability, propagation, HashMap::new())
+    }
+
+    pub fn query_with_local_overlay(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        overlay: QueryLocalOverlay,
+    ) -> QueryFuture {
+        let local_overlay_rows = if overlay.row_ids.is_empty() {
+            HashMap::new()
+        } else {
+            overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    (
+                        row_id,
+                        crate::sync_manager::RowBatchKey::new(
+                            row_id,
+                            overlay.branch_name,
+                            overlay.batch_id,
+                        ),
+                    )
+                })
+                .collect()
+        };
+        self.query_with_overlay_rows(query, session, durability, propagation, local_overlay_rows)
+    }
+
+    fn query_with_overlay_rows(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
+    ) -> QueryFuture {
         let _span = debug_span!(
             "query",
             table = query.table.as_str(),
@@ -329,13 +369,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let sub_id = match self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync_and_propagation_with_local_updates(
+            .subscribe_with_sync_and_propagation_with_local_overlay(
                 query,
                 session,
                 durability.tier,
-                durability.local_updates,
-                durability.strict_transactions,
-                propagation,
+                crate::query_manager::subscriptions::SubscriptionExecutionOptions {
+                    local_updates: durability.local_updates,
+                    strict_transactions: durability.strict_transactions,
+                    propagation,
+                    local_overlay_rows,
+                },
             ) {
             Ok(id) => id,
             Err(e) => {

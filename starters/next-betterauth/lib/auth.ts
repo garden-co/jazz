@@ -53,9 +53,6 @@ export const auth = betterAuth({
         expirationTime: "1h",
         issuer: APP_ORIGIN,
         getSubject: ({ user }: { user: { id: string } }) => user.id,
-        definePayload: ({ user }: { user: { id: string } }) => ({
-          jazz_principal_id: user.id,
-        }),
       },
     }),
   ],

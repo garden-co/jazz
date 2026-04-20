@@ -295,7 +295,7 @@ impl JazzClient {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .runtime
             .insert_with_id(
                 table,
@@ -389,6 +389,7 @@ impl JazzClient {
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
             .update(object_id, updates, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -410,6 +411,7 @@ impl JazzClient {
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -528,7 +530,7 @@ impl<'a> SessionClient<'a> {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        let (object_id, row_values, _batch_id) = self
             .client
             .runtime
             .insert_with_id(
@@ -633,6 +635,7 @@ impl<'a> SessionClient<'a> {
         self.client
             .runtime
             .update(object_id, updates, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -654,6 +657,7 @@ impl<'a> SessionClient<'a> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
@@ -723,8 +727,8 @@ async fn wait_for_persisted_write(
         })?
         .map_err(|rejection| {
             JazzError::Sync(format!(
-                "{operation} was rejected before reaching {tier:?} durability: {}",
-                rejection.reason
+                "{operation} was rejected before reaching {tier:?} durability ({}): {}",
+                rejection.code, rejection.reason
             ))
         })?;
     Ok(())

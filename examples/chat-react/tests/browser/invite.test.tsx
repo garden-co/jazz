@@ -53,7 +53,7 @@ describe("Invite Flow E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      auth?: { localFirstSecret: string };
+      secret?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -121,7 +121,7 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-a"),
       serverUrl,
-      auth: { localFirstSecret: await testSecret(`invite-user-a-${Date.now()}`) },
+      secret: await testSecret(`invite-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -261,7 +261,7 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-b"),
       serverUrl,
-      auth: { localFirstSecret: await testSecret(`invite-user-b-${Date.now()}`) },
+      secret: await testSecret(`invite-user-b-${Date.now()}`),
     });
 
     // User B should see the secret message after joining via invite

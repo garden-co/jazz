@@ -34,14 +34,11 @@ describe("resolveDefaultPersistentDbName", () => {
     expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::alice%40example.com");
   });
 
-  it("prefers jazz_principal_id when present in the JWT", () => {
+  it("url-encodes the sub when scoping the namespace", () => {
     const config: DbConfig = {
       appId: "chat-app",
       driver: { type: "persistent" },
-      jwtToken: makeJwt({
-        sub: "subject-123",
-        jazz_principal_id: "principal/456",
-      }),
+      jwtToken: makeJwt({ sub: "principal/456" }),
     };
 
     expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::principal%2F456");

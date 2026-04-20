@@ -56,7 +56,10 @@ describe("react/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("mutation-query") });
 
-      const inserted = await client.db.insert(todosTable, { title: "buy milk", done: false });
+      const { value: inserted } = await client.db.insert(todosTable, {
+        title: "buy milk",
+        done: false,
+      });
       const rows = await client.db.all(allTodosQuery);
 
       expect(
@@ -78,7 +81,7 @@ describe("react/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("external-id") });
 
-      const inserted = await client.db.insert(
+      const { value: inserted } = await client.db.insert(
         todosTable,
         { title: "with external id", done: false },
         { id: externalId },

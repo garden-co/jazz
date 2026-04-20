@@ -34,7 +34,7 @@
       // long-lived sessions don't silently drop to unauthenticated.
       const resolved = await client;
       unsubRefresh = resolved.db.onAuthChanged(async (state) => {
-        if (state.status !== "unauthenticated") return;
+        if (state.error !== "expired") return;
         const fresh = await getToken();
         if (fresh) resolved.db.updateAuthToken(fresh);
       });

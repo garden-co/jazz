@@ -42,7 +42,6 @@ test.describe("auth-betterauth-chat", () => {
       timeout: 20_000,
     });
     await expect(genericChat.list).toContainText("No messages yet.");
-    await expect(genericChat.readOnlyNotice).toBeVisible();
 
     // member is a new account — use sign-up
     const memberEmail = `member-${runId}@example.com`;
@@ -81,7 +80,6 @@ test.describe("auth-betterauth-chat", () => {
     await expect(messageItem(genericChat.list, memberGenericMessage)).toHaveCount(0, {
       timeout: 20_000,
     });
-    await expect(genericChat.readOnlyNotice).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
 
@@ -112,6 +110,34 @@ test.describe("auth-betterauth-chat", () => {
     const postSignupUserId = await page.getByTestId("user-id").textContent();
     expect(postSignupUserId).toBe(preSignupUserId);
 
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("preserves local-first chat messages across Better Auth sign-up", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => {
+      pageErrors.push(error.message);
+    });
+
+    const genericChat = chat(page, "chat-01");
+    const runId = Date.now();
+    const lofiMessage = `lofi-marker-${runId}`;
+
+    await page.goto("/");
+    await expect(page.getByTestId("auth-status")).toContainText("Anonymous", { timeout: 20_000 });
+
+    await sendMessage(genericChat, lofiMessage);
+    await expect(messageItem(genericChat.list, lofiMessage)).toBeVisible({ timeout: 20_000 });
+
+    await page.waitForTimeout(2000);
+    await page.reload();
+    await expect(page.getByTestId("auth-status")).toContainText("Anonymous", { timeout: 20_000 });
+
+    const email = `msg-continuity-${runId}@example.com`;
+    await signUp(page, { email, password: "test123" });
+    await expect(page.getByTestId("auth-status")).toContainText("member", { timeout: 20_000 });
+
+    await expect(messageItem(genericChat.list, lofiMessage)).toBeVisible({ timeout: 20_000 });
     expect(pageErrors).toEqual([]);
   });
 

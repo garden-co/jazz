@@ -126,6 +126,12 @@ same CRUD surface as normal writes, but with one shared logical `BatchId`.
 For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
 client/schema owns that handle.
 
+Transactional handles also expose transaction-scoped reads over their own staged rows:
+
+- `Transaction.query(...)`
+- `DbTransaction.all(...)`
+- `DbTransaction.one(...)`
+
 Transactional handles add the explicit completion step:
 
 - `tx.commit()` in TypeScript

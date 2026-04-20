@@ -82,6 +82,7 @@ visible body for the default head, plus:
 - a compact pool of contributing winner batch ids
 - one packed ordinal vector for the default merged preview when it is synthetic
 - extra packed ordinal vectors only for tiers whose preview differs from the default head
+- a reserved opaque merge-artifacts blob for future merge diagnostics and related sidecar metadata
 
 The visible-row format now also keeps the common case compact by treating some fields as implicit:
 
@@ -120,6 +121,14 @@ metadata stays coarse on purpose:
 Exact per-column provenance is carried in that visible-entry sidecar rather than expanded into the
 public row shape.
 
+The visible entry also reserves one engine-owned `_jazz_merge_artifacts` slot:
+
+- it lives only on visible rows, never on history rows
+- `null` means "no merge artifacts"
+- non-`null` bytes are a versioned opaque envelope owned by the engine
+- the current release keeps this slot empty while stabilizing the storage format for future
+  conflict diagnostics
+
 For history rows, the identity now lives in the raw-table-local storage key rather than the payload
 columns. For visible rows, `(branch_name, row_id)` comes from the raw-table-local key and the
 current visible `batch_id` stays in the flat visible payload. Raw table headers carry the general
@@ -144,9 +153,30 @@ For concurrent frontiers, step 2 now does an explicit MRCA-relative merge:
 
 - pick the latest common ancestor of the current frontier
 - compare each frontier tip against that ancestor
-- for each user column, choose the latest tip whose value differs from the ancestor value
+- for each user column, apply that column's schema-declared merge strategy to the set of
+  frontier tips whose value differs from the ancestor value
 - if no frontier tip changed that column, attribute the winner to the ancestor itself
 - deletes win over updates; two soft deletes keep a soft-deleted merged body
+
+The current column merge strategies are:
+
+- implicit `lww` for all columns
+- explicit `counter` for non-nullable integer columns
+
+`lww` keeps the existing MRCA-relative "latest changed tip wins" behavior.
+
+`counter` treats each conflicting snapshot as a delta from the MRCA value:
+
+- compute `tip_value - ancestor_value` for each changed frontier tip
+- sum those deltas
+- apply the sum to the ancestor value
+- raise an error if checked integer arithmetic overflows
+
+The visible-entry sidecar intentionally stays coarse even for non-`lww` strategies:
+
+- each visible column still records only the latest timestamp-ordered batch that contributed to
+  that column's resolved value
+- readers that want deeper provenance must walk row history directly
 
 That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream
 systems care about.
@@ -168,6 +198,13 @@ Two exclusion rules matter for merge behavior:
 - accepted transactional rows can participate in visible-row merges just like direct rows
 - conflicted transactional batches never participate in merging anywhere; rejected or still-staged
   rows do not affect merge previews, merge-on-write bases, or tier-specific visible resolution
+
+Merge strategy selection is schema-relative rather than history-relative:
+
+- row history stores the original snapshots only
+- the consumer's current schema decides which merge strategy applies to each visible column
+- after a schema change, old-schema consumers may resolve the same conflicting history differently
+  from new-schema consumers, and that is expected
 
 ## Why Visible Entries Exist
 

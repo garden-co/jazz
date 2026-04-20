@@ -19,7 +19,6 @@ export const ANONYMOUS_JWT_ISSUER = "urn:jazz:anonymous";
 export interface JwtPayload {
   sub?: unknown;
   iss?: unknown;
-  jazz_principal_id?: unknown;
   claims?: unknown;
   exp?: unknown;
 }
@@ -101,13 +100,13 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
 
 export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   const subject = asNonEmptyString(payload.sub);
+  if (!subject) return null;
+
   const issuer = asNonEmptyString(payload.iss);
-  const principalId = asNonEmptyString(payload.jazz_principal_id) ?? subject;
-  if (!principalId) return null;
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  if (subject) claims.subject = subject;
+  claims.subject = subject;
   if (issuer) claims.issuer = issuer;
 
   let authMode: Session["authMode"];
@@ -120,7 +119,7 @@ export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   }
 
   return {
-    user_id: principalId,
+    user_id: subject,
     claims,
     authMode,
   };
