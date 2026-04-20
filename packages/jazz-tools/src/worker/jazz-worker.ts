@@ -30,19 +30,23 @@ declare const self: {
   location?: { origin?: string; href?: string };
 };
 
-const wasmModule = await import("jazz-wasm");
+async function startWorker(): Promise<void> {
+  const wasmModule = await import("jazz-wasm");
 
-// Resolve the wasm binary URL for contexts where the bundler can't wire it up
-// automatically (e.g. OPFS worker served from a custom path).
-const locationHref = (self as any).location?.href as string | undefined;
-const wasmUrl = readWorkerRuntimeWasmUrl(locationHref);
+  // Resolve the wasm binary URL for contexts where the bundler can't wire it up
+  // automatically (e.g. OPFS worker served from a custom path).
+  const locationHref = (self as any).location?.href as string | undefined;
+  const wasmUrl = readWorkerRuntimeWasmUrl(locationHref);
 
-if (typeof wasmModule.default === "function") {
-  if (wasmUrl) {
-    await wasmModule.default({ module_or_path: wasmUrl });
-  } else {
-    await wasmModule.default();
+  if (typeof wasmModule.default === "function") {
+    if (wasmUrl) {
+      await wasmModule.default({ module_or_path: wasmUrl });
+    } else {
+      await wasmModule.default();
+    }
   }
+
+  await wasmModule.runWorker();
 }
 
-await wasmModule.runWorker();
+startWorker();
