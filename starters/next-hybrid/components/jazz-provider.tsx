@@ -10,7 +10,7 @@ function JwtRefresh() {
   useEffect(
     () =>
       db.onAuthChanged((state) => {
-        if (state.status !== "unauthenticated") return;
+        if (state.error !== "expired") return;
         authClient.token().then(({ data, error }) => {
           if (!error && data?.token) db.updateAuthToken(data.token);
         });
@@ -59,7 +59,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
   );
 }
 
-function baseConfig(): Omit<DbConfig, "jwtToken" | "auth"> {
+function baseConfig(): Omit<DbConfig, "jwtToken" | "secret"> {
   if (!APP_ID || !SERVER_URL) {
     const missing = [
       !APP_ID && "NEXT_PUBLIC_JAZZ_APP_ID",
@@ -79,7 +79,7 @@ function baseConfig(): Omit<DbConfig, "jwtToken" | "auth"> {
 
 async function buildLocalFirstConfig(): Promise<DbConfig> {
   const secret = await BrowserAuthSecretStore.getOrCreateSecret();
-  return { ...baseConfig(), auth: { localFirstSecret: secret } };
+  return { ...baseConfig(), secret };
 }
 
 async function buildJwtConfig(): Promise<DbConfig | null> {
