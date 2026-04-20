@@ -221,13 +221,13 @@ export type BatchSettlement =
       reason: string;
     }
   | {
-      kind: "durable_direct";
+      kind: "durableDirect";
       batchId: string;
       confirmedTier: DurabilityTier;
       visibleMembers: VisibleBatchMember[];
     }
   | {
-      kind: "accepted_transaction";
+      kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
       visibleMembers: VisibleBatchMember[];
@@ -714,7 +714,7 @@ function settlementSatisfiesTier(
     return false;
   }
 
-  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
+  if (settlement.kind !== "durableDirect" && settlement.kind !== "acceptedTransaction") {
     return false;
   }
 

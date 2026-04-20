@@ -38,7 +38,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     mode: "direct" as const,
     sealed: true,
     latestSettlement: {
-      kind: "durable_direct" as const,
+      kind: "durableDirect" as const,
       batchId: "00000000-0000-0000-0000-000000000041",
       confirmedTier: "edge" as const,
       visibleMembers: [
@@ -795,7 +795,7 @@ describe("JazzClient mutation durability split", () => {
       mode: "direct",
       sealed: true,
       latestSettlement: {
-        kind: "durable_direct",
+        kind: "durableDirect",
         batchId: "00000000-0000-0000-0000-000000000041",
         confirmedTier: "local",
         visibleMembers: [
@@ -812,7 +812,7 @@ describe("JazzClient mutation durability split", () => {
       currentLocalBatchRecord = {
         ...currentLocalBatchRecord!,
         latestSettlement: {
-          kind: "durable_direct",
+          kind: "durableDirect",
           batchId: currentLocalBatchRecord!.batchId,
           confirmedTier: syncMessageCount === 1 ? "edge" : "global",
           visibleMembers: [
@@ -855,7 +855,7 @@ describe("JazzClient mutation durability split", () => {
       mode: "direct",
       sealed: true,
       latestSettlement: {
-        kind: "durable_direct",
+        kind: "durableDirect",
         batchId: "00000000-0000-0000-0000-000000000041",
         confirmedTier: "edge",
         visibleMembers: [
@@ -871,7 +871,7 @@ describe("JazzClient mutation durability split", () => {
       currentLocalBatchRecord = {
         ...currentLocalBatchRecord!,
         latestSettlement: {
-          kind: "durable_direct",
+          kind: "durableDirect",
           batchId: currentLocalBatchRecord!.batchId,
           confirmedTier: "global",
           visibleMembers: [
