@@ -53,6 +53,7 @@ pub mod post_message_stream;
 pub mod query;
 pub mod runtime;
 pub mod types;
+pub mod worker_host;
 #[cfg(target_arch = "wasm32")]
 pub mod ws_stream;
 
