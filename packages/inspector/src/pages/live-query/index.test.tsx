@@ -236,7 +236,6 @@ describe("LiveQuery", () => {
     expect(mockFetchServerSubscriptions).toHaveBeenCalledWith("http://localhost:1625", {
       adminSecret: "admin-secret",
       appId: "test-app",
-      pathPrefix: undefined,
     });
     expect(screen.getByRole("cell", { name: "2" })).not.toBeNull();
     expect(screen.queryByLabelText("Filter by tier")).toBeNull();

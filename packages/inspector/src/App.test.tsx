@@ -133,7 +133,6 @@ describe("App", () => {
         env: "dev",
         branch: "main",
         schemaHash: "hash-b",
-        serverPathPrefix: "/apps/test-app-id",
       }),
     );
 
@@ -149,7 +148,6 @@ describe("App", () => {
     expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
     expect(screen.getByLabelText("App ID")).toHaveProperty("value", "test-app-id");
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "admin-secret");
-    expect(screen.getByLabelText(/Path prefix/i)).toHaveProperty("value", "/apps/test-app-id");
 
     fireEvent.click(screen.getByRole("button", { name: "Reset connection" }));
 
