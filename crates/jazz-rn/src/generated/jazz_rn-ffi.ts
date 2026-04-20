@@ -77,13 +77,13 @@ interface NativeModuleInterface {
     ptr: bigint,
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
     ptr: bigint,
     objectId: Uint8Array,
     writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -173,7 +173,7 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     valuesJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
     ptr: bigint,
     authJson: Uint8Array,
@@ -185,7 +185,7 @@ interface NativeModuleInterface {
     valuesJson: Uint8Array,
     writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
     vtable: UniffiVTableCallbackInterfaceAuthFailureCallback
   ): void;

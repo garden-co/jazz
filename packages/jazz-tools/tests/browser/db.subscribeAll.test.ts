@@ -370,7 +370,9 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id } = await db.insert(todos, {
+    const {
+      value: { id },
+    } = db.insert(todos, {
       title: "watch-me",
       done: false,
       priority: 1,
@@ -415,7 +417,9 @@ describe("db.subscribeAll browser integration", () => {
         }),
       );
 
-      const { id: insertedId } = await conditionsDb.insert(todos, testCase.insert);
+      const {
+        value: { id: insertedId },
+      } = await conditionsDb.insert(todos, testCase.insert);
 
       await waitForCondition(
         () => deltas.some((delta) => hasChangeForId(delta, 0, insertedId)),
@@ -445,7 +449,9 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id } = await db.insert(todos, {
+    const {
+      value: { id },
+    } = db.insert(todos, {
       title: "bytes-hit",
       done: false,
       priority: 1,
@@ -487,21 +493,21 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    await db.insert(todos, {
+    db.insert(todos, {
       title: "p1",
       done: false,
       priority: 1,
       owner_id: undefined,
       tags: ["x"],
     });
-    await db.insert(todos, {
+    db.insert(todos, {
       title: "p2",
       done: false,
       priority: 2,
       owner_id: undefined,
       tags: ["x"],
     });
-    await db.insert(todos, {
+    db.insert(todos, {
       title: "p3",
       done: false,
       priority: 3,
@@ -536,7 +542,9 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id: insertedId } = await db.insert(todos, {
+    const {
+      value: { id: insertedId },
+    } = db.insert(todos, {
       title: "completely unrelated",
       done: false,
       priority: 1,
@@ -568,7 +576,9 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id: userId } = await db.insert(users, { name: "Owner", team_id: undefined });
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
 
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 0, userId)),
@@ -597,13 +607,19 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id: orgId } = await db.insert(orgs, { name: "Hop Org" });
-    const { id: teamId } = await db.insert(teams, {
+    const {
+      value: { id: orgId },
+    } = db.insert(orgs, { name: "Hop Org" });
+    const {
+      value: { id: teamId },
+    } = db.insert(teams, {
       name: "Hop Team",
       org_id: orgId,
       parent_id: undefined,
     });
-    const { id: userId } = await db.insert(users, { name: "Hop User", team_id: teamId });
+    const {
+      value: { id: _userId },
+    } = db.insert(users, { name: "Hop User", team_id: teamId });
 
     await waitForCondition(
       () =>
@@ -623,19 +639,29 @@ describe("db.subscribeAll browser integration", () => {
       }),
     );
 
-    const { id: orgAId } = await db.insert(orgs, { name: "Org A" });
-    const { id: orgBId } = await db.insert(orgs, { name: "Org B" });
-    const { id: teamAId } = await db.insert(teams, {
+    const {
+      value: { id: orgAId },
+    } = db.insert(orgs, { name: "Org A" });
+    const {
+      value: { id: orgBId },
+    } = db.insert(orgs, { name: "Org B" });
+    const {
+      value: { id: teamAId },
+    } = db.insert(teams, {
       name: "Team A",
       org_id: orgAId,
       parent_id: undefined,
     });
-    const { id: teamBId } = await db.insert(teams, {
+    const {
+      value: { id: teamBId },
+    } = db.insert(teams, {
       name: "Team B",
       org_id: orgBId,
       parent_id: undefined,
     });
-    const { id: userId } = await db.insert(users, { name: "Mover", team_id: teamAId });
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Mover", team_id: teamAId });
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -682,9 +708,15 @@ describe("db.subscribeAll browser integration", () => {
       }),
     );
 
-    const { id: partAId } = await db.insert(fileParts, { label: "A" });
-    const { id: partBId } = await db.insert(fileParts, { label: "B" });
-    const { id: fileId } = await db.insert(files, { name: "File", parts: [partAId] });
+    const {
+      value: { id: partAId },
+    } = db.insert(fileParts, { label: "A" });
+    const {
+      value: { id: partBId },
+    } = db.insert(fileParts, { label: "B" });
+    const {
+      value: { id: fileId },
+    } = db.insert(files, { name: "File", parts: [partAId] });
 
     const deltas: Array<SubscriptionDelta<FilePart>> = [];
     const unsubscribe = trackUnsubscribe(
@@ -748,17 +780,23 @@ describe("db.subscribeAll browser integration", () => {
       ),
     );
 
-    const { id: rootId } = await db.insert(teams, {
+    const {
+      value: { id: rootId },
+    } = db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const { id: midId } = await db.insert(teams, {
+    const {
+      value: { id: midId },
+    } = db.insert(teams, {
       name: "mid",
       org_id: undefined,
       parent_id: rootId,
     });
-    const { id: leafId } = await db.insert(teams, {
+    const {
+      value: { id: leafId },
+    } = db.insert(teams, {
       name: "leaf",
       org_id: undefined,
       parent_id: midId,

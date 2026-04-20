@@ -920,7 +920,6 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
     let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
-        DurabilityTier::GlobalServer,
         true,
         Some(BatchSettlement::DurableDirect {
             batch_id,
@@ -986,19 +985,12 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
     let high = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 
     storage
-        .upsert_local_batch_record(&LocalBatchRecord::new(
-            high,
-            BatchMode::Direct,
-            DurabilityTier::Local,
-            true,
-            None,
-        ))
+        .upsert_local_batch_record(&LocalBatchRecord::new(high, BatchMode::Direct, true, None))
         .unwrap();
     storage
         .upsert_local_batch_record(&LocalBatchRecord::new(
             low,
             BatchMode::Transactional,
-            DurabilityTier::EdgeServer,
             false,
             Some(BatchSettlement::Missing { batch_id: low }),
         ))
@@ -1016,7 +1008,6 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
     let record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Transactional,
-        DurabilityTier::Local,
         false,
         Some(BatchSettlement::Rejected {
             batch_id,
@@ -1226,7 +1217,6 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
     let mut record = LocalBatchRecord::new(
         batch_id,
         BatchMode::Direct,
-        DurabilityTier::EdgeServer,
         true,
         Some(BatchSettlement::DurableDirect {
             batch_id,

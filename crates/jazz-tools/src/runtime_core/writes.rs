@@ -22,7 +22,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         RowBatchKey::new(row_id, branch_name, batch_id)
     }
 
-    fn default_requested_tier_for_transaction(&self) -> DurabilityTier {
+    fn local_write_confirmed_tier(&self) -> DurabilityTier {
         self.schema_manager
             .query_manager()
             .sync_manager()
@@ -71,7 +71,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         row_id: ObjectId,
         batch_id: BatchId,
         mode: BatchMode,
-        requested_tier: DurabilityTier,
+        seed_local_settlement: bool,
     ) -> Result<(), RuntimeError> {
         let branch_name = self.schema_manager.branch_name();
         let visible_members = vec![VisibleBatchMember {
@@ -79,18 +79,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             branch_name,
             batch_id,
         }];
-        let latest_settlement = match mode {
-            BatchMode::Direct => self
-                .schema_manager
-                .query_manager()
-                .sync_manager()
-                .max_local_durability_tier()
-                .map(|confirmed_tier| BatchSettlement::DurableDirect {
-                    batch_id,
-                    confirmed_tier,
-                    visible_members: visible_members.clone(),
-                }),
-            BatchMode::Transactional => None,
+        let latest_settlement = match (mode, seed_local_settlement) {
+            (BatchMode::Direct, true) => Some(BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: self.local_write_confirmed_tier(),
+                visible_members: visible_members.clone(),
+            }),
+            (BatchMode::Direct, false) | (BatchMode::Transactional, _) => None,
         };
 
         let mut record = self
@@ -98,13 +93,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .load_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
             .unwrap_or_else(|| {
-                LocalBatchRecord::new(
-                    batch_id,
-                    mode,
-                    requested_tier,
-                    matches!(mode, BatchMode::Direct),
-                    None,
-                )
+                LocalBatchRecord::new(batch_id, mode, matches!(mode, BatchMode::Direct), None)
             });
         if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
@@ -113,9 +102,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         for member in self.local_batch_members_for_row(row_id, batch_id)? {
             record.upsert_member(member);
-        }
-        if requested_tier > record.requested_tier {
-            record.requested_tier = requested_tier;
         }
         if let Some(settlement) = latest_settlement {
             record.apply_settlement(settlement);
@@ -290,7 +276,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         table: &str,
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
-    ) -> Result<InsertedRow, RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let result = self
@@ -299,22 +285,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
-        if write_context
+        let batch_id = result.batch_id;
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                row_id,
-                result.batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode, true)?;
         debug!(object_id = %row_id, "inserted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok((row_id, row_values))
+        Ok(((row_id, row_values), batch_id))
     }
 
     /// Compatibility shim for callers that pass an explicit row id.
@@ -324,7 +303,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         values: HashMap<String, Value>,
         object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
-    ) -> Result<InsertedRow, RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         self.ensure_transactional_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
@@ -338,22 +317,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
-        if write_context
+        let batch_id = result.batch_id;
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                row_id,
-                result.batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode, true)?;
         debug!(object_id = %row_id, "inserted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok((row_id, row_values))
+        Ok(((row_id, row_values), batch_id))
     }
 
     /// Update a row (partial update by column name).
@@ -362,29 +334,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        if write_context
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                object_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, true)?;
 
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(())
+        Ok(batch_id)
     }
 
     /// Compatibility shim for callers that expect explicit-id upserts.
@@ -412,12 +376,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct)
             == BatchMode::Transactional
         {
-            self.track_local_batch(
-                object_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
+            self.track_local_batch(object_id, batch_id, BatchMode::Transactional, false)?;
         }
 
         self.mark_storage_write_pending_flush();
@@ -430,29 +389,22 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         &mut self,
         object_id: ObjectId,
         write_context: Option<&WriteContext>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
         self.ensure_transactional_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
-        if write_context
+        let batch_id = handle.batch_id;
+        let batch_mode = write_context
             .map(WriteContext::batch_mode)
-            .unwrap_or(BatchMode::Direct)
-            == BatchMode::Transactional
-        {
-            self.track_local_batch(
-                object_id,
-                handle.batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
-        }
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, true)?;
         debug!("deleted");
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(())
+        Ok(batch_id)
     }
 
     // =========================================================================
@@ -501,14 +453,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct)
             == BatchMode::Transactional
         {
-            self.track_local_batch(
-                row_id,
-                batch_id,
-                BatchMode::Transactional,
-                self.default_requested_tier_for_transaction(),
-            )?;
+            self.track_local_batch(row_id, batch_id, BatchMode::Transactional, false)?;
         } else {
-            self.track_local_batch(row_id, batch_id, BatchMode::Direct, tier)?;
+            self.track_local_batch(row_id, batch_id, BatchMode::Direct, false)?;
         }
         let (sender, receiver) = oneshot::channel();
         if self
@@ -550,7 +497,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         let batch_id = result.batch_id;
         let row_values = result.row_values;
-        self.track_local_batch(row_id, batch_id, batch_mode, tier)?;
+        self.track_local_batch(row_id, batch_id, batch_mode, false)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -604,7 +551,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
+        self.track_local_batch(object_id, batch_id, batch_mode, false)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -663,7 +610,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let batch_mode = write_context
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
-        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
+        self.track_local_batch(object_id, batch_id, batch_mode, false)?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -703,7 +650,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map(WriteContext::batch_mode)
             .unwrap_or(BatchMode::Direct);
         let batch_id = handle.batch_id;
-        self.track_local_batch(object_id, batch_id, batch_mode, tier)?;
+        self.track_local_batch(object_id, batch_id, batch_mode, false)?;
 
         let (sender, receiver) = oneshot::channel();
         if self

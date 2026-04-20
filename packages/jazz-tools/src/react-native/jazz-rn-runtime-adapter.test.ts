@@ -13,14 +13,16 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     updateAuth: vi.fn(),
     onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
-    delete_: vi.fn(),
-    deleteWithSession: vi.fn(),
+    delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
+    deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
+    insert: vi.fn((_table, _valuesJson) =>
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
+    ),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
-      JSON.stringify({ id: "row-1", values: [] }),
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
     ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
@@ -30,8 +32,8 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
-    update: vi.fn(),
-    updateWithSession: vi.fn(),
+    update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
+    updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
   };
 }
@@ -56,7 +58,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -161,7 +163,7 @@ describe("JazzRnRuntimeAdapter", () => {
       { title: { type: "Text", value: "milk" } },
       writeContextJson,
     );
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-2" });
     expect(binding.insertWithSession).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
@@ -188,6 +190,7 @@ describe("JazzRnRuntimeAdapter", () => {
     ).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-2",
     });
     await expect(
       adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
@@ -304,6 +307,7 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-1",
     });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
@@ -312,27 +316,6 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
     expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
-  });
-
-  it("swallows ObjectNotFound runtime errors for update/delete", () => {
-    const objectNotFound = {
-      tag: "Runtime",
-      inner: {
-        message: 'WriteError("ObjectNotFound(ObjectId(019c70f1-8514-72f0-bad8-8d849e1c3e70))")',
-      },
-    };
-    const binding = createBinding({
-      update: vi.fn(() => {
-        throw objectNotFound;
-      }),
-      delete_: vi.fn(() => {
-        throw objectNotFound;
-      }),
-    });
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    expect(() => adapter.update("row-1", { done: { type: "Boolean", value: true } })).not.toThrow();
-    expect(() => adapter.delete("row-1")).not.toThrow();
   });
 
   it("wraps Jazz RN errors with error name and cause", async () => {

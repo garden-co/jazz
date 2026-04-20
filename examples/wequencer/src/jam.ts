@@ -66,5 +66,6 @@ export async function getCurrentJam(db: Db): Promise<string> {
     return existing[0].id;
   }
 
-  return db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 }).id;
+  const { value: jam } = db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 });
+  return jam.id;
 }

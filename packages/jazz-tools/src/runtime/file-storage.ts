@@ -1,5 +1,5 @@
 import type { DurabilityTier } from "./client.js";
-import type { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import type { QueryBuilder, QueryOptions, TableProxy, InsertHandle } from "./db.js";
 
 export const DEFAULT_FILE_CHUNK_SIZE_BYTES = 256 * 1024;
 export const MAX_FILE_PART_BYTES = 1_048_576;
@@ -47,7 +47,7 @@ export class IncompleteFileDataError extends Error {
 }
 
 export interface FileStorageDb {
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T;
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T>;
   insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
@@ -140,7 +140,7 @@ export function createFileStorage<
       return db.insertDurable(table, data, { tier: writeOptions.tier });
     }
 
-    return db.insert(table, data);
+    return db.insert(table, data).value;
   };
 
   const loadFileRecord = async (

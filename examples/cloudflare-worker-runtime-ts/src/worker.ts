@@ -44,7 +44,7 @@ async function listTodos(db: Db) {
 
 async function handleSmoke(db: Db): Promise<Response> {
   const title = `workerd-${crypto.randomUUID().slice(0, 8)}`;
-  const inserted = db.insert(app.todos, {
+  const { value: inserted } = db.insert(app.todos, {
     title,
     done: false,
   });

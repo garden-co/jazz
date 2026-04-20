@@ -89,7 +89,7 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
           observedSnapshots.push(delta.all);
         },
       });
-      const inserted = await db.insert(todosTable, { title: "first", done: false });
+      const { value: inserted } = await db.insert(todosTable, { title: "first", done: false });
 
       await waitForCondition(
         () => observedSnapshots.some((snapshot) => snapshot.some((row) => row.id === inserted.id)),
@@ -187,15 +187,15 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
         },
       });
 
-      const { id: insertedId } = await db.insert(todosTable, { title: "shared", done: false });
+      const { value: inserted } = await db.insert(todosTable, { title: "shared", done: false });
       await waitForCondition(
         () => listenerA.length > 0 && listenerB.length > 0,
         5_000,
         "SO-I03 expected both listeners to receive update",
       );
 
-      expect(listenerA[listenerA.length - 1]).toEqual([insertedId]);
-      expect(listenerB[listenerB.length - 1]).toEqual([insertedId]);
+      expect(listenerA[listenerA.length - 1]).toEqual([inserted.id]);
+      expect(listenerB[listenerB.length - 1]).toEqual([inserted.id]);
 
       offA();
       offB();

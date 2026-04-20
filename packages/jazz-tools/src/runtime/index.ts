@@ -6,8 +6,9 @@ export {
   type AuthConfig,
   type BatchMode,
   type BatchSettlement,
-  type LocalUpdatesMode,
   type LocalBatchRecord,
+  type LocalUpdatesMode,
+  type MutationErrorEvent,
   PersistedWrite,
   PersistedWriteRejectedError,
   SessionClient,
@@ -43,6 +44,8 @@ export {
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,
+  type InsertHandle,
+  WriteHandle,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
