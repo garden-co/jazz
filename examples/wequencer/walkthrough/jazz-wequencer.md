@@ -115,7 +115,7 @@ One call to `createJazzClient` initialises the WASM worker, opens the OPFS datab
   const client = createJazzClient({
     appId: import.meta.env.VITE_JAZZ_APP_ID ?? "wequencer",
     serverUrl: import.meta.env.DEV
-      ? window.location.origin // Vite proxies /sync and /events in dev
+      ? window.location.origin // Vite proxies app-scoped Jazz routes in dev
       : import.meta.env.VITE_JAZZ_SERVER_URL,
   });
 </script>

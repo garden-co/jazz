@@ -63,11 +63,13 @@ pub fn deny_all_select_permissions(schema: &Schema) -> Map<String, JsonValue> {
 
 pub async fn publish_allow_all_permissions(
     base_url: &str,
+    app_id: impl std::fmt::Display,
     admin_secret: &str,
     schema: &Schema,
 ) -> PublishedPermissionsHead {
     publish_permissions(
         base_url,
+        app_id,
         admin_secret,
         schema,
         allow_all_permissions(schema),
@@ -78,6 +80,7 @@ pub async fn publish_allow_all_permissions(
 
 pub async fn publish_permissions(
     base_url: &str,
+    app_id: impl std::fmt::Display,
     admin_secret: &str,
     schema: &Schema,
     permissions: Map<String, JsonValue>,
@@ -90,7 +93,7 @@ pub async fn publish_permissions(
 
     loop {
         let response = client
-            .post(format!("{base_url}/admin/permissions"))
+            .post(format!("{base_url}/apps/{app_id}/admin/permissions"))
             .header("X-Jazz-Admin-Secret", admin_secret)
             .json(&json!({
                 "schemaHash": schema_hash.to_string(),
@@ -117,7 +120,8 @@ pub async fn publish_permissions(
             }
             StatusCode::CONFLICT if !fetched_parent_after_conflict => {
                 expected_parent_bundle_object_id =
-                    fetch_current_parent_bundle_object_id(&client, base_url, admin_secret).await;
+                    fetch_current_parent_bundle_object_id(&client, base_url, &app_id, admin_secret)
+                        .await;
                 fetched_parent_after_conflict = true;
             }
             _ => {
@@ -134,10 +138,11 @@ pub async fn publish_permissions(
 async fn fetch_current_parent_bundle_object_id(
     client: &Client,
     base_url: &str,
+    app_id: &impl std::fmt::Display,
     admin_secret: &str,
 ) -> Option<String> {
     let response = client
-        .get(format!("{base_url}/admin/permissions/head"))
+        .get(format!("{base_url}/apps/{app_id}/admin/permissions/head"))
         .header("X-Jazz-Admin-Secret", admin_secret)
         .send()
         .await

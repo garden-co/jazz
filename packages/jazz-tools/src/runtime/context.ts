@@ -64,8 +64,6 @@ export interface AppContext {
 
   /** Optional server URL for sync */
   serverUrl?: string;
-  /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
-  serverPathPrefix?: string;
 
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;

@@ -18,6 +18,8 @@ use tempfile::TempDir;
 
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const JWT_KID: &str = "test-jwks-kid";
+// Use a deterministic UUID app ID for testing
+const TEST_APP_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[derive(Clone)]
 struct JwksState {
@@ -176,9 +178,6 @@ impl TestServer {
         enable_jwks: bool,
         extra_env: Vec<(&str, String)>,
     ) -> Self {
-        // Use a deterministic UUID app ID for testing
-        let app_id = "00000000-0000-0000-0000-000000000001";
-
         let jazz_binary = Self::find_jazz_binary();
         let bound_port_file = data_dir.path().join("bound-port");
 
@@ -186,7 +185,7 @@ impl TestServer {
         command
             .args([
                 "server",
-                app_id,
+                TEST_APP_ID,
                 "--port",
                 &port.to_string(),
                 "--data-dir",
@@ -248,6 +247,10 @@ impl TestServer {
     /// Get the base URL for this server.
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn app_id(&self) -> &'static str {
+        TEST_APP_ID
     }
 
     /// Wait for the server to become ready by polling /health.

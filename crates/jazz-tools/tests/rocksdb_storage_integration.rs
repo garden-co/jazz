@@ -243,7 +243,13 @@ async fn make_client(
         .connect()
         .await;
 
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     client
 }
@@ -280,7 +286,13 @@ async fn make_client_external_jwks(
         |_| Some(()),
     )
     .await;
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     client
 }

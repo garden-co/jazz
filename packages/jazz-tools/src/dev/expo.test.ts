@@ -72,9 +72,12 @@ describe("withJazz", () => {
     const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
     expect(healthResponse.ok).toBe(true);
 
-    const schemasResponse = await fetch(`http://127.0.0.1:${port}/schemas`, {
-      headers: { "X-Jazz-Admin-Secret": "expo-test-admin" },
-    });
+    const schemasResponse = await fetch(
+      `http://127.0.0.1:${port}/apps/${resolved.extra?.jazzAppId}/schemas`,
+      {
+        headers: { "X-Jazz-Admin-Secret": "expo-test-admin" },
+      },
+    );
     expect(schemasResponse.ok).toBe(true);
 
     const body = (await schemasResponse.json()) as { hashes?: string[] };

@@ -165,15 +165,18 @@ export async function pushSchemaCatalogue(
 ): Promise<{ hash: string }> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   const result = await publishStoredSchema(options.serverUrl, {
+    appId: options.appId,
     adminSecret: options.adminSecret,
     schema: compiled.wasmSchema,
   });
 
   if (compiled.permissions) {
     const { head } = await fetchPermissionsHead(options.serverUrl, {
+      appId: options.appId,
       adminSecret: options.adminSecret,
     });
     await publishStoredPermissions(options.serverUrl, {
+      appId: options.appId,
       adminSecret: options.adminSecret,
       schemaHash: result.hash,
       permissions: compiled.permissions,

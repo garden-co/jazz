@@ -76,14 +76,16 @@ describe("History & Conflict Management", () => {
   afterEach(() => ctx.cleanup());
   beforeEach(async () => {
     testingServer = await getTestingServerInfo(uniqueDbName("history-conflict-app"));
-    const { serverUrl, adminSecret } = testingServer;
+    const { appId, serverUrl, adminSecret } = testingServer;
     await unblockTestingServerNetwork(serverUrl);
     const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+      appId,
       adminSecret,
       schema,
     });
-    const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
     await publishStoredPermissions(serverUrl, {
+      appId,
       adminSecret,
       schemaHash,
       permissions: {

@@ -37,7 +37,6 @@ export class Db extends RuntimeDb {
           appId: this.nativeConfig.appId,
           schema,
           serverUrl: this.nativeConfig.serverUrl,
-          serverPathPrefix: this.nativeConfig.serverPathPrefix,
           env: this.nativeConfig.env,
           userBranch: this.nativeConfig.userBranch,
           jwtToken: this.nativeConfig.jwtToken,
@@ -53,14 +52,10 @@ export class Db extends RuntimeDb {
       );
 
       if (this.nativeConfig.serverUrl) {
-        client.connectTransport(
-          this.nativeConfig.serverUrl,
-          {
-            jwt_token: this.nativeConfig.jwtToken,
-            admin_secret: this.nativeConfig.adminSecret,
-          },
-          this.nativeConfig.serverPathPrefix,
-        );
+        client.connectTransport(this.nativeConfig.serverUrl, {
+          jwt_token: this.nativeConfig.jwtToken,
+          admin_secret: this.nativeConfig.adminSecret,
+        });
       }
 
       this.nativeClients.set(key, client);

@@ -4,7 +4,6 @@ export interface StandaloneConnectionConfig {
   serverUrl: string;
   appId: string;
   adminSecret: string;
-  serverPathPrefix?: string;
 }
 
 interface StandaloneContextValue {

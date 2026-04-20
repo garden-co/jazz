@@ -758,6 +758,7 @@ async fn test_server_resync() {
         let permissions_schema = test_schema();
         permissions_support::publish_allow_all_permissions(
             &server.base_url(),
+            test_app_id,
             TEST_ADMIN_SECRET,
             &permissions_schema,
         )

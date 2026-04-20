@@ -73,11 +73,13 @@ async function createTestContext(
   adminSecret: string,
 ) {
   const { hash: schemaHash } = await publishStoredSchema(server.url, {
+    appId,
     adminSecret,
     schema: todoApp.wasmSchema,
   });
-  const { head } = await fetchPermissionsHead(server.url, { adminSecret });
+  const { head } = await fetchPermissionsHead(server.url, { appId, adminSecret });
   await publishStoredPermissions(server.url, {
+    appId,
     adminSecret,
     schemaHash,
     permissions: todoAppPermissions,

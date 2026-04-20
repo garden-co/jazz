@@ -21,7 +21,7 @@ React/Vue/Svelte app
            -> dedicated worker
               -> persistent WasmRuntime.openPersistent(...)
               -> OPFS-backed storage
-              -> upstream /sync + /events
+              -> upstream /apps/<appId>/ws
 ```
 
 ## Two Browser Modes
@@ -86,8 +86,7 @@ The worker is the durable browser runtime host. It owns:
 
 - `WasmRuntime.openPersistent(...)`
 - OPFS-backed storage
-- upstream `/events` connection
-- upstream `/sync` POSTs
+- upstream app-scoped WebSocket connection
 - replay of sync messages to the main thread runtime
 - durable local batch records, authoritative settlements, and sealed transactional submissions
 

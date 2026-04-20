@@ -16,11 +16,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { loadWasmModule } from "./runtime/client.js";
 import {
-  createMigration,
-  deploy,
-  exportSchema,
-  permissionsStatus,
-  pushMigration,
+  createMigration as rawCreateMigration,
+  deploy as rawDeploy,
+  exportSchema as rawExportSchema,
+  permissionsStatus as rawPermissionsStatus,
+  pushMigration as rawPushMigration,
   validate,
 } from "./cli.js";
 
@@ -35,6 +35,24 @@ const bootstrapVerifierPath = fileURLToPath(
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const tmpBase = join(packageRoot, ".test-tmp");
 const tempRoots: string[] = [];
+const APP_ID = "test-app";
+
+function withAppId<T extends { appId?: string }>(options: T): T & { appId: string } {
+  return { appId: APP_ID, ...options };
+}
+
+const exportSchema = (options: Parameters<typeof rawExportSchema>[0]) =>
+  rawExportSchema(withAppId(options));
+const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
+  rawCreateMigration(withAppId(options));
+const pushMigration = (
+  options: Omit<Parameters<typeof rawPushMigration>[0], "appId"> & { appId?: string },
+) => rawPushMigration(withAppId(options));
+const permissionsStatus = (
+  options: Omit<Parameters<typeof rawPermissionsStatus>[0], "appId"> & { appId?: string },
+) => rawPermissionsStatus(withAppId(options));
+const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
+  rawDeploy(withAppId(options));
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -700,11 +718,11 @@ describe("cli migrations", () => {
     const toHash = "7171717171717171717171717171717171717171717171717171717171717171";
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [
@@ -715,7 +733,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
       }
 
@@ -749,15 +767,15 @@ describe("cli migrations", () => {
     const fromHash = "1010101010101010101010101010101010101010101010101010101010101010";
     const toHash = "2020202020202020202020202020202020202020202020202020202020202020";
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
       }
 
@@ -902,11 +920,11 @@ describe("cli migrations", () => {
     const toHash = "4040404040404040404040404040404040404040404040404040404040404040";
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: false }],
@@ -914,7 +932,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: true }],
@@ -983,11 +1001,11 @@ describe("cli migrations", () => {
     const fromShortHash = fromHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
@@ -1040,11 +1058,11 @@ describe("cli migrations", () => {
     const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
@@ -1055,7 +1073,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [
@@ -1103,11 +1121,11 @@ describe("cli migrations", () => {
     const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           users: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -1115,7 +1133,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           people: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -1156,11 +1174,11 @@ describe("cli migrations", () => {
     const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           users: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -1171,7 +1189,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           companies: {
             columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
@@ -1218,11 +1236,11 @@ describe("cli migrations", () => {
     const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           archived_users: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -1233,7 +1251,7 @@ describe("cli migrations", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           people: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -1303,7 +1321,7 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
@@ -1390,7 +1408,7 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
@@ -1485,11 +1503,11 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (_input.endsWith(`/schema/${fromHash}`)) {
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [
@@ -1500,7 +1518,7 @@ export default s.defineMigration({
         });
       }
 
-      if (_input.endsWith(`/schema/${toHash}`)) {
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
       }
 
@@ -1544,15 +1562,15 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (_input.endsWith(`/schema/${fromHash}`)) {
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (_input.endsWith(`/schema/${toHash}`)) {
+      if (_input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
       }
 
@@ -1586,11 +1604,11 @@ export default s.defineMigration({
     const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${fromHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           memberships: {
             columns: [
@@ -1605,7 +1623,7 @@ export default s.defineMigration({
         });
       }
 
-      if (input.endsWith(`/schema/${toHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           memberships: {
             columns: [
@@ -1680,7 +1698,7 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
@@ -1764,7 +1782,7 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      if (_input.endsWith("/schemas")) {
+      if (_input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
       }
 
@@ -1807,15 +1825,15 @@ describe("cli permissions", () => {
 
     const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${schemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(
           JSON.stringify({
             head: {
@@ -1835,6 +1853,7 @@ describe("cli permissions", () => {
 
     const { logs } = await captureConsoleLogs(() =>
       permissionsStatus({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -1861,15 +1880,15 @@ describe("cli permissions", () => {
 
     const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${schemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: null }), { status: 200 });
       }
 
@@ -1879,6 +1898,7 @@ describe("cli permissions", () => {
 
     const { logs } = await captureConsoleLogs(() =>
       permissionsStatus({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -1896,15 +1916,15 @@ describe("cli permissions", () => {
 
     const schemaHash = "ababeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${schemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
         return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: null }), { status: 200 });
       }
 
@@ -1914,6 +1934,7 @@ describe("cli permissions", () => {
 
     const { logs } = await captureConsoleLogs(() =>
       permissionsStatus({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -1933,6 +1954,7 @@ describe("cli deploy", () => {
 
     await expect(
       deploy({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -1951,7 +1973,7 @@ describe("cli deploy", () => {
     let permissionsPublishBody: any;
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/admin/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         schemaPublishBody = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({
@@ -1962,15 +1984,15 @@ describe("cli deploy", () => {
         );
       }
 
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: null }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
         permissionsPublishBody = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({
@@ -1990,6 +2012,7 @@ describe("cli deploy", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await deploy({
+      appId: APP_ID,
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       schemaDir: root,
@@ -2018,19 +2041,19 @@ describe("cli deploy", () => {
     let permissionsPublishBody: any;
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
       }
 
-      if (input.endsWith(`/schema/${schemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${schemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
         permissionsPublishBody = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({
@@ -2045,7 +2068,7 @@ describe("cli deploy", () => {
         );
       }
 
-      if (input.endsWith("/admin/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
         throw new Error("deploy() should not publish an unchanged structural schema.");
       }
 
@@ -2054,6 +2077,7 @@ describe("cli deploy", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await deploy({
+      appId: APP_ID,
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       schemaDir: root,
@@ -2079,13 +2103,13 @@ describe("cli deploy", () => {
     };
 
     const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
           status: 200,
         });
       }
 
-      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [
@@ -2096,18 +2120,18 @@ describe("cli deploy", () => {
         });
       }
 
-      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.includes("/admin/schema-connectivity?")) {
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
         const url = new URL(input);
         expect(url.searchParams.get("fromHash")).toBe(previousSchemaHash);
         expect(url.searchParams.get("toHash")).toBe(nextSchemaHash);
         return new Response(JSON.stringify({ connected: false }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
       }
 
@@ -2117,13 +2141,14 @@ describe("cli deploy", () => {
 
     await expect(
       deploy({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
         migrationsDir: join(root, "migrations"),
       }),
     ).rejects.toThrow(
-      "The new permissions schema bbbbbbbbbbbb is not connected to the previous permissions schema aaaaaaaaaaaa on the server. Reads and writes may fail until you push a migration. Run `jazz-tools migrations create --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
+      "The new permissions schema bbbbbbbbbbbb is not connected to the previous permissions schema aaaaaaaaaaaa on the server. Reads and writes may fail until you push a migration. Run `jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
     );
   });
 
@@ -2173,13 +2198,13 @@ export default s.defineMigration({
     );
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
           status: 200,
         });
       }
 
-      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
         return storedSchemaResponse({
           users: {
             columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
@@ -2187,19 +2212,19 @@ export default s.defineMigration({
         });
       }
 
-      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.includes("/admin/schema-connectivity?")) {
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
         return new Response(JSON.stringify({ connected: false }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/migrations")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/migrations`)) {
         const body = JSON.parse(String(init?.body));
         expect(body.fromHash).toBe(previousSchemaHash);
         expect(body.toHash).toBe(nextSchemaHash);
@@ -2225,7 +2250,7 @@ export default s.defineMigration({
         );
       }
 
-      if (input.endsWith("/admin/permissions")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
         return new Response(
           JSON.stringify({
             head: {
@@ -2245,6 +2270,7 @@ export default s.defineMigration({
 
     const { logs } = await captureConsoleLogs(() =>
       deploy({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -2271,13 +2297,13 @@ export default s.defineMigration({
     };
 
     const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
-      if (input.endsWith("/schemas")) {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
         return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
           status: 200,
         });
       }
 
-      if (input.endsWith(`/schema/${previousSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
         return storedSchemaResponse({
           todos: {
             columns: [
@@ -2288,19 +2314,19 @@ export default s.defineMigration({
         });
       }
 
-      if (input.endsWith(`/schema/${nextSchemaHash}`)) {
+      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
         return storedSchemaResponse(storedRootSchema());
       }
 
-      if (input.includes("/admin/schema-connectivity?")) {
+      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
         return new Response(JSON.stringify({ connected: false }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions/head")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
         return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
       }
 
-      if (input.endsWith("/admin/permissions")) {
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
         return new Response(
           JSON.stringify({
             head: {
@@ -2320,6 +2346,7 @@ export default s.defineMigration({
 
     const { logs } = await captureConsoleLogs(() =>
       deploy({
+        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
@@ -2494,7 +2521,7 @@ describe("bin integration", () => {
       "utf8",
     );
 
-    const result = runBin(["schema", "export", "--schema-hash", schemaHash], {
+    const result = runBin(["schema", "export", APP_ID, "--schema-hash", schemaHash], {
       cwd: root,
     });
 
@@ -2539,7 +2566,7 @@ describe("bin integration", () => {
     }) as typeof process.stdout.write);
 
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      expect(input).toContain(`/schema/${schemaHash}`);
+      expect(input).toContain(`/apps/${APP_ID}/schema/${schemaHash}`);
       expect(init?.method).toBe("GET");
       expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
       return storedSchemaResponse(schema, publishedAt);
@@ -2589,7 +2616,7 @@ describe("bin integration", () => {
     }) as typeof process.stdout.write);
 
     const exportFetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      expect(input).toContain(`/schema/${schemaHash}`);
+      expect(input).toContain(`/apps/${APP_ID}/schema/${schemaHash}`);
       expect(init?.method).toBe("GET");
       expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
       return storedSchemaResponse(schema, publishedAt);

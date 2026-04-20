@@ -93,7 +93,6 @@ describe("react-native Db", () => {
     const config: DbConfig = {
       appId: "rn-app",
       serverUrl: "https://example.test",
-      serverPathPrefix: "/apps/rn-app",
       env: "prod",
       userBranch: "user-branch",
       jwtToken: "jwt-token",
@@ -123,7 +122,6 @@ describe("react-native Db", () => {
         appId: config.appId,
         schema,
         serverUrl: config.serverUrl,
-        serverPathPrefix: config.serverPathPrefix,
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
@@ -253,20 +251,15 @@ describe("react-native Db", () => {
     const db = new TestDb({
       appId: "rn-app",
       serverUrl: "https://example.test",
-      serverPathPrefix: "/apps/rn-app",
       jwtToken: "jwt-x",
       adminSecret: "admin-y",
     });
     db.exposeGetClient(makeSchema("todos"));
 
-    expect(stub.connectTransport).toHaveBeenCalledWith(
-      "https://example.test",
-      {
-        jwt_token: "jwt-x",
-        admin_secret: "admin-y",
-      },
-      "/apps/rn-app",
-    );
+    expect(stub.connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+    });
   });
 
   it("RNDB-U09 does not call connectTransport when serverUrl is absent", () => {

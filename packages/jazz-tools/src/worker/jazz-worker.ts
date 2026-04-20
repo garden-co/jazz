@@ -213,10 +213,9 @@ export { mapAuthReason } from "../runtime/auth-state.js";
 
 /**
  * Build the WebSocket URL for runtime.connect() from the init message fields.
- * Delegates scheme conversion and path prefix appending to `httpUrlToWs`.
  */
-export function composeConnectUrl(serverUrl: string, serverPathPrefix?: string): string {
-  return httpUrlToWs(serverUrl, serverPathPrefix);
+export function composeConnectUrl(serverUrl: string, appId: string): string {
+  return httpUrlToWs(serverUrl, appId);
 }
 
 /**
@@ -396,7 +395,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
         currentAuth.admin_secret = msg.adminSecret;
       }
       currentAuth = mergeAuth(currentAuth, msg.jwtToken);
-      const wsUrl = composeConnectUrl(msg.serverUrl, msg.serverPathPrefix);
+      const wsUrl = composeConnectUrl(msg.serverUrl, msg.appId);
       currentWsUrl = wsUrl;
       performUpstreamConnect(runtime, post, wsUrl, JSON.stringify(currentAuth));
     }

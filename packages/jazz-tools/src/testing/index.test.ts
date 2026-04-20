@@ -116,14 +116,14 @@ describe("TestingServer", () => {
       expect(server.adminSecret).toBe(adminSecret);
       expect(server.backendSecret).toBe(backendSecret);
 
-      const allowed = await fetch(`${server.url}/admin/schemas`, {
+      const allowed = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": adminSecret },
         body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
       expect(allowed.status).toBe(201);
 
-      const denied = await fetch(`${server.url}/admin/schemas`, {
+      const denied = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": "wrong-secret" },
         body: JSON.stringify({ schema: TEST_SCHEMA }),
@@ -239,7 +239,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -265,7 +265,7 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -315,7 +315,7 @@ describe("pushSchemaCatalogue", () => {
 
       expect(hash).toBeTruthy();
 
-      const response = await fetch(`${server.url}/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/schemas`, {
         headers: {
           "X-Jazz-Admin-Secret": adminSecret,
         },

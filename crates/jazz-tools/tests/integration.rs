@@ -17,6 +17,8 @@ use reqwest::Client;
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+const TEST_APP_ID: &str = "00000000-0000-0000-0000-000000000001";
+
 fn mint_test_token(audience: &str) -> String {
     let seed = [42u8; 32];
     jazz_tools::identity::mint_jazz_self_signed_token(
@@ -48,11 +50,11 @@ fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     Some(&data[4..4 + len])
 }
 
-/// Perform a WS handshake against `ws://host/ws` using a local-first JWT token.
+/// Perform a WS handshake against `ws://host/apps/<appId>/ws` using a local-first JWT token.
 ///
 /// Returns `Ok(ConnectedResponse)` on success, or `Err(message)` on failure.
 async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, String> {
-    let ws_url = format!("ws://127.0.0.1:{port}/ws");
+    let ws_url = format!("ws://127.0.0.1:{port}/apps/{TEST_APP_ID}/ws");
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("ws connect failed: {e}"))?;
@@ -111,14 +113,12 @@ impl TestServer {
         let bound_port_file = data_dir.path().join("bound-port");
 
         // Use a deterministic UUID app ID for testing
-        let app_id = "00000000-0000-0000-0000-000000000001";
-
         let jazz_binary = Self::find_jazz_binary();
 
         let process = Command::new(&jazz_binary)
             .args([
                 "server",
-                app_id,
+                TEST_APP_ID,
                 "--port",
                 &port.to_string(),
                 "--data-dir",
@@ -155,13 +155,12 @@ impl TestServer {
         let configured_data_dir = data_dir.path().join("should-not-exist");
         let bound_port_file = data_dir.path().join("bound-port");
 
-        let app_id = "00000000-0000-0000-0000-000000000001";
         let jazz_binary = Self::find_jazz_binary();
 
         let process = Command::new(&jazz_binary)
             .args([
                 "server",
-                app_id,
+                TEST_APP_ID,
                 "--port",
                 &port.to_string(),
                 "--data-dir",
@@ -355,7 +354,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
     let server = TestServer::start(0).await;
 
     let token = mint_test_token("00000000-0000-0000-0000-000000000001");
-    let ws_url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let ws_url = format!("ws://127.0.0.1:{}/apps/{TEST_APP_ID}/ws", server.port);
     let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
 
     let handshake = AuthHandshake {

@@ -37,31 +37,26 @@ describe("runtime/Db direct path upstream wiring", () => {
     vi.restoreAllMocks();
   });
 
-  it("DBRT-U01 calls connectTransport with serverUrl and serverPathPrefix when configured and no worker", () => {
+  it("DBRT-U01 calls connectTransport with serverUrl and derived app scope when configured and no worker", () => {
     const client = makeClientStub();
     const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
 
     const db = new TestDb({
       appId: "app",
       serverUrl: "https://example.test",
-      serverPathPrefix: "/apps/app",
       jwtToken: "jwt-x",
       adminSecret: "admin-y",
     });
     db.exposeGetClient(makeSchema());
 
     expect(connectSyncSpy).toHaveBeenCalledTimes(1);
-    expect((client as any).connectTransport).toHaveBeenCalledWith(
-      "https://example.test",
-      {
-        jwt_token: "jwt-x",
-        admin_secret: "admin-y",
-      },
-      "/apps/app",
-    );
+    expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+    });
   });
 
-  it("DBRT-U01b calls connectTransport without prefix when serverPathPrefix is absent", () => {
+  it("DBRT-U01b calls connectTransport without a separate prefix argument", () => {
     const client = makeClientStub();
     vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
 
@@ -73,14 +68,10 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
     db.exposeGetClient(makeSchema());
 
-    expect((client as any).connectTransport).toHaveBeenCalledWith(
-      "https://example.test",
-      {
-        jwt_token: "jwt-x",
-        admin_secret: "admin-y",
-      },
-      undefined,
-    );
+    expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+    });
   });
 
   it("DBRT-U02 does not call connectTransport when serverUrl is absent", () => {
