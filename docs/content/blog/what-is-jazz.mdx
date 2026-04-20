@@ -349,21 +349,84 @@ dynamics beneath.
 
 # Who Jazz is for right now
 
-Jazz has always been highest-leverage for small teams building new apps that are collaborative,
-real-time, local-first, agent-heavy or otherwise unusual enough to really benefit from its unique design.
-This remains true for Jazz v2. In fact early evidence shows that adopters are able to move even more
-quickly with it, which validates our new design choices to look more instantly familiar and mainstream.
+Right now, Jazz is best suited to small teams building new apps that are collaborative, real-time,
+local-first, agent-heavy, or otherwise unusual enough to really benefit from its architecture.
 
-If you can tolerate a still evolving API target and best-effort SLA you will find that we can offer a
-symbiotic co-design experience where we can iterate on feature requests and improvements very quickly.
+That does come with an important caveat: Jazz is still alpha-quality software and infrastructure. If
+you can tolerate an evolving API and a best-effort SLA, the upside is that we can work very closely
+with you and iterate quickly on rough edges, feature requests, and missing pieces.
 
-This includes if you want to just play around with it to get a feeling for the possibilities. We've
-learned so much in the past from the early feedback of industry experts with taste and experience that
-later proved itself across adopters - so we're actively seeking out your first impressions. (Link to Discord)
+That also applies if you simply want to get a feel for the abstraction. Some of the most useful
+feedback we have ever gotten came from early users who were just exploring the model and reacting to
+it honestly, so we are very interested in those first impressions too. (Link to Discord)
 
-For commercial products, the default recommendation right now is still adventurous greenfield teams. But we are also already onboarding larger and more brownfield adopters selectively, in close partnership. That model works because it lets us support those teams directly, constrain the initial scope, and ensure the parts of Jazz they rely on are production-ready for their use case even while the overall platform is still in alpha.
+For commercial products, the default recommendation is still adventurous greenfield teams. But we are
+also already onboarding larger and more brownfield adopters selectively, in close partnership. That
+works because it lets us support those teams directly, constrain the initial scope, and ensure the
+parts of Jazz they rely on are solid for their use case even while the overall platform is still in
+alpha.
 
-Especially if you have a serious use-case that's tricky to serve with existing tech, we'd love to start
-conversations early and are able to demonstrate relevant capabilities in targeted pilots. (Link to book a call)
+Especially if you have a serious use case that is awkward to serve with existing technology, we would
+love to start the conversation early and can often demonstrate the relevant capabilities in a targeted
+pilot. (Link to book a call)
 
 # What we learned from classic Jazz and how to migrate
+
+We've hinted a couple times that Jazz v2 is quite different from Jazz v0.x, which we'll now call
+"classic Jazz". For the benefit of current adopters of classic Jazz, and those of you that hear about
+Jazz for the first time, I'd like to explain why Jazz v2 is different and why we're no longer
+recommending to build new apps on classic Jazz.
+
+The biggest design choice that defined classic Jazz from the beginning was the use of cryptography
+to implement permissions. This enabled a true local-first notion of permissions to govern local-first
+data, in the extreme letting you build end-to-end encrypted apps that don't have to trust its syncing
+infrastructure at all.
+
+It turned out that most adopters actually didn't care about this property at all. What they did care
+about was the developer experience that local-first state plus local-first permissions could provide.
+But even adopters for whom the encryption was a USP didn't care for the complex public-key machinery
+and unusual permission APIs. The worst property of this design was that permission mistakes were
+essentially written in stone, and that there were some permission rules that you still could only
+have implemented with at least a semi-trusted central authority.
+
+This is why Jazz v2's biggest departure is around permissions. We now heavily lean into the Jazz
+server being a trusted authority, taking responsiblity for enforcing usefully-complex permission
+policies that can evolve over time. The key unlock here was to frame permissions to apply at sync
+time, but to have accurate local previews of likely fates for local-first data.
+
+There will still be an end-to-end encryption story with Jazz v2, but it will essentially treat
+the whole system as untrusted with "encrypted columns" that devices encrypt into using simple
+on-device keys that are shared with other users as appropriate. The idea is that the Jazz server
+_is_ trusted with enforcing access control, but sensitive data is still completely hidden from it.
+
+The second biggest change is around the way we represent concurrent and branching edit histories.
+Classic Jazz was all-in on CRDTs to represent edit histories. CRDTs naturally provide local-first
+eventually consistent semantics but also rely on heavy amounts of history replay to materialize
+the current value of an object. We made significant inroads to making that fast enough even for
+large amounts of data, but eventually came to the conclusion that a more git-like model of a
+DAG of data _snapshots_ encodes history with just as much fidelity, but making current state
+and historical reads much more efficient - pushing most compute to the much rarer merge time.
+
+In terms of the API, after the complexity of permissions, the biggest source of confusion for
+adopters was that we were trying to make Jazz look too much like local JSON state, but then also
+provided the ability to granularly load data, resulting in a brittle model of partially available
+data that actually made "local JSON state" a leaky abstraction with lots of custom caveats to learn.
+
+Here, we realized that an underlying relational model plus a modern ORM with includes that resolve
+to joins and subexpressions under the hood provided a proven abstraction with clear semantics and
+much cleaner "all or nothing" bundles of query results that make sense for each component of your app.
+
+There's many smaller learnings and new choices that we'll mention in future posts, but these are less
+consequential.
+
+Finally, we would like to make a clear promise to existing adopters: While we recommend everyone to
+migrate to Jazz v2 as soon as possible and are eager to help, we are also still working on more
+automated tools to make this migration easier. So for the time being we will keep maintaining classic
+Jazz with security patches, blocking bugs or smaller missing features and most importantly, we'll
+keep the infrastructure (classic Jazz Cloud) running until everyone had a chance to migrate off of it.
+
+If your classic app should suddenly experience a surge in traffic, we might reach out and offer direct
+migration support sooner, since it will be much easier to serve you on top of Jazz v2.
+
+We'd love to hear what you all think of these big news and new decisions, please reach out on Discord,
+Twitter or email (links), personally or publicly, and help us shape Jazz further!
