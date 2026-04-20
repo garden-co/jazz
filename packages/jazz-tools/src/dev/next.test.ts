@@ -88,6 +88,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const wrapped = withJazz(
       { reactStrictMode: true },
@@ -113,6 +114,13 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBe(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID);
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+          `http://127.0.0.1:${port}`,
+        )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}&adminSecret=next-test-admin`,
+      ),
+    );
   }, 30_000);
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {

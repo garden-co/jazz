@@ -157,4 +157,37 @@ describe("App", () => {
     expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "");
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
+
+  it("prefills the connection form from partial hash params", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        serverUrl: "http://localhost:19879",
+        appId: "stored-app-id",
+        adminSecret: "stored-admin-secret",
+        env: "dev",
+        branch: "main",
+        schemaHash: "hash-b",
+      }),
+    );
+    window.location.hash =
+      "#serverUrl=https%3A%2F%2Fstaging.v2.aws.cloud.jazz.tools&appId=019d9bc9-646b-7560-b26d-b775a7d061d3&serverPathPrefix=%2Fapps%2F019d9bc9-646b-7560-b26d-b775a7d061d3";
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Connect to Jazz server" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://staging.v2.aws.cloud.jazz.tools",
+    );
+    expect(screen.getByLabelText("App ID")).toHaveProperty(
+      "value",
+      "019d9bc9-646b-7560-b26d-b775a7d061d3",
+    );
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(screen.getByLabelText(/Path prefix/i)).toHaveProperty(
+      "value",
+      "/apps/019d9bc9-646b-7560-b26d-b775a7d061d3",
+    );
+  });
 });
