@@ -29,7 +29,7 @@
       if (authenticated) {
         const resolved = await jazzClient;
         unsubRefresh = resolved.db.onAuthChanged(async (state) => {
-          if (state.status !== "unauthenticated") return;
+          if (state.error !== "expired") return;
           const fresh = await getToken();
           if (fresh) resolved.db.updateAuthToken(fresh);
         });

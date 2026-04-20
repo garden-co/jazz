@@ -723,8 +723,8 @@ async fn wait_for_persisted_write(
         })?
         .map_err(|rejection| {
             JazzError::Sync(format!(
-                "{operation} was rejected before reaching {tier:?} durability: {}",
-                rejection.reason
+                "{operation} was rejected before reaching {tier:?} durability ({}): {}",
+                rejection.code, rejection.reason
             ))
         })?;
     Ok(())

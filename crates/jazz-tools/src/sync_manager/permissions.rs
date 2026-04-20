@@ -41,6 +41,21 @@ impl SyncManager {
         check: PendingPermissionCheck,
         reason: String,
     ) {
+        self.reject_permission_check_with_code(
+            storage,
+            check,
+            "permission_denied".to_string(),
+            reason,
+        );
+    }
+
+    pub fn reject_permission_check_with_code<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        check: PendingPermissionCheck,
+        code: String,
+        reason: String,
+    ) {
         if let SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } =
             &check.payload
             && matches!(
@@ -50,7 +65,7 @@ impl SyncManager {
         {
             let settlement = BatchSettlement::Rejected {
                 batch_id: row.batch_id,
-                code: "permission_denied".to_string(),
+                code: code.clone(),
                 reason: reason.clone(),
             };
             if let Err(error) = storage.upsert_authoritative_batch_settlement(&settlement) {
@@ -90,6 +105,7 @@ impl SyncManager {
             payload: SyncPayload::Error(SyncError::PermissionDenied {
                 object_id,
                 branch_name,
+                code,
                 reason,
             }),
         });

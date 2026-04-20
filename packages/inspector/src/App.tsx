@@ -318,33 +318,25 @@ function readFragmentConfig(): DbConfigFormValues | null {
   if (!raw) return null;
 
   const params = new URLSearchParams(raw);
-  const serverUrl = (params.get("url") ?? params.get("serverUrl") ?? "").trim();
-  const appId = (params.get("appid") ?? params.get("appId") ?? "").trim();
-  const adminSecret = (params.get("adminsecret") ?? params.get("adminSecret") ?? "").trim();
-  const env = (params.get("env") ?? "dev").trim() || "dev";
-  const branch = (params.get("branch") ?? "main").trim() || "main";
-  const serverPathPrefix = (
-    params.get("serverPathPrefix") ??
-    params.get("pathPrefix") ??
-    ""
-  ).trim();
+  const hasKnownPrefillParam = [
+    "serverUrl",
+    "appId",
+    "adminSecret",
+    "env",
+    "branch",
+    "serverPathPrefix",
+  ].some((key) => params.has(key));
 
-  if (!serverUrl || !appId || !adminSecret) {
-    return null;
-  }
-
-  try {
-    new URL(serverUrl);
-  } catch {
+  if (!hasKnownPrefillParam) {
     return null;
   }
 
   return {
-    serverUrl,
-    appId,
-    adminSecret,
-    env,
-    branch,
-    serverPathPrefix: serverPathPrefix || undefined,
+    serverUrl: (params.get("serverUrl") ?? "").trim(),
+    appId: (params.get("appId") ?? "").trim(),
+    adminSecret: (params.get("adminSecret") ?? "").trim(),
+    env: (params.get("env") ?? "dev").trim() || "dev",
+    branch: (params.get("branch") ?? "main").trim() || "main",
+    serverPathPrefix: (params.get("serverPathPrefix") ?? "").trim() || undefined,
   };
 }

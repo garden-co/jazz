@@ -10,7 +10,7 @@ function JwtRefresh() {
   useEffect(
     () =>
       db.onAuthChanged((state) => {
-        if (state.status !== "unauthenticated") return;
+        if (state.error !== "expired") return;
         authClient.token().then(({ data, error }) => {
           if (!error && data?.token) db.updateAuthToken(data.token);
         });
