@@ -275,6 +275,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [bobTeam.id],
           admin_team_ids: [],
         },
+        authMode: "external",
       },
       reproApp,
     );
@@ -497,6 +498,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [aliceTeam.id, opsTeam.id, regionalTeam.id, internTeam.id],
           admin_team_ids: [],
         },
+        authMode: "external",
       },
       bob: {
         user_id: "bob",
@@ -504,6 +506,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [bobTeam.id],
           admin_team_ids: [],
         },
+        authMode: "external",
       },
       intern: {
         user_id: "intern",
@@ -511,6 +514,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [internTeam.id, regionalTeam.id, aliceTeam.id, opsTeam.id],
           admin_team_ids: [],
         },
+        authMode: "external",
       },
     } as const;
 
