@@ -6,7 +6,7 @@ reviewedAt: "4059cdef"
 
 ## Local-first writes
 
-All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
+All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
 For TypeScript callers that need a replayable handle instead of awaiting immediately, Jazz also exposes persisted-write helpers and explicit batch builders:
 
@@ -93,7 +93,7 @@ Required fields cannot be set to `null`.
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insert(...).wait({ tier })`, `update(...).wait({ tier })`, or `delete(...).wait({ tier })`, the tier controls how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
