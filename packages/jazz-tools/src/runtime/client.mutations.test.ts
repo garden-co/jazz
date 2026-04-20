@@ -15,48 +15,17 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const updateDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
   > = [];
-  const insertPersistedCalls: Array<[string, Record<string, unknown>, string]> = [];
-  const insertPersistedWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined, string]
-  > = [];
-  const updatePersistedCalls: Array<[string, Record<string, unknown>, string]> = [];
-  const updatePersistedWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined, string]
-  > = [];
-  const deletePersistedCalls: Array<[string, string]> = [];
-  const deletePersistedWithSessionCalls: Array<[string, string | undefined, string]> = [];
-  const localBatchRecordCalls: string[] = [];
-  const localBatchRecordsCalls: string[] = [];
-  const acknowledgeRejectedBatchCalls: string[] = [];
-  const sealBatchCalls: string[] = [];
   const deleteCalls: string[] = [];
   const deleteDurableCalls: Array<[string, string]> = [];
   const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
-  const localBatchRecord = {
-    batchId: "00000000-0000-0000-0000-000000000041",
-    mode: "direct" as const,
-    sealed: true,
-    latestSettlement: {
-      kind: "durableDirect" as const,
-      batchId: "00000000-0000-0000-0000-000000000041",
-      confirmedTier: "edge" as const,
-      visibleMembers: [
-        {
-          objectId: "00000000-0000-0000-0000-000000000001",
-          branchName: "main",
-          batchId: "00000000-0000-0000-0000-000000000041",
-        },
-      ],
-    },
-  };
   const runtimeBase: Runtime = {
     insert: (table: string, values: Record<string, unknown>) => {
       insertCalls.push([table, values]);
       return {
         id: "00000000-0000-0000-0000-000000000001",
         values: [],
-        batchId: "plain-insert-batch",
+        batchId: "insert-batch-id",
       };
     },
     insertWithSession: (
@@ -68,7 +37,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return {
         id: "00000000-0000-0000-0000-000000000001",
         values: [],
-        batchId: "plain-insert-session-batch",
+        batchId: "insert-with-session-batch-id",
       };
     },
     insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
@@ -81,28 +50,9 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       insertDurableWithSessionCalls.push([table, values, writeContextJson ?? undefined, tier]);
       return { id: "00000000-0000-0000-0000-000000000001", values: [] };
     },
-    insertPersisted: (table: string, values: Record<string, unknown>, tier: string) => {
-      insertPersistedCalls.push([table, values, tier]);
-      return {
-        batchId: localBatchRecord.batchId,
-        row: { id: "00000000-0000-0000-0000-000000000001", values: [] },
-      };
-    },
-    insertPersistedWithSession: (
-      table: string,
-      values: Record<string, unknown>,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      insertPersistedWithSessionCalls.push([table, values, writeContextJson ?? undefined, tier]);
-      return {
-        batchId: localBatchRecord.batchId,
-        row: { id: "00000000-0000-0000-0000-000000000001", values: [] },
-      };
-    },
     update: (objectId: string, updates: Record<string, unknown>) => {
       updateCalls.push([objectId, updates]);
-      return { batchId: localBatchRecord.batchId };
+      return { batchId: "update-batch-id" };
     },
     updateWithSession: (
       objectId: string,
@@ -110,7 +60,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       updateWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined]);
-      return { batchId: localBatchRecord.batchId };
+      return { batchId: "update-with-session-batch-id" };
     },
     updateDurable: async (objectId: string, updates: Record<string, unknown>, tier: string) => {
       updateDurableCalls.push([objectId, updates, tier]);
@@ -123,31 +73,13 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     ) => {
       updateDurableWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined, tier]);
     },
-    updatePersisted: (objectId: string, updates: Record<string, unknown>, tier: string) => {
-      updatePersistedCalls.push([objectId, updates, tier]);
-      return { batchId: localBatchRecord.batchId };
-    },
-    updatePersistedWithSession: (
-      objectId: string,
-      updates: Record<string, unknown>,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      updatePersistedWithSessionCalls.push([
-        objectId,
-        updates,
-        writeContextJson ?? undefined,
-        tier,
-      ]);
-      return { batchId: localBatchRecord.batchId };
-    },
     delete: (objectId: string) => {
       deleteCalls.push(objectId);
-      return { batchId: localBatchRecord.batchId };
+      return { batchId: "delete-batch-id" };
     },
     deleteWithSession: (objectId: string, writeContextJson?: string | null) => {
       deleteWithSessionCalls.push([objectId, writeContextJson ?? undefined]);
-      return { batchId: localBatchRecord.batchId };
+      return { batchId: "delete-with-session-batch-id" };
     },
     deleteDurable: async (objectId: string, tier: string) => {
       deleteDurableCalls.push([objectId, tier]);
@@ -158,18 +90,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       tier = "edge",
     ) => {
       deleteDurableWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
-    },
-    deletePersisted: (objectId: string, tier: string) => {
-      deletePersistedCalls.push([objectId, tier]);
-      return { batchId: localBatchRecord.batchId };
-    },
-    deletePersistedWithSession: (
-      objectId: string,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      deletePersistedWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
-      return { batchId: localBatchRecord.batchId };
     },
     query: async () => [],
     subscribe: () => 0,
@@ -183,21 +103,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
-    loadLocalBatchRecord: (batchId: string) => {
-      localBatchRecordCalls.push(batchId);
-      return batchId === localBatchRecord.batchId ? localBatchRecord : null;
-    },
-    loadLocalBatchRecords: () => {
-      localBatchRecordsCalls.push("scan");
-      return [localBatchRecord];
-    },
-    acknowledgeRejectedBatch: (batchId: string) => {
-      acknowledgeRejectedBatchCalls.push(batchId);
-      return batchId === localBatchRecord.batchId;
-    },
-    sealBatch: (batchId: string) => {
-      sealBatchCalls.push(batchId);
-    },
   };
   const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 
@@ -221,25 +126,14 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     insertCalls,
     insertWithSessionCalls,
     insertDurableWithSessionCalls,
-    insertPersistedCalls,
-    insertPersistedWithSessionCalls,
     updateCalls,
     updateWithSessionCalls,
     updateDurableCalls,
     updateDurableWithSessionCalls,
-    updatePersistedCalls,
-    updatePersistedWithSessionCalls,
     deleteCalls,
     deleteDurableCalls,
     deleteWithSessionCalls,
     deleteDurableWithSessionCalls,
-    deletePersistedCalls,
-    deletePersistedWithSessionCalls,
-    localBatchRecord,
-    localBatchRecordCalls,
-    localBatchRecordsCalls,
-    acknowledgeRejectedBatchCalls,
-    sealBatchCalls,
   };
 }
 
@@ -298,36 +192,18 @@ describe("JazzClient mutation durability split", () => {
   });
 
   it("routes update/delete through the synchronous runtime methods", () => {
-    const { client, updateCalls, deleteCalls, localBatchRecord } = makeClient();
+    const { client, updateCalls, deleteCalls } = makeClient();
     const updates = { done: { type: "Boolean" as const, value: true } };
 
-    expect(client.update("row-1", updates)).toEqual({ batchId: localBatchRecord.batchId });
-    expect(client.delete("row-1")).toEqual({ batchId: localBatchRecord.batchId });
+    expect(client.update("row-1", updates)).toEqual({
+      batchId: "update-batch-id",
+    });
+    expect(client.delete("row-1")).toEqual({
+      batchId: "delete-batch-id",
+    });
 
     expect(updateCalls).toEqual([["row-1", updates]]);
     expect(deleteCalls).toEqual(["row-1"]);
-  });
-
-  it("returns direct-write batch ids from plain runtime mutations when available", () => {
-    const { client } = makeClient({
-      insert: () => ({
-        id: "00000000-0000-0000-0000-000000000001",
-        values: [],
-        batchId: "batch-insert",
-      }),
-      update: () => ({ batchId: "batch-update" }),
-      delete: () => ({ batchId: "batch-delete" }),
-    });
-
-    const created = client.createInternal("todos", {});
-    const updated = client.updateInternal("row-1", {
-      done: { type: "Boolean" as const, value: true },
-    });
-    const deleted = client.deleteInternal("row-1");
-
-    expect(created).toMatchObject({ batchId: "batch-insert" });
-    expect(updated).toEqual({ batchId: "batch-update" });
-    expect(deleted).toEqual({ batchId: "batch-delete" });
   });
 
   it("routes updateDurable/deleteDurable through durability-aware runtime methods", async () => {
@@ -477,233 +353,6 @@ describe("JazzClient mutation durability split", () => {
     ]);
   });
 
-  it("reuses one transactional batch id across create, update, and delete", () => {
-    const { client, insertWithSessionCalls, updateWithSessionCalls, deleteWithSessionCalls } =
-      makeClient();
-    const transaction = client.beginTransaction();
-    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
-    const updates = { done: { type: "Boolean" as const, value: true } };
-
-    expect(typeof transaction.batchId()).toBe("string");
-
-    transaction.create("todos", insertValues);
-    transaction.update("row-1", updates);
-    transaction.delete("row-1");
-
-    const insertContext = JSON.parse(insertWithSessionCalls[0]![2]!);
-    const updateContext = JSON.parse(updateWithSessionCalls[0]![2]!);
-    const deleteContext = JSON.parse(deleteWithSessionCalls[0]![1]!);
-
-    expect(insertContext).toMatchObject({
-      batch_mode: "transactional",
-      batch_id: transaction.batchId(),
-    });
-    expect(updateContext).toMatchObject({
-      batch_mode: "transactional",
-      batch_id: transaction.batchId(),
-    });
-    expect(deleteContext).toMatchObject({
-      batch_mode: "transactional",
-      batch_id: transaction.batchId(),
-    });
-  });
-
-  it("commits a transactional batch by sealing its batch id", () => {
-    const { client, sealBatchCalls } = makeClient();
-    const transaction = client.beginTransaction();
-
-    expect(transaction.commit()).toBe(transaction.batchId());
-    expect(sealBatchCalls).toEqual([transaction.batchId()]);
-  });
-
-  it("rejects transactional writes after commit", () => {
-    const { client, insertWithSessionCalls } = makeClient();
-    const transaction = client.beginTransaction();
-    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
-
-    transaction.commit();
-
-    expect(() => transaction.create("todos", insertValues)).toThrow(/committed/i);
-    expect(insertWithSessionCalls).toEqual([]);
-  });
-
-  it("reuses one direct batch id across create, update, and delete without sealing", () => {
-    const {
-      client,
-      insertWithSessionCalls,
-      updateWithSessionCalls,
-      deleteWithSessionCalls,
-      sealBatchCalls,
-    } = makeClient();
-    const batch = client.beginDirectBatch();
-    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
-    const updates = { done: { type: "Boolean" as const, value: true } };
-
-    expect(typeof batch.batchId()).toBe("string");
-
-    batch.create("todos", insertValues);
-    batch.update("row-1", updates);
-    batch.delete("row-1");
-
-    const insertContext = JSON.parse(insertWithSessionCalls[0]![2]!);
-    const updateContext = JSON.parse(updateWithSessionCalls[0]![2]!);
-    const deleteContext = JSON.parse(deleteWithSessionCalls[0]![1]!);
-
-    expect(insertContext).toMatchObject({
-      batch_mode: "direct",
-      batch_id: batch.batchId(),
-    });
-    expect(updateContext).toMatchObject({
-      batch_mode: "direct",
-      batch_id: batch.batchId(),
-    });
-    expect(deleteContext).toMatchObject({
-      batch_mode: "direct",
-      batch_id: batch.batchId(),
-    });
-    expect(sealBatchCalls).toEqual([]);
-  });
-
-  it("returns persisted writes with an immediate batch id and local wait handle", async () => {
-    const { client, insertPersistedCalls, localBatchRecordCalls, localBatchRecord } = makeClient();
-    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
-
-    const persisted = client.createPersisted("todos", insertValues);
-
-    expect(insertPersistedCalls).toEqual([["todos", insertValues, "edge"]]);
-    expect(persisted.batchId()).toBe(localBatchRecord.batchId);
-    expect(persisted.value()).toEqual({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-    });
-    await expect(persisted.wait()).resolves.toEqual({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-    });
-    expect(localBatchRecordCalls).toContain(localBatchRecord.batchId);
-  });
-
-  it("routes persisted transactional writes through session-aware runtime methods", () => {
-    const {
-      client,
-      insertPersistedWithSessionCalls,
-      updatePersistedWithSessionCalls,
-      deletePersistedWithSessionCalls,
-    } = makeClient();
-    const transaction = client.beginTransaction();
-    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
-    const updates = { done: { type: "Boolean" as const, value: true } };
-
-    transaction.createPersisted("todos", insertValues, { tier: "global" });
-    transaction.updatePersisted("row-1", updates, { tier: "global" });
-    transaction.deletePersisted("row-1", { tier: "global" });
-
-    const insertContext = JSON.parse(insertPersistedWithSessionCalls[0]![2]!);
-    const updateContext = JSON.parse(updatePersistedWithSessionCalls[0]![2]!);
-    const deleteContext = JSON.parse(deletePersistedWithSessionCalls[0]![1]!);
-
-    expect(insertPersistedWithSessionCalls[0]![3]).toBe("global");
-    expect(updatePersistedWithSessionCalls[0]![3]).toBe("global");
-    expect(deletePersistedWithSessionCalls[0]![2]).toBe("global");
-    expect(insertContext.batch_id).toBe(transaction.batchId());
-    expect(updateContext.batch_id).toBe(transaction.batchId());
-    expect(deleteContext.batch_id).toBe(transaction.batchId());
-  });
-
-  it("binds a transaction to the target composed prefix at begin time", () => {
-    let currentSchemaHash = "1111111111111111111111111111111111111111111111111111111111111111";
-    const { client, insertWithSessionCalls, updateWithSessionCalls } = makeClient({
-      getSchemaHash: () => currentSchemaHash,
-    });
-    const transaction = client.beginTransaction();
-
-    currentSchemaHash = "2222222222222222222222222222222222222222222222222222222222222222";
-
-    transaction.create("todos", {
-      title: { type: "Text" as const, value: "Bound prefix" },
-    });
-    transaction.update("row-1", {
-      done: { type: "Boolean" as const, value: true },
-    });
-
-    const insertContext = JSON.parse(insertWithSessionCalls[0]![2]!);
-    const updateContext = JSON.parse(updateWithSessionCalls[0]![2]!);
-
-    expect(insertContext).toMatchObject({
-      batch_mode: "transactional",
-      batch_id: transaction.batchId(),
-      target_branch_name: "dev-111111111111-main",
-    });
-    expect(updateContext).toMatchObject({
-      batch_mode: "transactional",
-      batch_id: transaction.batchId(),
-      target_branch_name: "dev-111111111111-main",
-    });
-  });
-
-  it("delegates local batch record inspection and rejection acknowledgement", () => {
-    const {
-      client,
-      localBatchRecordCalls,
-      localBatchRecordsCalls,
-      acknowledgeRejectedBatchCalls,
-      localBatchRecord,
-    } = makeClient();
-
-    expect(client.localBatchRecord(localBatchRecord.batchId)).toEqual(localBatchRecord);
-    expect(client.localBatchRecords()).toEqual([localBatchRecord]);
-    expect(client.acknowledgeRejectedBatch(localBatchRecord.batchId)).toBe(true);
-
-    expect(localBatchRecordCalls).toEqual([localBatchRecord.batchId, localBatchRecord.batchId]);
-    expect(localBatchRecordsCalls).toEqual(["scan"]);
-    expect(acknowledgeRejectedBatchCalls).toEqual([localBatchRecord.batchId]);
-  });
-
-  it("rejects persisted waits on rejected settlements without polling storage", async () => {
-    let currentLocalBatchRecord: LocalBatchRecord | null = {
-      batchId: "00000000-0000-0000-0000-000000000041",
-      mode: "transactional",
-      sealed: true,
-      latestSettlement: null,
-    };
-    const runtimeOnSyncMessageReceived = vi.fn(() => {
-      currentLocalBatchRecord = {
-        ...currentLocalBatchRecord!,
-        latestSettlement: {
-          kind: "rejected",
-          batchId: currentLocalBatchRecord!.batchId,
-          code: "permission_denied",
-          reason: "writer lacks publish rights",
-        },
-      };
-    });
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-    const { client } = makeClient({
-      loadLocalBatchRecord: (batchId: string) =>
-        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
-      onSyncMessageReceived: runtimeOnSyncMessageReceived,
-    });
-
-    const persisted = client.createPersisted("todos", {
-      title: { type: "Text" as const, value: "Draft" },
-    });
-    const waitPromise = persisted.wait();
-
-    await Promise.resolve();
-    expect(setTimeoutSpy).not.toHaveBeenCalled();
-
-    client.getRuntime().onSyncMessageReceived("{}");
-
-    await expect(waitPromise).rejects.toMatchObject({
-      name: "PersistedWriteRejectedError",
-      batchId: currentLocalBatchRecord!.batchId,
-      code: "permission_denied",
-      reason: "writer lacks publish rights",
-    });
-    expect(runtimeOnSyncMessageReceived).toHaveBeenCalledWith("{}", undefined);
-    expect(setTimeoutSpy).not.toHaveBeenCalled();
-  });
-
   it("encodes custom updated_at overrides for create and update mutation options", async () => {
     const insertWithSession = vi.fn(
       (
@@ -731,7 +380,7 @@ describe("JazzClient mutation durability split", () => {
     );
     const updateWithSession = vi.fn();
     const updateDurableWithSession = vi.fn(async () => {});
-    const { client, localBatchRecord } = makeClient({
+    const { client } = makeClient({
       insertWithSession,
       insertDurableWithSession,
       updateWithSession,
@@ -811,125 +460,5 @@ describe("JazzClient mutation durability split", () => {
       updatedAtContext,
       "edge",
     );
-  });
-
-  it("resolves lower-tier waits without resolving stricter waits for the same batch", async () => {
-    let syncMessageCount = 0;
-    let currentLocalBatchRecord: LocalBatchRecord | null = {
-      batchId: "00000000-0000-0000-0000-000000000041",
-      mode: "direct",
-      sealed: true,
-      latestSettlement: {
-        kind: "durableDirect",
-        batchId: "00000000-0000-0000-0000-000000000041",
-        confirmedTier: "local",
-        visibleMembers: [
-          {
-            objectId: "00000000-0000-0000-0000-000000000001",
-            branchName: "main",
-            batchId: "00000000-0000-0000-0000-000000000041",
-          },
-        ],
-      },
-    };
-    const runtimeOnSyncMessageReceived = vi.fn(() => {
-      syncMessageCount += 1;
-      currentLocalBatchRecord = {
-        ...currentLocalBatchRecord!,
-        latestSettlement: {
-          kind: "durableDirect",
-          batchId: currentLocalBatchRecord!.batchId,
-          confirmedTier: syncMessageCount === 1 ? "edge" : "global",
-          visibleMembers: [
-            {
-              objectId: "00000000-0000-0000-0000-000000000001",
-              branchName: "main",
-              batchId: currentLocalBatchRecord!.batchId,
-            },
-          ],
-        },
-      };
-    });
-    const { client } = makeClient({
-      loadLocalBatchRecord: (batchId: string) =>
-        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
-      onSyncMessageReceived: runtimeOnSyncMessageReceived,
-    });
-
-    const edgeWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "edge");
-    const globalWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "global");
-    let globalResolved = false;
-    void globalWait.then(() => {
-      globalResolved = true;
-    });
-
-    client.getRuntime().onSyncMessageReceived("{}");
-
-    await expect(edgeWait).resolves.toBeUndefined();
-    await Promise.resolve();
-    expect(globalResolved).toBe(false);
-
-    client.getRuntime().onSyncMessageReceived("{}");
-
-    await expect(globalWait).resolves.toBeUndefined();
-  });
-
-  it("allows a stricter wait to attach after an earlier lower-tier wait resolved", async () => {
-    let currentLocalBatchRecord: LocalBatchRecord | null = {
-      batchId: "00000000-0000-0000-0000-000000000041",
-      mode: "direct",
-      sealed: true,
-      latestSettlement: {
-        kind: "durableDirect",
-        batchId: "00000000-0000-0000-0000-000000000041",
-        confirmedTier: "edge",
-        visibleMembers: [
-          {
-            objectId: "00000000-0000-0000-0000-000000000001",
-            branchName: "main",
-            batchId: "00000000-0000-0000-0000-000000000041",
-          },
-        ],
-      },
-    };
-    const runtimeOnSyncMessageReceived = vi.fn(() => {
-      currentLocalBatchRecord = {
-        ...currentLocalBatchRecord!,
-        latestSettlement: {
-          kind: "durableDirect",
-          batchId: currentLocalBatchRecord!.batchId,
-          confirmedTier: "global",
-          visibleMembers: [
-            {
-              objectId: "00000000-0000-0000-0000-000000000001",
-              branchName: "main",
-              batchId: currentLocalBatchRecord!.batchId,
-            },
-          ],
-        },
-      };
-    });
-    const { client } = makeClient({
-      loadLocalBatchRecord: (batchId: string) =>
-        batchId === currentLocalBatchRecord?.batchId ? currentLocalBatchRecord : null,
-      onSyncMessageReceived: runtimeOnSyncMessageReceived,
-    });
-
-    await expect(
-      client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "edge"),
-    ).resolves.toBeUndefined();
-
-    const globalWait = client.waitForPersistedBatch(currentLocalBatchRecord.batchId, "global");
-    let globalResolved = false;
-    void globalWait.then(() => {
-      globalResolved = true;
-    });
-
-    await Promise.resolve();
-    expect(globalResolved).toBe(false);
-
-    client.getRuntime().onSyncMessageReceived("{}");
-
-    await expect(globalWait).resolves.toBeUndefined();
   });
 });
