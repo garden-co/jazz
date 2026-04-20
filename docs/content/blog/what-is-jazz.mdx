@@ -238,59 +238,68 @@ And with agents, even small teams or solo developers can reach that same level o
 
 # The Franken-stack that Jazz replaces
 
-A good way to get an overview of what Jazz provides is to look at what it replaces compared to the
-existing and planned stacks out there without Jazz. This picture becomes clear from what we
-specifically designed Jazz to do, from greenfield apps that turn out much simpler than expected, and
-from existing apps that have been able to shed significant complexity since adopting Jazz.
+A good way to understand what Jazz provides is to look at which layers it can collapse. Modern app
+stacks often contain several systems whose main job is compensating for a database that does not
+natively sync, branch, carry permissions through sync, or tolerate ongoing schema drift. Jazz does
+not eliminate every other component, but it often removes a surprising amount of glue.
 
-The most obvious part that Jazz replaces is the database. Even without the extra jobs that Jazz can
-take on, it already subsumes a bunch of tooling that is typically used around the database, just to
-make maintenance, integration easier: schema definition DSLs, migration frameworks and ORMs. As you've
-seen, these are all part of a cohesive whole in Jazz.
+The most obvious replacement is the database-shaped stack around the database itself. Jazz is not just
+the storage engine; it also absorbs several categories of tooling that are often introduced to make a
+database usable in an application at all: schema definition DSLs, migration frameworks, and ORMs. In
+Jazz, those are part of one cohesive system rather than a bundle of separate abstractions.
 
-Then, there are infra components that are still close to the database and aid with performance and
-scalability. One common one for bigger apps are connection poolers like PGBouncer. These are unnecessary
-in Jazz, since it was explicitly built for large numbers of clients connecting directly to the database.
-Another key component are caches in front of the database. They often quickly alleviate stress on
-databases, but come with tricky problems like cache invalidation and accidental auth-bypasses. For this
-reason, we architected Jazz to inherently consist of caching layers (making use of it's local-first
-nature) but threading consistency and permissions as first-class concerns through the layers.
+Then there is the infrastructure that often appears near a database to compensate for scale and data
+distribution. Connection poolers like PgBouncer exist because many databases are not designed for huge
+numbers of direct client connections. Caches exist because round-tripping to a centralized database is
+too expensive and too latent. Queue and stream systems often appear because low-latency fanout and
+background coordination are otherwise awkward. Jazz does not make those categories disappear in every
+architecture, but it often absorbs much of their job by being built around direct sync, local caching,
+and real-time propagation from the start.
 
-Two other data-related infra components that increasingly occur in stacks are dedicated queue and
-durable stream providers. They help with distributing the system and make low-latency and
-high-throughput data exchange possible. We believe that you should get both from your database: sync should compete on latency and throughput and should offer an even easier mental model and integration
-story: the endpoints simply write data into the database and read incoming updates out of it.
+The same pattern shows up at the edges of the stack too. Jazz can store and sync large blobs as well
+as structured data, which often lets a product avoid a separate blob system for application-owned
+files. And on the frontend, it can eliminate a whole layer of data-fetching abstractions whose job is
+to mirror remote state locally, revalidate it, and simulate optimistic updates on top. With Jazz, the
+local mirror is the database itself.
 
-Casting the net wider, we have been known for our batteries-included philosophy. Part of that is a
-frontend-centric sympathy for app builders, but it's also a result of having a broader concept of what kind of data a database should house and deliver. Jazz is able to store and stream-sync large blobs just
-as well as structured data and thus lets you get rid of external blob storage. This means one less
-external system to resolve references to - and blobs automatically participate in permissions and
-caching.
+The last replacement is the most surprising: Jazz can often replace some categories of ephemeral
+frontend state. Modern UI state libraries exist for good reasons, but many of them are really filling
+in for the absence of a durable, reactive, queryable local data model. Because Jazz already gives you
+that model, some state that would otherwise live in client-side state containers can instead live in
+the database and naturally benefit from durability, sync, and history.
 
-Thinking about where the data is consumed, Jazz eliminates the need for a whole group of data-fetching
-abstractions in the frontend. These have grown quite complex, with some essentially containing half a
-sync engine with optimistic updates over yet another mirror of the underlying data. Jazz completely
-abstract data transport, fetching and revalidation from you, only having you define the shape of the
-data each component of your app needs.
+Just as important as what Jazz replaces is what remains. Jazz is intentionally not trying to erase all
+backend logic or every external system. Many apps still need privileged compute, integrations, custom
+handlers, and domain-specific logic outside the database. Jazz is designed to be a good center of
+gravity for those systems, not an isolated "backend as a service" empire.
 
-The last replacement is perhaps the most surprising: Jazz also often replaces ephemeral front-end state.
-The user interfaces of modern apps can get quite complex and the proliferation of whole state handling
-frameworks hints at a need for a database-shaped solution here, too. Jazz provides a more rigorous
-relational model and slots perfectly into the now common expectation of something that looks like
-global reactive state. It internally deduplicates data queries and optimizes what gets rerendered.
-And once you just happen to have durability available, it suddenly clearly makes sense for the UX in
-many unexpected places.
-
-Just as interesting as what Jazz replaces is what remains, though: Jazz intentionally is not a
-"Backend as a Service." For many apps it provides enough functionality to act as such, but it is also
-very careful about being a good citizen in a larger ensemble of backend systems and integrations. Most
-importantly, it allows you to keep backend business logic around Jazz in arbitrary external forms of
-compute, recognizing priviledged access and the ability for handlers to attribute backend writes to
-users. Because of the similarity between sync, queues, and streams, it has also proven to act as
-excellent real-time glue between other backend components, often resulting in a more decoupled,
-type-safe and secure overall integration.
+And because sync, queues, and streams are close relatives conceptually, Jazz also tends to work well as real-time glue between other backend components, often resulting in a more decoupled and more type-safe
+integration story overall.
 
 # Alternatives and friends
+
+Apart from unique aspects in the four "fresh ideas" Jazz is really quite similar to other contenders in
+the emerging category of modern real-time databases and sync engines. Especially the "relational data +
+permissions + blobs" formula seems to be what the market appreciates.
+
+Other databases like Zero, Convex and InstantDB are probably the most similar in ambition, sync engines
+like ElectricSQL and PowerSync intentionally focus on being a new sync layer in front of an existing
+database, but increasingly overlap with "a whole synced database per client" solutions like Turso.
+
+The biggest difference in Jazz is probably its "truly local-first" nature, deeply rooted in its origins
+in the well-established Local-first community, where a lot of cross-pollination happened with research projects (especially by Ink & Switch) like Cambria, Peritext and Keyhive and open-source libraries like Automerge, Y.js, Loro, Evolu and Triplit.
+
+Since Jazz v2 is a somewhat radical departure from some prior design choices of classical Jazz (more on
+that in the last paragraph) the main advantage other solutions have over Jazz right now is maturity and
+proven-ness and we encourage you to also check them out for this reason.
+
+But the better reason to also check them out is that we all have to prove together one main thing: that
+it's worth trying something new rather than glueing old tech together in the same ways. The database
+is the most tricky thing to replace in a stack, especially if the shape of what it does changes. But
+this also proves that it has immense value and that a new database can be the best possible investment
+in your stack. Invariably different technologies will turn out to be the best fit for each app, but we
+strive to learn from all the things that people are figuring out and will keep incorporating them into
+the opinionated new abstraction that is Jazz.
 
 # A new cloud for a new database
 
