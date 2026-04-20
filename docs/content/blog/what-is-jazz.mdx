@@ -8,11 +8,11 @@ date: "2026-04-18"
 I'm very proud to announce the public alpha of Jazz v2: the biggest re-focusing of what
 we think a database should be since we started developing Jazz six years ago.
 
+This post is the big-picture introduction to Jazz. We'll likely turn some of these sections into deeper follow-up posts over time, but for now feel free to skim or read it all in one go.
+
 # A new database for a new world
 
-I often say that Jazz is obviously good for apps that need offline support or are
-very real-time in their nature, but that the truth is that almost every app now has a more general
-problem: at its core, it needs data to exist in more than one place at a time.
+Jazz is often associated with offline-first and real-time apps. But the deeper reason it exists is simpler: almost every app now needs its data to exist in more than one place at a time.
 
 Our bet is that this is now a database problem. The database has to step up and become a
 distributed source of truth for inherently collaborative data. The rest of this post is really
@@ -23,7 +23,7 @@ Wherever you want access to data, you actually also care about permissions and c
 And suddenly schema evolution matters in more places, too. This was usually all managed by a
 centralized database and API. What does an actually distributed version of this look like?
 
-But even if permissions, consistency and schema evolution are taken care of, the needs we have
+The needs we have
 for the data itself are also changing: collaborative apps used to be a niche, they
 are now the norm. Especially when multiple people and agents co-edit the same data as you,
 conflict resolution and precise edit histories become very important. While many hand-build
@@ -89,7 +89,7 @@ distinctive strengths.
 One more important thing to note: Jazz is built as an integrated whole, not layered on top of an
 existing database or ORM. That is what lets us optimize the whole stack, provide a clean developer experience around universal abstractions and reuse much more implementation code across the different environments where Jazz runs.
 
-# Fresh Idea 1: Local-First Data With Tunable Consistency
+# Fresh Idea 1:<br/>Local-First Data With Tunable Consistency
 
 Local-first goes hand-in-hand with eventual consistency. If data can be edited in many places at
 once, those copies will sometimes diverge temporarily. In eventual consistency, that is expected,
@@ -112,7 +112,7 @@ the rest of the system stays naturally local-first. Those transactional writes c
 optimistic local actions, then resolve once they are centrally approved or rejected, including after
 time spent offline.
 
-# Fresh Idea 2: Row-Level Security With Per-Query Auth
+# Fresh Idea 2:<br/>Row-Level Security With Per-Query Auth
 
 In a local-first system, permissions do not only control what a centralized backend returns. They
 also determine what is allowed to sync down and exist locally on a device in the first place. That
@@ -153,7 +153,7 @@ optimizer. That is particularly helpful when access control is more complicated 
 data itself, because multi-hop permission checks across many relations can still be evaluated in one
 go.
 
-# Fresh Idea 3: Real-Time Collaboration And Deep Histories
+# Fresh Idea 3:<br/>Real-Time Collaboration And Deep Histories
 
 Collaboration in apps can look like a UI feature from the outside. But once multiple people and
 agents are working on the same data, you need low-latency propagation, offline work, drafts,
@@ -192,7 +192,7 @@ The actors involved in writing that data and the exact series of events that res
 state are part of what really makes the data what it is. We think that will matter more than ever as
 users edit data at a much higher volume with agents, whether those agents live inside or outside your app.
 
-# Fresh Idea 4: Fluid Schema Evolution
+# Fresh Idea 4:<br/>Fluid Migrations for Parallel Schema Evolution
 
 Local-first and offline first bring two challenges. We already talked about data consistency; that is
 the obvious one. The subtler challenge is schema evolution. Once you have truly distributed state, you
@@ -278,32 +278,75 @@ integration story overall.
 
 # Alternatives and friends
 
-Apart from unique aspects in the four "fresh ideas" Jazz is really quite similar to other contenders in
-the emerging category of modern real-time databases and sync engines. Especially the "relational data +
-permissions + blobs" formula seems to be what the market appreciates.
+Jazz's design makes it part of a now well-established category: modern real-time databases and sync engines. In many ways it looks similar to the other strong contenders. The shared
+shape is pretty clear: relational data, permissions, sync, and blobs.
 
-Other databases like Zero, Convex and InstantDB are probably the most similar in ambition, sync engines
-like ElectricSQL and PowerSync intentionally focus on being a new sync layer in front of an existing
-database, but increasingly overlap with "a whole synced database per client" solutions like Turso.
+Zero, Convex, and InstantDB are probably the closest in ambition. ElectricSQL and PowerSync are more
+explicitly sync layers in front of an existing database. And solutions like Turso increasingly overlap
+with the "whole synced database per client" side of the space, even if they come from a different
+starting point.
 
-The biggest difference in Jazz is probably its "truly local-first" nature, deeply rooted in its origins
-in the well-established Local-first community, where a lot of cross-pollination happened with research projects (especially by Ink & Switch) like Cambria, Peritext and Keyhive and open-source libraries like Automerge, Y.js, Loro, Evolu and Triplit.
+Where Jazz feels most different is that local-first is the starting assumption that shaped the whole architecture. Six years of research, development, and deployment around that problem led directly to the four fresh ideas above.
 
-Since Jazz v2 is a somewhat radical departure from some prior design choices of classical Jazz (more on
-that in the last paragraph) the main advantage other solutions have over Jazz right now is maturity and
-proven-ness and we encourage you to also check them out for this reason.
+And that perspective is deeply rooted in our origins in the broader Local-first community. A lot of Jazz's thinking was
+formed through cross-pollination with research projects, especially from Ink & Switch, like Cambria,
+Peritext, and Keyhive, and with open-source libraries like Automerge, Y.js, Loro, Evolu, and Triplit.
+Even where Jazz made different tradeoffs, it came out of that same ecosystem of ideas.
 
-But the better reason to also check them out is that we all have to prove together one main thing: that
-it's worth trying something new rather than glueing old tech together in the same ways. The database
-is the most tricky thing to replace in a stack, especially if the shape of what it does changes. But
-this also proves that it has immense value and that a new database can be the best possible investment
-in your stack. Invariably different technologies will turn out to be the best fit for each app, but we
-strive to learn from all the things that people are figuring out and will keep incorporating them into
-the opinionated new abstraction that is Jazz.
+Since Jazz v2 is also a fairly radical departure from some prior design choices of classical Jazz
+(more on that later), the clearest advantage many alternatives have over Jazz right now is maturity
+and proven-ness. That is a real advantage, and a good reason to evaluate them seriously.
+
+Different technologies will turn out to be the best fit for different apps. We want Jazz to stand in
+that field honestly, learn from what others are discovering, and keep refining its own opinionated
+take on this new category.
 
 # A new cloud for a new database
 
+A lot of the unique features of Jazz are manifested in its abstractions, API shape and runtime behavior, but
+they also imply a fundamentally different infrastructure architecture compared to traditional databases.
+With explicit regional caches, inherent distribution of data, variable consistency guarantees over many
+nodes and a future design for very fine-grained geo-aware auto-sharding.
+
+We're building that infrastructure in lockstep with the client libraries for Jazz, which will let us optimize
+developer experience of the whole as a product: Jazz plus Jazz Cloud. The most important goal is a seamless
+"doesn't feel like deploying anything" experience from the first time you scaffold a small Jazz app to when
+you experience rapid growth and need to serve entire new regions.
+
+But especially for a small app, you can also easily self-host a single instance of the Jazz server. It's very
+important to us that that part, too, is open-source. While it's single tenant and single-node by default,
+you can create more complicated distributed arrangements using just that, too. You'll just have to configure, orchestrate and scale it yourself. But you can realistically do that.
+
+In the meantime, we'll make sure that our zero-config auto-scaling Jazz Cloud and our experience running
+its low-latency, high-scale, globally distributed infrastructure reliably and securely is a no-brainer
+proposition. And if you want a custom version of that for yourself, including multitenancy and on-premises
+deployment, we can offer flexbile enterprise agreements and support contracts.
+
+But because we believe some of the best stuff happens when things are possible without permission, we aim
+to make the self-serve version of Jazz Cloud scale not just in technical terms, but also across the broadest
+diversity of companies and use cases.
+
 # Pricing that enables
+
+The natural question then is of course what Jazz Cloud should cost. Thanks to our experience hosting and
+deploying classic Jazz we're intimately familiar with the highly variable cost _and_ delivered value this new
+kind of infrastructure has.
+
+We've always been big fans of usage-based pricing that abstracts complex concerns behind simple commodity-like
+billable metrics. But the choice of metrics we bill can still make a huge difference in which apps are
+feasible, where we terribly overcharge and where we barely cover costs. Especially metrics like active users,
+concurrent connected clients etc. are terrible in terms of allowing diverse apps and accurately capturing value
+or costs.
+
+So we've decided to stick to fundamentals and reduce everything to three nerdy metrics that represent what's
+irreducably hard or downstream-costly: disk I/O operations, storage and egress. Different apps use wildly
+different distributions of these, but everything else that you would have to worry about if you self hosted
+(like CPU usage, RAM, number and geo-distribution of instances) has proven to either scale the same as the
+basic metrics or to be invisible in cost and value. So we can safely bundle those and help you save on the
+most important currencies: your time and the complexity of your stack costs.
+
+And your app gets to treat Jazz's complicated global infra as a simple socket in the wall that syncs your
+local data via a durable, reliable cloud.
 
 # Who Jazz is for right now
 
