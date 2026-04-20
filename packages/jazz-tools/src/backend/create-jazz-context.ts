@@ -44,7 +44,7 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /** Optional node durability tier identity. */
-  tier?: "worker" | "edge" | "global";
+  tier?: "local" | "edge" | "global";
   /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
   jwksUrl?: string;
   /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
@@ -172,6 +172,20 @@ export class JazzContext {
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
+
+    // Wire Rust-owned WebSocket transport when a server URL is configured.
+    if (this.config.serverUrl) {
+      this.clientInstance.connectTransport(
+        this.config.serverUrl,
+        {
+          backend_secret: this.config.backendSecret,
+          admin_secret: this.config.adminSecret,
+          jwt_token: this.config.jwtToken,
+        },
+        this.config.serverPathPrefix,
+      );
+    }
+
     return this.clientInstance;
   }
 

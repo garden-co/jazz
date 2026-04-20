@@ -10,9 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use rusqlite::OptionalExtension;
+
 use super::{
-    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, Storage,
-    StorageError, VisibleRowBytes, key_codec,
+    HistoryRowBytes, IndexMutation, OwnedHistoryRowBytes, OwnedVisibleRowBytes, RawTableMutation,
+    Storage, StorageError, VisibleRowBytes, key_codec,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -59,10 +61,52 @@ impl SqliteInner {
 }
 
 pub struct SqliteStorage {
+    cache_namespace: usize,
     inner: Mutex<Option<SqliteInner>>,
 }
 
 impl SqliteStorage {
+    fn store_has_any_rows(conn: &rusqlite::Connection) -> Result<bool, StorageError> {
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM kv LIMIT 1)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|exists| exists != 0)
+        .map_err(|e| StorageError::IoError(format!("sqlite inspect store contents: {e}")))
+    }
+
+    fn ensure_store_manifest(conn: &rusqlite::Connection) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::SQLITE_STORE_KIND);
+        let existing = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::IoError(format!("sqlite read store manifest: {e}")))?;
+
+        match existing {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                if Self::store_has_any_rows(conn)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty sqlite store".to_string(),
+                    ));
+                }
+                let bytes = super::encode_store_manifest(&expected)?;
+                conn.execute(
+                    "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+                    rusqlite::params![super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+                )
+                .map_err(|e| StorageError::IoError(format!("sqlite write store manifest: {e}")))?;
+                Ok(())
+            }
+        }
+    }
+
     /// Compute the lexicographic successor of `prefix` for use as an
     /// exclusive upper bound. Same logic as RocksDB's `prefix_upper_bound`.
     fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
@@ -94,8 +138,10 @@ impl SqliteStorage {
              ) WITHOUT ROWID;",
         )
         .map_err(|e| StorageError::IoError(format!("sqlite init: {e}")))?;
+        Self::ensure_store_manifest(&conn)?;
 
         Ok(Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             inner: Mutex::new(Some(SqliteInner {
                 conn,
                 path: path.to_path_buf(),
@@ -288,6 +334,10 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
@@ -306,6 +356,32 @@ impl Storage for SqliteStorage {
                 raw_table_delete_core(table, key, |storage_key| {
                     Self::delete(&inner.conn, storage_key)
                 })
+            })
+        })
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                for mutation in mutations {
+                    match mutation {
+                        RawTableMutation::Put { table, key, value } => {
+                            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                                Self::set(&inner.conn, storage_key, bytes)
+                            })?;
+                        }
+                        RawTableMutation::Delete { table, key } => {
+                            raw_table_delete_core(table, key, |storage_key| {
+                                Self::delete(&inner.conn, storage_key)
+                            })?;
+                        }
+                    }
+                }
+                Ok(())
             })
         })
     }
@@ -400,15 +476,18 @@ impl Storage for SqliteStorage {
 
     fn delete_visible_region_row(
         &mut self,
-        _table: &str,
+        table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        let cache_key = (branch.to_string(), row_id);
+        let locator = self
+            .with_inner_mut(|inner| Ok(inner.visible_row_table_locators.remove(&cache_key)))?
+            .or(super::exact_visible_row_table_locator_for_delete(
+                self, table, branch, row_id,
+            )?);
         self.with_inner_mut(|inner| {
             inner.ensure_write_tx()?;
-            let locator = inner
-                .visible_row_table_locators
-                .remove(&(branch.to_string(), row_id));
             Self::with_savepoint(&inner.conn, || {
                 let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
                 if let Some(locator) = locator.as_ref() {
@@ -813,6 +892,65 @@ mod tests {
     fn storage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<SqliteStorage>();
+    }
+
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let storage = SqliteStorage::open(&path).unwrap();
+        storage.close().unwrap();
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let bad_manifest = super::super::StoreManifest {
+            store_kind: super::super::SQLITE_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        let bytes = super::super::encode_store_manifest(&bad_manifest).unwrap();
+        conn.execute(
+            "UPDATE kv SET value = ?2 WHERE key = ?1",
+            rusqlite::params![super::super::STORE_MANIFEST_KEY.as_bytes(), bytes],
+        )
+        .unwrap();
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv (
+                 key   BLOB PRIMARY KEY,
+                 value BLOB NOT NULL
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv(key, value) VALUES (?1, ?2)",
+            rusqlite::params![b"raw:legacy:alice".as_slice(), b"hello".as_slice()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = match SqliteStorage::open(&path) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty sqlite store"),
+            "unexpected error: {err}"
+        );
     }
 
     mod sqlite_conformance {

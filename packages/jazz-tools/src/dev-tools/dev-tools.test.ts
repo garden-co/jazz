@@ -124,7 +124,7 @@ describe("attachDevTools active query subscription bridge", () => {
         query: '{"table":"todos"}',
         table: "todos",
         branches: ["main"],
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         createdAt: "2026-03-10T10:00:00.000Z",
         stack: "Error\n  at demo",
@@ -237,7 +237,7 @@ describe("attachDevTools mutation bridge", () => {
       payload: {
         table: "todos",
         values: { title: { type: "Text", value: "hello" } },
-        tier: "worker",
+        tier: "local",
       },
     });
 
@@ -247,7 +247,7 @@ describe("attachDevTools mutation bridge", () => {
     expect(createDurable).toHaveBeenCalledWith(
       "todos",
       { title: { type: "Text", value: "hello" } },
-      { tier: "worker" },
+      { tier: "local" },
     );
   });
 

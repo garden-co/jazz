@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type LocalBatchRecord, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
@@ -50,7 +50,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       ],
     },
   };
-
   const runtimeBase: Runtime = {
     insert: (table: string, values: Record<string, unknown>) => {
       insertCalls.push([table, values]);
@@ -72,10 +71,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
         batchId: "plain-insert-session-batch",
       };
     },
-    insertDurable: async () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-    }),
+    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     insertDurableWithSession: async (
       table: string,
       values: Record<string, unknown>,
@@ -216,7 +212,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
 
@@ -239,19 +235,15 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     deleteDurableWithSessionCalls,
     deletePersistedCalls,
     deletePersistedWithSessionCalls,
+    localBatchRecord,
     localBatchRecordCalls,
     localBatchRecordsCalls,
     acknowledgeRejectedBatchCalls,
     sealBatchCalls,
-    localBatchRecord,
   };
 }
 
 describe("JazzClient mutation durability split", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("keeps Bytea mutations as Uint8Array at the runtime boundary", () => {
     const { client, insertCalls, updateCalls } = makeClient();
     const payload = new Uint8Array([1, 2, 3]);
@@ -301,9 +293,7 @@ describe("JazzClient mutation durability split", () => {
 
     expect(() => client.create("todos", {})).toThrow(insertError);
     expect(() =>
-      client.update("row-1", {
-        done: { type: "Boolean" as const, value: true },
-      }),
+      client.update("row-1", { done: { type: "Boolean" as const, value: true } }),
     ).toThrow(updateError);
   });
 
@@ -376,9 +366,7 @@ describe("JazzClient mutation durability split", () => {
     client.updateInternal("row-1", updates, undefined, "alice");
     await client.updateDurableInternal("row-1", updates, undefined, "alice");
     client.deleteInternal("row-1", undefined, "alice");
-    await client.deleteDurableInternal("row-1", undefined, "alice", {
-      tier: "global",
-    });
+    await client.deleteDurableInternal("row-1", undefined, "alice", { tier: "global" });
 
     expect(insertWithSessionCalls).toEqual([["todos", insertValues, attributedContext]]);
     expect(insertDurableWithSessionCalls).toEqual([
@@ -390,15 +378,67 @@ describe("JazzClient mutation durability split", () => {
     expect(deleteDurableWithSessionCalls).toEqual([["row-1", attributedContext, "global"]]);
   });
 
+  it("forwards caller-supplied create ids to runtime insert methods", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insert = vi.fn(
+      (table: string, values: Record<string, unknown>, objectId?: string | null) => {
+        return { id: objectId ?? "generated-id", values: [], batchId: "batch-1" };
+      },
+    );
+    const insertDurable = vi.fn(
+      async (
+        table: string,
+        values: Record<string, unknown>,
+        tier: string,
+        objectId?: string | null,
+      ) => {
+        return { id: objectId ?? "generated-id", values: [] };
+      },
+    );
+    const { client } = makeClient({ insert, insertDurable });
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+
+    const created = client.create("todos", insertValues, { id: externalId });
+    const createdDurable = await client.createDurable("todos", insertValues, { id: externalId });
+
+    expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", insertValues, "edge", externalId);
+    expect(created.id).toBe(externalId);
+    expect(createdDurable.id).toBe(externalId);
+  });
+
+  it("falls back to update when upsert sees an existing object id", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insert = vi.fn(() => {
+      throw insertError;
+    });
+    const insertDurable = vi.fn(async () => {
+      throw insertError;
+    });
+    const update = vi.fn();
+    const updateDurable = vi.fn(async () => {});
+    const { client } = makeClient({ insert, insertDurable, update, updateDurable });
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+
+    expect(client.upsert("todos", values, { id: externalId })).toBeUndefined();
+    await expect(
+      client.upsertDurable("todos", values, { id: externalId }),
+    ).resolves.toBeUndefined();
+
+    expect(insert).toHaveBeenCalledWith("todos", values, externalId);
+    expect(insertDurable).toHaveBeenCalledWith("todos", values, "edge", externalId);
+    expect(update).toHaveBeenCalledWith(externalId, values);
+    expect(updateDurable).toHaveBeenCalledWith(externalId, values, "edge");
+  });
+
   it("encodes session and attribution together when both are provided", () => {
     const { client, insertWithSessionCalls } = makeClient();
     const session: Session = {
       user_id: "backend-user",
       claims: { role: "admin" },
     };
-    const insertValues = {
-      title: { type: "Text" as const, value: "Attributed" },
-    };
+    const insertValues = { title: { type: "Text" as const, value: "Attributed" } };
 
     client.createInternal("todos", insertValues, session, "alice");
 
@@ -641,6 +681,113 @@ describe("JazzClient mutation durability split", () => {
     expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
 
+  it("encodes custom updated_at overrides for create and update mutation options", async () => {
+    const insertWithSession = vi.fn(
+      (
+        table: string,
+        values: Record<string, unknown>,
+        _writeContextJson?: string | null,
+        objectId?: string | null,
+      ) => ({
+        id: objectId ?? "generated-id",
+        values: [],
+        batchId: "generated-batch-id",
+      }),
+    );
+    const insertDurableWithSession = vi.fn(
+      async (
+        table: string,
+        values: Record<string, unknown>,
+        _writeContextJson?: string | null,
+        _tier = "edge",
+        objectId?: string | null,
+      ) => ({
+        id: objectId ?? "generated-id",
+        values: [],
+      }),
+    );
+    const updateWithSession = vi.fn();
+    const updateDurableWithSession = vi.fn(async () => {});
+    const { client } = makeClient({
+      insertWithSession,
+      insertDurableWithSession,
+      updateWithSession,
+      updateDurableWithSession,
+    });
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+    const updatedAt = 1_764_000_000_000_000;
+    const updatedAtContext = JSON.stringify({ updated_at: updatedAt });
+
+    client.create("todos", insertValues, { updatedAt });
+    await client.createDurable("todos", insertValues, {
+      id: "todo-1",
+      tier: "global",
+      updatedAt,
+    });
+    client.update("row-1", updates, { updatedAt });
+    await client.updateDurable("row-1", updates, { tier: "global", updatedAt });
+
+    expect(insertWithSession).toHaveBeenCalledWith("todos", insertValues, updatedAtContext);
+    expect(insertDurableWithSession).toHaveBeenCalledWith(
+      "todos",
+      insertValues,
+      updatedAtContext,
+      "global",
+      "todo-1",
+    );
+    expect(updateWithSession).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
+    expect(updateDurableWithSession).toHaveBeenCalledWith(
+      "row-1",
+      updates,
+      updatedAtContext,
+      "global",
+    );
+  });
+
+  it("preserves custom updated_at overrides when upsert falls back to update", async () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insertWithSession = vi.fn(() => {
+      throw insertError;
+    });
+    const insertDurableWithSession = vi.fn(async () => {
+      throw insertError;
+    });
+    const updateWithSession = vi.fn();
+    const updateDurableWithSession = vi.fn(async () => {});
+    const { client } = makeClient({
+      insertWithSession,
+      insertDurableWithSession,
+      updateWithSession,
+      updateDurableWithSession,
+    });
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+    const updatedAt = 1_764_000_000_000_000;
+    const updatedAtContext = JSON.stringify({ updated_at: updatedAt });
+
+    expect(client.upsert("todos", values, { id: externalId, updatedAt })).toBeUndefined();
+    await expect(
+      client.upsertDurable("todos", values, { id: externalId, updatedAt }),
+    ).resolves.toBeUndefined();
+
+    expect(insertWithSession).toHaveBeenCalledWith("todos", values, updatedAtContext, externalId);
+    expect(insertDurableWithSession).toHaveBeenCalledWith(
+      "todos",
+      values,
+      updatedAtContext,
+      "edge",
+      externalId,
+    );
+    expect(updateWithSession).toHaveBeenCalledWith(externalId, values, updatedAtContext);
+    expect(updateDurableWithSession).toHaveBeenCalledWith(
+      externalId,
+      values,
+      updatedAtContext,
+      "edge",
+    );
+  });
+
   it("resolves lower-tier waits without resolving stricter waits for the same batch", async () => {
     let syncMessageCount = 0;
     let currentLocalBatchRecord: LocalBatchRecord | null = {
@@ -650,7 +797,7 @@ describe("JazzClient mutation durability split", () => {
       latestSettlement: {
         kind: "durable_direct",
         batchId: "00000000-0000-0000-0000-000000000041",
-        confirmedTier: "worker",
+        confirmedTier: "local",
         visibleMembers: [
           {
             objectId: "00000000-0000-0000-0000-000000000001",

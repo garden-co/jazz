@@ -58,6 +58,7 @@ export type RelOrderByExpr = {
 export type RelExpr =
   | { TableScan: { table: string } }
   | { Filter: { input: RelExpr; predicate: RelPredicateExpr } }
+  | { Union: { inputs: RelExpr[] } }
   | { Join: { left: RelExpr; right: RelExpr; on: RelJoinCondition[]; join_kind: RelJoinKind } }
   | { Project: { input: RelExpr; columns: RelProjectColumn[] } }
   | {

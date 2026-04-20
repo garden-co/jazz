@@ -14,7 +14,8 @@ use rocksdb::{
 };
 
 use super::{
-    HistoryRowBytes, IndexMutation, Storage, StorageError, VisibleRowBytes, key_codec,
+    HistoryRowBytes, IndexMutation, RawTableMutation, Storage, StorageError, VisibleRowBytes,
+    key_codec,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
@@ -33,10 +34,47 @@ struct RocksDBInner {
 }
 
 pub struct RocksDBStorage {
+    cache_namespace: usize,
     inner: RefCell<Option<RocksDBInner>>,
 }
 
 impl RocksDBStorage {
+    fn store_has_any_rows(db: &TransactionDB) -> Result<bool, StorageError> {
+        let mut iter = db.iterator(IteratorMode::Start);
+        match iter.next() {
+            Some(Ok(_)) => Ok(true),
+            Some(Err(e)) => Err(StorageError::IoError(format!(
+                "rocksdb inspect store contents: {e}"
+            ))),
+            None => Ok(false),
+        }
+    }
+
+    fn ensure_store_manifest(db: &TransactionDB) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::ROCKSDB_STORE_KIND);
+        match db
+            .get(super::STORE_MANIFEST_KEY.as_bytes())
+            .map_err(|e| StorageError::IoError(format!("rocksdb read store manifest: {e}")))?
+        {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                if Self::store_has_any_rows(db)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty rocksdb store".to_string(),
+                    ));
+                }
+                let bytes = super::encode_store_manifest(&expected)?;
+                db.put(super::STORE_MANIFEST_KEY.as_bytes(), bytes)
+                    .map_err(|e| {
+                        StorageError::IoError(format!("rocksdb write store manifest: {e}"))
+                    })
+            }
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
@@ -53,8 +91,10 @@ impl RocksDBStorage {
         let txdb_opts = TransactionDBOptions::default();
         let db = TransactionDB::open(&opts, &txdb_opts, path.as_ref())
             .map_err(|e| StorageError::IoError(format!("rocksdb open: {e}")))?;
+        Self::ensure_store_manifest(&db)?;
 
         Ok(Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             inner: RefCell::new(Some(RocksDBInner {
                 db,
                 ensured_raw_table_headers: HashSet::new(),
@@ -282,6 +322,10 @@ impl RocksDBStorage {
 }
 
 impl Storage for RocksDBStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
@@ -298,6 +342,30 @@ impl Storage for RocksDBStorage {
             raw_table_delete_core(table, key, |storage_key| {
                 Self::delete_on_txn_cell(&txn, storage_key)
             })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            for mutation in mutations {
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_table_put_core(table, key, value, |storage_key, bytes| {
+                            Self::put_on_txn_cell(&txn, storage_key, bytes)
+                        })?;
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        raw_table_delete_core(table, key, |storage_key| {
+                            Self::delete_on_txn_cell(&txn, storage_key)
+                        })?;
+                    }
+                }
+            }
             Self::commit_txn(txn.into_inner())
         })
     }
@@ -405,15 +473,18 @@ impl Storage for RocksDBStorage {
 
     fn delete_visible_region_row(
         &mut self,
-        _table: &str,
+        table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        let cache_key = (branch.to_string(), row_id);
+        let locator = self
+            .with_inner_mut(|inner| Ok(inner.visible_row_table_locators.remove(&cache_key)))?
+            .or(super::exact_visible_row_table_locator_for_delete(
+                self, table, branch, row_id,
+            )?);
         self.with_inner_mut(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            let locator = inner
-                .visible_row_table_locators
-                .remove(&(branch.to_string(), row_id));
             let key = super::key_codec::visible_row_raw_table_key(branch, row_id);
             if let Some(locator) = locator.as_ref() {
                 raw_table_delete_core(locator.row_raw_table.as_str(), &key, |storage_key| {
@@ -707,6 +778,64 @@ mod tests {
         storage.close().unwrap();
         let reopened = RocksDBStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         reopened.close().unwrap();
+    }
+
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.rocksdb");
+        let storage = RocksDBStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        storage.close().unwrap();
+
+        let db = TransactionDB::<rocksdb::SingleThreaded>::open(
+            &Options::default(),
+            &TransactionDBOptions::default(),
+            &db_path,
+        )
+        .unwrap();
+        let bad_manifest = super::super::StoreManifest {
+            store_kind: super::super::ROCKSDB_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        let bytes = super::super::encode_store_manifest(&bad_manifest).unwrap();
+        db.put(super::super::STORE_MANIFEST_KEY.as_bytes(), bytes)
+            .unwrap();
+        drop(db);
+
+        let err = match RocksDBStorage::open(&db_path, 8 * 1024 * 1024) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("legacy.rocksdb");
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        let db = TransactionDB::<rocksdb::SingleThreaded>::open(
+            &opts,
+            &TransactionDBOptions::default(),
+            &db_path,
+        )
+        .unwrap();
+        db.put(b"raw:legacy:alice", b"hello").unwrap();
+        drop(db);
+
+        let err = match RocksDBStorage::open(&db_path, 8 * 1024 * 1024) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty rocksdb store"),
+            "unexpected error: {err}"
+        );
     }
 
     mod rocksdb_conformance {

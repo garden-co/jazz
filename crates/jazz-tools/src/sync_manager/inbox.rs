@@ -95,28 +95,34 @@ impl SyncManager {
         &self,
         storage: &mut H,
         settlement: &BatchSettlement,
-    ) {
-        if let Err(error) = storage.upsert_authoritative_batch_settlement(settlement) {
-            tracing::warn!(
-                batch_id = ?settlement.batch_id(),
-                %error,
-                "failed to persist authoritative batch settlement"
-            );
-        }
+    ) -> Result<(), crate::storage::StorageError> {
+        storage
+            .upsert_authoritative_batch_settlement(settlement)
+            .map_err(|error| {
+                tracing::warn!(
+                    batch_id = ?settlement.batch_id(),
+                    %error,
+                    "failed to persist authoritative batch settlement"
+                );
+                error
+            })
     }
 
     fn persist_sealed_batch_submission<H: Storage>(
         &self,
         storage: &mut H,
         submission: &SealedBatchSubmission,
-    ) {
-        if let Err(error) = storage.upsert_sealed_batch_submission(submission) {
-            tracing::warn!(
-                batch_id = ?submission.batch_id,
-                %error,
-                "failed to persist sealed batch submission"
-            );
-        }
+    ) -> Result<(), crate::storage::StorageError> {
+        storage
+            .upsert_sealed_batch_submission(submission)
+            .map_err(|error| {
+                tracing::warn!(
+                    batch_id = ?submission.batch_id,
+                    %error,
+                    "failed to persist sealed batch submission"
+                );
+                error
+            })
     }
 
     fn ensure_object_metadata<H: Storage>(
@@ -167,9 +173,18 @@ impl SyncManager {
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
         let visibility_change =
-            apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[])
-                .ok()
-                .and_then(|applied| applied.visibility_change);
+            match apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[]) {
+                Ok(applied) => applied.visibility_change,
+                Err(err) => {
+                    tracing::warn!(
+                        row_id = %row.row_id,
+                        %branch_name,
+                        ?err,
+                        "failed to apply synced row batch"
+                    );
+                    return None;
+                }
+            };
 
         Some(AppliedRowBatch {
             metadata,
@@ -273,6 +288,13 @@ impl SyncManager {
             .or_else(|| {
                 let confirmed_tier = confirmed_tier?;
                 let record = storage.load_local_batch_record(batch_id).ok().flatten()?;
+                if !record
+                    .members
+                    .iter()
+                    .any(|member| member.object_id == row_id && member.branch_name == branch_name)
+                {
+                    return None;
+                }
                 let visible_members = record
                     .members
                     .iter()
@@ -504,7 +526,12 @@ impl SyncManager {
         settlement: BatchSettlement,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
-        self.persist_authoritative_batch_settlement(storage, &settlement);
+        if self
+            .persist_authoritative_batch_settlement(storage, &settlement)
+            .is_err()
+        {
+            return;
+        }
         self.pending_batch_settlements.push(settlement.clone());
         if let Err(error) = storage.delete_sealed_batch_submission(settlement.batch_id()) {
             tracing::warn!(
@@ -566,7 +593,12 @@ impl SyncManager {
                         confirmed_tier,
                         visible_members,
                     };
-                    self.persist_authoritative_batch_settlement(storage, &settlement);
+                    if self
+                        .persist_authoritative_batch_settlement(storage, &settlement)
+                        .is_err()
+                    {
+                        return;
+                    }
                     settlement
                 }
             }
@@ -823,8 +855,11 @@ impl SyncManager {
                     batch_id,
                     confirmed_tier,
                 );
-                if let Some(settlement) = settlement.clone() {
-                    self.persist_authoritative_batch_settlement(storage, &settlement);
+                let persisted_settlement = settlement.clone().filter(|settlement| {
+                    self.persist_authoritative_batch_settlement(storage, settlement)
+                        .is_ok()
+                });
+                if let Some(settlement) = persisted_settlement.clone() {
                     self.pending_batch_settlements.push(settlement);
                 }
                 for cid in interested {
@@ -838,7 +873,7 @@ impl SyncManager {
                             confirmed_tier,
                         },
                     });
-                    if let Some(settlement) = settlement.clone() {
+                    if let Some(settlement) = persisted_settlement.clone() {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(cid),
                             payload: SyncPayload::BatchSettlement { settlement },
@@ -847,7 +882,12 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchSettlement { settlement } => {
-                self.persist_authoritative_batch_settlement(storage, &settlement);
+                if self
+                    .persist_authoritative_batch_settlement(storage, &settlement)
+                    .is_err()
+                {
+                    return;
+                }
                 self.pending_batch_settlements.push(settlement.clone());
                 let interested: HashSet<ClientId> = match &settlement {
                     BatchSettlement::DurableDirect {
@@ -1125,6 +1165,7 @@ impl SyncManager {
                 query,
                 session,
                 propagation,
+                policy_context_tables,
             } => {
                 // Build effective session: identity (user_id) comes from the
                 // server-established session (set during the SSE auth handshake) and
@@ -1177,6 +1218,7 @@ impl SyncManager {
                         query: query.as_ref().clone(),
                         session: effective_session,
                         propagation: *propagation,
+                        policy_context_tables: policy_context_tables.clone(),
                     });
             }
             // Handle query unsubscription
@@ -1223,8 +1265,11 @@ impl SyncManager {
                     *batch_id,
                     *confirmed_tier,
                 );
-                if let Some(settlement) = settlement.clone() {
-                    self.persist_authoritative_batch_settlement(storage, &settlement);
+                let persisted_settlement = settlement.clone().filter(|settlement| {
+                    self.persist_authoritative_batch_settlement(storage, settlement)
+                        .is_ok()
+                });
+                if let Some(settlement) = persisted_settlement.clone() {
                     self.pending_batch_settlements.push(settlement);
                 }
                 for cid in interested {
@@ -1238,7 +1283,7 @@ impl SyncManager {
                             confirmed_tier: *confirmed_tier,
                         },
                     });
-                    if let Some(settlement) = settlement.clone() {
+                    if let Some(settlement) = persisted_settlement.clone() {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(cid),
                             payload: SyncPayload::BatchSettlement { settlement },
@@ -1370,6 +1415,9 @@ impl SyncManager {
                             });
                         }
                         if let Some(settlement) = settlement {
+                            let _ =
+                                self.persist_authoritative_batch_settlement(storage, &settlement);
+                            self.pending_batch_settlements.push(settlement.clone());
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::BatchSettlement { settlement },
@@ -1417,7 +1465,12 @@ impl SyncManager {
                     );
                     return;
                 }
-                self.persist_sealed_batch_submission(storage, &submission);
+                if self
+                    .persist_sealed_batch_submission(storage, &submission)
+                    .is_err()
+                {
+                    return;
+                }
                 self.try_accept_completed_sealed_batch_from_client(
                     storage,
                     client_id,

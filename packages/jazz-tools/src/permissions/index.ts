@@ -66,6 +66,11 @@ interface SessionWhereCondition {
   readonly where: Record<string, unknown>;
 }
 
+interface WhereObjectCondition {
+  readonly __jazzPermissionKind: "where-object";
+  readonly where: Record<string, unknown>;
+}
+
 type SessionWhereBuilder = SessionRefValue &
   ((input: Record<string, unknown>) => SessionWhereCondition);
 
@@ -100,6 +105,7 @@ type Condition =
   | CompoundCondition
   | ExistsCondition
   | ExistsRelationCondition
+  | WhereObjectCondition
   | SessionWhereCondition;
 
 interface RelationJoinSpec {
@@ -116,13 +122,24 @@ interface RelationFilterEntry {
 }
 
 interface RelationExprState {
-  kind: "table" | "recursive";
+  kind: "table" | "recursive" | "union";
   outputTable: string;
   base: RelExpr;
   initialScope: string;
   filters: RelationFilterEntry[];
   joins: RelationJoinSpec[];
   selectMap?: Record<string, string>;
+}
+
+function relationJoinAlias(
+  kind: RelationExprState["kind"],
+  join: RelationJoinSpec,
+  index: number,
+): string {
+  if (kind === "recursive") {
+    return `__recursive_join_${index}`;
+  }
+  return join.viaHop ? `__hop_${index}` : `__join_${index}`;
 }
 
 interface TableJoinTarget {
@@ -138,7 +155,7 @@ export interface PermissionRelation {
   select(columns: Record<string, string>): PermissionRelation;
   hopTo(relation: string): PermissionRelation;
   gather(options: {
-    start: Record<string, unknown>;
+    start?: Record<string, unknown>;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation;
@@ -155,11 +172,11 @@ class PermissionRelationBuilder implements PermissionRelation {
   ) {}
 
   where(input: unknown): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("where(...) does not support union(...) relations in MVP.");
+    }
     const where = resolveRelationWhereInput(input);
-    const filters = [
-      ...this.state.filters,
-      ...extractRelationFilters(where, currentRelationScope(this.state)),
-    ];
+    const filters = [...this.state.filters, ...extractRelationFilters(where, this.state)];
     return new PermissionRelationBuilder(
       {
         ...this.state,
@@ -170,6 +187,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   join(target: RelationJoinTarget, on: { left: string; right: string }): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("join(...) does not support union(...) relations in MVP.");
+    }
     const table = relationJoinTargetToTable(target);
     const joins = [
       ...this.state.joins,
@@ -189,6 +209,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   select(columns: Record<string, string>): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("select(...) does not support union(...) relations in MVP.");
+    }
     return new PermissionRelationBuilder(
       {
         ...this.state,
@@ -199,6 +222,9 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   hopTo(relation: string): PermissionRelation {
+    if (this.state.kind === "union") {
+      throw new Error("hopTo(...) does not support union(...) relations in MVP.");
+    }
     const relationName = relation.trim();
     if (!relationName) {
       throw new Error("hopTo(...) requires a non-empty relation name.");
@@ -229,6 +255,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       return new PermissionRelationBuilder(
         {
           ...this.state,
+          outputTable: rel.toTable,
           joins: [...this.state.joins, join],
         },
         this.relations,
@@ -250,6 +277,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     return new PermissionRelationBuilder(
       {
         ...this.state,
+        outputTable: rel.toTable,
         joins: [
           ...this.state.joins,
           {
@@ -265,25 +293,21 @@ class PermissionRelationBuilder implements PermissionRelation {
   }
 
   gather(options: {
-    start: Record<string, unknown>;
+    start?: Record<string, unknown>;
     step: (ctx: { current: RecursiveCurrentValue }) => PermissionRelation;
     maxDepth?: number;
   }): PermissionRelation {
-    if (this.state.kind !== "table") {
-      throw new Error("gather(...) must start from policy.<table>.");
-    }
-    if (this.state.joins.length > 0) {
-      throw new Error("gather(...) does not support pre-joined start relations in MVP.");
-    }
     if (typeof options.step !== "function") {
       throw new Error("gather(...) requires a step callback.");
     }
+    if (this.state.selectMap && Object.keys(this.state.selectMap).length > 0) {
+      throw new Error("gather(...) does not support select(...) seeds in MVP.");
+    }
+    if (options.start && this.state.kind === "union") {
+      throw new Error("gather(...) start does not support union(...) seeds in MVP.");
+    }
 
-    const startWhere = resolveRelationWhereInput(options.start);
-    const startFilters = [
-      ...this.state.filters,
-      ...extractRelationFilters(startWhere, currentRelationScope(this.state)),
-    ];
+    const seedState = buildGatherSeedState(this.state, options.start, this.relations);
 
     const currentToken: RecursiveCurrentValue = {
       __jazzPermissionKind: "recursive-current",
@@ -322,8 +346,7 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
 
-    const seedPredicates = startFilters.flatMap((filter) => relationFilterToPredicates(filter));
-    const seed = applyRelFilter(this.state.base, seedPredicates);
+    const seed = relationStateToRelExpr(seedState);
 
     const stepPredicates = [
       ...stepFilters.flatMap((filter) => relationFilterToPredicates(filter)),
@@ -487,6 +510,7 @@ export type PolicyContext<TApp extends AppLike> = {
     >;
   } & {
     exists(relation: PermissionRelation): ExistsRelationCondition;
+    union(relations: readonly PermissionRelation[]): PermissionRelation;
   };
   anyOf: (conditions: readonly unknown[]) => Condition;
   allOf: (conditions: readonly unknown[]) => Condition;
@@ -497,18 +521,30 @@ export type PolicyContext<TApp extends AppLike> = {
 
 export type CompiledPermissions = Record<string, TablePolicies>;
 
+type PermissionWhereLeaf<T> = T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+
+type PermissionWhereObjectBase<T> = {
+  [K in keyof T]?:
+    | PermissionWhereInput<T[K]>
+    | SessionRefValue
+    | RowRefValue
+    | RecursiveCurrentValue;
+};
+
+type QualifiedPermissionWhereEntries = {
+  [K in `${string}.${string}`]?: unknown | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+};
+
+type PermissionWhereObject<T> =
+  | PermissionWhereObjectBase<T>
+  | (PermissionWhereObjectBase<T> & QualifiedPermissionWhereEntries);
+
 type PermissionWhereInput<T> =
   T extends Array<infer U>
     ? Array<PermissionWhereInput<U>>
     : T extends object
-      ? {
-          [K in keyof T]?:
-            | PermissionWhereInput<T[K]>
-            | SessionRefValue
-            | RowRefValue
-            | RecursiveCurrentValue;
-        }
-      : T | SessionRefValue | RowRefValue | RecursiveCurrentValue;
+      ? PermissionWhereObject<T>
+      : PermissionWhereLeaf<T>;
 
 class UpdateRuleBuilder<WhereInput, Row> {
   private oldCondition?: Condition;
@@ -604,7 +640,7 @@ export function definePermissions<TApp extends AppLike>(
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
   factory(ctx);
-  return compileRules(rules, fkReferencesByTable);
+  return compileRules(rules, fkReferencesByTable, relationsByTable);
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
@@ -660,6 +696,8 @@ function buildPolicyContext(
     __jazzPermissionKind: "exists-relation",
     relation,
   });
+  context.union = (relations: readonly PermissionRelation[]): PermissionRelation =>
+    createUnionRelation(relations, relationsByTable);
   return context;
 }
 
@@ -731,7 +769,7 @@ function buildTablePolicyBuilder(
       return createTableRelation(table, relationsByTable).hopTo(relation);
     },
     gather(options: {
-      start: Record<string, unknown>;
+      start?: Record<string, unknown>;
       step: (ctx: { current: unknown }) => PermissionRelation;
       maxDepth?: number;
     }): PermissionRelation {
@@ -760,6 +798,178 @@ function createTableRelation(
     },
     relationsByTable,
   );
+}
+
+function createUnionRelation(
+  relations: readonly PermissionRelation[],
+  relationsByTable: Map<string, Relation[]>,
+): PermissionRelation {
+  if (relations.length === 0) {
+    throw new Error("union(...) requires at least one relation.");
+  }
+
+  const states = relations.map((relation) => getRelationState(relation));
+  const firstState = states[0];
+  if (!firstState) {
+    throw new Error("union(...) requires at least one relation.");
+  }
+  if (states.some((state) => state.outputTable !== firstState.outputTable)) {
+    throw new Error("union(...) requires all relations to output the same table.");
+  }
+  if (states.some((state) => state.selectMap && Object.keys(state.selectMap).length > 0)) {
+    throw new Error("union(...) does not support select(...) relations in MVP.");
+  }
+
+  return new PermissionRelationBuilder(
+    {
+      kind: "union",
+      outputTable: firstState.outputTable,
+      base: {
+        Union: {
+          inputs: states.map((state) => relationStateToRelExpr(state)),
+        },
+      },
+      initialScope: "",
+      filters: [],
+      joins: [],
+      selectMap: undefined,
+    },
+    relationsByTable,
+  );
+}
+
+function buildGatherSeedState(
+  state: RelationExprState,
+  start: Record<string, unknown> | undefined,
+  relationsByTable: Map<string, Relation[]>,
+): RelationExprState {
+  if (start === undefined) {
+    return state;
+  }
+
+  const startWhere = resolveRelationWhereInput(start);
+  const baseScope = currentRelationScope(state);
+  const joins = [...state.joins];
+  const filters = [...state.filters];
+  const qualifiedRelationByPrefix = new Map<string, Relation>();
+  const qualifiedScopeByPrefix = new Map<string, string>();
+
+  for (const [column, raw] of Object.entries(startWhere)) {
+    if (raw === undefined) {
+      continue;
+    }
+
+    const [prefix, bare] = splitQualifiedColumn(column);
+    if (!prefix || prefix === state.outputTable) {
+      filters.push({ column: bare, raw, scope: baseScope });
+      continue;
+    }
+
+    const relation = resolveQualifiedGatherStartRelation(
+      relationsByTable,
+      state.outputTable,
+      prefix,
+      bare,
+    );
+    const existingRelation = qualifiedRelationByPrefix.get(prefix);
+    if (existingRelation && existingRelation.name !== relation.name) {
+      throw new Error(
+        `gather(...) qualified start table "${prefix}" is ambiguous from "${state.outputTable}"; use an explicit relation seed instead.`,
+      );
+    }
+    qualifiedRelationByPrefix.set(prefix, relation);
+
+    let scope = qualifiedScopeByPrefix.get(prefix);
+    if (!scope) {
+      const join = relationToJoinSpec(relation);
+      joins.push(join);
+      scope = relationJoinAlias(state.kind, join, joins.length - 1);
+      qualifiedScopeByPrefix.set(prefix, scope);
+    }
+
+    filters.push({ column: bare, raw, scope });
+  }
+
+  return {
+    ...state,
+    joins,
+    filters,
+  };
+}
+
+function resolveQualifiedGatherStartRelation(
+  relationsByTable: Map<string, Relation[]>,
+  outputTable: string,
+  qualifiedTable: string,
+  column: string,
+): Relation {
+  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
+    (relation) => relation.toTable === qualifiedTable,
+  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `gather(...) qualified start column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
+    );
+  }
+  if (candidates.length === 1) {
+    return candidates[0]!;
+  }
+
+  const disambiguated = candidates.filter((relation) =>
+    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
+  );
+  if (disambiguated.length === 1) {
+    return disambiguated[0]!;
+  }
+
+  throw new Error(
+    `gather(...) qualified start table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation seed instead.`,
+  );
+}
+
+function resolveQualifiedRuleRelation(
+  relationsByTable: Map<string, Relation[]>,
+  outputTable: string,
+  qualifiedTable: string,
+  column: string,
+): Relation {
+  const candidates = (relationsByTable.get(outputTable) ?? []).filter(
+    (relation) => relation.toTable === qualifiedTable,
+  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `Qualified where(...) column "${qualifiedTable}.${column}" does not match a direct relation from "${outputTable}".`,
+    );
+  }
+  if (candidates.length === 1) {
+    return candidates[0]!;
+  }
+
+  const disambiguated = candidates.filter((relation) =>
+    relation.type === "forward" ? relation.fromColumn === column : relation.toColumn === column,
+  );
+  if (disambiguated.length === 1) {
+    return disambiguated[0]!;
+  }
+
+  throw new Error(
+    `Qualified where(...) table "${qualifiedTable}" is ambiguous from "${outputTable}"; use an explicit relation instead.`,
+  );
+}
+
+function relationToJoinSpec(relation: Relation): RelationJoinSpec {
+  if (relation.type === "forward") {
+    return {
+      table: relation.toTable,
+      left: relation.fromColumn,
+      right: "id",
+    };
+  }
+  return {
+    table: relation.toTable,
+    left: "id",
+    right: relation.toColumn,
+  };
 }
 
 function relationJoinTargetToTable(target: RelationJoinTarget): string {
@@ -814,24 +1024,72 @@ function currentRelationScope(state: RelationExprState): string {
 
   const joinIndex = state.joins.length - 1;
   const join = state.joins[joinIndex]!;
-  if (state.kind === "recursive") {
-    return `__recursive_join_${joinIndex}`;
-  }
-  return join.viaHop ? `__hop_${joinIndex}` : `__join_${joinIndex}`;
+  return relationJoinAlias(state.kind, join, joinIndex);
 }
 
 function extractRelationFilters(
   where: Record<string, unknown>,
-  scope: string,
+  state: RelationExprState,
 ): RelationFilterEntry[] {
   const filters: RelationFilterEntry[] = [];
+  const defaultScope = currentRelationScope(state);
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    filters.push({ column, raw, scope });
+    const [prefix, bare] = splitQualifiedColumn(column);
+    filters.push({
+      column: bare,
+      raw,
+      scope: prefix ? resolveQualifiedRelationFilterScope(state, prefix, bare) : defaultScope,
+    });
   }
   return filters;
+}
+
+function relationBaseScopeBinding(
+  state: RelationExprState,
+): { table: string; scope: string } | null {
+  if (!state.initialScope) {
+    return null;
+  }
+
+  return {
+    table: state.initialScope,
+    scope: state.initialScope,
+  };
+}
+
+function resolveQualifiedRelationFilterScope(
+  state: RelationExprState,
+  qualifiedTable: string,
+  column: string,
+): string {
+  const scopes = new Set<string>();
+  const baseBinding = relationBaseScopeBinding(state);
+  if (baseBinding && baseBinding.table === qualifiedTable) {
+    scopes.add(baseBinding.scope);
+  }
+
+  state.joins.forEach((join, index) => {
+    if (join.table === qualifiedTable) {
+      scopes.add(relationJoinAlias(state.kind, join, index));
+    }
+  });
+
+  if (scopes.size === 0) {
+    throw new Error(
+      `Qualified relation where(...) column "${qualifiedTable}.${column}" does not match the current relation scopes.`,
+    );
+  }
+
+  if (scopes.size > 1) {
+    throw new Error(
+      `Qualified relation where(...) table "${qualifiedTable}" is ambiguous in the current relation; use an unambiguous relation shape instead.`,
+    );
+  }
+
+  return scopes.values().next().value as string;
 }
 
 function normalizeRelationSelectMap(columns: Record<string, string>): Record<string, string> {
@@ -885,7 +1143,7 @@ function relationColumnRef(column: string, defaultScope: string): RelColumnRef {
   if (prefix) {
     return { scope: prefix, column: bare };
   }
-  return { scope: defaultScope, column: bare };
+  return defaultScope ? { scope: defaultScope, column: bare } : { column: bare };
 }
 
 function toRelValueRef(value: unknown, options: { allowRowRefs: boolean }): RelValueRef {
@@ -1147,12 +1405,7 @@ function relationStateToRelExpr(state: RelationExprState): RelExpr {
     joins: state.joins,
     filters: state.filters,
     selectMap: state.selectMap,
-    joinAlias: (join, index) =>
-      state.kind === "recursive"
-        ? `__recursive_join_${index}`
-        : join.viaHop
-          ? `__hop_${index}`
-          : `__join_${index}`,
+    joinAlias: (join, index) => relationJoinAlias(state.kind, join, index),
   });
 }
 
@@ -1342,23 +1595,120 @@ function resolveWhereInput(input: unknown): Condition {
     return input;
   }
   if (isPlainObject(input)) {
-    return whereObjectToCondition(input, { allowRowRefs: false });
+    return {
+      __jazzPermissionKind: "where-object",
+      where: normalizeWhereObject(input),
+    };
   }
   throw new Error("Unsupported permission condition input.");
 }
 
-function whereObjectToCondition(
-  where: Record<string, unknown>,
+function filtersToCondition(
+  filters: readonly RelationFilterEntry[],
   options: { allowRowRefs: boolean },
 ): PolicyExpr {
   const exprs: PolicyExpr[] = [];
+  for (const filter of filters) {
+    exprs.push(...columnFilterToExprs(filter.column, filter.raw, options));
+  }
+  return andExpr(exprs);
+}
+
+type QualifiedWhereAnalysis = {
+  hasQualifiedFilters: boolean;
+  joins: RelationJoinSpec[];
+  filters: RelationFilterEntry[];
+};
+
+function analyzeQualifiedWhereObject(
+  table: string,
+  where: Record<string, unknown>,
+  relationsByTable: Map<string, Relation[]>,
+): QualifiedWhereAnalysis {
+  const joins: RelationJoinSpec[] = [];
+  const filters: RelationFilterEntry[] = [];
+  const qualifiedRelationByPrefix = new Map<string, Relation>();
+  const qualifiedScopeByPrefix = new Map<string, string>();
+  let hasQualifiedFilters = false;
+
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    exprs.push(...columnFilterToExprs(column, raw, options));
+
+    const [prefix, bare] = splitQualifiedColumn(column);
+    if (!prefix || prefix === table) {
+      filters.push({ column: bare, raw, scope: table });
+      continue;
+    }
+
+    hasQualifiedFilters = true;
+    const relation = resolveQualifiedRuleRelation(relationsByTable, table, prefix, bare);
+    const existingRelation = qualifiedRelationByPrefix.get(prefix);
+    if (existingRelation && existingRelation.name !== relation.name) {
+      throw new Error(
+        `Qualified where(...) table "${prefix}" is ambiguous from "${table}"; use an explicit relation instead.`,
+      );
+    }
+    qualifiedRelationByPrefix.set(prefix, relation);
+
+    let scope = qualifiedScopeByPrefix.get(prefix);
+    if (!scope) {
+      const join = relationToJoinSpec(relation);
+      joins.push(join);
+      scope = relationJoinAlias("table", join, joins.length - 1);
+      qualifiedScopeByPrefix.set(prefix, scope);
+    }
+
+    filters.push({ column: bare, raw, scope });
   }
-  return andExpr(exprs);
+
+  return {
+    hasQualifiedFilters,
+    joins,
+    filters,
+  };
+}
+
+function compileQualifiedWhereRelation(
+  table: string,
+  where: Record<string, unknown>,
+  relationsByTable: Map<string, Relation[]>,
+  options: { anchorOuterRow: boolean },
+): RelExpr {
+  const analysis = analyzeQualifiedWhereObject(table, where, relationsByTable);
+  let relation = applyRelationTail({
+    base: {
+      TableScan: {
+        table,
+      },
+    },
+    initialScope: table,
+    joins: analysis.joins,
+    filters: analysis.filters,
+    selectMap: undefined,
+    joinAlias: (join, index) => relationJoinAlias("table", join, index),
+  });
+
+  if (!options.anchorOuterRow) {
+    return relation;
+  }
+
+  relation = applyRelFilter(relation, [
+    {
+      Cmp: {
+        left: {
+          scope: table,
+          column: "id",
+        },
+        op: "Eq",
+        right: {
+          RowId: "Outer",
+        },
+      },
+    } satisfies RelPredicateExpr,
+  ]);
+  return relation;
 }
 
 function sessionWhereObjectToCondition(where: Record<string, unknown>): PolicyExpr {
@@ -1690,6 +2040,7 @@ function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): Compou
 function compileRules(
   rules: RuleLike[],
   fkReferencesByTable: Map<string, Map<string, string>>,
+  relationsByTable: Map<string, Relation[]>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
   for (const ruleLike of rules) {
@@ -1701,23 +2052,33 @@ function compileRules(
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
       case "insert":
         tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
+          with_check: compileCondition(
+            rule.withCheck,
+            rule.table,
+            fkReferencesByTable,
+            relationsByTable,
+          ),
         });
         break;
       case "update":
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
-          with_check: compileCondition(rule.withCheck, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
+          with_check: compileCondition(
+            rule.withCheck,
+            rule.table,
+            fkReferencesByTable,
+            relationsByTable,
+          ),
         });
         break;
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using, rule.table, fkReferencesByTable),
+          using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
         });
         break;
       default:
@@ -1775,9 +2136,26 @@ function compileCondition(
   condition: Condition | undefined,
   table: string,
   fkReferencesByTable: Map<string, Map<string, string>>,
+  relationsByTable: Map<string, Relation[]>,
 ): PolicyExpr | undefined {
   if (!condition) {
     return undefined;
+  }
+  if (isWhereObjectCondition(condition)) {
+    const analysis = analyzeQualifiedWhereObject(table, condition.where, relationsByTable);
+    if (analysis.hasQualifiedFilters) {
+      return {
+        type: "ExistsRel",
+        rel: compileQualifiedWhereRelation(table, condition.where, relationsByTable, {
+          anchorOuterRow: true,
+        }),
+      };
+    }
+    const compiledCondition = filtersToCondition(analysis.filters, {
+      allowRowRefs: false,
+    });
+    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
+    return compiledCondition;
   }
   if (isPolicyExpr(condition)) {
     resolveAndAssertInheritsColumns(condition, table, fkReferencesByTable);
@@ -1793,13 +2171,23 @@ function compileCondition(
     };
   }
   if (isExistsCondition(condition)) {
-    const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
-    resolveAndAssertInheritsColumns(compiledCondition, table, fkReferencesByTable);
-    if (!compiledCondition) {
-      throw new Error(
-        `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
-      );
+    const analysis = analyzeQualifiedWhereObject(
+      condition.table,
+      condition.where,
+      relationsByTable,
+    );
+    if (analysis.hasQualifiedFilters) {
+      return {
+        type: "ExistsRel",
+        rel: compileQualifiedWhereRelation(condition.table, condition.where, relationsByTable, {
+          anchorOuterRow: false,
+        }),
+      };
     }
+    const compiledCondition = filtersToCondition(analysis.filters, {
+      allowRowRefs: true,
+    });
+    resolveAndAssertInheritsColumns(compiledCondition, condition.table, fkReferencesByTable);
     return {
       type: "Exists",
       table: condition.table,
@@ -1808,7 +2196,7 @@ function compileCondition(
   }
   if (isCompoundCondition(condition)) {
     const compiledChildren = condition.conditions.map((child) =>
-      compileCondition(child, table, fkReferencesByTable),
+      compileCondition(child, table, fkReferencesByTable, relationsByTable),
     );
     const exprs = compiledChildren.filter((expr): expr is PolicyExpr => Boolean(expr));
     if (exprs.length === 0) {
@@ -1952,6 +2340,14 @@ function isExistsRelationCondition(input: unknown): input is ExistsRelationCondi
     isPlainObject(input) &&
     input.__jazzPermissionKind === "exists-relation" &&
     isPlainObject(input.relation)
+  );
+}
+
+function isWhereObjectCondition(input: unknown): input is WhereObjectCondition {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "where-object" &&
+    isPlainObject(input.where)
   );
 }
 

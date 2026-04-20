@@ -58,7 +58,7 @@ function App() {
         setConfig({ ...sharedConfig, jwtToken: jwtToken! });
       } else {
         // No external session — use local-first auth
-        const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+        const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
         setConfig({ ...sharedConfig, auth: { localFirstSecret: secret } });
       }
     }

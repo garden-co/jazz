@@ -30,6 +30,7 @@ export interface WorkerBridgeOptions {
   jwtToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
+  fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
@@ -128,7 +129,7 @@ export class WorkerBridge {
     };
 
     // Wire main → worker: outgoing sync messages from runtime
-    this.runtime.onSyncMessageToSend(
+    this.runtime.onSyncMessageToSend?.(
       createSyncOutboxRouter({
         onServerPayload: (payload) => {
           if (this.isDisposedLike()) return;
@@ -176,6 +177,7 @@ export class WorkerBridge {
       jwtToken: options.jwtToken,
       adminSecret: options.adminSecret,
       runtimeSources: options.runtimeSources,
+      fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };
@@ -301,6 +303,16 @@ export class WorkerBridge {
     if (this.isDisposedLike()) return;
     this.runtime.removeServer();
     this.runtime.addServer();
+  }
+
+  disconnectUpstream(): void {
+    if (this.isDisposedLike()) return;
+    this.worker.postMessage({ type: "disconnect-upstream" });
+  }
+
+  reconnectUpstream(): void {
+    if (this.isDisposedLike()) return;
+    this.worker.postMessage({ type: "reconnect-upstream" });
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
@@ -429,7 +441,7 @@ export class WorkerBridge {
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
     this.state.syncBatchFlushQueued = false;
-    this.runtime.onSyncMessageToSend(() => undefined);
+    this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }
 

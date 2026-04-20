@@ -890,11 +890,14 @@ impl<'a> Normalizer<'a> {
                     self.batch(batch_id),
                 )
             }
-            SyncPayload::BatchSettlement { settlement } => {
-                format!("{settlement:?}")
-            }
+            SyncPayload::BatchSettlement { settlement } => self.format_settlement(settlement),
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
-                format!("batch_ids:{batch_ids:?}")
+                let batches = batch_ids
+                    .iter()
+                    .map(|batch_id| self.batch(batch_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("batch_ids:[{batches}]")
             }
             SyncPayload::SealBatch { submission } => {
                 format!(
@@ -938,6 +941,64 @@ impl<'a> Normalizer<'a> {
                 format!("{:?}", e)
             }
         }
+    }
+
+    fn format_settlement(&mut self, settlement: &crate::batch_fate::BatchSettlement) -> String {
+        match settlement {
+            crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+                format!("missing batch:{}", self.batch(batch_id))
+            }
+            crate::batch_fate::BatchSettlement::Rejected {
+                batch_id,
+                code,
+                reason,
+            } => {
+                format!(
+                    "rejected batch:{} code:{code} reason:{reason}",
+                    self.batch(batch_id)
+                )
+            }
+            crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                format!(
+                    "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
+                    self.batch(batch_id),
+                    self.format_visible_members(visible_members)
+                )
+            }
+            crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                format!(
+                    "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
+                    self.batch(batch_id),
+                    self.format_visible_members(visible_members)
+                )
+            }
+        }
+    }
+
+    fn format_visible_members(
+        &mut self,
+        members: &[crate::batch_fate::VisibleBatchMember],
+    ) -> String {
+        members
+            .iter()
+            .map(|member| {
+                format!(
+                    "row:{} branch:{} batch:{}",
+                    self.object(&member.object_id),
+                    self.branch(&member.branch_name),
+                    self.batch(&member.batch_id),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -1019,11 +1080,14 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 names.batch(batch_id),
             )
         }
-        SyncPayload::BatchSettlement { settlement } => {
-            format!("{settlement:?}")
-        }
+        SyncPayload::BatchSettlement { settlement } => format_settlement_details(settlement, names),
         SyncPayload::BatchSettlementNeeded { batch_ids } => {
-            format!("batch_ids:{batch_ids:?}")
+            let batches = batch_ids
+                .iter()
+                .map(|batch_id| names.batch(batch_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("batch_ids:[{batches}]")
         }
         SyncPayload::SealBatch { submission } => {
             format!(
@@ -1060,6 +1124,67 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
             format!("{:?}", e)
         }
     }
+}
+
+fn format_settlement_details(
+    settlement: &crate::batch_fate::BatchSettlement,
+    names: &Names<'_>,
+) -> String {
+    match settlement {
+        crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+            format!("missing batch:{}", names.batch(batch_id))
+        }
+        crate::batch_fate::BatchSettlement::Rejected {
+            batch_id,
+            code,
+            reason,
+        } => {
+            format!(
+                "rejected batch:{} code:{code} reason:{reason}",
+                names.batch(batch_id)
+            )
+        }
+        crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => {
+            format!(
+                "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
+                names.batch(batch_id),
+                format_visible_members_details(visible_members, names)
+            )
+        }
+        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => {
+            format!(
+                "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
+                names.batch(batch_id),
+                format_visible_members_details(visible_members, names)
+            )
+        }
+    }
+}
+
+fn format_visible_members_details(
+    members: &[crate::batch_fate::VisibleBatchMember],
+    names: &Names<'_>,
+) -> String {
+    members
+        .iter()
+        .map(|member| {
+            format!(
+                "row:{} branch:{} batch:{}",
+                names.object(&member.object_id),
+                member.branch_name,
+                names.batch(&member.batch_id),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// First 4 bytes of a BatchId as hex (8 chars).

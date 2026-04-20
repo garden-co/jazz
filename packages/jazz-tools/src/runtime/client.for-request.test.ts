@@ -115,7 +115,7 @@ function makeClient() {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
   return {
@@ -165,7 +165,7 @@ function makeClientWithContext(context: AppContext): JazzClient {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
   return new JazzClientCtor(runtime, context, "edge");

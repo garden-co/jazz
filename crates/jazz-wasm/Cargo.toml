@@ -8,7 +8,12 @@ description = "WebAssembly bindings for the Jazz database engine"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false }
+jazz_tools = { package = "jazz-tools", path = "../jazz-tools", version = "2.0.0-alpha.0", default-features = false, features = [
+  "transport",
+] }
+
+ws_stream_wasm = "0.7"
+futures = "0.3"
 
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

@@ -67,7 +67,7 @@ describe("Db devMode active query tracing", () => {
 
     expect(trace?.table).toBe("todos");
     expect(trace?.branches).toEqual(["feature-branch"]);
-    expect(trace?.tier).toBe("worker");
+    expect(trace?.tier).toBe("local");
     expect(trace?.propagation).toBe("full");
     expect(trace?.query).toContain('"table":"todos"');
     expect(trace?.stack).toContain("Error");

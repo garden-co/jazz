@@ -3,7 +3,6 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { TestingServer, pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
 
@@ -85,26 +84,6 @@ exit 13
   return binaryPath;
 }
 
-function makeSchemaCatalogueSyncBody(appId: string) {
-  return {
-    client_id: "01234567-89ab-cdef-0123-456789abcdef",
-    payloads: [
-      {
-        CatalogueEntryUpdated: {
-          entry: {
-            object_id: "11111111-1111-1111-1111-111111111111",
-            metadata: {
-              type: "catalogue_schema",
-              app_id: appId,
-              schema_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            },
-            content: Array.from(new TextEncoder().encode(serializeRuntimeSchema(TEST_SCHEMA))),
-          },
-        },
-      },
-    ],
-  };
-}
 describe("TestingServer", () => {
   it("starts and is reachable at /health", async () => {
     const server = await TestingServer.start();
@@ -137,19 +116,17 @@ describe("TestingServer", () => {
       expect(server.adminSecret).toBe(adminSecret);
       expect(server.backendSecret).toBe(backendSecret);
 
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
-
-      const allowed = await fetch(`${server.url}/sync`, {
+      const allowed = await fetch(`${server.url}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": adminSecret },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
-      expect(allowed.status).toBe(200);
+      expect(allowed.status).toBe(201);
 
-      const denied = await fetch(`${server.url}/sync`, {
+      const denied = await fetch(`${server.url}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": "wrong-secret" },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
       expect(denied.status).toBe(401);
     } finally {
@@ -251,7 +228,7 @@ describe("startLocalJazzServer", () => {
     await server.stop();
   }, 15_000);
 
-  it("accepts a catalogue schema sync payload via /sync when admin secret matches", async () => {
+  it("accepts a schema publish via /admin/schemas when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -262,24 +239,22 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
-
-      const response = await fetch(`${server.url}/sync`, {
+      const response = await fetch(`${server.url}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": adminSecret,
         },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(201);
     } finally {
       await server.stop();
     }
   });
 
-  it("rejects a catalogue schema sync payload via /sync when admin secret doesn't match", async () => {
+  it("rejects a schema publish via /admin/schemas when admin secret doesn't match", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -290,15 +265,13 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = makeSchemaCatalogueSyncBody(server.appId);
-
-      const response = await fetch(`${server.url}/sync`, {
+      const response = await fetch(`${server.url}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
 
       expect(response.status).toBe(401);

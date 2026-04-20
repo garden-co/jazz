@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
@@ -13,11 +14,14 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
-    use crate::row_histories::{RowState, StoredRowBatch};
+    use crate::row_histories::{RowState, StoredRowBatch, VisibleRowEntry};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::{MemoryStorage, Storage};
+    use crate::storage::{
+        HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
+        RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+    };
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
     fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
@@ -65,6 +69,132 @@ mod tests {
             content,
             timestamp,
             author: author.into(),
+        }
+    }
+
+    struct CountingCatalogueUpsertsStorage {
+        inner: MemoryStorage,
+        catalogue_upserts: Cell<usize>,
+    }
+
+    impl CountingCatalogueUpsertsStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                catalogue_upserts: Cell::new(0),
+            }
+        }
+
+        fn catalogue_upserts(&self) -> usize {
+            self.catalogue_upserts.get()
+        }
+    }
+
+    impl Storage for CountingCatalogueUpsertsStorage {
+        fn raw_table_put(
+            &mut self,
+            table: &str,
+            key: &str,
+            value: &[u8],
+        ) -> Result<(), StorageError> {
+            self.inner.raw_table_put(table, key, value)
+        }
+
+        fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+            self.inner.raw_table_delete(table, key)
+        }
+
+        fn apply_raw_table_mutations(
+            &mut self,
+            mutations: &[RawTableMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_raw_table_mutations(mutations)
+        }
+
+        fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.raw_table_get(table, key)
+        }
+
+        fn raw_table_scan_prefix(
+            &self,
+            table: &str,
+            prefix: &str,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_prefix(table, prefix)
+        }
+
+        fn raw_table_scan_range(
+            &self,
+            table: &str,
+            start: Option<&str>,
+            end: Option<&str>,
+        ) -> Result<RawTableRows, StorageError> {
+            self.inner.raw_table_scan_range(table, start, end)
+        }
+
+        fn append_history_region_row_bytes(
+            &mut self,
+            table: &str,
+            rows: &[HistoryRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.append_history_region_row_bytes(table, rows)
+        }
+
+        fn upsert_visible_region_row_bytes(
+            &mut self,
+            table: &str,
+            rows: &[VisibleRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.upsert_visible_region_row_bytes(table, rows)
+        }
+
+        fn apply_encoded_row_mutation(
+            &mut self,
+            table: &str,
+            history_rows: &[OwnedHistoryRowBytes],
+            visible_rows: &[OwnedVisibleRowBytes],
+            index_mutations: &[IndexMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_encoded_row_mutation(
+                table,
+                history_rows,
+                visible_rows,
+                index_mutations,
+            )
+        }
+
+        fn apply_prepared_row_mutation(
+            &mut self,
+            table: &str,
+            history_rows: &[StoredRowBatch],
+            visible_entries: &[VisibleRowEntry],
+            encoded_history_rows: &[OwnedHistoryRowBytes],
+            encoded_visible_rows: &[OwnedVisibleRowBytes],
+            index_mutations: &[IndexMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_prepared_row_mutation(
+                table,
+                history_rows,
+                visible_entries,
+                encoded_history_rows,
+                encoded_visible_rows,
+                index_mutations,
+            )
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            entry: &crate::catalogue::CatalogueEntry,
+        ) -> Result<(), StorageError> {
+            self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+            self.inner.upsert_catalogue_entry(entry)
+        }
+
+        fn load_catalogue_entry(
+            &self,
+            object_id: ObjectId,
+        ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+            self.inner.load_catalogue_entry(object_id)
         }
     }
 
@@ -138,6 +268,54 @@ mod tests {
             v2_values[v2_descriptor.column_index("email").unwrap()],
             Value::Null
         ); // Added column with default
+    }
+
+    #[test]
+    fn schema_manager_persists_current_schema_only_once_per_storage() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = CountingCatalogueUpsertsStorage::new();
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("name".to_string(), Value::Text("Alice".into())),
+                ]),
+            )
+            .expect("first insert should succeed");
+        let first_upserts = storage.catalogue_upserts();
+        assert!(
+            first_upserts >= 1,
+            "first insert should persist current schema/catalogue state"
+        );
+
+        manager
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("name".to_string(), Value::Text("Bob".into())),
+                ]),
+            )
+            .expect("second insert should succeed");
+
+        assert_eq!(
+            storage.catalogue_upserts(),
+            first_upserts,
+            "schema-aware writes should not reload and repersist the unchanged current schema",
+        );
     }
 
     /// Test column rename through lens.
@@ -4485,8 +4663,8 @@ mod tests {
         assert_eq!(matching[0].delta.added.len(), 1);
     }
 
-    /// Test 2: Client A subscribes on server B with settled_tier=Worker.
-    /// B settles → emits QuerySettled(Worker). After A receives it, A delivers.
+    /// Test 2: Client A subscribes on server B with settled_tier=Local.
+    /// B settles → emits QuerySettled(Local). After A receives it, A delivers.
     #[test]
     fn query_settled_direct() {
         let schema = SchemaBuilder::new()
@@ -4508,9 +4686,9 @@ mod tests {
         .unwrap();
         let mut io_a = MemoryStorage::new();
 
-        // === Setup Server B (Worker tier) ===
+        // === Setup Server B (Local tier) ===
         let mut server_b = SchemaManager::new(
-            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Local),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -4541,13 +4719,13 @@ mod tests {
         server_b.insert(&mut io_b, "items", values).unwrap();
         server_b.process(&mut io_b);
 
-        // === Client A subscribes with settled_tier=Worker ===
+        // === Client A subscribes with settled_tier=Local ===
         let query = QueryBuilder::new("items")
             .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client_a.process(&mut io_a);
 
@@ -4588,13 +4766,13 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
 
-        // Expect QuerySettled(Worker) in outbox
+        // Expect QuerySettled(Local) in outbox
         let settled_msg = outbox_b
             .iter()
             .find(|e| matches!(e.payload, SyncPayload::QuerySettled { .. }));
         assert!(
             settled_msg.is_some(),
-            "Server B should emit QuerySettled(Worker)"
+            "Server B should emit QuerySettled(Local)"
         );
 
         // Forward all from B to A (including data + QuerySettled)
@@ -4622,7 +4800,7 @@ mod tests {
             .collect();
         assert!(
             !matching.is_empty(),
-            "Should deliver after QuerySettled(Worker) received"
+            "Should deliver after QuerySettled(Local) received"
         );
         let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
         assert!(total_added >= 1, "Should have at least 1 row delivered");
@@ -4694,7 +4872,7 @@ mod tests {
             .expect("one visible row");
         let server_b_id = ServerId::new();
 
-        // Simulate per-row Worker settlement — still insufficient for EdgeServer reads.
+        // Simulate per-row Local settlement — still insufficient for EdgeServer reads.
         client_a
             .query_manager_mut()
             .sync_manager_mut()
@@ -4705,7 +4883,7 @@ mod tests {
                     branch_name: BranchName::new(&visible_row.branch),
                     batch_id: visible_row.batch_id,
                     state: None,
-                    confirmed_tier: Some(DurabilityTier::Worker),
+                    confirmed_tier: Some(DurabilityTier::Local),
                 },
             });
         client_a.process(&mut io_a);
@@ -4717,7 +4895,7 @@ mod tests {
             .collect();
         assert!(
             matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Worker < EdgeServer — should still not deliver"
+            "Local < EdgeServer — should still not deliver"
         );
 
         // Simulate per-row EdgeServer settlement — now the row may become visible.
@@ -4766,7 +4944,7 @@ mod tests {
             )
             .build();
 
-        // A = end client, B = worker tier mid-tier, C = edge tier upstream.
+        // A = end client, B = local tier mid-tier, C = edge tier upstream.
         let mut client_a = SchemaManager::new(
             SyncManager::new(),
             schema.clone(),
@@ -4778,7 +4956,7 @@ mod tests {
         let mut io_a = MemoryStorage::new();
 
         let mut worker_b = SchemaManager::new(
-            SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+            SyncManager::new().with_durability_tier(DurabilityTier::Local),
             schema.clone(),
             test_app_id(),
             "dev",
@@ -4941,7 +5119,7 @@ mod tests {
         });
         assert!(
             edge_settled.is_some(),
-            "Worker tier should relay QuerySettled(EdgeServer) from upstream to client"
+            "Local tier should relay QuerySettled(EdgeServer) from upstream to client"
         );
 
         for entry in &relayed_from_b {
@@ -4995,7 +5173,7 @@ mod tests {
         .unwrap();
         let mut storage = MemoryStorage::new();
 
-        // Subscribe with settled_tier=Worker
+        // Subscribe with settled_tier=Local
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
@@ -5004,7 +5182,7 @@ mod tests {
             .subscribe_with_sync_with_local_updates(
                 query,
                 None,
-                Some(DurabilityTier::Worker),
+                Some(DurabilityTier::Local),
                 LocalUpdates::Deferred,
             )
             .unwrap();
@@ -5047,7 +5225,7 @@ mod tests {
                         branch_name: BranchName::new(&row.branch),
                         batch_id: row.batch_id,
                         state: None,
-                        confirmed_tier: Some(DurabilityTier::Worker),
+                        confirmed_tier: Some(DurabilityTier::Local),
                     },
                 });
         }
@@ -5102,13 +5280,13 @@ mod tests {
         client.insert(&mut storage, "items", values).unwrap();
         client.process(&mut storage);
 
-        // Subscribe with settled_tier=Worker (simulating one-shot behavior)
+        // Subscribe with settled_tier=Local (simulating one-shot behavior)
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client.process(&mut storage);
 
@@ -5143,12 +5321,12 @@ mod tests {
                     branch_name: BranchName::new(&visible_row.branch),
                     batch_id: visible_row.batch_id,
                     state: None,
-                    confirmed_tier: Some(DurabilityTier::Worker),
+                    confirmed_tier: Some(DurabilityTier::Local),
                 },
             });
         client.process(&mut storage);
 
-        // Worker durability arriving later should not emit another visible
+        // Local durability arriving later should not emit another visible
         // delta because the row is already present.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
@@ -5157,7 +5335,7 @@ mod tests {
             .collect();
         assert!(
             matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "Worker promotion should not emit a second visible delta"
+            "Local promotion should not emit a second visible delta"
         );
     }
 
@@ -5182,13 +5360,13 @@ mod tests {
         .unwrap();
         let mut storage = MemoryStorage::new();
 
-        // No rows inserted. Subscribe with settled_tier=Worker.
+        // No rows inserted. Subscribe with settled_tier=Local.
         let query = QueryBuilder::new("items")
             .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None, Some(DurabilityTier::Worker))
+            .subscribe_with_sync(query, None, Some(DurabilityTier::Local))
             .unwrap();
         client.process(&mut storage);
 

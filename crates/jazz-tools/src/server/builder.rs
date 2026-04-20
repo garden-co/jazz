@@ -210,19 +210,18 @@ impl ServerBuilder {
     fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let dispatch_hub = Arc::clone(&connection_event_hub);
-        let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                // Record outgoing server message to tracer if present
-                if let Some(ref tracer) = tracer_for_outgoing {
-                    tracer.record_outgoing("server", &entry.destination, &entry.payload);
-                }
                 dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
+
+        if let Some(ref tracer) = self.sync_tracer {
+            runtime.set_sync_tracer(tracer.clone(), "server".to_string());
+        }
 
         Ok((runtime, connection_event_hub))
     }
@@ -236,6 +235,11 @@ impl ServerBuilder {
                     SchemaManager::new_server(sync_manager, self.app_id, "prod");
                 rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
                     .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
+                // Dynamic servers fail closed until an explicit permissions head
+                // is available for the active app.
+                schema_manager
+                    .query_manager_mut()
+                    .require_authorization_schema();
                 Ok(schema_manager)
             }
             ServerSchemaMode::Fixed(schema) => {
@@ -451,9 +455,10 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         }
     };
     info!(
-        "Auth configured: local_first={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
+        "Auth configured: local_first={}, jwks={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
+        auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
         authority_mode

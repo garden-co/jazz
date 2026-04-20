@@ -15,17 +15,21 @@ export interface TestingServerNetworkDebugState {
 
 declare module "vitest/internal/browser" {
   interface BrowserCommands {
-    testingServerInfo: () => Promise<TestingServerInfo>;
+    testingServerInfo: (appId?: string) => Promise<TestingServerInfo>;
     isolatedTestingServerInfo: () => Promise<TestingServerInfo>;
     testingServerBlockNetwork: (serverUrl: string) => Promise<void>;
     testingServerUnblockNetwork: (serverUrl: string) => Promise<void>;
     testingServerNetworkDebug: (serverUrl: string) => Promise<TestingServerNetworkDebugState>;
-    testingServerJwtForUser: (userId: string, claims?: Record<string, unknown>) => Promise<string>;
+    testingServerJwtForUser: (
+      userId: string,
+      claims?: Record<string, unknown>,
+      appId?: string,
+    ) => Promise<string>;
   }
 }
 
-export function getTestingServerInfo(): Promise<TestingServerInfo> {
-  return commands.testingServerInfo();
+export function getTestingServerInfo(appId?: string): Promise<TestingServerInfo> {
+  return commands.testingServerInfo(appId);
 }
 
 export function getIsolatedTestingServerInfo(): Promise<TestingServerInfo> {
@@ -49,6 +53,7 @@ export function getTestingServerNetworkDebug(
 export async function getTestingServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
+  appId?: string,
 ): Promise<string> {
-  return commands.testingServerJwtForUser(userId, claims);
+  return commands.testingServerJwtForUser(userId, claims, appId);
 }

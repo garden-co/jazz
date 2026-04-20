@@ -42,6 +42,13 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   return {
     name: "jazz-sveltekit",
 
+    config(config: { ssr?: { external?: string[] } }) {
+      const existing = config.ssr?.external ?? [];
+      return {
+        ssr: { external: Array.from(new Set([...existing, "jazz-napi"])) },
+      };
+    },
+
     async configureServer(viteServer: ViteDevServer): Promise<void> {
       if (viteServer.config.command !== "serve" || options.server === false) return;
 

@@ -23,10 +23,10 @@ pub struct PolicyError {
 // ID Types
 // ============================================================================
 
-/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < GlobalServer).
+/// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum DurabilityTier {
-    Worker,
+    Local,
     EdgeServer,
     GlobalServer,
 }
@@ -288,6 +288,8 @@ pub enum SyncPayload {
         session: Option<Session>,
         #[serde(default)]
         propagation: QueryPropagation,
+        #[serde(default)]
+        policy_context_tables: Vec<String>,
     },
 
     /// Unsubscribe from a query (client to server).
@@ -523,7 +525,7 @@ impl SyncPayload {
 }
 
 /// Destination for an outbox entry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Destination {
     Server(ServerId),
     Client(ClientId),
@@ -537,7 +539,7 @@ pub enum Source {
 }
 
 /// Outgoing message to be sent.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboxEntry {
     pub destination: Destination,
     pub payload: SyncPayload,
@@ -558,6 +560,7 @@ pub struct PendingQuerySubscription {
     pub query: Query,
     pub session: Option<Session>,
     pub propagation: QueryPropagation,
+    pub policy_context_tables: Vec<String>,
 }
 
 /// A pending query unsubscription that needs cleanup.

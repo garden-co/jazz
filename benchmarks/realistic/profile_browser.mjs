@@ -540,13 +540,13 @@ function buildInitScript(schemaTables) {
           owner_id: owners.allowedOwnerId,
           title: "allowed-root",
           updated_at: ts,
-        }, { tier: "worker" });
+        }, { tier: "local" });
         const deniedRoot = await db.insertDurable(folderTable, {
           parent_id: null,
           owner_id: owners.deniedOwnerId,
           title: "denied-root",
           updated_at: ts + 1,
-        }, { tier: "worker" });
+        }, { tier: "local" });
         allowedFolders.push(allowedRoot.id);
         deniedFolders.push(deniedRoot.id);
         for (let i = 2; i < totalFolders; i += 1) {
@@ -559,7 +559,7 @@ function buildInitScript(schemaTables) {
             owner_id: allowedChain ? owners.allowedOwnerId : owners.deniedOwnerId,
             title: "folder-" + i,
             updated_at: ts + i,
-          }, { tier: "worker" });
+          }, { tier: "local" });
           if (allowedChain) allowedFolders.push(row.id);
           else deniedFolders.push(row.id);
         }
@@ -578,7 +578,7 @@ function buildInitScript(schemaTables) {
             body: "doc-" + i,
             revision: 0,
             updated_at: ts + 10000 + i,
-          }, { tier: "worker" });
+          }, { tier: "local" });
         }
       }
       async function seedDataset(db, config) {
@@ -702,7 +702,7 @@ function buildW4Setup(config, dbName) {
       const state = await h.seedDataset(db, cfg);
       await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: state.projects[0] }], [["updated_at", "desc"]], 200),
-        { tier: "worker" }
+        { tier: "local" }
       );
       await db.shutdown();
       globalThis.__w4Profile = { dbName, hotProjectId: state.projects[0] };
@@ -720,7 +720,7 @@ function buildW4Run() {
       const db = await h.createDb({ appId: "profile-w4-app", dbName, logLevel: "warn" });
       const rows = await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: hotProjectId }], [["updated_at", "desc"]], 200),
-        { tier: "worker" }
+        { tier: "local" }
       );
       globalThis.__w4Profile.db = db;
       return { rows: rows.length, elapsedMs: performance.now() - t0 };

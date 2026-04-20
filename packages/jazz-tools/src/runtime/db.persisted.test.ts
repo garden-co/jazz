@@ -182,7 +182,7 @@ describe("Db persisted writes", () => {
       { tier: "global" },
     );
     const updated = db.updatePersisted(table, "todo-2", { done: false }, { tier: "edge" });
-    const deleted = db.deletePersisted(table, "todo-2", { tier: "worker" });
+    const deleted = db.deletePersisted(table, "todo-2", { tier: "local" });
 
     expect(createPersistedInternal).toHaveBeenCalledWith(
       "todos",
@@ -202,10 +202,16 @@ describe("Db persisted writes", () => {
       session,
       "alice@writer",
       { tier: "edge" },
+      undefined,
+      undefined,
     );
-    expect(deletePersistedInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer", {
-      tier: "worker",
-    });
+    expect(deletePersistedInternal).toHaveBeenCalledWith(
+      "todo-2",
+      session,
+      "alice@writer",
+      { tier: "local" },
+      undefined,
+    );
     expect(inserted.value()).toEqual({
       id: "todo-2",
       title: "With session",

@@ -30,22 +30,29 @@ declare module "jazz-wasm" {
     );
     schedule?: (task: () => void) => void;
 
-    insert(table: string, values: InsertValues): { id: string; values: any[]; batchId: string };
+    insert(
+      table: string,
+      values: InsertValues,
+      objectId?: string | null,
+    ): { id: string; values: any[]; batchId: string };
     insertWithSession(
       table: string,
       values: InsertValues,
       sessionJson?: string | null,
+      objectId?: string | null,
     ): { id: string; values: any[]; batchId: string };
     insertDurable(
       table: string,
       values: InsertValues,
       tier: string,
+      objectId?: string | null,
     ): Promise<{ id: string; values: any[] }>;
     insertDurableWithSession(
       table: string,
       values: InsertValues,
       sessionJson: string | null | undefined,
       tier: string,
+      objectId?: string | null,
     ): Promise<{ id: string; values: any[] }>;
     update(objectId: string, values: unknown): { batchId: string };
     updateWithSession(

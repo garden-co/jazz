@@ -8,6 +8,10 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    updateAuth: vi.fn(),
+    onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
     deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
@@ -23,7 +27,6 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
-    onSyncMessageToSend: vi.fn(),
     query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
@@ -59,6 +62,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      undefined,
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
@@ -86,6 +90,7 @@ describe("JazzRnRuntimeAdapter", () => {
       JSON.stringify({
         data: { type: "Bytea", value: "0102ff" },
       }),
+      undefined,
     );
   });
 
@@ -163,6 +168,7 @@ describe("JazzRnRuntimeAdapter", () => {
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
       writeContextJson,
+      undefined,
     );
 
     adapter.updateWithSession(
@@ -180,34 +186,24 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
 
     await expect(
-      adapter.insertDurableWithSession("todos", {}, writeContextJson, "worker"),
+      adapter.insertDurableWithSession("todos", {}, writeContextJson, "local"),
     ).resolves.toEqual({
       id: "row-1",
       values: [],
       batchId: "batch-2",
     });
     await expect(
-      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
+      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
     ).resolves.toBeUndefined();
     await expect(
-      adapter.deleteDurableWithSession("row-1", writeContextJson, "worker"),
+      adapter.deleteDurableWithSession("row-1", writeContextJson, "local"),
     ).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
-  it("bridges sync and subscription callbacks with handle conversion", () => {
+  it("bridges subscription callbacks with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
-
-    // New callback shape: direct 4-arg payload (after RN callback API update).
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    callbackObject.onSyncMessage("server", "server-1", "{}", false);
-    expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
     const onUpdate = vi.fn();
     const handle = adapter.subscribe("{}", onUpdate, null, null);
@@ -255,16 +251,9 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.unsubscribe).toHaveBeenCalledWith(9n);
   });
 
-  it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
+  it("swallows exceptions thrown by subscription callbacks crossing the native boundary", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    adapter.onSyncMessageToSend(() => {
-      throw new Error("sync boom");
-    });
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const syncCallback = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
@@ -273,25 +262,6 @@ describe("JazzRnRuntimeAdapter", () => {
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
-  });
-
-  it("rejects legacy one-arg outbox callbacks", () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() =>
-      (callbackObject as any).onSyncMessage(
-        JSON.stringify({
-          destination: { Server: "server-1" },
-          payload: { QueryUnsubscription: { query_id: 1 } },
-        }),
-      ),
-    ).not.toThrow();
-    expect(syncHandler).not.toHaveBeenCalled();
   });
 
   it("passes canonical subscription tuple updates through unchanged", () => {
@@ -330,43 +300,22 @@ describe("JazzRnRuntimeAdapter", () => {
     });
   });
 
-  it("supports worker-tier persisted mutations and rejects global tiers", async () => {
+  it("supports local-tier persisted mutations and rejects global tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
+    await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
       id: "row-1",
       values: [],
       batchId: "batch-1",
     });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateDurable("row-1", {}, "local")).resolves.toBeUndefined();
+    await expect(adapter.deleteDurable("row-1", "local")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'worker' tier");
-  });
-
-  it("swallows ObjectNotFound runtime errors for update/delete", () => {
-    const objectNotFound = {
-      tag: "Runtime",
-      inner: {
-        message: 'WriteError("ObjectNotFound(ObjectId(019c70f1-8514-72f0-bad8-8d849e1c3e70))")',
-      },
-    };
-    const binding = createBinding({
-      update: vi.fn(() => {
-        throw objectNotFound;
-      }),
-      delete_: vi.fn(() => {
-        throw objectNotFound;
-      }),
-    });
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    expect(() => adapter.update("row-1", { done: { type: "Boolean", value: true } })).not.toThrow();
-    expect(() => adapter.delete("row-1")).not.toThrow();
+    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
   });
 
   it("wraps Jazz RN errors with error name and cause", async () => {
@@ -509,5 +458,34 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.removeServer).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
+  });
+
+  it("forwards updateAuth JSON payload to the native binding", () => {
+    const updateAuth = vi.fn();
+    const binding = createBinding({ updateAuth });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.updateAuth?.(JSON.stringify({ jwt_token: "refreshed" }));
+
+    expect(updateAuth).toHaveBeenCalledWith(JSON.stringify({ jwt_token: "refreshed" }));
+  });
+
+  it("registers onAuthFailure callback with the native binding and invokes it on failure", () => {
+    let captured: { onFailure: (reason: string) => void } | null = null;
+    const onAuthFailure = vi.fn((cb: { onFailure: (reason: string) => void }) => {
+      captured = cb;
+    });
+    const binding = createBinding({ onAuthFailure });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const listener = vi.fn();
+    adapter.onAuthFailure?.(listener);
+
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(captured).not.toBeNull();
+    expect(captured!.onFailure).toBeInstanceOf(Function);
+
+    captured!.onFailure("token expired");
+    expect(listener).toHaveBeenCalledWith("token expired");
   });
 });

@@ -110,11 +110,9 @@ describe("TS Update API", () => {
     });
 
     const pending = db.update(app.todos, todo.id, { done: true });
-    await pending.wait({ tier: "worker" });
+    await pending.wait({ tier: "local" });
 
-    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), {
-      tier: "worker",
-    });
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(updated!.done).toBe(true);
   });
 });

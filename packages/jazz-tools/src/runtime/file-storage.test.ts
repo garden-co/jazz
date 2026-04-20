@@ -85,7 +85,7 @@ class FakeDb implements FileStorageDb {
   async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options: { tier: "worker" | "edge" | "global" },
+    options: { tier: "local" | "edge" | "global" },
   ): Promise<T> {
     return this.store(table, data, true, options.tier) as T;
   }
@@ -290,7 +290,7 @@ describe("createFileStorage", () => {
     const storage = createConventionalFileStorage(db, app);
     await expect(
       storage.toBlob("file-1", {
-        tier: "worker",
+        tier: "local",
         propagation: "local-only",
       }),
     ).rejects.toMatchObject({

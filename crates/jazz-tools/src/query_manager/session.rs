@@ -124,13 +124,16 @@ impl Session {
 ///
 /// `session` controls permission evaluation. `attribution`, when present,
 /// controls who is recorded as the commit author without changing permission
-/// identity.
+/// identity. `updated_at`, when present, overrides the row provenance
+/// timestamp recorded for update-like writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_mode: Option<BatchMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,10 +147,16 @@ impl WriteContext {
         Self {
             session: Some(session),
             attribution: None,
+            updated_at: None,
             batch_mode: None,
             batch_id: None,
             target_branch_name: None,
         }
+    }
+
+    pub fn with_updated_at(mut self, updated_at: u64) -> Self {
+        self.updated_at = Some(updated_at);
+        self
     }
 
     pub fn with_batch_mode(mut self, batch_mode: BatchMode) -> Self {
@@ -179,6 +188,10 @@ impl WriteContext {
 
     pub fn target_branch_name(&self) -> Option<&str> {
         self.target_branch_name.as_deref()
+    }
+
+    pub fn updated_at(&self) -> Option<u64> {
+        self.updated_at
     }
 
     pub fn author_principal(&self) -> &str {
@@ -261,6 +274,7 @@ mod tests {
         let context = WriteContext {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
+            updated_at: None,
             batch_mode: None,
             batch_id: None,
             target_branch_name: None,
@@ -304,5 +318,12 @@ mod tests {
             .with_target_branch_name("dev-111111111111-main");
 
         assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
+    }
+
+    #[test]
+    fn test_write_context_updated_at_override() {
+        let context = WriteContext::from_session(Session::new("session-user")).with_updated_at(42);
+
+        assert_eq!(context.updated_at(), Some(42));
     }
 }

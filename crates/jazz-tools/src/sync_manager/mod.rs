@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
@@ -22,6 +25,10 @@ mod tests;
 // Re-export all public types
 pub use types::*;
 
+/// How long an installed transport may sit in `pending_servers` before callers
+/// treat it as offline.
+pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
+
 // ============================================================================
 // SyncManager
 // ============================================================================
@@ -38,6 +45,7 @@ pub struct SyncManager {
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
+    pub(super) pending_servers: HashMap<ServerId, Instant>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -83,6 +91,7 @@ impl std::fmt::Debug for SyncManager {
                 &self.allow_unprivileged_schema_catalogue_writes,
             )
             .field("servers", &self.servers)
+            .field("pending_servers", &self.pending_servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
             .field("outbox", &self.outbox)
@@ -188,6 +197,7 @@ impl SyncManager {
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
+            pending_servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -361,11 +371,33 @@ impl SyncManager {
         skip_catalogue_sync: bool,
         storage: &H,
     ) {
+        self.pending_servers.remove(&server_id);
         self.servers.insert(server_id, ServerState::default());
         self.queue_full_sync_to_server_from_storage(server_id, storage);
         if !skip_catalogue_sync {
             self.queue_catalogue_sync_to_server_from_storage(server_id, storage);
         }
+    }
+
+    pub fn add_pending_server(&mut self, server_id: ServerId) {
+        if self.servers.contains_key(&server_id) {
+            return;
+        }
+        self.pending_servers.insert(server_id, Instant::now());
+    }
+
+    pub fn remove_pending_server(&mut self, server_id: ServerId) {
+        self.pending_servers.remove(&server_id);
+    }
+
+    pub fn has_servers_or_pending_servers(&self) -> bool {
+        if !self.servers.is_empty() {
+            return true;
+        }
+        let now = Instant::now();
+        self.pending_servers
+            .values()
+            .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
     }
 
     pub fn request_batch_settlements_from_server(
@@ -398,6 +430,7 @@ impl SyncManager {
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
+        self.pending_servers.remove(&server_id);
         self.remote_query_scopes
             .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
     }
@@ -486,6 +519,15 @@ impl SyncManager {
     /// Take all outbox entries, clearing the outbox.
     pub fn take_outbox(&mut self) -> Vec<OutboxEntry> {
         std::mem::take(&mut self.outbox)
+    }
+
+    /// Restore previously dequeued outbox entries ahead of any newly queued ones.
+    pub(crate) fn prepend_outbox(&mut self, mut entries: Vec<OutboxEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        entries.append(&mut self.outbox);
+        self.outbox = entries;
     }
 
     /// Get a reference to the outbox (for checking if empty).
@@ -669,6 +711,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         for server_id in server_ids {
@@ -678,6 +721,7 @@ impl SyncManager {
                 query.clone(),
                 session.clone(),
                 propagation,
+                policy_context_tables.clone(),
             );
         }
     }
@@ -692,6 +736,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         if !self.servers.contains_key(&server_id) {
             return;
@@ -704,6 +749,7 @@ impl SyncManager {
                 query: Box::new(query),
                 session,
                 propagation,
+                policy_context_tables,
             },
         });
     }
@@ -737,6 +783,13 @@ impl SyncManager {
             .filter(|((_, remote_query_id), _)| *remote_query_id == query_id)
             .flat_map(|(_, scope)| scope.iter().copied())
             .collect()
+    }
+
+    /// Whether we have received at least one upstream scope snapshot for this query.
+    pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
+        self.remote_query_scopes
+            .keys()
+            .any(|(_, remote_query_id)| *remote_query_id == query_id)
     }
 
     /// Take pending replayable batch settlements for RuntimeCore to process.

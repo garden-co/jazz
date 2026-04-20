@@ -11,6 +11,7 @@ import {
   Session,
   SessionClient,
   SubscriptionCallback,
+  UpdateOptions,
   Value,
   WasmModule,
   WasmSchema,
@@ -485,13 +486,11 @@ class DevToolsDb extends Db {
   }
 
   protected getClient(schema: WasmSchema): JazzClient {
-    // @ts-expect-error proxy client intentionally implements a constrained bridge-backed surface.
-    return new DevToolsJazzClient(schema);
+    return new DevToolsJazzClient(schema) as unknown as JazzClient;
   }
 }
 
-// @ts-expect-error
-class DevToolsJazzClient implements JazzClient {
+class DevToolsJazzClient {
   private readonly fallbackSchema: WasmSchema;
 
   constructor(schema: WasmSchema) {

@@ -77,7 +77,7 @@ In the browser stack, for example:
 main thread subscribes
   -> worker settles locally
   -> worker may also forward upstream
-  -> worker sends row batch entries + QuerySettled(worker)
+  -> worker sends row batch entries + QuerySettled(local)
   -> main thread publishes once requested tier is satisfied
 ```
 

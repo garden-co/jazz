@@ -26,14 +26,14 @@ pub use sqlite::SqliteStorage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use smolset::SmolSet;
 
 use crate::batch_fate::{
-    BATCH_FATE_STORAGE_FORMAT_V1, BatchSettlement, CapturedFrontierMember, LocalBatchRecord,
-    SealedBatchSubmission,
+    BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -113,21 +113,123 @@ const LOCAL_BATCH_RECORD_TABLE: &str = "__local_batch_record";
 const AUTHORITATIVE_BATCH_SETTLEMENT_TABLE: &str = "__authoritative_batch_settlement";
 const SEALED_BATCH_SUBMISSION_TABLE: &str = "__sealed_batch_submission";
 const RAW_TABLE_HEADER_TABLE: &str = "__raw_table_header";
-const BRANCH_ORD_REGISTRY_TABLE: &str = "__branch_ord_registry";
-const BRANCH_ORD_REGISTRY_KEY: &str = "registry";
-const ROW_STORAGE_FORMAT_V1: i32 = 1;
-const BRANCH_ORD_REGISTRY_FORMAT_V1: i32 = 1;
+const BRANCH_ORD_BY_NAME_TABLE: &str = "__branch_ord_by_name";
+const BRANCH_NAME_BY_ORD_TABLE: &str = "__branch_name_by_ord";
+const BRANCH_ORD_META_TABLE: &str = "__branch_ord_meta";
+const BRANCH_ORD_NEXT_ORD_KEY: &str = "next_ord";
+pub(crate) const STORE_MANIFEST_KEY: &str = "__jazz_store_manifest";
+const STORE_MANIFEST_MAGIC: &[u8; 10] = b"JAZZSTORE1";
+const STORE_FORMAT_V3: i32 = 3;
+const ROW_STORAGE_FORMAT_V2: i32 = 2;
+const ROW_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
+const EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1: i32 = 1;
+const CATALOGUE_STORAGE_FORMAT_V1: i32 = 1;
+const BRANCH_ORD_BY_NAME_FORMAT_V1: i32 = 1;
+const BRANCH_NAME_BY_ORD_FORMAT_V1: i32 = 1;
+const BRANCH_ORD_META_FORMAT_V1: i32 = 1;
+const SEALED_BATCH_SUBMISSION_FORMAT_V2: i32 = 2;
+const AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2: i32 = 2;
+const LOCAL_BATCH_RECORD_FORMAT_V3: i32 = 3;
 
 pub type BranchOrd = i32;
 
 const STORAGE_KIND_ROW_LOCATOR: &str = "row_locator";
 const STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR: &str = "visible_row_table_locator";
 const STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR: &str = "history_row_batch_table_locator";
-const STORAGE_KIND_BRANCH_ORD_REGISTRY: &str = "branch_ord_registry";
+const STORAGE_KIND_BRANCH_ORD_BY_NAME: &str = "branch_ord_by_name";
+const STORAGE_KIND_BRANCH_NAME_BY_ORD: &str = "branch_name_by_ord";
+const STORAGE_KIND_BRANCH_ORD_META: &str = "branch_ord_meta";
 const STORAGE_KIND_LOCAL_BATCH_RECORD: &str = "local_batch_record";
 const STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT: &str = "authoritative_batch_settlement";
 const STORAGE_KIND_SEALED_BATCH_SUBMISSION: &str = "sealed_batch_submission";
 const STORAGE_KIND_CATALOGUE: &str = "catalogue";
+#[cfg(feature = "sqlite")]
+pub(crate) const SQLITE_STORE_KIND: &str = "sqlite";
+#[cfg(feature = "rocksdb")]
+pub(crate) const ROCKSDB_STORE_KIND: &str = "rocksdb";
+pub(crate) const OPFS_BTREE_STORE_KIND: &str = "opfs_btree";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreManifest {
+    pub store_kind: String,
+    pub store_format_version: i32,
+}
+
+pub(crate) fn expected_store_manifest(store_kind: &str) -> StoreManifest {
+    StoreManifest {
+        store_kind: store_kind.to_string(),
+        store_format_version: STORE_FORMAT_V3,
+    }
+}
+
+pub(crate) fn encode_store_manifest(manifest: &StoreManifest) -> Result<Vec<u8>, StorageError> {
+    let kind_bytes = manifest.store_kind.as_bytes();
+    if kind_bytes.len() > u8::MAX as usize {
+        return Err(StorageError::IoError(format!(
+            "store manifest kind too long: {} bytes",
+            kind_bytes.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        STORE_MANIFEST_MAGIC.len() + std::mem::size_of::<i32>() + 1 + kind_bytes.len(),
+    );
+    bytes.extend_from_slice(STORE_MANIFEST_MAGIC);
+    bytes.extend_from_slice(&manifest.store_format_version.to_le_bytes());
+    bytes.push(kind_bytes.len() as u8);
+    bytes.extend_from_slice(kind_bytes);
+    Ok(bytes)
+}
+
+pub(crate) fn decode_store_manifest(bytes: &[u8]) -> Result<StoreManifest, StorageError> {
+    let min_len = STORE_MANIFEST_MAGIC.len() + std::mem::size_of::<i32>() + 1;
+    if bytes.len() < min_len {
+        return Err(StorageError::IoError(
+            "store manifest too short".to_string(),
+        ));
+    }
+    if &bytes[..STORE_MANIFEST_MAGIC.len()] != STORE_MANIFEST_MAGIC {
+        return Err(StorageError::IoError(
+            "store manifest magic mismatch".to_string(),
+        ));
+    }
+    let mut version_bytes = [0u8; 4];
+    version_bytes
+        .copy_from_slice(&bytes[STORE_MANIFEST_MAGIC.len()..STORE_MANIFEST_MAGIC.len() + 4]);
+    let store_format_version = i32::from_le_bytes(version_bytes);
+    let kind_len = bytes[STORE_MANIFEST_MAGIC.len() + 4] as usize;
+    let kind_start = STORE_MANIFEST_MAGIC.len() + 5;
+    let kind_end = kind_start + kind_len;
+    if bytes.len() != kind_end {
+        return Err(StorageError::IoError(
+            "store manifest trailing bytes mismatch".to_string(),
+        ));
+    }
+    let store_kind = String::from_utf8(bytes[kind_start..kind_end].to_vec())
+        .map_err(|err| StorageError::IoError(format!("invalid store manifest kind utf8: {err}")))?;
+    Ok(StoreManifest {
+        store_kind,
+        store_format_version,
+    })
+}
+
+pub(crate) fn validate_store_manifest(
+    actual: &StoreManifest,
+    expected: &StoreManifest,
+) -> Result<(), StorageError> {
+    if actual.store_kind != expected.store_kind {
+        return Err(StorageError::IoError(format!(
+            "store manifest kind mismatch: expected {}, got {}",
+            expected.store_kind, actual.store_kind
+        )));
+    }
+    if actual.store_format_version != expected.store_format_version {
+        return Err(StorageError::IoError(format!(
+            "store manifest version mismatch for {}: expected {}, got {}",
+            expected.store_kind, expected.store_format_version, actual.store_format_version
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawTableHeader {
@@ -158,7 +260,7 @@ impl RawTableHeader {
         let table_name: SharedString = table_name.into().into();
         Self {
             storage_kind: kind.storage_kind().into(),
-            storage_format_version: ROW_STORAGE_FORMAT_V1,
+            storage_format_version: ROW_STORAGE_FORMAT_V2,
             logical_table_name: Some(table_name),
             schema_hash: Some(schema_hash),
             row_descriptor_bytes: Some(
@@ -272,27 +374,6 @@ impl RowRawTableId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BranchOrdRegistryEntry {
-    branch_ord: BranchOrd,
-    branch_name: BranchName,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BranchOrdRegistry {
-    next_ord: BranchOrd,
-    entries: Vec<BranchOrdRegistryEntry>,
-}
-
-impl Default for BranchOrdRegistry {
-    fn default() -> Self {
-        Self {
-            next_ord: 1,
-            entries: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndexMutation<'a> {
     Insert {
@@ -308,6 +389,19 @@ pub enum IndexMutation<'a> {
         branch: &'a str,
         value: Value,
         row_id: ObjectId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawTableMutation<'a> {
+    Put {
+        table: &'a str,
+        key: &'a str,
+        value: &'a [u8],
+    },
+    Delete {
+        table: &'a str,
+        key: &'a str,
     },
 }
 
@@ -358,14 +452,106 @@ struct ResolvedRowTable {
 
 #[derive(Clone)]
 pub(crate) struct PreparedRowWriteContext {
-    pub row_raw_table_id: RowRawTableId,
+    pub history_row_raw_table_id: RowRawTableId,
+    pub visible_row_raw_table_id: RowRawTableId,
     pub user_descriptor: Arc<RowDescriptor>,
     pub needs_exact_locator: bool,
+}
+
+type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
+
+fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
+    static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_row_raw_table_id(
+    kind: RowRawTableKind,
+    table: &str,
+    schema_hash: SchemaHash,
+) -> RowRawTableId {
+    let cache_key = (kind, table.to_string(), schema_hash);
+    if let Some(cached) = row_raw_table_id_cache()
+        .lock()
+        .expect("row raw table id cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return cached;
+    }
+
+    let created = RowRawTableId::new(kind, table, schema_hash);
+    row_raw_table_id_cache()
+        .lock()
+        .expect("row raw table id cache poisoned")
+        .insert(cache_key, created.clone());
+    created
 }
 
 fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDescriptor>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<RowDescriptor>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn next_storage_cache_namespace() -> usize {
+    static NEXT_STORAGE_CACHE_NAMESPACE: AtomicUsize = AtomicUsize::new(1);
+    NEXT_STORAGE_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn raw_table_header_cache() -> &'static Mutex<HashMap<(usize, String), RawTableHeader>> {
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), RawTableHeader>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_raw_table_header_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    raw_table: &str,
+) -> Option<RawTableHeader> {
+    raw_table_header_cache()
+        .lock()
+        .expect("raw table header cache poisoned")
+        .get(&(storage.storage_cache_namespace(), raw_table.to_string()))
+        .cloned()
+}
+
+fn cache_raw_table_header_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    raw_table: &str,
+    header: RawTableHeader,
+) {
+    raw_table_header_cache()
+        .lock()
+        .expect("raw table header cache poisoned")
+        .insert(
+            (storage.storage_cache_namespace(), raw_table.to_string()),
+            header,
+        );
+}
+
+fn validated_raw_table_cache() -> &'static Mutex<HashSet<(usize, String)>> {
+    static CACHE: OnceLock<Mutex<HashSet<(usize, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn raw_table_validated_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) -> bool {
+    validated_raw_table_cache()
+        .lock()
+        .expect("validated raw table cache poisoned")
+        .contains(&(storage.storage_cache_namespace(), raw_table.to_string()))
+}
+
+fn cache_validated_raw_table_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) {
+    validated_raw_table_cache()
+        .lock()
+        .expect("validated raw table cache poisoned")
+        .insert((storage.storage_cache_namespace(), raw_table.to_string()));
+}
+
+fn invalidate_validated_raw_table_with_storage<H: Storage + ?Sized>(storage: &H, raw_table: &str) {
+    validated_raw_table_cache()
+        .lock()
+        .expect("validated raw table cache poisoned")
+        .remove(&(storage.storage_cache_namespace(), raw_table.to_string()));
 }
 
 fn cached_row_descriptor(raw_table: &str) -> Option<Arc<RowDescriptor>> {
@@ -522,158 +708,135 @@ fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
     Ok(BatchId(bytes))
 }
 
-fn branch_ord_registry_storage_descriptor() -> RowDescriptor {
-    RowDescriptor::new(vec![
-        ColumnDescriptor::new("next_ord", ColumnType::Integer),
-        ColumnDescriptor::new(
-            "entries",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Row {
-                    columns: Box::new(RowDescriptor::new(vec![
-                        ColumnDescriptor::new("branch_ord", ColumnType::Integer),
-                        ColumnDescriptor::new("branch_name", ColumnType::Text),
-                    ])),
-                }),
-            },
-        ),
-    ])
+fn branch_ord_by_name_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![ColumnDescriptor::new(
+        "branch_ord",
+        ColumnType::Integer,
+    )])
 }
 
-fn encode_branch_ord_registry(registry: &BranchOrdRegistry) -> Result<Vec<u8>, StorageError> {
-    let mut entries = registry.entries.clone();
-    entries.sort_by_key(|entry| entry.branch_ord);
-    encode_row(
-        &branch_ord_registry_storage_descriptor(),
-        &[
-            Value::Integer(registry.next_ord),
-            Value::Array(
-                entries
-                    .into_iter()
-                    .map(|entry| Value::Row {
-                        id: None,
-                        values: vec![
-                            Value::Integer(entry.branch_ord),
-                            Value::Text(entry.branch_name.as_str().to_string()),
-                        ],
-                    })
-                    .collect(),
-            ),
-        ],
-    )
-    .map_err(|err| StorageError::IoError(format!("encode branch ord registry: {err}")))
+fn branch_name_by_ord_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![ColumnDescriptor::new("branch_name", ColumnType::Text)])
 }
 
-fn decode_branch_ord_registry(bytes: &[u8]) -> Result<BranchOrdRegistry, StorageError> {
-    let values = decode_row(&branch_ord_registry_storage_descriptor(), bytes)
-        .map_err(|err| StorageError::IoError(format!("decode branch ord registry: {err}")))?;
-    let [next_ord, entries] = values.as_slice() else {
-        return Err(StorageError::IoError(
-            "unexpected branch ord registry shape".to_string(),
-        ));
-    };
+fn branch_ord_meta_storage_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![ColumnDescriptor::new("next_ord", ColumnType::Integer)])
+}
 
-    let Value::Integer(next_ord) = next_ord else {
-        return Err(StorageError::IoError(
-            "branch ord registry next_ord must be Integer".to_string(),
-        ));
-    };
-    if *next_ord < 1 {
+fn branch_ord_by_name_key(branch_name: BranchName) -> String {
+    branch_name.as_str().to_string()
+}
+
+fn branch_name_by_ord_key(branch_ord: BranchOrd) -> Result<String, StorageError> {
+    if branch_ord < 1 {
         return Err(StorageError::IoError(format!(
-            "branch ord registry next_ord must be >= 1, got {}",
-            next_ord
+            "branch ord must be >= 1, got {branch_ord}"
         )));
     }
-
-    let Value::Array(entries) = entries else {
-        return Err(StorageError::IoError(
-            "branch ord registry entries must be Array".to_string(),
-        ));
-    };
-
-    let mut seen_branch_ords = HashSet::new();
-    let mut seen_branch_names = HashSet::new();
-    let mut decoded_entries = entries
-        .iter()
-        .map(|entry| match entry {
-            Value::Row { values, .. } => {
-                let [branch_ord, branch_name] = values.as_slice() else {
-                    return Err(StorageError::IoError(
-                        "expected branch ord registry row to have two values".to_string(),
-                    ));
-                };
-                let branch_ord = match branch_ord {
-                    Value::Integer(branch_ord) => *branch_ord,
-                    other => {
-                        return Err(StorageError::IoError(format!(
-                            "expected branch ord registry branch_ord integer, got {other:?}"
-                        )));
-                    }
-                };
-                let branch_name = match branch_name {
-                    Value::Text(branch_name) => BranchName::new(branch_name.clone()),
-                    other => {
-                        return Err(StorageError::IoError(format!(
-                            "expected branch ord registry branch_name text, got {other:?}"
-                        )));
-                    }
-                };
-                if branch_ord < 1 {
-                    return Err(StorageError::IoError(format!(
-                        "branch ord registry branch ord must be >= 1, got {branch_ord}"
-                    )));
-                }
-                if !seen_branch_ords.insert(branch_ord) {
-                    return Err(StorageError::IoError(format!(
-                        "duplicate branch ord registry branch ord {branch_ord}"
-                    )));
-                }
-                if !seen_branch_names.insert(branch_name) {
-                    return Err(StorageError::IoError(format!(
-                        "duplicate branch ord registry branch name {}",
-                        branch_name.as_str()
-                    )));
-                }
-                Ok(BranchOrdRegistryEntry {
-                    branch_ord,
-                    branch_name,
-                })
-            }
-            other => Err(StorageError::IoError(format!(
-                "expected branch ord registry entry row, got {other:?}"
-            ))),
-        })
-        .collect::<Result<Vec<_>, StorageError>>()?;
-    decoded_entries.sort_by_key(|entry| entry.branch_ord);
-
-    Ok(BranchOrdRegistry {
-        next_ord: *next_ord,
-        entries: decoded_entries,
-    })
+    Ok(format!("{branch_ord:010}"))
 }
 
-fn load_branch_ord_registry<H: Storage + ?Sized>(
-    storage: &H,
-) -> Result<BranchOrdRegistry, StorageError> {
-    match storage.raw_table_get(BRANCH_ORD_REGISTRY_TABLE, BRANCH_ORD_REGISTRY_KEY)? {
-        Some(bytes) => decode_branch_ord_registry(&bytes),
-        None => Ok(BranchOrdRegistry::default()),
+fn encode_branch_ord_value(branch_ord: BranchOrd) -> Result<Vec<u8>, StorageError> {
+    if branch_ord < 1 {
+        return Err(StorageError::IoError(format!(
+            "branch ord must be >= 1, got {branch_ord}"
+        )));
+    }
+    encode_row(
+        &branch_ord_by_name_storage_descriptor(),
+        &[Value::Integer(branch_ord)],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode branch ord value: {err}")))
+}
+
+fn decode_branch_ord_value(bytes: &[u8]) -> Result<BranchOrd, StorageError> {
+    let values = decode_row(&branch_ord_by_name_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode branch ord value: {err}")))?;
+    let [branch_ord] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "unexpected branch ord row shape".to_string(),
+        ));
+    };
+    match branch_ord {
+        Value::Integer(branch_ord) if *branch_ord >= 1 => Ok(*branch_ord),
+        Value::Integer(branch_ord) => Err(StorageError::IoError(format!(
+            "branch ord must be >= 1, got {branch_ord}"
+        ))),
+        other => Err(StorageError::IoError(format!(
+            "branch ord row must contain Integer, got {other:?}"
+        ))),
     }
 }
 
-fn store_branch_ord_registry<H: Storage + ?Sized>(
-    storage: &mut H,
-    registry: &BranchOrdRegistry,
-) -> Result<(), StorageError> {
-    ensure_raw_table_header(
-        storage,
-        BRANCH_ORD_REGISTRY_TABLE,
-        &RawTableHeader::system(
-            STORAGE_KIND_BRANCH_ORD_REGISTRY,
-            BRANCH_ORD_REGISTRY_FORMAT_V1,
-        ),
-    )?;
-    let bytes = encode_branch_ord_registry(registry)?;
-    storage.raw_table_put(BRANCH_ORD_REGISTRY_TABLE, BRANCH_ORD_REGISTRY_KEY, &bytes)
+fn encode_branch_name_value(branch_name: BranchName) -> Result<Vec<u8>, StorageError> {
+    encode_row(
+        &branch_name_by_ord_storage_descriptor(),
+        &[Value::Text(branch_name.as_str().to_string())],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode branch name value: {err}")))
+}
+
+fn decode_branch_name_value(bytes: &[u8]) -> Result<BranchName, StorageError> {
+    let values = decode_row(&branch_name_by_ord_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode branch name value: {err}")))?;
+    let [branch_name] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "unexpected branch name row shape".to_string(),
+        ));
+    };
+    match branch_name {
+        Value::Text(branch_name) => Ok(BranchName::new(branch_name.clone())),
+        other => Err(StorageError::IoError(format!(
+            "branch name row must contain Text, got {other:?}"
+        ))),
+    }
+}
+
+fn encode_branch_ord_meta(next_ord: BranchOrd) -> Result<Vec<u8>, StorageError> {
+    if next_ord < 1 {
+        return Err(StorageError::IoError(format!(
+            "next branch ord must be >= 1, got {next_ord}"
+        )));
+    }
+    encode_row(
+        &branch_ord_meta_storage_descriptor(),
+        &[Value::Integer(next_ord)],
+    )
+    .map_err(|err| StorageError::IoError(format!("encode branch ord meta: {err}")))
+}
+
+fn decode_branch_ord_meta(bytes: &[u8]) -> Result<BranchOrd, StorageError> {
+    let values = decode_row(&branch_ord_meta_storage_descriptor(), bytes)
+        .map_err(|err| StorageError::IoError(format!("decode branch ord meta: {err}")))?;
+    let [next_ord] = values.as_slice() else {
+        return Err(StorageError::IoError(
+            "unexpected branch ord meta row shape".to_string(),
+        ));
+    };
+    match next_ord {
+        Value::Integer(next_ord) if *next_ord >= 1 => Ok(*next_ord),
+        Value::Integer(next_ord) => Err(StorageError::IoError(format!(
+            "next branch ord must be >= 1, got {next_ord}"
+        ))),
+        other => Err(StorageError::IoError(format!(
+            "branch ord meta row must contain Integer, got {other:?}"
+        ))),
+    }
+}
+
+fn load_next_branch_ord<H: Storage + ?Sized>(storage: &H) -> Result<BranchOrd, StorageError> {
+    match storage.raw_table_get(BRANCH_ORD_META_TABLE, BRANCH_ORD_NEXT_ORD_KEY)? {
+        Some(bytes) => {
+            ensure_system_raw_table_header_validated_once(
+                storage,
+                BRANCH_ORD_META_TABLE,
+                STORAGE_KIND_BRANCH_ORD_META,
+                BRANCH_ORD_META_FORMAT_V1,
+            )?;
+            decode_branch_ord_meta(&bytes)
+        }
+        None => Ok(1),
+    }
 }
 
 fn encode_raw_table_header(header: &RawTableHeader) -> Result<Vec<u8>, StorageError> {
@@ -782,6 +945,85 @@ fn raw_table_header_storage_descriptor() -> RowDescriptor {
     ])
 }
 
+fn supported_storage_format_version(storage_kind: &str) -> Result<i32, StorageError> {
+    match storage_kind {
+        STORAGE_KIND_ROW_LOCATOR => Ok(ROW_LOCATOR_STORAGE_FORMAT_V1),
+        STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR => Ok(EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1),
+        STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR => {
+            Ok(EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1)
+        }
+        STORAGE_KIND_BRANCH_ORD_BY_NAME => Ok(BRANCH_ORD_BY_NAME_FORMAT_V1),
+        STORAGE_KIND_BRANCH_NAME_BY_ORD => Ok(BRANCH_NAME_BY_ORD_FORMAT_V1),
+        STORAGE_KIND_BRANCH_ORD_META => Ok(BRANCH_ORD_META_FORMAT_V1),
+        STORAGE_KIND_LOCAL_BATCH_RECORD => Ok(LOCAL_BATCH_RECORD_FORMAT_V3),
+        STORAGE_KIND_SEALED_BATCH_SUBMISSION => Ok(SEALED_BATCH_SUBMISSION_FORMAT_V2),
+        STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT => Ok(AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2),
+        STORAGE_KIND_CATALOGUE => Ok(CATALOGUE_STORAGE_FORMAT_V1),
+        "visible_rows" | "row_history" => Ok(ROW_STORAGE_FORMAT_V2),
+        other => Err(StorageError::IoError(format!(
+            "unknown raw table header storage_kind '{other}'"
+        ))),
+    }
+}
+
+fn validate_raw_table_header_storage_format(
+    raw_table: &str,
+    header: &RawTableHeader,
+) -> Result<(), StorageError> {
+    let expected_version = supported_storage_format_version(header.storage_kind.as_str())?;
+    if header.storage_format_version != expected_version {
+        return Err(StorageError::IoError(format!(
+            "raw table header storage_format_version mismatch for {raw_table}: expected {expected_version}, got {}",
+            header.storage_format_version
+        )));
+    }
+    Ok(())
+}
+
+fn validate_system_raw_table_header(
+    raw_table: &str,
+    header: RawTableHeader,
+    expected_storage_kind: &str,
+    expected_storage_format_version: i32,
+) -> Result<RawTableHeader, StorageError> {
+    validate_raw_table_header_storage_format(raw_table, &header)?;
+    if header.storage_kind.as_str() != expected_storage_kind {
+        return Err(StorageError::IoError(format!(
+            "raw table header storage_kind mismatch for {raw_table}: expected {expected_storage_kind}, got {}",
+            header.storage_kind
+        )));
+    }
+    if header.storage_format_version != expected_storage_format_version {
+        return Err(StorageError::IoError(format!(
+            "raw table header storage_format_version mismatch for {raw_table}: expected {expected_storage_format_version}, got {}",
+            header.storage_format_version
+        )));
+    }
+    Ok(header)
+}
+
+fn ensure_system_raw_table_header_validated_once<H: Storage + ?Sized>(
+    storage: &H,
+    raw_table: &str,
+    expected_storage_kind: &str,
+    expected_storage_format_version: i32,
+) -> Result<(), StorageError> {
+    if raw_table_validated_with_storage(storage, raw_table) {
+        return Ok(());
+    }
+    let header = storage.load_raw_table_header(raw_table)?.ok_or_else(|| {
+        StorageError::IoError(format!("missing raw table header for {raw_table}"))
+    })?;
+    validate_system_raw_table_header(
+        raw_table,
+        header,
+        expected_storage_kind,
+        expected_storage_format_version,
+    )?;
+    cache_validated_raw_table_with_storage(storage, raw_table);
+    Ok(())
+}
+
 fn ensure_raw_table_header<H: Storage + ?Sized>(
     storage: &mut H,
     raw_table: &str,
@@ -803,16 +1045,26 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
                 "raw table header mismatch for {raw_table}"
             )))
         }
-        None => storage.upsert_raw_table_header(raw_table, expected_header),
+        None => {
+            if !storage
+                .raw_table_scan_prefix_keys(raw_table, "")?
+                .is_empty()
+            {
+                return Err(StorageError::IoError(format!(
+                    "missing raw table header for non-empty table {raw_table}"
+                )));
+            }
+            storage.upsert_raw_table_header(raw_table, expected_header)
+        }
     }
 }
 
 fn history_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    RowRawTableId::new(RowRawTableKind::History, table, schema_hash)
+    cached_row_raw_table_id(RowRawTableKind::History, table, schema_hash)
 }
 
 fn visible_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    RowRawTableId::new(RowRawTableKind::Visible, table, schema_hash)
+    cached_row_raw_table_id(RowRawTableKind::Visible, table, schema_hash)
 }
 
 fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
@@ -827,6 +1079,28 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
             ))
         },
     )
+}
+
+fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    let needs_exact_locator = storage
+        .load_row_locator(row_id)?
+        .and_then(|locator| locator.origin_schema_hash)
+        != Some(schema_hash);
+    Ok(PreparedRowWriteContext {
+        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
+        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
+            storage,
+            table_name,
+            schema_hash,
+        )?),
+        needs_exact_locator,
+    })
 }
 
 fn load_user_descriptor_from_raw_table_header(
@@ -896,6 +1170,7 @@ fn validate_row_raw_table_header_fields(
     raw_table_name: &str,
     header: RawTableHeader,
 ) -> Result<RawTableHeader, StorageError> {
+    validate_raw_table_header_storage_format(raw_table_name, &header)?;
     if header.storage_kind.as_str() != kind.storage_kind() {
         return Err(StorageError::IoError(format!(
             "raw table header storage_kind '{}' did not match expected row raw table kind '{}'",
@@ -918,14 +1193,38 @@ fn validate_row_raw_table_header_fields(
     Ok(header)
 }
 
+fn ensure_row_raw_table_header_validated_once<H: Storage + ?Sized>(
+    storage: &H,
+    row_raw_table_id: &RowRawTableId,
+) -> Result<(), StorageError> {
+    if raw_table_validated_with_storage(storage, row_raw_table_id.raw_table_name()) {
+        return Ok(());
+    }
+    let header = storage
+        .load_raw_table_header(row_raw_table_id.raw_table_name())?
+        .ok_or_else(|| {
+            StorageError::IoError(format!(
+                "missing raw table header for {}",
+                row_raw_table_id.raw_table_name()
+            ))
+        })?;
+    validate_row_raw_table_header(row_raw_table_id, header)?;
+    cache_validated_raw_table_with_storage(storage, row_raw_table_id.raw_table_name());
+    Ok(())
+}
+
 pub(crate) fn load_row_raw_table_header_with_storage<H: Storage + ?Sized>(
     storage: &H,
     id: &RowRawTableId,
 ) -> Result<Option<RawTableHeader>, StorageError> {
-    storage
+    let header = storage
         .load_raw_table_header(id.raw_table_name())?
         .map(|header| validate_row_raw_table_header(id, header))
-        .transpose()
+        .transpose()?;
+    if header.is_some() {
+        cache_validated_raw_table_with_storage(storage, id.raw_table_name());
+    }
+    Ok(header)
 }
 
 pub(crate) fn scan_row_raw_table_headers_with_storage<H: Storage + ?Sized>(
@@ -937,6 +1236,7 @@ pub(crate) fn scan_row_raw_table_headers_with_storage<H: Storage + ?Sized>(
             continue;
         }
         let row_raw_table_id = RowRawTableId::parse_raw_table_name(&raw_table_name)?;
+        cache_validated_raw_table_with_storage(storage, &raw_table_name);
         rows.push((
             row_raw_table_id.clone(),
             validate_row_raw_table_header(&row_raw_table_id, header)?,
@@ -956,7 +1256,9 @@ fn row_raw_table_ids_for_table<H: Storage + ?Sized>(
     for (raw_table_name, bytes) in storage.raw_table_scan_prefix(RAW_TABLE_HEADER_TABLE, &prefix)? {
         let row_raw_table_id = RowRawTableId::parse_raw_table_name(&raw_table_name)?;
         let header = decode_raw_table_header(&bytes)?;
-        validate_row_raw_table_header(&row_raw_table_id, header)?;
+        let header = validate_row_raw_table_header(&row_raw_table_id, header)?;
+        cache_raw_table_header_with_storage(storage, &raw_table_name, header);
+        cache_validated_raw_table_with_storage(storage, &raw_table_name);
         ids.push(row_raw_table_id);
     }
     ids.sort_by_key(|row_raw_table_id| row_raw_table_id.raw_table_name().to_string());
@@ -1005,6 +1307,13 @@ fn resolved_row_table_from_locator<H: Storage + ?Sized>(
     storage: &H,
     locator: &ExactRowTableLocator,
 ) -> Result<Option<ResolvedRowTable>, StorageError> {
+    let row_raw_table_id = RowRawTableId {
+        kind: RowRawTableId::parse_raw_table_name(locator.row_raw_table.as_str())?.kind,
+        table_name: locator.table_name.clone(),
+        schema_hash: locator.schema_hash,
+        raw_table_name: locator.row_raw_table.clone(),
+    };
+    ensure_row_raw_table_header_validated_once(storage, &row_raw_table_id)?;
     let user_descriptor =
         if let Some(descriptor) = cached_row_descriptor(locator.row_raw_table.as_str()) {
             descriptor
@@ -1036,16 +1345,19 @@ fn resolved_row_tables_for_table<H: Storage + ?Sized>(
         let row_raw_table_id = RowRawTableId::parse_raw_table_name(&raw_table_name)?;
         let schema_hash = row_raw_table_id.schema_hash;
         let header = decode_raw_table_header(&bytes)?;
+        let header = validate_row_raw_table_header_fields(
+            kind,
+            table,
+            schema_hash,
+            &raw_table_name,
+            header,
+        )?;
+        cache_raw_table_header_with_storage(storage, &raw_table_name, header.clone());
+        cache_validated_raw_table_with_storage(storage, &raw_table_name);
         tables.push(resolved_row_table_from_header(
             storage,
             row_raw_table_id,
-            validate_row_raw_table_header_fields(
-                kind,
-                table,
-                schema_hash,
-                &raw_table_name,
-                header,
-            )?,
+            header,
         )?);
     }
     tables.sort_by(|left, right| left.row_raw_table.cmp(&right.row_raw_table));
@@ -1101,6 +1413,32 @@ fn common_case_exact_visible_row_table_locator<H: Storage + ?Sized>(
     }))
 }
 
+fn exact_visible_row_table_locator_for_delete<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+) -> Result<Option<ExactRowTableLocator>, StorageError> {
+    if let Some(locator) = storage.load_visible_row_table_locator(branch, row_id)? {
+        if locator.table_name.as_str() != table {
+            return Err(StorageError::IoError(format!(
+                "visible row locator table mismatch for {branch}/{row_id:?}: expected {table}, got {}",
+                locator.table_name
+            )));
+        }
+        return Ok(Some(locator));
+    }
+
+    let Some(locator) = common_case_exact_visible_row_table_locator(storage, row_id)? else {
+        return Ok(None);
+    };
+    if locator.table_name.as_str() == table {
+        Ok(Some(locator))
+    } else {
+        Ok(None)
+    }
+}
+
 fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
@@ -1151,8 +1489,6 @@ fn local_batch_record_storage_descriptor_with_branch_ords() -> RowDescriptor {
                 }),
             },
         ),
-        ColumnDescriptor::new("sealed_submission", ColumnType::Bytea).nullable(),
-        ColumnDescriptor::new("latest_settlement", ColumnType::Bytea).nullable(),
     ])
 }
 
@@ -1336,15 +1672,10 @@ pub(crate) fn resolve_history_row_write_context<H: Storage + ?Sized>(
 ) -> Result<PreparedRowWriteContext, StorageError> {
     let (schema_hash, user_descriptor) =
         required_history_user_descriptor_and_schema_hash_for_row(storage, table, row)?;
-    let needs_exact_locator = storage
-        .load_row_locator(row.row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(PreparedRowWriteContext {
-        row_raw_table_id: history_row_raw_table_id(table, schema_hash),
-        user_descriptor: Arc::new(user_descriptor),
-        needs_exact_locator,
-    })
+    let mut context =
+        prepared_row_write_context_for_schema_hash(storage, table, schema_hash, row.row_id)?;
+    context.user_descriptor = Arc::new(user_descriptor);
+    Ok(context)
 }
 
 pub(crate) fn encode_history_row_bytes_with_context(
@@ -1356,8 +1687,11 @@ pub(crate) fn encode_history_row_bytes_with_context(
             .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
 
     Ok(OwnedHistoryRowBytes {
-        row_raw_table: context.row_raw_table_id.raw_table_name().to_string(),
-        row_raw_table_id: context.row_raw_table_id.clone(),
+        row_raw_table: context
+            .history_row_raw_table_id
+            .raw_table_name()
+            .to_string(),
+        row_raw_table_id: context.history_row_raw_table_id.clone(),
         user_descriptor: context.user_descriptor.clone(),
         branch: row.branch.to_string(),
         row_id: row.row_id,
@@ -1378,16 +1712,11 @@ pub(crate) fn encode_visible_row_bytes_with_context(
     .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
 
     Ok(OwnedVisibleRowBytes {
-        row_raw_table: visible_row_raw_table_id(
-            context.row_raw_table_id.table_name.as_str(),
-            context.row_raw_table_id.schema_hash,
-        )
-        .raw_table_name()
-        .to_string(),
-        row_raw_table_id: visible_row_raw_table_id(
-            context.row_raw_table_id.table_name.as_str(),
-            context.row_raw_table_id.schema_hash,
-        ),
+        row_raw_table: context
+            .visible_row_raw_table_id
+            .raw_table_name()
+            .to_string(),
+        row_raw_table_id: context.visible_row_raw_table_id.clone(),
         user_descriptor: context.user_descriptor.clone(),
         branch: entry.current_row.branch.to_string(),
         row_id: entry.current_row.row_id,
@@ -1627,6 +1956,33 @@ pub(super) fn load_visible_region_row_bytes_with_storage<H: Storage + ?Sized>(
         }))
 }
 
+fn scan_history_row_batches_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<Vec<StoredRowBatch>, StorageError> {
+    let row_raw_table_id = history_row_raw_table_id(table, schema_hash);
+    let Some(resolved) = resolved_row_table_from_id(storage, row_raw_table_id.clone())? else {
+        return Ok(Vec::new());
+    };
+
+    let prefix = key_codec::history_row_raw_table_prefix(Some(row_id));
+    let mut rows = Vec::new();
+    for (key, bytes) in storage.raw_table_scan_prefix(row_raw_table_id.raw_table_name(), &prefix)? {
+        let (decoded_row_id, branch, batch_id) = key_codec::decode_history_row_raw_table_key(&key)?;
+        rows.push(decode_history_row_bytes_in_table(
+            &resolved,
+            decoded_row_id,
+            branch.as_str(),
+            batch_id,
+            &bytes,
+        )?);
+    }
+    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
+    Ok(rows)
+}
+
 pub(super) fn scan_visible_region_row_batch_branches_with_storage<H: Storage + ?Sized>(
     storage: &H,
     table: &str,
@@ -1715,12 +2071,18 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
         let history_rows = history_by_visible_row
             .remove(&(branch.clone(), *row_id))
             .unwrap_or_default();
-        if let Some(current_row) = history_rows
-            .iter()
-            .find(|row| row.batch_id() == existing_entry.current_row.batch_id())
-            .cloned()
+        let context = if let Some(current_row) = history_rows.first() {
+            resolve_history_row_write_context(storage, table, current_row)?
+        } else {
+            continue;
+        };
+        if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+            context.user_descriptor.as_ref(),
+            &history_rows,
+        )
+        .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
         {
-            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current_row, &history_rows));
+            rebuilt_visible_entries.push(entry);
             continue;
         }
 
@@ -1737,7 +2099,14 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
         }
 
         if current.state.is_visible() {
-            rebuilt_visible_entries.push(VisibleRowEntry::rebuild(current, &history_rows));
+            if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+                context.user_descriptor.as_ref(),
+                &history_rows,
+            )
+            .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+            {
+                rebuilt_visible_entries.push(entry);
+            }
         } else {
             rows_without_visible_head.push((branch.clone(), *row_id));
         }
@@ -1774,29 +2143,26 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
         (Some(existing), None) => Some(existing),
         (None, incoming) => incoming,
     };
-    storage.append_history_region_rows(table, std::slice::from_ref(&row))?;
-
-    let Some(existing_entry) = storage.load_visible_region_entry(table, branch, row_id)? else {
-        return Ok(true);
-    };
-
     let history_rows = storage.scan_history_row_batches(table, row_id)?;
-    let current_batch_id = existing_entry.current_row.batch_id();
-    let Some(current_row) = history_rows
-        .iter()
-        .find(|candidate| candidate.branch == branch && candidate.batch_id() == current_batch_id)
-        .cloned()
-    else {
-        storage.delete_visible_region_row(table, branch, row_id)?;
-        return Ok(true);
-    };
+    let mut patched_history = history_rows.clone();
+    if let Some(existing) = patched_history
+        .iter_mut()
+        .find(|candidate| candidate.branch == branch && candidate.batch_id() == batch_id)
+    {
+        *existing = row.clone();
+    }
+    let context = resolve_history_row_write_context(storage, table, &row)?;
 
-    if current_row.state.is_visible() {
-        storage.upsert_visible_region_rows(
-            table,
-            &[VisibleRowEntry::rebuild(current_row, &history_rows)],
-        )?;
-    } else {
+    let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
+        context.user_descriptor.as_ref(),
+        &patched_history,
+    )
+    .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+    .into_iter()
+    .collect::<Vec<_>>();
+
+    storage.apply_row_mutation(table, std::slice::from_ref(&row), &visible_entries, &[])?;
+    if visible_entries.is_empty() {
         storage.delete_visible_region_row(table, branch, row_id)?;
     }
 
@@ -2064,17 +2430,6 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
     storage: &mut H,
     record: &LocalBatchRecord,
 ) -> Result<Vec<u8>, StorageError> {
-    let latest_settlement = record
-        .latest_settlement
-        .as_ref()
-        .map(BatchSettlement::encode_storage_row)
-        .transpose()
-        .map_err(|err| StorageError::IoError(format!("encode local batch settlement: {err}")))?;
-    let sealed_submission = record
-        .sealed_submission
-        .as_ref()
-        .map(|submission| encode_sealed_batch_submission_with_branch_ords(storage, submission))
-        .transpose()?;
     encode_row(
         &local_batch_record_storage_descriptor_with_branch_ords(),
         &[
@@ -2100,8 +2455,6 @@ fn encode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
                     })
                     .collect::<Result<Vec<_>, StorageError>>()?,
             ),
-            sealed_submission.map(Value::Bytea).unwrap_or(Value::Null),
-            latest_settlement.map(Value::Bytea).unwrap_or(Value::Null),
         ],
     )
     .map_err(|err| StorageError::IoError(format!("encode local batch record: {err}")))
@@ -2116,15 +2469,7 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         bytes,
     )
     .map_err(|err| StorageError::IoError(format!("decode local batch record: {err}")))?;
-    let [
-        batch_id,
-        mode,
-        sealed,
-        members,
-        sealed_submission,
-        latest_settlement,
-    ] = values.as_slice()
-    else {
+    let [batch_id, mode, sealed, members] = values.as_slice() else {
         return Err(StorageError::IoError(
             "unexpected local batch record shape".to_string(),
         ));
@@ -2247,36 +2592,14 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
             )));
         }
     };
-    let sealed_submission = match sealed_submission {
-        Value::Null => None,
-        Value::Bytea(bytes) => Some(decode_sealed_batch_submission_with_branch_ords(
-            storage, bytes,
-        )?),
-        other => {
-            return Err(StorageError::IoError(format!(
-                "expected sealed submission bytes or null, got {other:?}"
-            )));
-        }
-    };
-    let latest_settlement = match latest_settlement {
-        Value::Null => None,
-        Value::Bytea(bytes) => Some(BatchSettlement::decode_storage_row(bytes).map_err(|err| {
-            StorageError::IoError(format!("decode local batch settlement: {err}"))
-        })?),
-        other => {
-            return Err(StorageError::IoError(format!(
-                "expected latest settlement bytes or null, got {other:?}"
-            )));
-        }
-    };
 
     Ok(LocalBatchRecord {
         batch_id,
         mode,
         sealed,
         members,
-        sealed_submission,
-        latest_settlement,
+        sealed_submission: storage.load_sealed_batch_submission(batch_id)?,
+        latest_settlement: storage.load_authoritative_batch_settlement(batch_id)?,
     })
 }
 
@@ -2295,6 +2618,10 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
 /// No `Send + Sync` bounds. Each thread has its own Storage instance.
 /// Cross-thread communication uses the sync protocol, not shared state.
 pub trait Storage {
+    fn storage_cache_namespace(&self) -> usize {
+        std::ptr::from_ref(self).cast::<()>() as usize
+    }
+
     // ================================================================
     // Logical row locator storage (sync - returns immediately with result)
     // ================================================================
@@ -2302,6 +2629,12 @@ pub trait Storage {
     fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
         let mut rows = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(ROW_LOCATOR_TABLE, "")? {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                ROW_LOCATOR_TABLE,
+                STORAGE_KIND_ROW_LOCATOR,
+                ROW_LOCATOR_STORAGE_FORMAT_V1,
+            )?;
             rows.push((decode_metadata_raw_key(&key)?, decode_row_locator(&bytes)?));
         }
         rows.sort_by_key(|(object_id, _)| *object_id);
@@ -2310,7 +2643,15 @@ pub trait Storage {
 
     fn load_row_locator(&self, id: ObjectId) -> Result<Option<RowLocator>, StorageError> {
         self.raw_table_get(ROW_LOCATOR_TABLE, &metadata_raw_key(id))?
-            .map(|bytes| decode_row_locator(&bytes))
+            .map(|bytes| {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    ROW_LOCATOR_TABLE,
+                    STORAGE_KIND_ROW_LOCATOR,
+                    ROW_LOCATOR_STORAGE_FORMAT_V1,
+                )?;
+                decode_row_locator(&bytes)
+            })
             .transpose()
     }
 
@@ -2323,7 +2664,7 @@ pub trait Storage {
             ensure_raw_table_header(
                 self,
                 ROW_LOCATOR_TABLE,
-                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, 1),
+                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, ROW_LOCATOR_STORAGE_FORMAT_V1),
             )?;
             let locator_bytes = encode_row_locator(locator)?;
             self.raw_table_put(ROW_LOCATOR_TABLE, &metadata_raw_key(id), &locator_bytes)
@@ -2341,7 +2682,15 @@ pub trait Storage {
             VISIBLE_ROW_TABLE_LOCATOR_TABLE,
             &visible_row_table_locator_key(branch, row_id),
         )?
-        .map(|bytes| decode_exact_row_table_locator(&bytes))
+        .map(|bytes| {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                VISIBLE_ROW_TABLE_LOCATOR_TABLE,
+                STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
+                EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1,
+            )?;
+            decode_exact_row_table_locator(&bytes)
+        })
         .transpose()
     }
 
@@ -2356,7 +2705,10 @@ pub trait Storage {
             ensure_raw_table_header(
                 self,
                 VISIBLE_ROW_TABLE_LOCATOR_TABLE,
-                &RawTableHeader::system(STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR, 1),
+                &RawTableHeader::system(
+                    STORAGE_KIND_VISIBLE_ROW_TABLE_LOCATOR,
+                    EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1,
+                ),
             )?;
             let bytes = encode_exact_row_table_locator(locator)?;
             self.raw_table_put(VISIBLE_ROW_TABLE_LOCATOR_TABLE, &key, &bytes)
@@ -2375,7 +2727,15 @@ pub trait Storage {
             HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
             &history_row_batch_table_locator_key(row_id, branch, batch_id),
         )?
-        .map(|bytes| decode_exact_row_table_locator(&bytes))
+        .map(|bytes| {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
+                STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
+                EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1,
+            )?;
+            decode_exact_row_table_locator(&bytes)
+        })
         .transpose()
     }
 
@@ -2391,7 +2751,10 @@ pub trait Storage {
             ensure_raw_table_header(
                 self,
                 HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE,
-                &RawTableHeader::system(STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR, 1),
+                &RawTableHeader::system(
+                    STORAGE_KIND_HISTORY_ROW_BATCH_TABLE_LOCATOR,
+                    EXACT_ROW_TABLE_LOCATOR_STORAGE_FORMAT_V1,
+                ),
             )?;
             let bytes = encode_exact_row_table_locator(locator)?;
             self.raw_table_put(HISTORY_ROW_BATCH_TABLE_LOCATOR_TABLE, &key, &bytes)
@@ -2419,6 +2782,23 @@ pub trait Storage {
         Err(StorageError::IoError(
             "raw table deletes are not implemented for this backend yet".to_string(),
         ))
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        for mutation in mutations {
+            match mutation {
+                RawTableMutation::Put { table, key, value } => {
+                    self.raw_table_put(table, key, value)?;
+                }
+                RawTableMutation::Delete { table, key } => {
+                    self.raw_table_delete(table, key)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn raw_table_get(&self, _table: &str, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -2468,57 +2848,98 @@ pub trait Storage {
     }
 
     fn load_branch_ord(&self, branch_name: BranchName) -> Result<Option<BranchOrd>, StorageError> {
-        Ok(load_branch_ord_registry(self)?
-            .entries
-            .into_iter()
-            .find(|entry| entry.branch_name == branch_name)
-            .map(|entry| entry.branch_ord))
+        self.raw_table_get(
+            BRANCH_ORD_BY_NAME_TABLE,
+            &branch_ord_by_name_key(branch_name),
+        )?
+        .map(|bytes| {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                BRANCH_ORD_BY_NAME_TABLE,
+                STORAGE_KIND_BRANCH_ORD_BY_NAME,
+                BRANCH_ORD_BY_NAME_FORMAT_V1,
+            )?;
+            decode_branch_ord_value(&bytes)
+        })
+        .transpose()
     }
 
     fn load_branch_name_by_ord(
         &self,
         branch_ord: BranchOrd,
     ) -> Result<Option<BranchName>, StorageError> {
-        Ok(load_branch_ord_registry(self)?
-            .entries
-            .into_iter()
-            .find(|entry| entry.branch_ord == branch_ord)
-            .map(|entry| entry.branch_name))
+        let key = branch_name_by_ord_key(branch_ord)?;
+        self.raw_table_get(BRANCH_NAME_BY_ORD_TABLE, &key)?
+            .map(|bytes| {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    BRANCH_NAME_BY_ORD_TABLE,
+                    STORAGE_KIND_BRANCH_NAME_BY_ORD,
+                    BRANCH_NAME_BY_ORD_FORMAT_V1,
+                )?;
+                decode_branch_name_value(&bytes)
+            })
+            .transpose()
     }
 
     fn resolve_or_alloc_branch_ord(
         &mut self,
         branch_name: BranchName,
     ) -> Result<BranchOrd, StorageError> {
-        let mut registry = load_branch_ord_registry(self)?;
-        if let Some(existing_ord) = registry
-            .entries
-            .iter()
-            .find(|entry| entry.branch_name == branch_name)
-            .map(|entry| entry.branch_ord)
-        {
+        if let Some(existing_ord) = self.load_branch_ord(branch_name)? {
             return Ok(existing_ord);
         }
 
-        let next_ord = registry
-            .next_ord
-            .max(
-                registry
-                    .entries
-                    .iter()
-                    .map(|entry| entry.branch_ord)
-                    .max()
-                    .unwrap_or(0)
-                    .saturating_add(1),
-            )
-            .max(1);
-        registry.entries.push(BranchOrdRegistryEntry {
-            branch_ord: next_ord,
-            branch_name,
-        });
-        registry.entries.sort_by_key(|entry| entry.branch_ord);
-        registry.next_ord = next_ord.saturating_add(1);
-        store_branch_ord_registry(self, &registry)?;
+        ensure_raw_table_header(
+            self,
+            BRANCH_ORD_BY_NAME_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_BRANCH_ORD_BY_NAME,
+                BRANCH_ORD_BY_NAME_FORMAT_V1,
+            ),
+        )?;
+        ensure_raw_table_header(
+            self,
+            BRANCH_NAME_BY_ORD_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_BRANCH_NAME_BY_ORD,
+                BRANCH_NAME_BY_ORD_FORMAT_V1,
+            ),
+        )?;
+        ensure_raw_table_header(
+            self,
+            BRANCH_ORD_META_TABLE,
+            &RawTableHeader::system(STORAGE_KIND_BRANCH_ORD_META, BRANCH_ORD_META_FORMAT_V1),
+        )?;
+
+        let mut next_ord = load_next_branch_ord(self)?.max(1);
+        while self.load_branch_name_by_ord(next_ord)?.is_some() {
+            next_ord = next_ord.saturating_add(1);
+        }
+
+        let branch_name_key = branch_ord_by_name_key(branch_name);
+        let branch_ord_key = branch_name_by_ord_key(next_ord)?;
+        let branch_ord_bytes = encode_branch_ord_value(next_ord)?;
+        let branch_name_bytes = encode_branch_name_value(branch_name)?;
+        let next_ord_bytes = encode_branch_ord_meta(next_ord.saturating_add(1))?;
+        let mutations = [
+            RawTableMutation::Put {
+                table: BRANCH_ORD_BY_NAME_TABLE,
+                key: branch_name_key.as_str(),
+                value: &branch_ord_bytes,
+            },
+            RawTableMutation::Put {
+                table: BRANCH_NAME_BY_ORD_TABLE,
+                key: branch_ord_key.as_str(),
+                value: &branch_name_bytes,
+            },
+            RawTableMutation::Put {
+                table: BRANCH_ORD_META_TABLE,
+                key: BRANCH_ORD_NEXT_ORD_KEY,
+                value: &next_ord_bytes,
+            },
+        ];
+        self.apply_raw_table_mutations(&mutations)?;
         Ok(next_ord)
     }
 
@@ -2526,7 +2947,7 @@ pub trait Storage {
         ensure_raw_table_header(
             self,
             "catalogue",
-            &RawTableHeader::system(STORAGE_KIND_CATALOGUE, 1),
+            &RawTableHeader::system(STORAGE_KIND_CATALOGUE, CATALOGUE_STORAGE_FORMAT_V1),
         )?;
         let bytes = entry
             .encode_storage_row()
@@ -2543,9 +2964,17 @@ pub trait Storage {
         object_id: ObjectId,
     ) -> Result<Option<CatalogueEntry>, StorageError> {
         match self.raw_table_get("catalogue", &key_codec::catalogue_entry_key(object_id))? {
-            Some(bytes) => CatalogueEntry::decode_storage_row(object_id, &bytes)
-                .map(Some)
-                .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}"))),
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    "catalogue",
+                    STORAGE_KIND_CATALOGUE,
+                    CATALOGUE_STORAGE_FORMAT_V1,
+                )?;
+                CatalogueEntry::decode_storage_row(object_id, &bytes)
+                    .map(Some)
+                    .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}")))
+            }
             None => Ok(None),
         }
     }
@@ -2555,6 +2984,12 @@ pub trait Storage {
         for (key, bytes) in
             self.raw_table_scan_prefix("catalogue", key_codec::catalogue_entry_prefix())?
         {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                "catalogue",
+                STORAGE_KIND_CATALOGUE,
+                CATALOGUE_STORAGE_FORMAT_V1,
+            )?;
             let Some(hex_id) = key.strip_prefix(key_codec::catalogue_entry_prefix()) else {
                 continue;
             };
@@ -2579,34 +3014,62 @@ pub trait Storage {
         header: &RawTableHeader,
     ) -> Result<(), StorageError> {
         let bytes = encode_raw_table_header(header)?;
-        self.raw_table_put(RAW_TABLE_HEADER_TABLE, raw_table, &bytes)
+        self.raw_table_put(RAW_TABLE_HEADER_TABLE, raw_table, &bytes)?;
+        cache_raw_table_header_with_storage(self, raw_table, header.clone());
+        invalidate_validated_raw_table_with_storage(self, raw_table);
+        Ok(())
     }
 
     fn load_raw_table_header(
         &self,
         raw_table: &str,
     ) -> Result<Option<RawTableHeader>, StorageError> {
-        self.raw_table_get(RAW_TABLE_HEADER_TABLE, raw_table)?
-            .map(|bytes| decode_raw_table_header(&bytes))
-            .transpose()
+        if let Some(header) = cached_raw_table_header_with_storage(self, raw_table) {
+            if !raw_table_validated_with_storage(self, raw_table) {
+                validate_raw_table_header_storage_format(raw_table, &header)?;
+            }
+            return Ok(Some(header));
+        }
+
+        let header = self
+            .raw_table_get(RAW_TABLE_HEADER_TABLE, raw_table)?
+            .map(|bytes| {
+                let header = decode_raw_table_header(&bytes)?;
+                validate_raw_table_header_storage_format(raw_table, &header)?;
+                Ok(header)
+            })
+            .transpose()?;
+        if let Some(header) = header.as_ref() {
+            cache_raw_table_header_with_storage(self, raw_table, header.clone());
+        }
+        Ok(header)
     }
 
     fn scan_raw_table_headers(&self) -> Result<Vec<(String, RawTableHeader)>, StorageError> {
         let mut rows = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(RAW_TABLE_HEADER_TABLE, "")? {
-            rows.push((key, decode_raw_table_header(&bytes)?));
+            let header = decode_raw_table_header(&bytes)?;
+            validate_raw_table_header_storage_format(&key, &header)?;
+            cache_raw_table_header_with_storage(self, &key, header.clone());
+            rows.push((key, header));
         }
         rows.sort_by(|(left, _), (right, _)| left.cmp(right));
         Ok(rows)
     }
 
     fn upsert_local_batch_record(&mut self, record: &LocalBatchRecord) -> Result<(), StorageError> {
+        if let Some(submission) = record.sealed_submission.as_ref() {
+            self.upsert_sealed_batch_submission(submission)?;
+        }
+        if let Some(settlement) = record.latest_settlement.as_ref() {
+            self.upsert_authoritative_batch_settlement(settlement)?;
+        }
         ensure_raw_table_header(
             self,
             LOCAL_BATCH_RECORD_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_LOCAL_BATCH_RECORD,
-                BATCH_FATE_STORAGE_FORMAT_V1,
+                LOCAL_BATCH_RECORD_FORMAT_V3,
             ),
         )?;
         let bytes = encode_local_batch_record_with_branch_ords(self, record)?;
@@ -2622,7 +3085,15 @@ pub trait Storage {
         batch_id: BatchId,
     ) -> Result<Option<LocalBatchRecord>, StorageError> {
         match self.raw_table_get(LOCAL_BATCH_RECORD_TABLE, &local_batch_record_key(batch_id))? {
-            Some(bytes) => decode_local_batch_record_with_branch_ords(self, &bytes).map(Some),
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    LOCAL_BATCH_RECORD_TABLE,
+                    STORAGE_KIND_LOCAL_BATCH_RECORD,
+                    LOCAL_BATCH_RECORD_FORMAT_V3,
+                )?;
+                decode_local_batch_record_with_branch_ords(self, &bytes).map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -2634,6 +3105,12 @@ pub trait Storage {
     fn scan_local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, StorageError> {
         let mut records = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(LOCAL_BATCH_RECORD_TABLE, "batch:")? {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                LOCAL_BATCH_RECORD_TABLE,
+                STORAGE_KIND_LOCAL_BATCH_RECORD,
+                LOCAL_BATCH_RECORD_FORMAT_V3,
+            )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let record = decode_local_batch_record_with_branch_ords(self, &bytes)?;
             if record.batch_id != batch_id {
@@ -2656,7 +3133,7 @@ pub trait Storage {
             SEALED_BATCH_SUBMISSION_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_SEALED_BATCH_SUBMISSION,
-                BATCH_FATE_STORAGE_FORMAT_V1,
+                SEALED_BATCH_SUBMISSION_FORMAT_V2,
             ),
         )?;
         let bytes = encode_sealed_batch_submission_with_branch_ords(self, submission)?;
@@ -2675,7 +3152,15 @@ pub trait Storage {
             SEALED_BATCH_SUBMISSION_TABLE,
             &local_batch_record_key(batch_id),
         )? {
-            Some(bytes) => decode_sealed_batch_submission_with_branch_ords(self, &bytes).map(Some),
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    SEALED_BATCH_SUBMISSION_TABLE,
+                    STORAGE_KIND_SEALED_BATCH_SUBMISSION,
+                    SEALED_BATCH_SUBMISSION_FORMAT_V2,
+                )?;
+                decode_sealed_batch_submission_with_branch_ords(self, &bytes).map(Some)
+            }
             None => Ok(None),
         }
     }
@@ -2690,6 +3175,12 @@ pub trait Storage {
     fn scan_sealed_batch_submissions(&self) -> Result<Vec<SealedBatchSubmission>, StorageError> {
         let mut submissions = Vec::new();
         for (key, bytes) in self.raw_table_scan_prefix(SEALED_BATCH_SUBMISSION_TABLE, "batch:")? {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                SEALED_BATCH_SUBMISSION_TABLE,
+                STORAGE_KIND_SEALED_BATCH_SUBMISSION,
+                SEALED_BATCH_SUBMISSION_FORMAT_V2,
+            )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let submission = decode_sealed_batch_submission_with_branch_ords(self, &bytes)?;
             if submission.batch_id != batch_id {
@@ -2712,7 +3203,7 @@ pub trait Storage {
             AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
             &RawTableHeader::system(
                 STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
-                BATCH_FATE_STORAGE_FORMAT_V1,
+                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
             ),
         )?;
         let bytes = settlement.encode_storage_row().map_err(|err| {
@@ -2733,11 +3224,21 @@ pub trait Storage {
             AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
             &local_batch_record_key(batch_id),
         )? {
-            Some(bytes) => BatchSettlement::decode_storage_row(&bytes)
-                .map(Some)
-                .map_err(|err| {
-                    StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
-                }),
+            Some(bytes) => {
+                ensure_system_raw_table_header_validated_once(
+                    self,
+                    AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+                    STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
+                    AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
+                )?;
+                BatchSettlement::decode_storage_row(&bytes)
+                    .map(Some)
+                    .map_err(|err| {
+                        StorageError::IoError(format!(
+                            "decode authoritative batch settlement: {err}"
+                        ))
+                    })
+            }
             None => Ok(None),
         }
     }
@@ -2747,6 +3248,12 @@ pub trait Storage {
         for (key, bytes) in
             self.raw_table_scan_prefix(AUTHORITATIVE_BATCH_SETTLEMENT_TABLE, "batch:")?
         {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+                STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
+                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
+            )?;
             let batch_id = decode_local_batch_record_key(&key)?;
             let settlement = BatchSettlement::decode_storage_row(&bytes).map_err(|err| {
                 StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
@@ -2977,12 +3484,14 @@ pub trait Storage {
 
     fn delete_visible_region_row(
         &mut self,
-        _table: &str,
+        table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         let key = key_codec::visible_row_raw_table_key(branch, row_id);
-        if let Some(locator) = self.load_visible_row_table_locator(branch, row_id)? {
+        if let Some(locator) =
+            exact_visible_row_table_locator_for_delete(self, table, branch, row_id)?
+        {
             self.raw_table_delete(locator.row_raw_table.as_str(), &key)?;
         }
         self.put_visible_row_table_locator(branch, row_id, None)?;
@@ -3102,18 +3611,37 @@ pub trait Storage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<StoredRowBatch>, StorageError> {
-        let Some(entry) = self.load_visible_region_entry(table, branch, row_id)? else {
+        let Some(row) = load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+        else {
             return Ok(None);
         };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(entry.current_row));
+        let entry = crate::row_histories::decode_flat_visible_row_entry(
+            row.user_descriptor.as_ref(),
+            row_id,
+            branch,
+            &row.bytes,
+        )
+        .map_err(|err| StorageError::IoError(format!("decode flat visible row: {err}")))?;
+        if entry
+            .current_row
+            .confirmed_tier
+            .is_some_and(|tier| tier >= required_tier)
+            || entry.batch_id_for_tier(required_tier).is_some()
+        {
+            return entry.materialize_preview_for_tier_with_storage(
+                self,
+                table,
+                row.user_descriptor.as_ref(),
+                required_tier,
+            );
         }
-
-        self.load_history_row_batch(table, branch, row_id, batch_id)
+        let history_rows = self.scan_history_region(table, branch, HistoryScan::Row { row_id })?;
+        crate::row_histories::visible_row_preview_from_history_rows(
+            row.user_descriptor.as_ref(),
+            &history_rows,
+            Some(required_tier),
+        )
+        .map_err(|err| StorageError::IoError(format!("load tiered visible preview: {err}")))
     }
 
     fn load_visible_query_row_for_tier(
@@ -3337,7 +3865,8 @@ pub trait Storage {
             });
         }
 
-        let history_rows = self.scan_history_row_batches(table, row_id)?;
+        let history_rows =
+            scan_history_row_batches_for_schema_hash(self, table, schema_hash, row_id)?;
         let mut patched_history = history_rows.clone();
         if let Some(existing) = patched_history
             .iter_mut()
@@ -3345,29 +3874,37 @@ pub trait Storage {
         {
             *existing = current_row.clone();
         }
-        self.append_history_region_rows(table, &patched_history)?;
-
-        let Some(existing_entry) = self.load_visible_region_entry(table, branch, row_id)? else {
-            return Ok(true);
-        };
-        let current_batch_id = existing_entry.current_row.batch_id();
-        let Some(current_row) = patched_history
+        let context = prepared_row_write_context_for_schema_hash(
+            self,
+            table,
+            schema_hash,
+            current_row.row_id,
+        )?;
+        let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
+            context.user_descriptor.as_ref(),
+            &patched_history,
+        )
+        .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+        .into_iter()
+        .collect::<Vec<_>>();
+        let encoded_history_rows = vec![encode_history_row_bytes_with_context(
+            &context,
+            &current_row,
+        )?];
+        let encoded_visible_rows = visible_entries
             .iter()
-            .find(|candidate| {
-                candidate.branch == branch && candidate.batch_id() == current_batch_id
-            })
-            .cloned()
-        else {
-            self.delete_visible_region_row(table, branch, row_id)?;
-            return Ok(true);
-        };
+            .map(|entry| encode_visible_row_bytes_with_context(&context, entry))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        if current_row.state.is_visible() {
-            self.upsert_visible_region_rows(
-                table,
-                &[VisibleRowEntry::rebuild(current_row, &patched_history)],
-            )?;
-        } else {
+        self.apply_prepared_row_mutation(
+            table,
+            std::slice::from_ref(&current_row),
+            &visible_entries,
+            &encoded_history_rows,
+            &encoded_visible_rows,
+            &[],
+        )?;
+        if visible_entries.is_empty() {
             self.delete_visible_region_row(table, branch, row_id)?;
         }
 
@@ -3642,6 +4179,10 @@ pub trait Storage {
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
 impl<T: Storage + ?Sized> Storage for Box<T> {
+    fn storage_cache_namespace(&self) -> usize {
+        (**self).storage_cache_namespace()
+    }
+
     fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
         (**self).scan_row_locators()
     }
@@ -3664,6 +4205,13 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         (**self).raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        (**self).apply_raw_table_mutations(mutations)
     }
 
     fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -4190,31 +4738,6 @@ impl TableRowHistories {
         rows.sort_by_key(|row| (row.updated_at, row.batch_id()));
         rows
     }
-
-    fn rebuild_visible_entry(&mut self, branch: &str, row_id: ObjectId) {
-        let Some(current_row) = self
-            .visible
-            .get(branch)
-            .and_then(|rows| rows.get(&row_id))
-            .map(|entry| entry.current_row.clone())
-        else {
-            return;
-        };
-        let branch_key = current_row.branch.clone();
-
-        let mut history_rows = self.history_rows_for(branch, row_id);
-        if !history_rows
-            .iter()
-            .any(|row| row.batch_id() == current_row.batch_id())
-        {
-            history_rows.push(current_row.clone());
-        }
-
-        self.visible
-            .entry(branch_key)
-            .or_default()
-            .insert(row_id, VisibleRowEntry::rebuild(current_row, &history_rows));
-    }
 }
 
 /// In-memory Storage for testing and main-thread use.
@@ -4224,8 +4747,8 @@ impl TableRowHistories {
 /// - All jazz unit tests
 /// - All jazz integration tests
 /// - Main thread in browser (acts as cache of worker state)
-#[derive(Default)]
 pub struct MemoryStorage {
+    cache_namespace: usize,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
     /// Raw table headers already validated/inserted in this storage instance.
@@ -4255,6 +4778,19 @@ impl MemoryStorage {
         ensure_raw_table_header(self, raw_table, expected_header)?;
         self.ensured_raw_table_headers.insert(raw_table.to_string());
         Ok(())
+    }
+}
+
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        Self {
+            cache_namespace: next_storage_cache_namespace(),
+            raw_tables: HashMap::new(),
+            ensured_raw_table_headers: HashSet::new(),
+            row_locators: HashMap::new(),
+            row_histories: HashMap::new(),
+            row_history_bytes: HashMap::new(),
+        }
     }
 }
 
@@ -4366,6 +4902,10 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 impl Storage for MemoryStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn apply_prepared_row_mutation(
         &mut self,
         table: &str,
@@ -4575,6 +5115,10 @@ impl Storage for MemoryStorage {
         locator: Option<&RowLocator>,
     ) -> Result<(), StorageError> {
         if let Some(locator) = locator {
+            self.ensure_cached_raw_table_header(
+                ROW_LOCATOR_TABLE,
+                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, ROW_LOCATOR_STORAGE_FORMAT_V1),
+            )?;
             let locator_bytes = encode_row_locator(locator)?;
             self.raw_tables
                 .entry(ROW_LOCATOR_TABLE.to_string())
@@ -4607,6 +5151,30 @@ impl Storage for MemoryStorage {
         if let Some(rows) = self.raw_tables.get_mut(table) {
             rows.remove(key);
         }
+        Ok(())
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        let mut raw_tables = self.raw_tables.clone();
+        for mutation in mutations {
+            match mutation {
+                RawTableMutation::Put { table, key, value } => {
+                    raw_tables
+                        .entry((*table).to_string())
+                        .or_default()
+                        .insert((*key).to_string(), (*value).to_vec());
+                }
+                RawTableMutation::Delete { table, key } => {
+                    if let Some(rows) = raw_tables.get_mut(*table) {
+                        rows.remove(*key);
+                    }
+                }
+            }
+        }
+        self.raw_tables = raw_tables;
         Ok(())
     }
 
@@ -4831,28 +5399,15 @@ impl Storage for MemoryStorage {
         state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        let Some(regions) = self.row_histories.get_mut(table) else {
-            return Ok(());
-        };
+        let mut rebuild_inputs = Vec::new();
 
-        let mut affected_visible_rows = HashSet::new();
-        for row in regions.history.values_mut() {
-            if row.batch_id == batch_id {
-                if let Some(state) = state {
-                    row.state = state;
-                }
-                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
-                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
-                    (Some(existing), None) => Some(existing),
-                    (None, incoming) => incoming,
-                };
-                affected_visible_rows.insert((row.branch.clone(), row.row_id));
-            }
-        }
+        {
+            let Some(regions) = self.row_histories.get_mut(table) else {
+                return Ok(());
+            };
 
-        for branch_rows in regions.visible.values_mut() {
-            for entry in branch_rows.values_mut() {
-                let row = &mut entry.current_row;
+            let mut affected_visible_rows = HashSet::new();
+            for row in regions.history.values_mut() {
                 if row.batch_id == batch_id {
                     if let Some(state) = state {
                         row.state = state;
@@ -4865,10 +5420,49 @@ impl Storage for MemoryStorage {
                     affected_visible_rows.insert((row.branch.clone(), row.row_id));
                 }
             }
+
+            for (branch, row_id) in affected_visible_rows {
+                let history_rows = regions.history_rows_for(&branch, row_id);
+                let context_row = regions
+                    .visible
+                    .get(branch.as_str())
+                    .and_then(|rows| rows.get(&row_id))
+                    .map(|entry| entry.current_row.clone())
+                    .or_else(|| {
+                        history_rows
+                            .iter()
+                            .rev()
+                            .find(|row| row.state.is_visible())
+                            .cloned()
+                    })
+                    .or_else(|| history_rows.last().cloned());
+                if let Some(context_row) = context_row {
+                    rebuild_inputs.push((branch, row_id, context_row, history_rows));
+                }
+            }
         }
 
-        for (branch, row_id) in affected_visible_rows {
-            regions.rebuild_visible_entry(&branch, row_id);
+        let mut rebuilt_visible_entries = Vec::new();
+        let mut rows_without_visible_head = Vec::new();
+        for (branch, row_id, context_row, history_rows) in rebuild_inputs {
+            let context = resolve_history_row_write_context(self, table, &context_row)?;
+            if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
+                context.user_descriptor.as_ref(),
+                &history_rows,
+            )
+            .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
+            {
+                rebuilt_visible_entries.push(entry);
+            } else {
+                rows_without_visible_head.push((branch, row_id));
+            }
+        }
+
+        if !rebuilt_visible_entries.is_empty() {
+            self.upsert_visible_region_rows(table, &rebuilt_visible_entries)?;
+        }
+        for (branch, row_id) in rows_without_visible_head {
+            self.delete_visible_region_row(table, branch.as_str(), row_id)?;
         }
 
         Ok(())
@@ -5015,18 +5609,27 @@ impl Storage for MemoryStorage {
         else {
             return Ok(None);
         };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(entry.current_row.clone()));
+        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
+        if entry
+            .current_row
+            .confirmed_tier
+            .is_some_and(|tier| tier >= required_tier)
+            || entry.batch_id_for_tier(required_tier).is_some()
+        {
+            return entry.materialize_preview_for_tier_with_storage(
+                self,
+                table,
+                context.user_descriptor.as_ref(),
+                required_tier,
+            );
         }
-
-        Ok(regions
-            .history_rows_for(branch, row_id)
-            .into_iter()
-            .find(|row| row.batch_id() == batch_id))
+        let history_rows = regions.history_rows_for(branch, row_id);
+        crate::row_histories::visible_row_preview_from_history_rows(
+            context.user_descriptor.as_ref(),
+            &history_rows,
+            Some(required_tier),
+        )
+        .map_err(|err| StorageError::IoError(format!("load tiered visible preview: {err}")))
     }
 
     fn load_visible_query_row_for_tier(
@@ -5036,29 +5639,10 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
         required_tier: DurabilityTier,
     ) -> Result<Option<QueryRowBatch>, StorageError> {
-        let Some(regions) = self.row_histories.get(table) else {
-            return Ok(None);
-        };
-        let Some(entry) = regions
-            .visible
-            .get(branch)
-            .and_then(|rows| rows.get(&row_id))
-        else {
-            return Ok(None);
-        };
-
-        let Some(batch_id) = entry.batch_id_for_tier(required_tier) else {
-            return Ok(None);
-        };
-        if batch_id == entry.current_batch_id() {
-            return Ok(Some(QueryRowBatch::from(&entry.current_row)));
-        }
-
-        Ok(regions
-            .history_rows_for(branch, row_id)
-            .into_iter()
-            .find(|row| row.batch_id() == batch_id)
-            .map(|row| QueryRowBatch::from(&row)))
+        Ok(self
+            .load_visible_region_row_for_tier(table, branch, row_id, required_tier)?
+            .as_ref()
+            .map(QueryRowBatch::from))
     }
 
     fn scan_visible_region_row_batches(
@@ -5357,6 +5941,89 @@ mod tests {
         )
     }
 
+    struct RawTableOnlyMemoryStorage {
+        inner: MemoryStorage,
+    }
+
+    impl RawTableOnlyMemoryStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+            }
+        }
+    }
+
+    impl Storage for RawTableOnlyMemoryStorage {
+        fn raw_table_put(
+            &mut self,
+            table: &str,
+            key: &str,
+            value: &[u8],
+        ) -> Result<(), StorageError> {
+            self.inner.raw_table_put(table, key, value)
+        }
+
+        fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+            self.inner.raw_table_delete(table, key)
+        }
+
+        fn apply_raw_table_mutations(
+            &mut self,
+            mutations: &[RawTableMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_raw_table_mutations(mutations)
+        }
+
+        fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.raw_table_get(table, key)
+        }
+
+        fn raw_table_scan_prefix(
+            &self,
+            table: &str,
+            prefix: &str,
+        ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+            self.inner.raw_table_scan_prefix(table, prefix)
+        }
+
+        fn append_history_region_row_bytes(
+            &mut self,
+            _table: &str,
+            rows: &[HistoryRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            for row in rows {
+                self.inner.raw_table_put(
+                    row.row_raw_table,
+                    &key_codec::history_row_raw_table_key(row.row_id, row.branch, row.batch_id),
+                    row.bytes,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn upsert_visible_region_row_bytes(
+            &mut self,
+            _table: &str,
+            rows: &[VisibleRowBytes<'_>],
+        ) -> Result<(), StorageError> {
+            for row in rows {
+                self.inner.raw_table_put(
+                    row.row_raw_table,
+                    &key_codec::visible_row_raw_table_key(row.branch, row.row_id),
+                    row.bytes,
+                )?;
+            }
+            Ok(())
+        }
+
+        fn apply_index_mutations(
+            &mut self,
+            _index_mutations: &[IndexMutation<'_>],
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
     struct FailOnNthRawPutStorage {
         inner: MemoryStorage,
         fail_on_put_number: usize,
@@ -5392,6 +6059,37 @@ mod tests {
 
         fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
             self.inner.raw_table_delete(table, key)
+        }
+
+        fn apply_raw_table_mutations(
+            &mut self,
+            mutations: &[RawTableMutation<'_>],
+        ) -> Result<(), StorageError> {
+            let mut raw_tables = self.inner.raw_tables.clone();
+            for mutation in mutations {
+                self.raw_puts_seen += 1;
+                if self.raw_puts_seen == self.fail_on_put_number {
+                    return Err(StorageError::IoError(format!(
+                        "simulated raw_table_mutation failure #{:?}",
+                        self.fail_on_put_number
+                    )));
+                }
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_tables
+                            .entry((*table).to_string())
+                            .or_default()
+                            .insert((*key).to_string(), (*value).to_vec());
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        if let Some(rows) = raw_tables.get_mut(*table) {
+                            rows.remove(*key);
+                        }
+                    }
+                }
+            }
+            self.inner.raw_tables = raw_tables;
+            Ok(())
         }
 
         fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -5452,6 +6150,13 @@ mod tests {
 
         fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
             self.inner.raw_table_delete(table, key)
+        }
+
+        fn apply_raw_table_mutations(
+            &mut self,
+            mutations: &[RawTableMutation<'_>],
+        ) -> Result<(), StorageError> {
+            self.inner.apply_raw_table_mutations(mutations)
         }
 
         fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -5607,59 +6312,114 @@ mod tests {
     }
 
     #[test]
-    fn branch_ord_allocation_commits_atomically_in_one_put() {
+    fn branch_ord_allocation_commits_atomically_across_forward_reverse_and_meta_rows() {
         let mut storage = FailOnNthRawPutStorage::new(2);
         let main = BranchName::new("dev-aaaaaaaaaaaa-main");
-        storage
-            .upsert_raw_table_header(
-                BRANCH_ORD_REGISTRY_TABLE,
-                &RawTableHeader::system(
-                    STORAGE_KIND_BRANCH_ORD_REGISTRY,
-                    BRANCH_ORD_REGISTRY_FORMAT_V1,
+        storage.fail_on_put_number = usize::MAX;
+        for (table, header) in [
+            (
+                BRANCH_ORD_BY_NAME_TABLE,
+                RawTableHeader::system(
+                    STORAGE_KIND_BRANCH_ORD_BY_NAME,
+                    BRANCH_ORD_BY_NAME_FORMAT_V1,
                 ),
-            )
-            .expect("branch ord registry header should pre-exist");
+            ),
+            (
+                BRANCH_NAME_BY_ORD_TABLE,
+                RawTableHeader::system(
+                    STORAGE_KIND_BRANCH_NAME_BY_ORD,
+                    BRANCH_NAME_BY_ORD_FORMAT_V1,
+                ),
+            ),
+            (
+                BRANCH_ORD_META_TABLE,
+                RawTableHeader::system(STORAGE_KIND_BRANCH_ORD_META, BRANCH_ORD_META_FORMAT_V1),
+            ),
+        ] {
+            storage
+                .upsert_raw_table_header(table, &header)
+                .expect("branch ord headers should pre-exist");
+        }
+        storage.fail_on_put_number = 2;
         storage.raw_puts_seen = 0;
 
-        let branch_ord = storage
-            .resolve_or_alloc_branch_ord(main)
-            .expect("branch ord allocation should fit in one raw_table_put");
-
-        assert_eq!(branch_ord, 1);
-        assert_eq!(storage.raw_puts_seen, 1);
-        assert_eq!(storage.load_branch_ord(main).unwrap(), Some(branch_ord));
+        let err = storage.resolve_or_alloc_branch_ord(main).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("simulated raw_table_mutation failure"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(storage.raw_puts_seen, 2);
+        assert_eq!(storage.load_branch_ord(main).unwrap(), None);
+        assert_eq!(storage.load_branch_name_by_ord(1).unwrap(), None);
         assert_eq!(
-            storage.load_branch_name_by_ord(branch_ord).unwrap(),
-            Some(main)
+            storage
+                .raw_table_get(BRANCH_ORD_META_TABLE, BRANCH_ORD_NEXT_ORD_KEY)
+                .unwrap(),
+            None
         );
     }
 
     #[test]
-    fn branch_ord_registry_row_uses_header_owned_format_version() {
+    fn branch_ord_tables_use_header_owned_format_version() {
         let mut storage = MemoryStorage::new();
         let branch_name = BranchName::new("dev-aaaaaaaaaaaa-main");
 
         storage.resolve_or_alloc_branch_ord(branch_name).unwrap();
 
-        let header = storage
-            .load_raw_table_header(BRANCH_ORD_REGISTRY_TABLE)
+        let by_name_header = storage
+            .load_raw_table_header(BRANCH_ORD_BY_NAME_TABLE)
             .unwrap()
-            .expect("branch ord registry header");
+            .expect("branch ord by name header");
         assert_eq!(
-            header,
+            by_name_header,
             RawTableHeader::system(
-                STORAGE_KIND_BRANCH_ORD_REGISTRY,
-                BRANCH_ORD_REGISTRY_FORMAT_V1,
+                STORAGE_KIND_BRANCH_ORD_BY_NAME,
+                BRANCH_ORD_BY_NAME_FORMAT_V1,
             )
         );
 
-        let bytes = storage
-            .raw_table_get(BRANCH_ORD_REGISTRY_TABLE, BRANCH_ORD_REGISTRY_KEY)
+        let by_ord_header = storage
+            .load_raw_table_header(BRANCH_NAME_BY_ORD_TABLE)
             .unwrap()
-            .expect("branch ord registry row");
-        let values = decode_row(&branch_ord_registry_storage_descriptor(), &bytes).unwrap();
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0], Value::Integer(2));
+            .expect("branch name by ord header");
+        assert_eq!(
+            by_ord_header,
+            RawTableHeader::system(
+                STORAGE_KIND_BRANCH_NAME_BY_ORD,
+                BRANCH_NAME_BY_ORD_FORMAT_V1,
+            )
+        );
+
+        let meta_header = storage
+            .load_raw_table_header(BRANCH_ORD_META_TABLE)
+            .unwrap()
+            .expect("branch ord meta header");
+        assert_eq!(
+            meta_header,
+            RawTableHeader::system(STORAGE_KIND_BRANCH_ORD_META, BRANCH_ORD_META_FORMAT_V1)
+        );
+
+        let ord_bytes = storage
+            .raw_table_get(BRANCH_ORD_BY_NAME_TABLE, branch_name.as_str())
+            .unwrap()
+            .expect("branch ord row");
+        assert_eq!(decode_branch_ord_value(&ord_bytes).unwrap(), 1);
+
+        let name_bytes = storage
+            .raw_table_get(
+                BRANCH_NAME_BY_ORD_TABLE,
+                &branch_name_by_ord_key(1).unwrap(),
+            )
+            .unwrap()
+            .expect("branch name row");
+        assert_eq!(decode_branch_name_value(&name_bytes).unwrap(), branch_name);
+
+        let meta_bytes = storage
+            .raw_table_get(BRANCH_ORD_META_TABLE, BRANCH_ORD_NEXT_ORD_KEY)
+            .unwrap()
+            .expect("branch ord meta row");
+        assert_eq!(decode_branch_ord_meta(&meta_bytes).unwrap(), 2);
     }
 
     #[test]
@@ -5803,7 +6563,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -5847,7 +6607,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -5880,7 +6640,7 @@ mod tests {
             "alice",
             crate::metadata::RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -5929,7 +6689,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -5976,7 +6736,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6021,7 +6781,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let sibling_row = make_users_row_batch(
@@ -6030,7 +6790,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("bob".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6085,7 +6845,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_scan_loads_catalogue_descriptor_once_per_raw_table_instance() {
+    fn visible_scan_loads_catalogue_descriptor_at_most_once_per_raw_table_instance() {
         use crate::row_histories::VisibleRowEntry;
 
         let mut storage = CountingCatalogueLoadsStorage::new();
@@ -6110,7 +6870,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let second_row = make_users_row_batch(
@@ -6119,7 +6879,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("alice".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6140,11 +6900,14 @@ mod tests {
         let loaded = Storage::scan_visible_region(&storage, "users", "main").unwrap();
 
         assert_eq!(loaded, vec![first_row, second_row]);
-        assert_eq!(storage.catalogue_loads(), 1);
+        assert!(
+            storage.catalogue_loads() <= 1,
+            "visible scan should not reload the descriptor more than once per raw table instance"
+        );
     }
 
     #[test]
-    fn history_row_scan_loads_catalogue_descriptor_once_per_raw_table_instance() {
+    fn history_row_scan_loads_catalogue_descriptor_at_most_once_per_raw_table_instance() {
         let mut storage = CountingCatalogueLoadsStorage::new();
         let schema_hash = persist_test_schema(&mut storage, &users_test_schema());
         let first_row_id = ObjectId::new();
@@ -6167,7 +6930,7 @@ mod tests {
             "alpha",
             RowProvenance::for_insert("alice".to_string(), 10),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
         let second_row = make_users_row_batch(
@@ -6176,7 +6939,7 @@ mod tests {
             "beta",
             RowProvenance::for_insert("alice".to_string(), 20),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             Vec::new(),
         );
 
@@ -6189,7 +6952,10 @@ mod tests {
             Storage::scan_history_region(&storage, "users", "main", HistoryScan::Branch).unwrap();
 
         assert_eq!(loaded, vec![first_row, second_row]);
-        assert_eq!(storage.catalogue_loads(), 1);
+        assert!(
+            storage.catalogue_loads() <= 1,
+            "history scan should not reload the descriptor more than once per raw table instance"
+        );
     }
 
     #[test]
@@ -6221,7 +6987,7 @@ mod tests {
                 updated_at: 20,
             },
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
             vec![globally_confirmed.batch_id()],
         );
 
@@ -6546,14 +7312,14 @@ mod tests {
         assert_eq!(decoded, locator);
     }
 
-    #[test]
-    fn common_case_rows_skip_exact_locator_tables_and_still_load_exactly() {
+    fn seed_common_case_visible_task_row<H: Storage>(
+        storage: &mut H,
+    ) -> (SchemaHash, ObjectId, crate::row_histories::StoredRowBatch) {
         use crate::catalogue::CatalogueEntry;
         use crate::metadata::{MetadataKey, ObjectType};
         use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
         use crate::schema_manager::encoding::encode_schema;
 
-        let mut storage = MemoryStorage::new();
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("tasks").column("title", ColumnType::Text))
             .build();
@@ -6572,9 +7338,8 @@ mod tests {
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::new(),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
-        let entry = VisibleRowEntry::new(row.clone());
 
         storage
             .upsert_catalogue_entry(&CatalogueEntry {
@@ -6595,13 +7360,20 @@ mod tests {
                 }),
             )
             .unwrap();
-
         storage
             .append_history_region_rows("tasks", std::slice::from_ref(&row))
             .unwrap();
         storage
-            .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+            .upsert_visible_region_rows("tasks", &[VisibleRowEntry::new(row.clone())])
             .unwrap();
+
+        (schema_hash, row_id, row)
+    }
+
+    #[test]
+    fn common_case_rows_skip_exact_locator_tables_and_still_load_exactly() {
+        let mut storage = RawTableOnlyMemoryStorage::new();
+        let (_schema_hash, row_id, row) = seed_common_case_visible_task_row(&mut storage);
 
         assert_eq!(
             storage
@@ -6626,6 +7398,38 @@ mod tests {
                 .load_visible_region_row("tasks", "main", row_id)
                 .unwrap(),
             Some(row)
+        );
+    }
+
+    #[test]
+    fn common_case_visible_delete_removes_visible_row_without_exact_locator_row() {
+        let mut storage = RawTableOnlyMemoryStorage::new();
+        let (schema_hash, row_id, row) = seed_common_case_visible_task_row(&mut storage);
+
+        storage
+            .delete_visible_region_row("tasks", row.branch.as_str(), row_id)
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .load_visible_region_row("tasks", row.branch.as_str(), row_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .raw_table_get(
+                    &visible_row_raw_table_id("tasks", schema_hash).raw_table_name,
+                    &key_codec::visible_row_raw_table_key(row.branch.as_str(), row_id),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .raw_table_scan_prefix(VISIBLE_ROW_TABLE_LOCATOR_TABLE, "")
+                .unwrap(),
+            Vec::new()
         );
     }
 
@@ -6662,7 +7466,7 @@ mod tests {
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::new(),
             crate::row_histories::RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let entry = VisibleRowEntry::new(row.clone());
 
@@ -6708,6 +7512,233 @@ mod tests {
                 table_name: "tasks".into(),
                 schema_hash,
             }
+        );
+    }
+
+    #[test]
+    fn branch_ord_tables_reject_header_version_mismatch_on_read() {
+        let mut storage = MemoryStorage::new();
+        let branch_name = BranchName::new("dev-aaaaaaaaaaaa-main");
+
+        storage.resolve_or_alloc_branch_ord(branch_name).unwrap();
+
+        let mut header = storage
+            .load_raw_table_header(BRANCH_ORD_BY_NAME_TABLE)
+            .unwrap()
+            .expect("branch ord by name header");
+        header.storage_format_version += 1;
+        storage
+            .upsert_raw_table_header(BRANCH_ORD_BY_NAME_TABLE, &header)
+            .unwrap();
+
+        let err = storage.load_branch_ord(branch_name).unwrap_err();
+        assert!(
+            err.to_string().contains("storage_format_version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn nonempty_headerless_raw_table_is_rejected_instead_of_backfilled() {
+        let mut storage = MemoryStorage::new();
+        storage
+            .raw_table_put("legacy_users", "alice", b"hello")
+            .expect("seed legacy row without header");
+
+        let err = ensure_raw_table_header(
+            &mut storage,
+            "legacy_users",
+            &RawTableHeader::system(STORAGE_KIND_CATALOGUE, CATALOGUE_STORAGE_FORMAT_V1),
+        )
+        .expect_err("non-empty headerless raw table should fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("missing raw table header for non-empty table legacy_users"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            storage.load_raw_table_header("legacy_users").unwrap(),
+            None,
+            "legacy raw table should not be relabeled in place"
+        );
+    }
+
+    #[test]
+    fn exact_visible_row_load_rejects_row_raw_table_header_version_mismatch() {
+        let mut storage = RawTableOnlyMemoryStorage::new();
+        let (schema_hash, row_id, row) = seed_common_case_visible_task_row(&mut storage);
+
+        let raw_table = visible_row_raw_table_id("tasks", schema_hash).raw_table_name;
+        let mut header = storage
+            .load_raw_table_header(&raw_table)
+            .unwrap()
+            .expect("visible raw table header");
+        header.storage_format_version += 1;
+        storage
+            .upsert_raw_table_header(&raw_table, &header)
+            .unwrap();
+
+        let err = storage
+            .load_visible_region_row("tasks", row.branch.as_str(), row_id)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("storage_format_version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn local_batch_records_store_artifacts_in_dedicated_tables_only() {
+        use crate::batch_fate::{
+            BatchMode, LocalBatchMember, SealedBatchMember, VisibleBatchMember,
+        };
+
+        let mut storage = MemoryStorage::new();
+        let batch_id = BatchId::new();
+        let object_id = ObjectId::new();
+        let branch_name = BranchName::new("main");
+        let schema_hash = SchemaHash::from_bytes([0x33; 32]);
+        let row_digest = Digest32([0x44; 32]);
+        let mut record = LocalBatchRecord::new(
+            batch_id,
+            BatchMode::Transactional,
+            DurabilityTier::EdgeServer,
+            false,
+            None,
+        );
+        record.upsert_member(LocalBatchMember {
+            object_id,
+            table_name: "tasks".to_string(),
+            branch_name,
+            schema_hash,
+            row_digest,
+        });
+        let submission = SealedBatchSubmission::new(
+            batch_id,
+            BranchName::new("main"),
+            vec![SealedBatchMember {
+                object_id,
+                row_digest,
+            }],
+            Vec::new(),
+        );
+        record.mark_sealed(submission.clone());
+        let settlement = BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id,
+                branch_name: BranchName::new("main"),
+                batch_id,
+            }],
+        };
+        record.apply_settlement(settlement.clone());
+
+        storage.upsert_local_batch_record(&record).unwrap();
+
+        let bytes = storage
+            .raw_table_get(LOCAL_BATCH_RECORD_TABLE, &local_batch_record_key(batch_id))
+            .unwrap()
+            .expect("local batch record row");
+        let values = decode_row(
+            &local_batch_record_storage_descriptor_with_branch_ords(),
+            &bytes,
+        )
+        .expect("decode local batch record row");
+        assert_eq!(values.len(), 5);
+        assert_eq!(
+            storage
+                .load_sealed_batch_submission(batch_id)
+                .unwrap()
+                .expect("sealed submission"),
+            submission
+        );
+        assert_eq!(
+            storage
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap()
+                .expect("authoritative settlement"),
+            settlement
+        );
+        assert_eq!(
+            storage
+                .load_local_batch_record(batch_id)
+                .unwrap()
+                .expect("record"),
+            record
+        );
+    }
+
+    #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+    #[test]
+    fn sqlite_common_case_visible_delete_after_restart_removes_durable_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("storage.sqlite");
+
+        let (schema_hash, row_id, row) = {
+            let mut storage = SqliteStorage::open(&path).unwrap();
+            let seeded = seed_common_case_visible_task_row(&mut storage);
+            storage.flush();
+            storage.close().unwrap();
+            seeded
+        };
+
+        let mut storage = SqliteStorage::open(&path).unwrap();
+        storage
+            .delete_visible_region_row("tasks", row.branch.as_str(), row_id)
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .load_visible_region_row("tasks", row.branch.as_str(), row_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .raw_table_get(
+                    &visible_row_raw_table_id("tasks", schema_hash).raw_table_name,
+                    &key_codec::visible_row_raw_table_key(row.branch.as_str(), row_id),
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+    #[test]
+    fn rocksdb_common_case_visible_delete_after_restart_removes_durable_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rocksdb");
+
+        let (schema_hash, row_id, row) = {
+            let mut storage = RocksDBStorage::open(&path, 8 * 1024 * 1024).unwrap();
+            let seeded = seed_common_case_visible_task_row(&mut storage);
+            storage.flush();
+            storage.close().unwrap();
+            seeded
+        };
+
+        let mut storage = RocksDBStorage::open(&path, 8 * 1024 * 1024).unwrap();
+        storage
+            .delete_visible_region_row("tasks", row.branch.as_str(), row_id)
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .load_visible_region_row("tasks", row.branch.as_str(), row_id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .raw_table_get(
+                    &visible_row_raw_table_id("tasks", schema_hash).raw_table_name,
+                    &key_codec::visible_row_raw_table_key(row.branch.as_str(), row_id),
+                )
+                .unwrap(),
+            None
         );
     }
 
@@ -6763,7 +7794,7 @@ mod tests {
         storage
             .upsert_raw_table_header(
                 "rowtable:visible:users:2222222222222222222222222222222222222222222222222222222222222222",
-                &RawTableHeader::system(STORAGE_KIND_BRANCH_ORD_REGISTRY, 1),
+                &RawTableHeader::system(STORAGE_KIND_BRANCH_ORD_BY_NAME, 1),
             )
             .unwrap();
 
@@ -6871,6 +7902,134 @@ mod tests {
         assert!(
             matches!(error, StorageError::IoError(ref message) if message.contains("missing catalogue-backed row descriptor")),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn exact_visible_row_tier_load_uses_persisted_winner_sidecar() {
+        use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
+        use crate::row_format::decode_row;
+        use crate::row_histories::{RowState, VisibleRowEntry};
+
+        let mut storage = RawTableOnlyMemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let schema_hash = persist_test_schema(&mut storage, &schema);
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "tasks".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let base = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
+        );
+        let edge_title = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("edge-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let worker_done = crate::row_histories::StoredRowBatch::new(
+            row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &user_descriptor,
+            &[base.clone(), edge_title.clone(), worker_done.clone()],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+
+        storage
+            .append_history_region_rows(
+                "tasks",
+                &[base.clone(), edge_title.clone(), worker_done.clone()],
+            )
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+            .unwrap();
+
+        let worker_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::Local,
+        )
+        .unwrap()
+        .expect("worker preview");
+        let edge_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap()
+        .expect("edge preview");
+        let global_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("global preview");
+
+        assert_eq!(
+            decode_row(&user_descriptor, &worker_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &edge_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &global_preview.data).unwrap(),
+            vec![Value::Text("task".into()), Value::Boolean(false)]
         );
     }
 

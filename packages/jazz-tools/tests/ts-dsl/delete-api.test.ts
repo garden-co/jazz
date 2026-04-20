@@ -39,8 +39,8 @@ describe("TS Delete API", () => {
   });
 
   it("can wait for deletes to be persisted up to a specific durability tier", async () => {
-    const projectHandle = await db.insert(app.projects, { name: "Test Project" });
-    await projectHandle.wait({ tier: "worker" });
+    const projectHandle = db.insert(app.projects, { name: "Test Project" });
+    await projectHandle.wait({ tier: "local" });
     const { value: project } = projectHandle;
 
     const owner = insertUser(db);
@@ -52,13 +52,13 @@ describe("TS Delete API", () => {
       ownerId: owner.id,
       assigneesIds: [],
     });
-    await todoHandle.wait({ tier: "worker" });
+    await todoHandle.wait({ tier: "local" });
     const { value: todo } = todoHandle;
 
     const pending = db.delete(app.todos, todo.id);
-    await pending.wait({ tier: "worker" });
+    await pending.wait({ tier: "local" });
 
-    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(rows).toEqual([]);
   });
 });

@@ -8,7 +8,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
 use crate::sync_manager::RowBatchKey;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn ack_watcher_key(
         &self,
         row_id: ObjectId,
@@ -27,7 +27,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager()
             .sync_manager()
             .max_local_durability_tier()
-            .unwrap_or(DurabilityTier::Worker)
+            .unwrap_or(DurabilityTier::Local)
     }
 
     fn ensure_transactional_batch_is_writable(
@@ -296,6 +296,38 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         Ok(((row_id, row_values), batch_id))
     }
 
+    /// Compatibility shim for callers that pass an explicit row id.
+    pub fn insert_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<DirectInsertResult, RuntimeError> {
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_id = result.row_id;
+        let row_values = result.row_values;
+        let batch_id = result.batch_id;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(row_id, batch_id, batch_mode, true)?;
+        debug!(object_id = %row_id, "inserted");
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(((row_id, row_values), batch_id))
+    }
+
     /// Update a row (partial update by column name).
     pub fn update(
         &mut self,
@@ -317,6 +349,39 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
         Ok(batch_id)
+    }
+
+    /// Compatibility shim for callers that expect explicit-id upserts.
+    pub fn upsert_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<(), RuntimeError> {
+        let _span = debug_span!("upsert", table, %object_id).entered();
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let batch_id = self
+            .schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            self.track_local_batch(object_id, batch_id, BatchMode::Transactional, false)?;
+        }
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
     }
 
     /// Delete a row.
@@ -358,6 +423,58 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let (result, _batch_id, receiver) =
             self.insert_persisted_with_batch_id(table, values, write_context, tier)?;
         Ok((result, receiver))
+    }
+
+    /// Compatibility shim for callers that pass an explicit row id.
+    pub fn insert_persisted_with_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let result = self
+            .schema_manager
+            .insert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                values,
+                object_id,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let row_id = result.row_id;
+        let batch_id = result.batch_id;
+        let row_values = result.row_values;
+        if write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct)
+            == BatchMode::Transactional
+        {
+            self.track_local_batch(row_id, batch_id, BatchMode::Transactional, false)?;
+        } else {
+            self.track_local_batch(row_id, batch_id, BatchMode::Direct, false)?;
+        }
+        let (sender, receiver) = oneshot::channel();
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(Ok(()));
+        } else {
+            let row_batch_key = self.ack_watcher_key(row_id, batch_id, write_context);
+            self.ack_watchers
+                .entry(row_batch_key)
+                .or_default()
+                .push((tier, sender));
+        }
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(((row_id, row_values), receiver))
     }
 
     /// Insert a row and return the logical batch id plus a receiver that
@@ -467,6 +584,52 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
         let (_batch_id, receiver) =
             self.delete_persisted_with_batch_id(object_id, write_context, tier)?;
+        Ok(receiver)
+    }
+
+    /// Compatibility shim for callers that expect explicit-id persisted upserts.
+    pub fn upsert_persisted_with_id(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+        self.ensure_transactional_batch_is_writable(write_context)?;
+        let batch_id = self
+            .schema_manager
+            .upsert_with_write_context_and_id(
+                &mut self.storage,
+                table,
+                object_id,
+                values,
+                write_context,
+            )
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
+        let batch_mode = write_context
+            .map(WriteContext::batch_mode)
+            .unwrap_or(BatchMode::Direct);
+        self.track_local_batch(object_id, batch_id, batch_mode, false)?;
+
+        let (sender, receiver) = oneshot::channel();
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_local_durability_at_least(tier)
+        {
+            let _ = sender.send(Ok(()));
+        } else {
+            let row_batch_key = self.ack_watcher_key(object_id, batch_id, write_context);
+            self.ack_watchers
+                .entry(row_batch_key)
+                .or_default()
+                .push((tier, sender));
+        }
+
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
         Ok(receiver)
     }
 

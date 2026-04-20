@@ -145,7 +145,7 @@ Typical browser example:
 main thread subscribes
   -> worker settles query locally
   -> worker relays upstream if propagation is full
-  -> worker emits QuerySettled(worker)
+  -> worker emits QuerySettled(local)
   -> main thread can deliver once requested tier is satisfied
 ```
 

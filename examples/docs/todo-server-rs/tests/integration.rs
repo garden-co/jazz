@@ -2,6 +2,9 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+#[path = "../../../../crates/jazz-tools/tests/support/permissions.rs"]
+mod permissions_support;
+
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -735,9 +738,9 @@ async fn test_server_resync() {
     // IMPORTANT: Client app_id must match server's app_id for schema sync to work
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
 
-    // 2. Create client with todos schema, add data
-    // This client has admin_secret so it can sync the catalogue (schema) to server.
-    // JWT token provides a session for the client's SSE and sync requests.
+    // 2. Create a normal JWT client with todos schema, then add data.
+    // User-scoped WS sync is what publishes the initial schema and rows here.
+    // Adding admin_secret would now force backend mode and reject catalogue writes.
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -748,10 +751,17 @@ async fn test_server_resync() {
             storage: ClientStorage::Persistent,
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
-            admin_secret: Some(TEST_ADMIN_SECRET.to_string()),
+            admin_secret: None,
             sync_tracer: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
+        let permissions_schema = test_schema();
+        permissions_support::publish_allow_all_permissions(
+            &server.base_url(),
+            TEST_ADMIN_SECRET,
+            &permissions_schema,
+        )
+        .await;
 
         // Create a todo
         let values = todo_values("Synced todo", "");

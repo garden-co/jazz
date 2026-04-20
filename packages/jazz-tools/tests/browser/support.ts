@@ -8,6 +8,7 @@
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getTestingServerInfo } from "./testing-server.js";
+import type { TestingServerInfo } from "./testing-server.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 
 // ---------------------------------------------------------------------------
@@ -66,7 +67,7 @@ export async function waitForQuery<T>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "worker" | "edge",
+  tier?: "local" | "edge",
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -263,16 +264,16 @@ export async function createSyncedDb(
   ctx: TestCleanup,
   label: string,
   secret?: string,
+  testingServer?: TestingServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+  const { appId, serverUrl } = testingServer ?? (await getTestingServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
       auth: { localFirstSecret },
-      adminSecret,
     }),
   );
 }

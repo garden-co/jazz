@@ -32,6 +32,7 @@ use super::RowNode;
 pub struct PolicyFilterNode {
     descriptor: RowDescriptor,
     policy: PolicyExpr,
+    policy_operation: Operation,
     session: Session,
     /// Schema for INHERITS lookups (resolving foreign key references).
     schema: Schema,
@@ -60,6 +61,7 @@ pub(crate) struct PolicyFilterOptions {
     branch: String,
     initial_depth: usize,
     row_policy_mode: RowPolicyMode,
+    policy_operation: Operation,
 }
 
 impl PolicyFilterOptions {
@@ -79,6 +81,11 @@ impl PolicyFilterOptions {
         self.row_policy_mode = row_policy_mode;
         self
     }
+
+    pub(crate) fn with_policy_operation(mut self, policy_operation: Operation) -> Self {
+        self.policy_operation = policy_operation;
+        self
+    }
 }
 
 impl Default for PolicyFilterOptions {
@@ -87,6 +94,7 @@ impl Default for PolicyFilterOptions {
             branch: "main".to_string(),
             initial_depth: 0,
             row_policy_mode: RowPolicyMode::PermissiveLocal,
+            policy_operation: Operation::Select,
         }
     }
 }
@@ -148,6 +156,29 @@ impl PolicyFilterNode {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_branch_policy_mode_and_operation(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        row_policy_mode: RowPolicyMode,
+        policy_operation: Operation,
+    ) -> Self {
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::for_branch(branch)
+                .with_row_policy_mode(row_policy_mode)
+                .with_policy_operation(policy_operation),
+        )
+    }
+
     /// Create a new policy filter node with explicit branch and initial recursion depth.
     pub fn new_with_branch_and_depth(
         descriptor: RowDescriptor,
@@ -182,6 +213,7 @@ impl PolicyFilterNode {
         Self {
             descriptor,
             policy,
+            policy_operation: options.policy_operation,
             session,
             schema,
             table_name,
@@ -344,7 +376,7 @@ impl PolicyFilterNode {
         );
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
-            Operation::Select,
+            self.policy_operation,
             row,
             &self.descriptor,
             &self.table_name,

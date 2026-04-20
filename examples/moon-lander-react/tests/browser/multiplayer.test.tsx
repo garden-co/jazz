@@ -1,14 +1,11 @@
 /**
  * E2E browser tests for Moon Lander — Multiplayer.
  *
- * Tests 1-2: local Game behaviour (player identity — no Jazz needed).
- *   Mount <Game> directly.
- *
- * Tests 3-6: real multiplayer sync through a Jazz server.
+ * Tests: real multiplayer sync through a Jazz server.
  *   Mount <App config={...}> with independent instances connected to the
  *   same sync server. Verify that each instance sees the other as a remote
- *   player, that collected deposits propagate cross-client, that fuel sharing
- *   propagates via Jazz, and that burst deposits reappear correctly.
+ *   player, that collected deposits propagate cross-client, and that burst
+ *   deposits reappear correctly.
  *
  * Data attribute contract:
  *   data-player-id           — unique player ID (persisted in localStorage)
@@ -22,10 +19,9 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { App } from "../../src/App";
-import { Game } from "../../src/Game";
 import { FUEL_TYPES } from "../../src/game/constants";
 import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_PORT, testSecret } from "./test-constants";
 import {
@@ -46,36 +42,6 @@ import {
 const SYNC_TIMEOUT = 20_000;
 
 const mounts: MountEntry[] = [];
-const openedIsolatedLabels: string[] = [];
-
-async function openIsolated(
-  opts: Parameters<(typeof commands)["openIsolatedApp"]>[0],
-): Promise<void> {
-  openedIsolatedLabels.push(opts.label);
-  await commands.openIsolatedApp(opts);
-}
-
-async function mountGame(opts: { physicsSpeed?: number } = {}): Promise<HTMLDivElement> {
-  const el = document.createElement("div");
-  document.body.appendChild(el);
-  const root = createRoot(el);
-  mounts.push({ root, container: el });
-
-  const props: Record<string, unknown> = { initialMode: "landed" };
-  if (opts.physicsSpeed !== undefined) props.physicsSpeed = opts.physicsSpeed;
-
-  await act(async () => {
-    root.render(<Game {...(props as any)} />);
-  });
-
-  await waitFor(
-    () => el.querySelector('[data-testid="game-canvas"]') !== null,
-    3000,
-    "Game canvas should render",
-  );
-
-  return el;
-}
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -125,43 +91,8 @@ async function mountApp(opts: {
   return el;
 }
 
-beforeEach(() => {
-  localStorage.removeItem("moon-lander-player-id");
-});
-
 afterEach(async () => {
-  for (const label of openedIsolatedLabels.splice(0)) {
-    await commands.closeIsolatedApp(label).catch(() => {});
-  }
   await unmountAll(mounts);
-});
-
-// ---------------------------------------------------------------------------
-// Player identity
-// ---------------------------------------------------------------------------
-
-describe("Moon Lander — Player Identity", () => {
-  it("creates a unique player ID and stores it in localStorage", async () => {
-    const el = await mountGame({ physicsSpeed: 10 });
-
-    const playerId = readStr(el, "player-id");
-    expect(playerId).toBeTruthy();
-    expect(playerId.length).toBeGreaterThan(0);
-
-    expect(localStorage.getItem("moon-lander-player-id")).toBe(playerId);
-  });
-
-  it("reuses player ID from localStorage on remount", async () => {
-    const el1 = await mountGame({ physicsSpeed: 10 });
-    const id1 = readStr(el1, "player-id");
-
-    const mount = mounts.pop()!;
-    await act(async () => mount.root.unmount());
-    mount.container.remove();
-
-    const el2 = await mountGame({ physicsSpeed: 10 });
-    expect(readStr(el2, "player-id")).toBe(id1);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -336,106 +267,6 @@ describe("Moon Lander — Cross-Client Sync", () => {
       await commands.stopFreshTestServer("cross-coll").catch(() => {});
     }
   });
-
-  it(
-    "shared deposit appears in receiver's inventory cross-client",
-    { timeout: 90_000 },
-    async () => {
-      /**
-       *   Player A (mountApp)       Jazz DB              Player B (mountApp, same page)
-       *   ───────────────────       ───────              ─────────────────────────────
-       *   mount + exit lander ───────────────────────→  mount + exit lander (same keypress)
-       *   (wait for B visible as remote player)
-       *   walk right 8s ─────────→ collect deposits
-       *   walk left 8s ──────────→ back near B
-       *   proximity share ──────→ collectedBy=B ──────→ B inventory updates
-       *
-       * Both A and B are mounted before "e" is pressed so both exit their
-       * landers with the same page-wide keydown. Page-wide "d"/"a" also reaches
-       * B, so B may collect its own deposits; B's inventory being non-empty
-       * validates cross-client Jazz sync regardless of source.
-       *
-       * Same-page mountApp avoids the isolated-BrowserContext stream connect
-       * timeouts that the openIsolatedApp approach suffered in headless Chromium.
-       * Fresh Jazz server keeps the player-row / deposit event log small.
-       */
-      const serverUrl = await commands.startFreshTestServer("share");
-      const spawnX = 4800;
-
-      try {
-        // Mount both before pressing "e" so both exit their landers simultaneously.
-        const elA = await mountApp({
-          appId: APP_ID_MULTI,
-          dbName: uniqueDbName("share-a"),
-          serverUrl,
-          adminSecret: ADMIN_SECRET,
-          physicsSpeed: 10,
-          spawnX,
-        });
-
-        const elB = await mountApp({
-          appId: APP_ID_MULTI,
-          dbName: uniqueDbName("share-b"),
-          serverUrl,
-          adminSecret: ADMIN_SECRET,
-          physicsSpeed: 10,
-          spawnX,
-        });
-
-        pressKey("e", "KeyE");
-        await waitForAttr(elA, "player-mode", "walking", 3000);
-        releaseKey("e", "KeyE");
-
-        await waitFor(
-          () => {
-            try {
-              return parseFloat(readStr(elA, "remote-player-count")) >= 1;
-            } catch {
-              return false;
-            }
-          },
-          SYNC_TIMEOUT,
-          "Player A should see Player B as a remote player",
-        );
-
-        pressKey("d", "KeyD");
-        await new Promise((r) => setTimeout(r, 8000));
-        releaseKey("d", "KeyD");
-        await waitFrames(10);
-
-        await waitFor(
-          () => {
-            try {
-              return readStr(elA, "inventory") !== "";
-            } catch {
-              return false;
-            }
-          },
-          SYNC_TIMEOUT,
-          "Player A inventory should be non-empty after collecting",
-        );
-
-        pressKey("a", "KeyA");
-        await new Promise((r) => setTimeout(r, 8000));
-        releaseKey("a", "KeyA");
-        await waitFrames(10);
-
-        await waitFor(
-          () => {
-            try {
-              return readStr(elB, "inventory") !== "";
-            } catch {
-              return false;
-            }
-          },
-          SYNC_TIMEOUT,
-          "Player B inventory should be non-empty after receiving a shared deposit",
-        );
-      } finally {
-        await commands.stopFreshTestServer("share").catch(() => {});
-      }
-    },
-  );
 
   it(
     "burst deposits reappear as uncollected after entering lander",

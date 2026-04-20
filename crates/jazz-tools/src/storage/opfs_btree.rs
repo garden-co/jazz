@@ -26,7 +26,7 @@ use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
         append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
@@ -100,10 +100,42 @@ impl SyncFile for AnyFile {
 }
 
 pub struct OpfsBTreeStorage {
+    cache_namespace: usize,
     tree: RefCell<OpfsBTree<AnyFile>>,
 }
 
 impl OpfsBTreeStorage {
+    fn tree_has_any_rows(tree: &mut OpfsBTree<AnyFile>) -> Result<bool, StorageError> {
+        Ok(!tree
+            .range(b"", &[0xFF], 1)
+            .map_err(map_storage_err)?
+            .is_empty())
+    }
+
+    fn ensure_store_manifest(tree: &mut OpfsBTree<AnyFile>) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::OPFS_BTREE_STORE_KIND);
+        match tree
+            .get(super::STORE_MANIFEST_KEY.as_bytes())
+            .map_err(map_storage_err)?
+        {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                if Self::tree_has_any_rows(tree)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty opfs_btree store".to_string(),
+                    ));
+                }
+                let bytes = super::encode_store_manifest(&expected)?;
+                tree.put(super::STORE_MANIFEST_KEY.as_bytes(), &bytes)
+                    .and_then(|_| tree.checkpoint())
+                    .map_err(map_storage_err)
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let file = StdFile::open(path).map_err(map_storage_err)?;
@@ -132,8 +164,10 @@ impl OpfsBTreeStorage {
 
     fn open_with_file(file: AnyFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let options = Self::options(cache_size_bytes);
-        let tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
+        let mut tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
+        Self::ensure_store_manifest(&mut tree)?;
         let storage = Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             tree: RefCell::new(tree),
         };
         Ok(storage)
@@ -229,6 +263,10 @@ impl OpfsBTreeStorage {
 }
 
 impl Storage for OpfsBTreeStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         raw_table_put_core(table, key, value, |storage_key, bytes| {
             self.tree_insert(storage_key, bytes)
@@ -237,6 +275,30 @@ impl Storage for OpfsBTreeStorage {
 
     fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         raw_table_delete_core(table, key, |storage_key| self.tree_delete(storage_key))
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_tree_mut(|tree| {
+            for mutation in mutations {
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_table_put_core(table, key, value, |storage_key, bytes| {
+                            tree.put(storage_key.as_bytes(), bytes)
+                                .map_err(map_storage_err)
+                        })?;
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        raw_table_delete_core(table, key, |storage_key| {
+                            tree.delete(storage_key.as_bytes()).map_err(map_storage_err)
+                        })?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -522,6 +584,59 @@ mod tests {
                 .scan_history_region("users", "main", HistoryScan::Row { row_id })
                 .unwrap(),
             vec![row]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.opfs");
+        let storage = OpfsBTreeStorage::open(&path, 4 * 1024 * 1024).unwrap();
+        let bad_manifest = crate::storage::StoreManifest {
+            store_kind: crate::storage::OPFS_BTREE_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        storage
+            .tree_insert(
+                crate::storage::STORE_MANIFEST_KEY,
+                &crate::storage::encode_store_manifest(&bad_manifest).unwrap(),
+            )
+            .unwrap();
+        storage.flush();
+        drop(storage);
+
+        let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.opfs");
+        let storage = OpfsBTreeStorage::open(&path, 4 * 1024 * 1024).unwrap();
+        storage.tree_insert("raw:legacy:alice", b"hello").unwrap();
+        storage
+            .tree_delete(crate::storage::STORE_MANIFEST_KEY)
+            .unwrap();
+        storage.flush();
+        drop(storage);
+
+        let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty opfs_btree store"),
+            "unexpected error: {err}"
         );
     }
 
