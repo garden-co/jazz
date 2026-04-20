@@ -217,3 +217,10 @@ button:disabled {
   background: none;
   color: var(--danger);
 }
+
+.dashboard header .auth-nav {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}

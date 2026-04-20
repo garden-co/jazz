@@ -25,10 +25,12 @@ export default function DashboardPage() {
           style={{ width: "100%", height: "auto" }}
           loading="eager"
         />
-        <p>Hello, {session.user.name}</p>
-        <button type="button" onClick={handleSignOut}>
-          Sign out
-        </button>
+        <div className="auth-nav">
+          <p>Hello, {session.user.name}</p>
+          <button type="button" onClick={handleSignOut}>
+            Sign out
+          </button>
+        </div>
       </header>
       <TodoWidget />
     </main>
