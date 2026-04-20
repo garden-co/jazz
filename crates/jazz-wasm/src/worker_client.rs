@@ -51,6 +51,11 @@ mod wasm_client {
         on_upstream_status: Rc<RefCell<Option<js_sys::Function>>>,
         on_auth_failed: Rc<RefCell<Option<js_sys::Function>>>,
         on_error: Rc<RefCell<Option<js_sys::Function>>>,
+
+        // Optional JS callback for `Destination::Server` outbox entries.
+        // When set (follower mode), server-bound payloads are handed to this
+        // function instead of being forwarded to the worker.
+        server_payload_forwarder: Rc<RefCell<Option<js_sys::Function>>>,
     }
 
     #[wasm_bindgen]
@@ -86,6 +91,9 @@ mod wasm_client {
             let on_auth_failed: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
             let on_error: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
 
+            let server_payload_forwarder: Rc<RefCell<Option<js_sys::Function>>> =
+                Rc::new(RefCell::new(None));
+
             // Spawn the inbox dispatcher.
             spawn_inbox_dispatcher(
                 stream.clone(),
@@ -113,6 +121,7 @@ mod wasm_client {
                 on_upstream_status,
                 on_auth_failed,
                 on_error,
+                server_payload_forwarder,
             }
         }
 
@@ -322,11 +331,15 @@ mod wasm_client {
         // ------------------------------------------------------------------
 
         /// Install a `ClientOutboxHandle` on `runtime` and spawn a drainer that
-        /// encodes each `OutboxEntry` as a `WorkerFrame::Sync { bytes }` and
-        /// posts it to the worker.
+        /// encodes each `OutboxEntry` and routes it based on destination:
         ///
-        /// Call this once after constructing both `WorkerClient` and the main-
-        /// thread `WasmRuntime`.
+        /// - `Destination::Client` → wrap as `WorkerFrame::Sync` and post to the worker.
+        /// - `Destination::Server` → if `server_payload_forwarder` is set (follower mode),
+        ///   call the JS forwarder; otherwise forward to the worker as a `WorkerFrame::Sync`
+        ///   frame so the worker's Rust transport can send it upstream (leader mode).
+        ///
+        /// Call this once after constructing both `WorkerClient` and the main-thread
+        /// `WasmRuntime`.
         #[wasm_bindgen(js_name = installOnRuntime)]
         pub fn install_on_runtime(&self, runtime: &WasmRuntime) {
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<OutboxEntry>();
@@ -336,6 +349,7 @@ mod wasm_client {
                 .set_client_outbox(ClientOutboxHandle { tx });
 
             let stream = self.stream.clone();
+            let fw_slot = self.server_payload_forwarder.clone();
             spawn_local(async move {
                 use jazz_tools::transport_manager::StreamAdapter;
 
@@ -349,7 +363,7 @@ mod wasm_client {
                     let mut frames: Vec<Vec<u8>> = Vec::new();
 
                     let mut translate = |entry: OutboxEntry| {
-                        match &entry.destination {
+                        match entry.destination {
                             Destination::Client(_) => {
                                 // All client-bound entries from the main-thread core are
                                 // destined for the worker's main-thread client.  Wrap as Sync.
@@ -368,11 +382,27 @@ mod wasm_client {
                                 }
                             }
                             Destination::Server(_) => {
-                                // Server-bound payloads should not originate from the
-                                // main-thread core (it has no transport).  Drop silently.
-                                web_sys::console::warn_1(
-                                    &"[WorkerClient] outbox: unexpected Server-destination entry — dropped".into(),
-                                );
+                                match entry.payload.to_bytes() {
+                                    Ok(bytes) => {
+                                        if let Some(fw) = fw_slot.borrow().as_ref() {
+                                            // Follower mode: hand to JS forwarder.
+                                            let u8arr = js_sys::Uint8Array::from(&bytes[..]);
+                                            let _ = fw.call1(&JsValue::NULL, &u8arr.into());
+                                        } else {
+                                            // Leader mode: forward to worker as Sync frame so
+                                            // the worker's Rust transport sends it upstream.
+                                            frames.push(encode(&WorkerFrame::Sync { bytes }));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        web_sys::console::warn_1(
+                                            &format!(
+                                                "[WorkerClient] outbox: server payload encode failed: {e}"
+                                            )
+                                            .into(),
+                                        );
+                                    }
+                                }
                             }
                         }
                     };
@@ -393,6 +423,21 @@ mod wasm_client {
                     }
                 }
             });
+        }
+
+        // ------------------------------------------------------------------
+        // setServerPayloadForwarder
+        // ------------------------------------------------------------------
+
+        /// Set (or clear) the JS callback that receives `Destination::Server` outbox
+        /// entries from the main-thread runtime.
+        ///
+        /// When set (follower / leader-election hand-off mode), server-bound payloads
+        /// are passed to `cb` as a `Uint8Array` instead of being forwarded to the
+        /// worker.  Pass `None` (JS `null` / `undefined`) to restore leader mode.
+        #[wasm_bindgen(js_name = setServerPayloadForwarder)]
+        pub fn set_server_payload_forwarder(&self, cb: Option<js_sys::Function>) {
+            *self.server_payload_forwarder.borrow_mut() = cb;
         }
 
         // ------------------------------------------------------------------
