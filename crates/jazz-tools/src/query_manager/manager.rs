@@ -248,6 +248,7 @@ pub struct QueryUpdate {
 #[derive(Debug, Clone)]
 pub struct QuerySubscriptionFailure {
     pub subscription_id: QuerySubscriptionId,
+    pub code: String,
     pub reason: String,
 }
 
@@ -864,6 +865,7 @@ impl QueryManager {
                 .unwrap_or(QueryPropagation::Full);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
+                code: "query_recompile_failed".to_string(),
                 reason: reason.clone(),
             });
             if propagation == QueryPropagation::Full {
@@ -873,7 +875,8 @@ impl QueryManager {
             }
         }
 
-        let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
+        let mut failed_server: Vec<(ClientId, QueryId, String, String, QueryPropagation)> =
+            Vec::new();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
@@ -914,13 +917,19 @@ impl QueryManager {
                             error = %reason,
                             "server subscription stale recompile failed; dropping subscription"
                         );
-                        failed_server.push((*client_id, *query_id, reason, sub.propagation));
+                        failed_server.push((
+                            *client_id,
+                            *query_id,
+                            "query_recompile_failed".to_string(),
+                            reason,
+                            sub.propagation,
+                        ));
                     }
                 }
             }
         }
 
-        for (client_id, query_id, reason, propagation) in failed_server {
+        for (client_id, query_id, code, reason, propagation) in failed_server {
             self.server_subscriptions.remove(&(client_id, query_id));
             self.sync_manager
                 .drop_client_query_subscription(client_id, query_id);
@@ -931,6 +940,7 @@ impl QueryManager {
             self.sync_manager.emit_query_subscription_rejected(
                 client_id,
                 query_id,
+                code,
                 format!(
                     "query recompilation failed for query_id {}: {}",
                     query_id.0, reason
@@ -942,6 +952,28 @@ impl QueryManager {
     /// Get the schema context.
     pub fn schema_context(&self) -> &SchemaContext {
         &self.schema_context
+    }
+
+    fn process_pending_query_rejections(&mut self) {
+        for rejection in self.sync_manager.take_pending_query_rejections() {
+            let sub_id = QuerySubscriptionId(rejection.query_id.0);
+            if !self.subscriptions.contains_key(&sub_id) {
+                tracing::warn!(
+                    sub_id = sub_id.0,
+                    code = %rejection.code,
+                    error = %rejection.reason,
+                    "received rejection for unknown local subscription"
+                );
+                continue;
+            }
+
+            self.unsubscribe_with_sync(sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                code: rejection.code,
+                reason: rejection.reason,
+            });
+        }
     }
 
     /// Get the current branch name for writes.
@@ -1091,6 +1123,8 @@ impl QueryManager {
                 self.sync_manager.requeue_pending_query_settled(blocked);
             }
         }
+
+        self.process_pending_query_rejections();
 
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.

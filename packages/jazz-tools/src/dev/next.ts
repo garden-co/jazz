@@ -1,3 +1,4 @@
+import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -55,6 +56,8 @@ export function withJazz(
   nextConfig?: NextConfigInput,
   options: NextJazzPluginOptions = {},
 ): NextConfigFactory {
+  let hasLoggedInspectorLink = false;
+
   return async (phase, context) => {
     const resolved = await resolveConfig(nextConfig, phase, context);
     const merged: NextConfigLike = {
@@ -73,6 +76,16 @@ export function withJazz(
         : undefined;
 
     const managed = await runtime.initialize({ ...options, backendSecret });
+    if (!hasLoggedInspectorLink) {
+      console.log(
+        `[jazz] Open the inspector: ${buildInspectorLink(
+          managed.serverUrl,
+          managed.appId,
+          managed.adminSecret,
+        )}`,
+      );
+      hasLoggedInspectorLink = true;
+    }
 
     return {
       ...merged,
