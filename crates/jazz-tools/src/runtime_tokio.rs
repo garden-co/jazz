@@ -23,6 +23,7 @@ use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
+use crate::row_histories::BatchId;
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
@@ -41,6 +42,7 @@ use crate::sync_manager::{
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
+type DirectInsertResult = (ObjectId, Vec<Value>, BatchId);
 type PersistedWriteReceiver = oneshot::Receiver<crate::runtime_core::PersistedWriteAck>;
 type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteReceiver);
 
@@ -315,7 +317,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         table: &str,
         values: HashMap<String, Value>,
         session: Option<&Session>,
-    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         self.insert_with_id(table, values, None, session)
     }
 
@@ -326,11 +328,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: HashMap<String, Value>,
         object_id: Option<ObjectId>,
         session: Option<&Session>,
-    ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
+    ) -> Result<DirectInsertResult, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        let result = core.insert_with_id(table, values, object_id, owned.as_ref())?;
-        Ok(result)
+        let ((row_id, row_values), batch_id) =
+            core.insert_with_id(table, values, object_id, owned.as_ref())?;
+        Ok((row_id, row_values, batch_id))
     }
 
     /// Insert a row and return a receiver that resolves when the requested
@@ -367,11 +370,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         values: Vec<(String, Value)>,
         session: Option<&Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        core.update(object_id, values, owned.as_ref())?;
-        Ok(())
+        Ok(core.update(object_id, values, owned.as_ref())?)
     }
 
     /// Create or update a row with a caller-supplied external row id.
@@ -425,11 +427,10 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         &self,
         object_id: ObjectId,
         session: Option<&Session>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let owned = session.cloned().map(WriteContext::from_session);
-        core.delete(object_id, owned.as_ref())?;
-        Ok(())
+        Ok(core.delete(object_id, owned.as_ref())?)
     }
 
     /// Delete a row and return a receiver that resolves when the requested
@@ -892,7 +893,7 @@ mod tests {
         // Insert a row
         let user_id = ObjectId::new();
         let expected_values = user_row_values(user_id, "Alice");
-        let (object_id, row_values) = runtime
+        let (object_id, row_values, _batch_id) = runtime
             .insert("users", user_insert_values(user_id, "Alice"), None)
             .unwrap();
         assert!(!object_id.0.is_nil());
@@ -919,7 +920,7 @@ mod tests {
         let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Insert
-        let (object_id, _row_values) = runtime
+        let (object_id, _row_values, _batch_id) = runtime
             .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
             .unwrap();
 
@@ -976,7 +977,7 @@ mod tests {
             .unwrap();
 
         // Insert a row - this should trigger the subscription callback
-        let (_object_id, _row_values) = runtime
+        let (_object_id, _row_values, _batch_id) = runtime
             .insert("users", user_insert_values(ObjectId::new(), "Eve"), None)
             .unwrap();
 

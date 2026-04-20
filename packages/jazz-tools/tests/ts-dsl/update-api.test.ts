@@ -76,10 +76,10 @@ describe("TS Update API", () => {
     );
   });
 
-  it("updates rows synchronously without returning a promise", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+  it("updates rows synchronously and returns a write handle", async () => {
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
@@ -89,16 +89,18 @@ describe("TS Update API", () => {
     });
 
     const result = db.update(app.todos, todo.id, { done: true });
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }));
     expect(updated!.done).toBe(true);
   });
 
   it("can wait for updates to be persisted up to a specific durability tier", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
@@ -107,10 +109,8 @@ describe("TS Update API", () => {
       assigneesIds: [],
     });
 
-    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "local" });
-    expect(pending).toBeInstanceOf(Promise);
-
-    await pending;
+    const pending = db.update(app.todos, todo.id, { done: true });
+    await pending.wait({ tier: "local" });
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(updated!.done).toBe(true);

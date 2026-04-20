@@ -12,7 +12,9 @@ export function TodoItem({ id }: { id: string }) {
     <View>
       <Switch
         value={todo.done}
-        onValueChange={() => db.update(app.todos, id, { done: !todo.done })}
+        onValueChange={() => {
+          db.update(app.todos, id, { done: !todo.done });
+        }}
       />
       <Text>{todo.title}</Text>
       <Pressable onPress={() => db.delete(app.todos, id)}>

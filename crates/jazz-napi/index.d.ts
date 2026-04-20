@@ -18,10 +18,10 @@ export declare class NapiRuntime {
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
   insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
   insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
-  update(objectId: string, values: any): void
-  updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): void
-  delete(objectId: string): void
-  deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): void
+  update(objectId: string, values: any): any
+  updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
+  delete(objectId: string): any
+  deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
   subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   unsubscribe(handle: number): void

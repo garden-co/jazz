@@ -16,6 +16,7 @@ import {
   WasmModule,
   WasmSchema,
 } from "../index.js";
+import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
@@ -502,7 +503,7 @@ class DevToolsJazzClient {
   forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
@@ -529,7 +530,11 @@ class DevToolsJazzClient {
   ): Promise<Row[]> {
     throw new Error("Method not implemented.");
   }
-  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): void {
+  update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: { tier?: DurabilityTier },
+  ): DirectMutationResult {
     throw new Error("DevTools client does not support non-durable update().");
   }
   async updateDurable(
@@ -544,7 +549,7 @@ class DevToolsJazzClient {
       tier: options?.tier,
     });
   }
-  delete(objectId: string, options?: { tier?: DurabilityTier }): void {
+  delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
