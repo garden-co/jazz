@@ -45,7 +45,6 @@ type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>>;
 type DirectInsertResult = (ObjectId, Vec<Value>, BatchId);
 type PersistedWriteReceiver = oneshot::Receiver<crate::runtime_core::PersistedWriteAck>;
 type PersistedInsertResult = ((ObjectId, Vec<Value>), PersistedWriteReceiver);
-type PersistedWriteResult = ((ObjectId, Vec<Value>), BatchId, PersistedWriteReceiver);
 
 /// Scheduler implementation for Tokio.
 ///
@@ -313,26 +312,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     // =========================================================================
 
     /// Insert a row into a table.
-    pub fn insert_with_write_context(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<DirectInsertResult, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let ((object_id, row_values), batch_id) = core.insert(table, values, write_context)?;
-        Ok((object_id, row_values, batch_id))
-    }
-
-    /// Insert a row into a table.
     pub fn insert(
         &self,
         table: &str,
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<DirectInsertResult, RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.insert_with_write_context(table, values, owned.as_ref())
+        self.insert_with_id(table, values, None, session)
     }
 
     /// Insert a row into a table with an optional external row id.
@@ -348,19 +334,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let ((row_id, row_values), batch_id) =
             core.insert_with_id(table, values, object_id, owned.as_ref())?;
         Ok((row_id, row_values, batch_id))
-    }
-
-    /// Insert a row and return the logical batch id plus a receiver that
-    /// resolves when the requested persistence tier (or higher) acknowledges.
-    pub fn insert_persisted_with_write_context(
-        &self,
-        table: &str,
-        values: HashMap<String, Value>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<PersistedWriteResult, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.insert_persisted_with_batch_id(table, values, write_context, tier)?)
     }
 
     /// Insert a row and return a receiver that resolves when the requested
@@ -398,18 +371,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
     ) -> Result<BatchId, RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.update_with_write_context(object_id, values, owned.as_ref())
-    }
-
-    pub fn update_with_write_context(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.update(object_id, values, write_context)?)
+        let owned = session.cloned().map(WriteContext::from_session);
+        Ok(core.update(object_id, values, owned.as_ref())?)
     }
 
     /// Create or update a row with a caller-supplied external row id.
@@ -441,17 +405,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(receiver)
     }
 
-    pub fn update_persisted_with_write_context(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(BatchId, PersistedWriteReceiver), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.update_persisted_with_batch_id(object_id, values, write_context, tier)?)
-    }
-
     /// Create or update a row and return a receiver that resolves when the
     /// requested durability tier (or higher) acknowledges.
     pub fn upsert_persisted_with_id(
@@ -475,17 +428,9 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         object_id: ObjectId,
         session: Option<&Session>,
     ) -> Result<BatchId, RuntimeError> {
-        let owned = session.cloned().map(WriteContext::from_session);
-        self.delete_with_write_context(object_id, owned.as_ref())
-    }
-
-    pub fn delete_with_write_context(
-        &self,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-    ) -> Result<BatchId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.delete(object_id, write_context)?)
+        let owned = session.cloned().map(WriteContext::from_session);
+        Ok(core.delete(object_id, owned.as_ref())?)
     }
 
     /// Delete a row and return a receiver that resolves when the requested
@@ -500,49 +445,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let owned = session.cloned().map(WriteContext::from_session);
         let receiver = core.delete_persisted(object_id, owned.as_ref(), tier)?;
         Ok(receiver)
-    }
-
-    pub fn delete_persisted_with_write_context(
-        &self,
-        object_id: ObjectId,
-        write_context: Option<&WriteContext>,
-        tier: DurabilityTier,
-    ) -> Result<(BatchId, PersistedWriteReceiver), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.delete_persisted_with_batch_id(object_id, write_context, tier)?)
-    }
-
-    /// Load one retained local batch record by logical batch id.
-    pub fn local_batch_record(
-        &self,
-        batch_id: BatchId,
-    ) -> Result<Option<crate::batch_fate::LocalBatchRecord>, RuntimeError> {
-        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.storage()
-            .load_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(err.to_string()))
-    }
-
-    /// Scan all retained local batch records.
-    pub fn local_batch_records(
-        &self,
-    ) -> Result<Vec<crate::batch_fate::LocalBatchRecord>, RuntimeError> {
-        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.storage()
-            .scan_local_batch_records()
-            .map_err(|err| RuntimeError::WriteError(err.to_string()))
-    }
-
-    /// Acknowledge a rejected batch and prune its retained local record.
-    pub fn acknowledge_rejected_batch(&self, batch_id: BatchId) -> Result<bool, RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.acknowledge_rejected_batch(batch_id)?)
-    }
-
-    /// Seal a transactional batch so it becomes eligible for submission.
-    pub fn seal_batch(&self, batch_id: BatchId) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.seal_batch(batch_id)?)
     }
 
     /// Flush pending operations to storage.
@@ -624,28 +526,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.subscribe(query, callback, session)
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
-    }
-
-    /// Subscribe with explicit read durability options.
-    pub fn subscribe_with_read_options<F>(
-        &self,
-        query: Query,
-        callback: F,
-        session: Option<Session>,
-        durability: ReadDurabilityOptions,
-    ) -> Result<SubscriptionHandle, RuntimeError>
-    where
-        F: Fn(SubscriptionDelta) + Send + 'static,
-    {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.subscribe_with_durability_and_propagation(
-            query,
-            callback,
-            session,
-            durability,
-            QueryPropagation::Full,
-        )
-        .map_err(|e| RuntimeError::QueryError(e.to_string()))
     }
 
     /// Unsubscribe from a query.
