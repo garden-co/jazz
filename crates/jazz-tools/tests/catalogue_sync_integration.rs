@@ -68,31 +68,6 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
 
-    let admin =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-dynamic"))
-            .await
-            .expect("connect admin");
-    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
-
-    let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = admin
-        .create(
-            "users",
-            user_values_v1(user_id_value, "hidden before permissions"),
-        )
-        .await
-        .expect("admin creates user");
-
-    wait_for_query(
-        &admin,
-        QueryBuilder::new("users").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "admin row settled at dynamic server",
-        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
-    )
-    .await;
-
     let mut reader_context = server.make_client_context_for_user(schema.clone(), "reader-dynamic");
     reader_context.backend_secret = None;
     reader_context.admin_secret = None;
@@ -117,6 +92,22 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 
     publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
 
+    let admin =
+        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-dynamic"))
+            .await
+            .expect("connect admin");
+    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
+
+    let user_id_value = jazz_tools::ObjectId::new();
+    let (user_obj_id, _) = admin
+        .create_persisted(
+            "users",
+            user_values_v1(user_id_value, "visible after permissions"),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("admin creates user after permissions publish");
+
     let rows_after_permissions = wait_for_query(
         &reader,
         QueryBuilder::new("users").build(),
@@ -130,7 +121,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
         rows_after_permissions[0].1,
         vec![
             Value::Uuid(user_id_value),
-            Value::Text("hidden before permissions".to_string()),
+            Value::Text("visible after permissions".to_string()),
         ]
     );
 
@@ -140,7 +131,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 }
 
 #[tokio::test]
-async fn dynamic_server_approves_queued_user_write_when_permissions_arrive_in_time() {
+async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
     let query = QueryBuilder::new("users").build();
@@ -190,21 +181,49 @@ async fn dynamic_server_approves_queued_user_write_when_permissions_arrive_in_ti
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
-        "queued user write becomes visible after permissions publish",
-        |rows| (rows.len() == 1 && rows[0].0 == queued_row_id).then_some(rows),
+        "pre-permissions user write stays hidden after permissions publish",
+        |rows| rows.is_empty().then_some(rows),
     )
     .await;
-    assert_eq!(
-        rows_after_publish[0].1,
-        vec![
-            Value::Uuid(queued_user_id),
-            Value::Text("queued before permissions".to_string()),
-        ]
+    assert!(rows_after_publish.is_empty());
+
+    let accepted_user_id = jazz_tools::ObjectId::new();
+    let (accepted_row_id, _) = writer
+        .create_persisted(
+            "users",
+            user_values_v1(accepted_user_id, "accepted after permissions"),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("post-publish create should succeed");
+
+    let rows_after_create = wait_for_query(
+        &observer,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "observer sees accepted row after permissions publish",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == accepted_row_id
+                && rows[0].1
+                    == vec![
+                        Value::Uuid(accepted_user_id),
+                        Value::Text("accepted after permissions".to_string()),
+                    ])
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows_after_create.len(), 1);
+    assert_ne!(
+        rows_after_create[0].0, queued_row_id,
+        "pre-permissions row should stay hidden after permissions arrive"
     );
 
     writer
         .update_persisted(
-            queued_row_id,
+            accepted_row_id,
             vec![(
                 "name".to_string(),
                 Value::Text("updated after permissions".to_string()),
@@ -222,10 +241,10 @@ async fn dynamic_server_approves_queued_user_write_when_permissions_arrive_in_ti
         "observer sees update after permissions publish",
         |rows| {
             (rows.len() == 1
-                && rows[0].0 == queued_row_id
+                && rows[0].0 == accepted_row_id
                 && rows[0].1
                     == vec![
-                        Value::Uuid(queued_user_id),
+                        Value::Uuid(accepted_user_id),
                         Value::Text("updated after permissions".to_string()),
                     ])
             .then_some(rows)
@@ -235,7 +254,7 @@ async fn dynamic_server_approves_queued_user_write_when_permissions_arrive_in_ti
     assert_eq!(rows_after_update.len(), 1);
 
     writer
-        .delete_persisted(queued_row_id, DurabilityTier::EdgeServer)
+        .delete_persisted(accepted_row_id, DurabilityTier::EdgeServer)
         .await
         .expect("delete should succeed once permissions exist");
 
@@ -345,31 +364,6 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     let schema = schema_v1();
     let query = QueryBuilder::new("users").build();
 
-    let admin =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-subscribe"))
-            .await
-            .expect("connect admin");
-    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
-
-    let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = admin
-        .create(
-            "users",
-            user_values_v1(user_id_value, "subscription target"),
-        )
-        .await
-        .expect("admin creates user");
-
-    wait_for_query(
-        &admin,
-        query.clone(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "admin row settled for subscription test",
-        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
-    )
-    .await;
-
     let reader = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -399,6 +393,23 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 
     let allow_head =
         publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+
+    let admin =
+        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-subscribe"))
+            .await
+            .expect("connect admin");
+    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
+
+    let user_id_value = jazz_tools::ObjectId::new();
+    let (user_obj_id, _) = admin
+        .create_persisted(
+            "users",
+            user_values_v1(user_id_value, "subscription target"),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("admin creates user after permissions publish");
+
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -462,31 +473,6 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     let server = TestingServer::start().await;
     let target_schema = schema_v2();
 
-    // === Alice connects with v1, creates a user ===
-    let alice =
-        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-catalogue"))
-            .await
-            .expect("connect alice");
-
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-
-    let user_id_value = jazz_tools::ObjectId::new();
-    let (user_obj_id, _) = alice
-        .create("users", user_values_v1(user_id_value, "Alice Smith"))
-        .await
-        .expect("alice creates user");
-
-    // Wait for Alice's row to settle at EdgeServer
-    wait_for_query(
-        &alice,
-        QueryBuilder::new("users").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "alice's user settled at edge",
-        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
-    )
-    .await;
-
     // === Push v2 schema + lens to server through the real sync pipeline ===
     push_catalogue_in_memory(
         server.server_state(),
@@ -499,6 +485,24 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     .await
     .expect("push catalogue");
     publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &target_schema).await;
+
+    // === Alice connects with v1, creates a user after permissions publish ===
+    let alice =
+        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-catalogue"))
+            .await
+            .expect("connect alice");
+
+    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+
+    let user_id_value = jazz_tools::ObjectId::new();
+    let (user_obj_id, _) = alice
+        .create_persisted(
+            "users",
+            user_values_v1(user_id_value, "Alice Smith"),
+            DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("alice creates user after permissions publish");
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
     let bob =
@@ -648,6 +652,19 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
 async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head() {
     let server = TestingServer::start().await;
     let query = QueryBuilder::new("users").build();
+    let v1_schema = schema_v1();
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(&v1_schema),
+        &[],
+    )
+    .await
+    .expect("push v1 catalogue before publishing v1 permissions");
+    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &v1_schema).await;
+
     let alice =
         JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-v1-head"))
             .await
@@ -657,22 +674,14 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
 
     let user_id_value = jazz_tools::ObjectId::new();
     let (user_obj_id, _) = alice
-        .create("users", user_values_v1(user_id_value, "Alice Through Lens"))
+        .create_persisted(
+            "users",
+            user_values_v1(user_id_value, "Alice Through Lens"),
+            DurabilityTier::EdgeServer,
+        )
         .await
-        .expect("alice creates user");
+        .expect("alice creates user after v1 permissions publish");
 
-    wait_for_query(
-        &alice,
-        query.clone(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(25),
-        "alice row settled before v1 permissions publish",
-        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
-    )
-    .await;
-
-    let v1_schema = schema_v1();
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &v1_schema).await;
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),

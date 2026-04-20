@@ -128,6 +128,14 @@ pub struct PendingQuerySettled {
     pub through_seq: u64,
 }
 
+/// Deferred query rejection waiting for QueryManager to drop local state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQueryRejection {
+    pub query_id: QueryId,
+    pub code: String,
+    pub reason: String,
+}
+
 // ============================================================================
 // Client Roles
 // ============================================================================
@@ -216,6 +224,7 @@ pub enum SyncError {
     PermissionDenied {
         object_id: ObjectId,
         branch_name: BranchName,
+        code: String,
         reason: String,
     },
     /// Client must have a session to write.
@@ -229,7 +238,11 @@ pub enum SyncError {
         branch_name: BranchName,
     },
     /// Query subscription was rejected (e.g. query compilation failed).
-    QuerySubscriptionRejected { query_id: QueryId, reason: String },
+    QuerySubscriptionRejected {
+        query_id: QueryId,
+        code: String,
+        reason: String,
+    },
 }
 
 // ============================================================================
