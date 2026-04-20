@@ -73,7 +73,9 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
-use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{
+    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
+};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -201,12 +203,27 @@ struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
     strict_transactions: Option<bool>,
+    transaction_overlay: Option<QueryTransactionOverlayWire>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct QueryTransactionOverlayWire {
+    batch_id: String,
+    branch_name: String,
+    row_ids: Vec<String>,
 }
 
 fn parse_read_durability_options(
     tier: Option<String>,
     options_json: Option<String>,
-) -> Result<(ReadDurabilityOptions, QueryPropagation), JsError> {
+) -> Result<
+    (
+        ReadDurabilityOptions,
+        QueryPropagation,
+        Option<QueryLocalOverlay>,
+    ),
+    JsError,
+> {
     let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
     let Some(raw) = options_json else {
         return Ok((
@@ -216,6 +233,7 @@ fn parse_read_durability_options(
                 strict_transactions: false,
             },
             QueryPropagation::Full,
+            None,
         ));
     };
 
@@ -240,6 +258,24 @@ fn parse_read_durability_options(
         ))),
     }?;
 
+    let transaction_overlay = match options.transaction_overlay {
+        None => None,
+        Some(overlay) => Some(QueryLocalOverlay {
+            batch_id: parse_batch_id_input(&overlay.batch_id)
+                .map_err(|err| JsError::new(&format!("Invalid query batch id: {err}")))?,
+            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
+            row_ids: overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    parse_external_object_id(Some(&row_id))
+                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
+                        .map_err(|err| JsError::new(&format!("Invalid query row id: {err}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+    };
+
     Ok((
         ReadDurabilityOptions {
             tier: parsed_tier,
@@ -247,6 +283,7 @@ fn parse_read_durability_options(
             strict_transactions: options.strict_transactions.unwrap_or(false),
         },
         propagation,
+        transaction_overlay,
     ))
 }
 
@@ -267,7 +304,8 @@ fn parse_subscription_inputs(
 > {
     let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
     let session = parse_session_json(session_json)?;
-    let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+    let (durability, propagation, _overlay) =
+        parse_read_durability_options(settled_tier, options_json)?;
     Ok((query, session, durability, propagation))
 }
 
@@ -811,11 +849,17 @@ impl WasmRuntime {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation) = parse_read_durability_options(settled_tier, options_json)?;
+        let (durability, propagation, overlay) =
+            parse_read_durability_options(settled_tier, options_json)?;
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_propagation(query, session, durability, propagation)
+            match overlay {
+                Some(overlay) => {
+                    core.query_with_local_overlay(query, session, durability, propagation, overlay)
+                }
+                None => core.query_with_propagation(query, session, durability, propagation),
+            }
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {

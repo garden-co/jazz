@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type DirectInsertResult, type Row, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  type DirectInsertResult,
+  type DirectMutationResult,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
 
 const schemaWithTodos = {
@@ -30,6 +35,10 @@ async function flushMicrotasks(): Promise<void> {
 
 function mockRow(id = "todo-1"): DirectInsertResult {
   return { id, values: [], batchId: `batch-${id}` };
+}
+
+function mockMutation(batchId = "batch-id"): DirectMutationResult {
+  return { batchId };
 }
 
 function makeClient() {
@@ -449,6 +458,86 @@ describe("JazzClient.forRequest", () => {
     const { client, queryCalls } = makeClient();
     await client.query('{"table":"todos"}', { strictTransactions: true });
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
+  });
+
+  it("passes transaction overlay options to runtime query for transaction reads", async () => {
+    const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
+      [];
+    let writeContextJson: string | null | undefined;
+
+    const runtime: Runtime = {
+      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
+      insertWithSession: (_table, _values, contextJson) => {
+        writeContextJson = contextJson;
+        return mockRow("00000000-0000-0000-0000-000000000001");
+      },
+      update: () => mockMutation(),
+      updateWithSession: () => mockMutation(),
+      delete: () => mockMutation(),
+      deleteWithSession: () => mockMutation(),
+      query: async (
+        queryJson: string,
+        sessionJson?: string | null,
+        tier?: string | null,
+        optionsJson?: string | null,
+      ) => {
+        queryCalls.push([
+          queryJson,
+          sessionJson ?? undefined,
+          tier ?? undefined,
+          optionsJson ?? undefined,
+        ]);
+        return [];
+      },
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "00000000-0000-0000-0000-000000000001",
+      getSchema: () => ({}),
+      getSchemaHash: () => "schema-hash",
+    };
+
+    const JazzClientCtor = JazzClient as unknown as {
+      new (
+        runtime: Runtime,
+        context: AppContext,
+        defaultDurabilityTier: "local" | "edge" | "global",
+      ): JazzClient;
+    };
+    const client = new JazzClientCtor(
+      runtime,
+      {
+        appId: "test-app",
+        schema: {},
+        serverUrl: "http://localhost:1625",
+        backendSecret: "test-backend-secret",
+      },
+      "edge",
+    );
+
+    const tx = client.beginTransaction();
+    tx.create("todos", { done: { type: "Boolean", value: false } });
+    await tx.query('{"table":"todos"}');
+
+    const writeContext = JSON.parse(writeContextJson ?? "{}");
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({
+        local_updates: "deferred",
+        transaction_overlay: {
+          batch_id: writeContext.batch_id,
+          branch_name: writeContext.target_branch_name,
+          row_ids: ["00000000-0000-0000-0000-000000000001"],
+        },
+      }),
+    );
   });
 
   it("passes query propagation options to runtime createSubscription", () => {
