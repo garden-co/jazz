@@ -30,8 +30,8 @@ describe("schema-fetch", () => {
 
     const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const result = await fetchStoredWasmSchema("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
       schemaHash: hash,
     });
 
@@ -58,6 +58,7 @@ describe("schema-fetch", () => {
 
     await expect(
       fetchStoredWasmSchema("http://localhost:1625", {
+        appId: "test-app",
         adminSecret: "admin-secret",
         schemaHash:
           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -77,8 +78,8 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await fetchSchemaHashes("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
     });
 
     expect(result.hashes).toEqual([
@@ -107,12 +108,13 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     await fetchStoredWasmSchema("http://localhost:1625/", {
+      appId: "test-app",
       adminSecret: "admin-secret",
       schemaHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
 
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:1625/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "http://localhost:1625/apps/test-app/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
   });
 
@@ -133,6 +135,7 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     await publishStoredPermissions("http://localhost:1625/", {
+      appId: "test-app",
       adminSecret: "admin-secret",
       schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       permissions: {
@@ -186,7 +189,9 @@ describe("schema-fetch", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/admin/permissions");
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/test-app/admin/permissions",
+    );
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "POST",
       headers: {
@@ -277,8 +282,8 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await fetchStoredPermissions("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
     });
 
     expect(result).toEqual({
@@ -321,6 +326,7 @@ describe("schema-fetch", () => {
 
     await expect(
       fetchStoredPermissions("http://localhost:1625", {
+        appId: "test-app",
         adminSecret: "admin-secret",
       }),
     ).rejects.toThrow('Permissions fetch failed: 401 Unauthorized - {"error":"bad secret"}');
@@ -338,8 +344,8 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await fetchSchemaConnectivity("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
       fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
@@ -382,14 +388,13 @@ describe("schema-fetch", () => {
     const result = await fetchServerSubscriptions("http://localhost:1625/", {
       adminSecret: "admin-secret",
       appId: "test-app",
-      pathPrefix: "/apps/app-123",
     });
 
     expect(result.appId).toBe("app-123");
     expect(result.queries).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:1625/apps/app-123/admin/introspection/subscriptions?appId=test-app",
+      "http://localhost:1625/apps/test-app/admin/introspection/subscriptions?appId=test-app",
     );
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "GET",

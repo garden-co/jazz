@@ -1,5 +1,5 @@
 import type { QueryPropagation } from "./client.js";
-import { buildEndpointUrl } from "./sync-transport.js";
+import { appScopedUrl } from "./url.js";
 
 export interface IntrospectionSubscriptionGroup {
   groupKey: string;
@@ -19,7 +19,6 @@ export interface IntrospectionSubscriptionResponse {
 export interface FetchServerSubscriptionsOptions {
   adminSecret: string;
   appId: string;
-  pathPrefix?: string;
 }
 
 export async function fetchServerSubscriptions(
@@ -27,7 +26,7 @@ export async function fetchServerSubscriptions(
   options: FetchServerSubscriptionsOptions,
 ): Promise<IntrospectionSubscriptionResponse> {
   const subscriptionsUrl = new URL(
-    buildEndpointUrl(serverUrl, "/admin/introspection/subscriptions", options.pathPrefix),
+    appScopedUrl(serverUrl, options.appId, "admin/introspection/subscriptions"),
   );
   subscriptionsUrl.searchParams.set("appId", options.appId);
 

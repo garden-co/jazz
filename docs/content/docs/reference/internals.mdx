@@ -192,14 +192,11 @@ correct and simple, but worth remembering when including across very large resul
 
 ### Transport
 
-Jazz uses HTTP with binary framing rather than WebSockets or raw SSE text.
+Jazz uses a single WebSocket sync transport plus a small HTTP surface for health and admin reads.
 
-- **Server -> client**: `GET /events?client_id=<uuid>` — a persistent binary stream of
-  length-prefixed JSON frames (`[4-byte u32 BE length][JSON payload]`). Event types include
-  `Connected`, `SyncUpdate`, and `Heartbeat`.
-- **Client -> server**: `POST /sync` — sends row-version updates, query subscription changes, and
-  related sync payloads.
-- **Admin**: `GET /schemas`, `GET /schema/:hash` — schema catalogue reads (requires admin access).
+- **Sync**: `GET /apps/<appId>/ws` upgrades to a WebSocket carrying the typed sync protocol.
+- **Admin**: `GET /apps/<appId>/schemas`, `GET /apps/<appId>/schema/:hash`, and
+  `POST /apps/<appId>/admin/...` handle schema and permissions publication/read flows.
 - **Health**: `GET /health`.
 
 ### Client identity

@@ -206,7 +206,7 @@ Main thread runtime
 
 Dedicated worker runtime
   -> OpfsBTreeStorage
-  -> upstream /sync and /events ownership
+  -> upstream /apps/<appId>/ws ownership
   -> durable local row histories, visible entries, and batch records
 ```
 

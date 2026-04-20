@@ -4,7 +4,7 @@
  * These tests target the exported pure helpers `composeConnectUrl` and
  * `mergeAuth`, which encapsulate the two behaviours that T22 validates:
  *
- *   1. serverUrl + serverPathPrefix → correct WebSocket URL via httpUrlToWs
+ *   1. serverUrl + appId → correct WebSocket URL via httpUrlToWs
  *   2. update-auth merges / clears jwt_token while preserving other fields
  *
  * The helpers are pure functions — no WASM, no worker globals needed.
@@ -42,8 +42,8 @@ import {
 import type { WorkerToMainMessage } from "./worker-protocol.js";
 
 describe("worker URL + auth wiring", () => {
-  it("normalizes serverUrl with serverPathPrefix via httpUrlToWs", () => {
-    const wsUrl = composeConnectUrl("http://localhost:4000", "/apps/xyz");
+  it("normalizes serverUrl with appId via httpUrlToWs", () => {
+    const wsUrl = composeConnectUrl("http://localhost:4000", "xyz");
     expect(wsUrl).toBe("ws://localhost:4000/apps/xyz/ws");
   });
 

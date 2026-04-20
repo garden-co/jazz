@@ -105,7 +105,7 @@ async fn ws_handshake_open(
     server: &TestServer,
     auth: AuthConfig,
 ) -> Result<(WsStream, ConnectedResponse), String> {
-    let ws_url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let ws_url = format!("ws://127.0.0.1:{}/apps/{}/ws", server.port, server.app_id());
     let (mut ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("ws connect failed: {e}"))?;
@@ -771,7 +771,11 @@ mod integration_tests {
 
         // Push schema via the typed admin endpoint.
         let publish_resp = http_client()
-            .post(format!("{}/admin/schemas", server.base_url()))
+            .post(format!(
+                "{}/apps/{}/admin/schemas",
+                server.base_url(),
+                server.app_id()
+            ))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
             .json(&json!({ "schema": schema, "permissions": null }))
             .send()
@@ -780,7 +784,11 @@ mod integration_tests {
         assert_eq!(publish_resp.status(), StatusCode::CREATED);
 
         let hashes_response = http_client()
-            .get(format!("{}/schemas", server.base_url()))
+            .get(format!(
+                "{}/apps/{}/schemas",
+                server.base_url(),
+                server.app_id()
+            ))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
             .send()
             .await
@@ -794,7 +802,11 @@ mod integration_tests {
         }));
 
         let schema_response = http_client()
-            .get(format!("{}/schema/{expected_hash}", server.base_url()))
+            .get(format!(
+                "{}/apps/{}/schema/{expected_hash}",
+                server.base_url(),
+                server.app_id()
+            ))
             .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
             .send()
             .await

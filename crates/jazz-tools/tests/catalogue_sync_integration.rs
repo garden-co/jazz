@@ -90,7 +90,13 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
         "dynamic server should deny reads before any permissions head is published"
     );
 
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     let admin =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-dynamic"))
@@ -174,7 +180,13 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         "server should keep queued user writes invisible before permissions arrive"
     );
 
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     let rows_after_publish = wait_for_query(
         &observer,
@@ -318,7 +330,13 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         rows_after_timeout.is_empty(),
         "timed-out write should still be absent before permissions are published"
     );
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     let allowed_user_id = jazz_tools::ObjectId::new();
     let (allowed_row_id, _) = writer
@@ -391,8 +409,13 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         "first subscription snapshot should fail closed as an empty delta"
     );
 
-    let allow_head =
-        publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &schema).await;
+    let allow_head = publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
 
     let admin =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-subscribe"))
@@ -421,6 +444,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 
     publish_permissions(
         &server.base_url(),
+        server.app_id(),
         server.admin_secret(),
         &schema,
         deny_all_select_permissions(&schema),
@@ -484,7 +508,13 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     )
     .await
     .expect("push catalogue");
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &target_schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &target_schema,
+    )
+    .await;
 
     // === Alice connects with v1, creates a user after permissions publish ===
     let alice =
@@ -576,7 +606,13 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
     )
     .await
     .expect("push catalogue");
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &target_schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &target_schema,
+    )
+    .await;
 
     // === Bob connects with v2, creates a user with the new email column ===
     let bob = JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-backward"))
@@ -663,7 +699,13 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
     )
     .await
     .expect("push v1 catalogue before publishing v1 permissions");
-    publish_allow_all_permissions(&server.base_url(), server.admin_secret(), &v1_schema).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
 
     let alice =
         JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-v1-head"))
@@ -682,6 +724,24 @@ async fn catalogue_sync_e2e_schema_evolution_keeps_authorization_through_v1_head
         .await
         .expect("alice creates user after v1 permissions publish");
 
+    wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "alice row settled before v1 permissions publish",
+        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
+    )
+    .await;
+
+    let v1_schema = schema_v1();
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),

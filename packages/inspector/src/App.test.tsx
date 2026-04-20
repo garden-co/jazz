@@ -133,7 +133,6 @@ describe("App", () => {
         env: "dev",
         branch: "main",
         schemaHash: "hash-b",
-        serverPathPrefix: "/apps/test-app-id",
       }),
     );
 
@@ -149,7 +148,6 @@ describe("App", () => {
     expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
     expect(screen.getByLabelText("App ID")).toHaveProperty("value", "test-app-id");
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "admin-secret");
-    expect(screen.getByLabelText(/Path prefix/i)).toHaveProperty("value", "/apps/test-app-id");
 
     fireEvent.click(screen.getByRole("button", { name: "Reset connection" }));
 
@@ -171,7 +169,7 @@ describe("App", () => {
       }),
     );
     window.location.hash =
-      "#serverUrl=https%3A%2F%2Fstaging.v2.aws.cloud.jazz.tools&appId=019d9bc9-646b-7560-b26d-b775a7d061d3&serverPathPrefix=%2Fapps%2F019d9bc9-646b-7560-b26d-b775a7d061d3";
+      "#serverUrl=https%3A%2F%2Fstaging.v2.aws.cloud.jazz.tools&appId=019d9bc9-646b-7560-b26d-b775a7d061d3";
 
     render(<App />);
 
@@ -185,9 +183,5 @@ describe("App", () => {
       "019d9bc9-646b-7560-b26d-b775a7d061d3",
     );
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
-    expect(screen.getByLabelText(/Path prefix/i)).toHaveProperty(
-      "value",
-      "/apps/019d9bc9-646b-7560-b26d-b775a7d061d3",
-    );
   });
 });

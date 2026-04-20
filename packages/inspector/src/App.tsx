@@ -16,7 +16,6 @@ interface StoredConfig {
   env: string;
   branch: string;
   schemaHash: string;
-  serverPathPrefix?: string;
 }
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
@@ -58,7 +57,6 @@ export default function App() {
       env: formValues.env || "dev",
       branch: formValues.branch || "main",
       schemaHash,
-      serverPathPrefix: formValues.serverPathPrefix,
     };
     writeStoredConfig(config);
     setStoredConfig(config);
@@ -132,24 +130,23 @@ export default function App() {
           createJazzClient({
             appId: storedConfig.appId,
             serverUrl: storedConfig.serverUrl,
-            serverPathPrefix: storedConfig.serverPathPrefix,
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
             driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
             schemaHash: storedConfig.schemaHash,
-            pathPrefix: storedConfig.serverPathPrefix,
           }),
           fetchSchemaHashes(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
-            pathPrefix: storedConfig.serverPathPrefix,
           }),
           fetchStoredPermissions(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
-            pathPrefix: storedConfig.serverPathPrefix,
           }).catch(() => null),
         ]);
 
@@ -259,7 +256,6 @@ export default function App() {
             serverUrl: storedConfig.serverUrl,
             appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
-            serverPathPrefix: storedConfig.serverPathPrefix,
           }}
         >
           <BrowserRouter>
@@ -278,7 +274,6 @@ function storedConfigToFormValues(config: StoredConfig): DbConfigFormValues {
     adminSecret: config.adminSecret,
     env: config.env,
     branch: config.branch,
-    serverPathPrefix: config.serverPathPrefix,
   };
 }
 
@@ -318,14 +313,9 @@ function readFragmentConfig(): DbConfigFormValues | null {
   if (!raw) return null;
 
   const params = new URLSearchParams(raw);
-  const hasKnownPrefillParam = [
-    "serverUrl",
-    "appId",
-    "adminSecret",
-    "env",
-    "branch",
-    "serverPathPrefix",
-  ].some((key) => params.has(key));
+  const hasKnownPrefillParam = ["serverUrl", "appId", "adminSecret", "env", "branch"].some((key) =>
+    params.has(key),
+  );
 
   if (!hasKnownPrefillParam) {
     return null;
@@ -337,6 +327,5 @@ function readFragmentConfig(): DbConfigFormValues | null {
     adminSecret: (params.get("adminSecret") ?? "").trim(),
     env: (params.get("env") ?? "dev").trim() || "dev",
     branch: (params.get("branch") ?? "main").trim() || "main",
-    serverPathPrefix: (params.get("serverPathPrefix") ?? "").trim() || undefined,
   };
 }
