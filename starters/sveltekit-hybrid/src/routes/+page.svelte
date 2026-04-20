@@ -3,6 +3,7 @@
   import { authClient } from "$lib/auth-client";
   import { BrowserAuthSecretStore } from "jazz-tools/svelte";
   import TodoWidget from "$lib/TodoWidget.svelte";
+  import AuthBackup from "$lib/AuthBackup.svelte";
 
   const session = authClient.useSession();
 
@@ -28,4 +29,7 @@
     </div>
   </header>
   <TodoWidget />
+  {#if !$session.data?.session}
+    <AuthBackup />
+  {/if}
 </main>

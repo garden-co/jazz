@@ -6,9 +6,16 @@
   let { children: pageChildren } = $props();
 
   const session = authClient.useSession();
-  const authenticated = $derived(
-    $session.isPending ? null : Boolean($session.data?.session),
-  );
+
+  // Never revert to null once resolved — prevents JazzClientProvider from
+  // unmounting during BetterAuth background re-fetches (which set isPending:true
+  // briefly), which would reset any in-progress UI state (e.g. open <details>).
+  let authenticated = $state<boolean | null>(null);
+  $effect(() => {
+    if (!$session.isPending) {
+      authenticated = Boolean($session.data?.session);
+    }
+  });
 </script>
 
 {#if authenticated !== null}
