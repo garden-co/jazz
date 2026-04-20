@@ -110,12 +110,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
   // Track active SSE connections for live updates
   const sseConnections = new Set<Response>();
-  const remoteQueryOptions = { tier: "edge" as const };
-  const remoteWriteDurability = { tier: "edge" as const };
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+    const todos = await db.all(schemaApp.todos);
     const data = `data: ${JSON.stringify(todos)}\n\n`;
 
     for (const res of sseConnections) {
@@ -135,7 +133,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // List all todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+      const todos = await db.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -152,15 +150,11 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      const todo = await db.insertDurable(
-        schemaApp.todos,
-        {
-          title: body.title,
-          done: false,
-          owner_id: body.owner_id ?? "unknown",
-        },
-        remoteWriteDurability,
-      );
+      const todo = db.insert(schemaApp.todos, {
+        title: body.title,
+        done: false,
+        owner_id: body.owner_id ?? "anonymous",
+      });
 
       res.status(201).json(todo);
 
@@ -179,7 +173,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         authMode: "external",
         claims: {},
       });
-      const todos = await userDb.all(schemaApp.todos, remoteQueryOptions);
+      const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -198,7 +192,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     sseConnections.add(res);
 
     // Send initial state
-    const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+    const todos = await db.all(schemaApp.todos);
     res.write(`data: ${JSON.stringify(todos)}\n\n`);
 
     // Clean up on disconnect
@@ -212,7 +206,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+      const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found" });
         return;
@@ -237,7 +231,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
       if (Object.values(updates).every((value) => value === undefined)) {
         // No updates, just return the current todo
-        const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+        const todo = await db.one(schemaApp.todos.where({ id }));
         if (!todo) {
           res.status(404).json({ error: "Todo not found" });
           return;
@@ -246,10 +240,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.updateDurable(schemaApp.todos, id, updates, remoteWriteDurability);
+      await db.updateDurable(schemaApp.todos, id, updates);
 
       // Fetch updated todo
-      const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+      const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found after update" });
         return;
@@ -268,7 +262,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.deleteDurable(schemaApp.todos, id, remoteWriteDurability);
+      await db.deleteDurable(schemaApp.todos, id);
       res.status(204).send();
 
       // Notify SSE connections
