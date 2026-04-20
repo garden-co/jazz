@@ -1,7 +1,7 @@
 import { Text, View } from "react-native";
 import { JazzProvider } from "jazz-tools/react-native";
 import { use } from "react";
-import { ExpoAuthSecretStore } from "jazz-tools/expo/auth-secret-store";
+import { ExpoAuthSecretStore } from "jazz-tools/expo";
 
 function TodoApp() {
   return null;
@@ -15,7 +15,7 @@ export function LocalFirstAuthExpoApp() {
     <JazzProvider
       config={{
         appId: "my-app",
-        auth: { localFirstSecret: secret },
+        secret,
       }}
     >
       <View>

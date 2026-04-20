@@ -61,6 +61,12 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
+    /// Write denied because the session is anonymous.
+    /// Short-circuited before policy evaluation; surfaces as ANONYMOUS_WRITE_DENIED on the wire.
+    AnonymousWriteDenied {
+        table: TableName,
+        operation: Operation,
+    },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -94,6 +100,13 @@ impl std::fmt::Display for QueryError {
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
+            }
+            QueryError::AnonymousWriteDenied { table, operation } => {
+                write!(
+                    f,
+                    "anonymous session cannot {} on table {}",
+                    operation, table
+                )
             }
             QueryError::UnknownSchema(hash) => {
                 write!(

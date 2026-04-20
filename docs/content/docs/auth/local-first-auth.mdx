@@ -12,7 +12,7 @@ Local-first auth lets users start using your app immediately — no sign-up, no 
 
 ## Client setup
 
-Use `BrowserAuthSecretStore` to persist the user's secret across sessions. On first load it generates a new identity; on subsequent loads it reuses the stored one.
+Use `useLocalFirstAuth()` to manage the user's secret. On first load it generates a new identity; on subsequent loads it reuses the stored one. It also exposes `login` and `signOut` for switching or clearing the local identity.
 
 <include cwd lang="tsx" meta='title="App.tsx"'>
   ../examples/auth-betterauth-chat/src/docs/local-first-client-snippet.tsx#local-first-client-setup

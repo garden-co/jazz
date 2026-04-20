@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo/auth-secret-store";
+import { ExpoAuthSecretStore } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -38,7 +38,7 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
     env: overrides.env ?? "dev",
     userBranch: overrides.userBranch ?? "main",
     serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    auth: { localFirstSecret: secret },
+    secret,
     adminSecret: overrides.adminSecret ?? envAdminSecret,
     ...overrides,
   };

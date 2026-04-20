@@ -28,7 +28,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
     this.store = options.secureStore ?? { getItemAsync, setItemAsync, deleteItemAsync };
   }
 
-  private static getDefault(): ExpoAuthSecretStore {
+  static getDefault(): ExpoAuthSecretStore {
     if (!ExpoAuthSecretStore.defaultInstance) {
       ExpoAuthSecretStore.defaultInstance = new ExpoAuthSecretStore();
     }
@@ -80,6 +80,8 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
     return ExpoAuthSecretStore.getDefault().getOrCreateSecret();
   }
 }
+
+export const expoAuthSecretStore: AuthSecretStore = ExpoAuthSecretStore.getDefault();
 
 function generateExpoAuthSecret(): string {
   const bytes = getRandomBytes(32);

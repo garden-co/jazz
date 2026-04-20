@@ -391,7 +391,7 @@ You can restrict what local-first users can do until they sign up. Define an `is
 ```ts
 
   const isLocalFirstAuthMode = session.where({
-    "claims.auth_mode": "local-first",
+    authMode: "local-first",
   });
 
   // Everyone can read

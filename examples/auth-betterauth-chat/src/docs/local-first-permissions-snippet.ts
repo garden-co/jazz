@@ -4,7 +4,7 @@ import { app } from "../../schema";
 // #region local-first-permissions
 export default definePermissions(app, ({ policy, allOf, session }) => {
   const isLocalFirstAuthMode = session.where({
-    "claims.auth_mode": "local-first",
+    authMode: "local-first",
   });
 
   // Everyone can read

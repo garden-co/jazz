@@ -130,6 +130,7 @@ describe("JazzClient.updateCookieSession", () => {
           subject: "alice-subject",
           issuer: "https://issuer.example",
         },
+        authMode: "external",
       },
     });
 
@@ -141,6 +142,7 @@ describe("JazzClient.updateCookieSession", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
 
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);

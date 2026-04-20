@@ -177,6 +177,12 @@ impl From<CoreRuntimeError> for RuntimeError {
             CoreRuntimeError::QueryError(s) => RuntimeError::QueryError(s),
             CoreRuntimeError::WriteError(s) => RuntimeError::WriteError(s),
             CoreRuntimeError::NotFound => RuntimeError::NotFound,
+            CoreRuntimeError::AnonymousWriteDenied { table, operation } => {
+                RuntimeError::WriteError(format!(
+                    "anonymous session cannot {} on table {}",
+                    operation, table
+                ))
+            }
         }
     }
 }

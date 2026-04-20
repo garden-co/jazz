@@ -1,17 +1,17 @@
 // #region local-first-client-setup
-import { use } from "react";
-import { BrowserAuthSecretStore } from "jazz-tools";
-import { JazzProvider } from "jazz-tools/react";
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
 function App() {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" }));
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return <p>Loading…</p>;
 
   return (
     <JazzProvider
       config={{
         appId: "my-app",
         serverUrl: "wss://your-jazz-server.example.com",
-        auth: { localFirstSecret: secret },
+        secret,
       }}
     >
       <YourApp />

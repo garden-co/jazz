@@ -192,6 +192,7 @@ describe("backend/create-jazz-context", () => {
     mocks.resolveRequestSession.mockResolvedValue({
       user_id: "u1",
       claims: {},
+      authMode: "external" as const,
     });
   });
 
@@ -243,7 +244,7 @@ describe("backend/create-jazz-context", () => {
       header: (name: string) =>
         name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
     };
-    const session: Session = { user_id: "u1", claims: {} };
+    const session: Session = { user_id: "u1", claims: {}, authMode: "external" };
 
     const db = context.db();
     const backendDb = context.asBackend();
@@ -264,7 +265,7 @@ describe("backend/create-jazz-context", () => {
     expect(requestDb).toEqual({
       kind: "scoped-db",
       client: mocks.clients[0]!,
-      session: { user_id: "u1", claims: {} },
+      session: { user_id: "u1", claims: {}, authMode: "external" },
     });
     expect(sessionDb).toEqual({
       kind: "scoped-db",
@@ -314,7 +315,7 @@ describe("backend/create-jazz-context", () => {
       header: (name: string) =>
         name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
     };
-    const session: Session = { user_id: "u1", claims: {} };
+    const session: Session = { user_id: "u1", claims: {}, authMode: "external" };
 
     await expect(context.forRequest(req)).resolves.toBeDefined();
     expect(() => context.forSession(session)).not.toThrow();
