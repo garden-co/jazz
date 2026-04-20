@@ -1,12 +1,23 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
+const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
+
+// Managed-runtime writes VITE_JAZZ_APP_ID / VITE_JAZZ_SERVER_URL to process.env
+// on successful init; that state leaks across vitest workers in the same thread
+// pool and flips later tests onto the env-driven cloud branch. Scrub before each
+// test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.VITE_JAZZ_APP_ID;
+  delete process.env.VITE_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+});
 
 afterEach(async () => {
   await tempRoots.cleanup();
@@ -19,10 +30,15 @@ afterEach(async () => {
 
   if (originalJazzAppId === undefined) {
     delete process.env.VITE_JAZZ_APP_ID;
-    return;
+  } else {
+    process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
   }
 
-  process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
+  if (originalAdminSecret === undefined) {
+    delete process.env.JAZZ_ADMIN_SECRET;
+  } else {
+    process.env.JAZZ_ADMIN_SECRET = originalAdminSecret;
+  }
 });
 
 describe("jazzPlugin", () => {

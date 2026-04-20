@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
@@ -24,6 +24,17 @@ function makeViteServer(
     ws: { send() {} },
   };
 }
+
+// Managed-runtime writes PUBLIC_JAZZ_APP_ID / PUBLIC_JAZZ_SERVER_URL to
+// process.env on successful init; that state leaks across vitest workers in the
+// same thread pool and flips later tests onto the env-driven cloud branch.
+// Scrub before each test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.PUBLIC_JAZZ_APP_ID;
+  delete process.env.PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+  delete process.env.BACKEND_SECRET;
+});
 
 afterEach(async () => {
   await __resetJazzSvelteKitPluginForTests();
