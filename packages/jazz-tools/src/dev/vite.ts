@@ -1,3 +1,4 @@
+import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 
 export interface JazzServerOptions {
@@ -78,6 +79,13 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       viteServer.config.env ??= {};
       viteServer.config.env.JAZZ_APP_ID = managed.appId;
       viteServer.config.env.JAZZ_SERVER_URL = managed.serverUrl;
+      console.log(
+        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
+          managed.serverUrl,
+          managed.appId,
+          managed.adminSecret,
+        )}`,
+      );
 
       viteServer.httpServer?.once("close", async () => {
         await runtime.dispose();

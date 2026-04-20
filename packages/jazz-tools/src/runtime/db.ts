@@ -3109,22 +3109,12 @@ function isBrowser(): boolean {
 /**
  * Generate a 32-byte ephemeral seed for anonymous auth.
  *
- * INTENTIONALLY NOT CRYPTOGRAPHICALLY SECURE. We pick Math.random over
- * crypto.getRandomValues on purpose: we want one implementation that runs on
- * every target (browser, Node ESM, React Native, edge workers) without a
- * `crypto` import or WASM dependency, and we're willing to trade CSPRNG-grade
- * unpredictability for that portability.
- *
- * Safe because anonymous sessions cannot own or write anything — the server
- * denies writes at the middleware layer regardless of identity — so a
- * predictable seed has no confidentiality or integrity consequence. Do NOT
- * reuse this helper for anything that touches writable state.
+ * Uses `globalThis.crypto.getRandomValues`, which is available in all
+ * supported environments (browser, Node ≥15, React Native, edge workers).
  */
 function generateEphemeralSeedBase64Url(): string {
   const bytes = new Uint8Array(32);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
+  globalThis.crypto.getRandomValues(bytes);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -3177,7 +3167,7 @@ export async function createDb(config: DbConfig): Promise<Db> {
       nowSeconds,
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
-  } else if (!config.jwtToken) {
+  } else if (!config.jwtToken && !config.cookieSession) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     const wasmModule = await loadWasmModule(config.runtimeSources);
     const ephemeralSeed = generateEphemeralSeedBase64Url();

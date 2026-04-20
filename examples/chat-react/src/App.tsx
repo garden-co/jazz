@@ -22,7 +22,7 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
     appId,
     env: "dev",
     userBranch: "main",
-    auth: { localFirstSecret: secret },
+    secret,
     ...(SERVER_URL ? { serverUrl: SERVER_URL } : {}),
     ...overrides,
   };

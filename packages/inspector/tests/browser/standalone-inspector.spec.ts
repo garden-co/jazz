@@ -56,7 +56,7 @@ function rowByTitle(page: Page, title: string) {
 test.describe("connection page", () => {
   test("prefills connection form from hash fragment", async ({ page }) => {
     const fragment = new URLSearchParams({
-      url: SERVER_URL,
+      serverUrl: SERVER_URL,
       appId: APP_ID,
       adminSecret: ADMIN_SECRET,
     }).toString();
