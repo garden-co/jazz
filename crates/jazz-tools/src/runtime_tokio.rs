@@ -1007,7 +1007,7 @@ mod tests {
         // Insert a row
         let user_id = ObjectId::new();
         let expected_values = user_row_values(user_id, "Alice");
-        let (object_id, row_values) = runtime
+        let (object_id, row_values, _batch_id) = runtime
             .insert("users", user_insert_values(user_id, "Alice"), None)
             .unwrap();
         assert!(!object_id.0.is_nil());
@@ -1034,7 +1034,7 @@ mod tests {
         let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Insert
-        let (object_id, _row_values) = runtime
+        let (object_id, _row_values, _batch_id) = runtime
             .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
             .unwrap();
 
@@ -1091,7 +1091,7 @@ mod tests {
             .unwrap();
 
         // Insert a row - this should trigger the subscription callback
-        let (_object_id, _row_values) = runtime
+        let (_object_id, _row_values, _batch_id) = runtime
             .insert("users", user_insert_values(ObjectId::new(), "Eve"), None)
             .unwrap();
 

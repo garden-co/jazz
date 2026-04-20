@@ -75,7 +75,7 @@ async fn create_note_with_backend_attribution(
         batch_id: None,
         target_branch_name: None,
     };
-    let note_id = runtime
+    let (note_id, _row_values) = runtime
         .insert("notes", note_input(title), Some(&write_context))
         .expect("create note with backend attribution")
         .0;

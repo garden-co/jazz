@@ -7600,13 +7600,7 @@ mod tests {
         let branch_name = BranchName::new("main");
         let schema_hash = SchemaHash::from_bytes([0x33; 32]);
         let row_digest = Digest32([0x44; 32]);
-        let mut record = LocalBatchRecord::new(
-            batch_id,
-            BatchMode::Transactional,
-            DurabilityTier::EdgeServer,
-            false,
-            None,
-        );
+        let mut record = LocalBatchRecord::new(batch_id, BatchMode::Transactional, false, None);
         record.upsert_member(LocalBatchMember {
             object_id,
             table_name: "tasks".to_string(),
@@ -7646,7 +7640,7 @@ mod tests {
             &bytes,
         )
         .expect("decode local batch record row");
-        assert_eq!(values.len(), 5);
+        assert_eq!(values.len(), 4);
         assert_eq!(
             storage
                 .load_sealed_batch_submission(batch_id)
