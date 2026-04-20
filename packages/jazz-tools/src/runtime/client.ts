@@ -25,8 +25,8 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { httpUrlToWs } from "./url.js";
 import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
+import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -2450,8 +2450,7 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("No server connection");
     }
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    return `${this.context.serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(this.context.appId)}${normalizedPath}`;
+    return appScopedUrl(this.context.serverUrl, this.context.appId, path);
   }
 
   /**

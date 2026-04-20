@@ -1,4 +1,5 @@
 import type { QueryPropagation } from "./client.js";
+import { appScopedUrl } from "./url.js";
 
 export interface IntrospectionSubscriptionGroup {
   groupKey: string;
@@ -25,7 +26,7 @@ export async function fetchServerSubscriptions(
   options: FetchServerSubscriptionsOptions,
 ): Promise<IntrospectionSubscriptionResponse> {
   const subscriptionsUrl = new URL(
-    `${serverUrl.replace(/\/+$/, "")}/apps/${encodeURIComponent(options.appId)}/admin/introspection/subscriptions`,
+    appScopedUrl(serverUrl, options.appId, "admin/introspection/subscriptions"),
   );
   subscriptionsUrl.searchParams.set("appId", options.appId);
 
