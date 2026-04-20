@@ -1,5 +1,5 @@
 import { fetchSchemaHashes } from "jazz-tools";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import styles from "./DbConfigForm.module.css";
 
 export interface DbConfigFormValues {
@@ -14,9 +14,16 @@ export interface DbConfigFormValues {
 interface DbConfigFormProps {
   onSubmit: (values: DbConfigFormValues, hashes: string[]) => void;
   initialValues?: Partial<DbConfigFormValues>;
+  mode?: "connect" | "edit";
+  onReset?: () => void;
 }
 
-export function DbConfigForm({ onSubmit, initialValues }: DbConfigFormProps) {
+export function DbConfigForm({
+  onSubmit,
+  initialValues,
+  mode = "connect",
+  onReset,
+}: DbConfigFormProps) {
   const [serverUrl, setServerUrl] = useState(initialValues?.serverUrl ?? "");
   const [appId, setAppId] = useState(initialValues?.appId ?? "");
   const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
@@ -25,6 +32,17 @@ export function DbConfigForm({ onSubmit, initialValues }: DbConfigFormProps) {
   const [serverPathPrefix, setServerPathPrefix] = useState(initialValues?.serverPathPrefix ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setServerUrl(initialValues?.serverUrl ?? "");
+    setAppId(initialValues?.appId ?? "");
+    setAdminSecret(initialValues?.adminSecret ?? "");
+    setEnv(initialValues?.env ?? "dev");
+    setBranch(initialValues?.branch ?? "main");
+    setServerPathPrefix(initialValues?.serverPathPrefix ?? "");
+    setIsSubmitting(false);
+    setErrorMessage(null);
+  }, [initialValues]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -56,7 +74,9 @@ export function DbConfigForm({ onSubmit, initialValues }: DbConfigFormProps) {
 
   return (
     <form onSubmit={handleSubmit} className={styles.form}>
-      <h2 className={styles.title}>Connect to Jazz server</h2>
+      <h2 className={styles.title}>
+        {mode === "edit" ? "Edit connection" : "Connect to Jazz server"}
+      </h2>
       <label className={styles.field}>
         Server URL
         <input
@@ -123,9 +143,16 @@ export function DbConfigForm({ onSubmit, initialValues }: DbConfigFormProps) {
           {errorMessage}
         </p>
       ) : null}
-      <button type="submit" disabled={isSubmitting} className={styles.submitButton}>
-        {isSubmitting ? "Fetching schemas…" : "Connect"}
-      </button>
+      <div className={styles.buttonRow}>
+        <button type="submit" disabled={isSubmitting} className={styles.submitButton}>
+          {isSubmitting ? "Fetching schemas…" : mode === "edit" ? "Save changes" : "Connect"}
+        </button>
+        {onReset ? (
+          <button type="button" onClick={onReset} className={styles.resetButton}>
+            Reset connection
+          </button>
+        ) : null}
+      </div>
     </form>
   );
 }

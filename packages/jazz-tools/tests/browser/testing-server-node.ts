@@ -8,7 +8,8 @@ interface StartedTestingServer {
   adminSecret: string;
 }
 
-let testingServerPromise: Promise<StartedTestingServer> | null = null;
+const DEFAULT_TESTING_SERVER_KEY = "__default__";
+const testingServerPromises = new Map<string, Promise<StartedTestingServer>>();
 const isolatedTestingServers = new Set<Promise<StartedTestingServer>>();
 const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
 const browserContextIds = new WeakMap<BrowserContext, number>();
@@ -27,9 +28,9 @@ async function loadTestingServer(): Promise<typeof import("jazz-napi").TestingSe
   }
 }
 
-async function startTestingServer(): Promise<StartedTestingServer> {
+async function startTestingServer(appId?: string): Promise<StartedTestingServer> {
   const TestingServer = await loadTestingServer();
-  const server = await TestingServer.start();
+  const server = await TestingServer.start(appId ? { appId } : undefined);
   return {
     server,
     appId: server.appId,
@@ -38,31 +39,41 @@ async function startTestingServer(): Promise<StartedTestingServer> {
   };
 }
 
-async function getOrStartTestingServer(): Promise<StartedTestingServer> {
-  if (!testingServerPromise) {
-    testingServerPromise = startTestingServer().catch((error) => {
-      testingServerPromise = null;
+async function getOrStartTestingServer(appId?: string): Promise<StartedTestingServer> {
+  const key = appId ?? DEFAULT_TESTING_SERVER_KEY;
+  const existing = testingServerPromises.get(key);
+
+  if (!existing) {
+    const startedServer = startTestingServer(appId).catch((error) => {
+      testingServerPromises.delete(key);
       throw error;
     });
+    testingServerPromises.set(key, startedServer);
+    return startedServer;
   }
 
-  return testingServerPromise;
+  return existing;
 }
 
-export async function testingServerInfo(): Promise<{
+export async function testingServerInfo(appId?: string): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const { appId, serverUrl, adminSecret } = await getOrStartTestingServer();
-  return { appId, serverUrl, adminSecret };
+  const serverInfo = await getOrStartTestingServer(appId);
+  return {
+    appId: serverInfo.appId,
+    serverUrl: serverInfo.serverUrl,
+    adminSecret: serverInfo.adminSecret,
+  };
 }
 
 export async function testingServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
+  appId?: string,
 ): Promise<string> {
-  const { server } = await getOrStartTestingServer();
+  const { server } = await getOrStartTestingServer(appId);
   return server.jwtForUser(userId, claims);
 }
 
@@ -87,23 +98,23 @@ export async function isolatedTestingServerInfo(): Promise<{
 }
 
 export async function stopTestingServer(): Promise<void> {
-  const runningServer = testingServerPromise;
-  testingServerPromise = null;
+  const runningServers = [...testingServerPromises.values()];
+  testingServerPromises.clear();
   const isolatedServerPromises = [...isolatedTestingServers];
   isolatedTestingServers.clear();
 
-  if (!runningServer && isolatedServerPromises.length === 0) {
+  if (runningServers.length === 0 && isolatedServerPromises.length === 0) {
     return;
   }
 
-  try {
-    if (runningServer) {
+  for (const runningServer of runningServers) {
+    try {
       const { server } = await runningServer;
       await server.stop();
+    } catch {
+      // Swallow all errors: either startup never produced a server (nothing to stop),
+      // or stop() itself failed (nothing recoverable during teardown).
     }
-  } catch {
-    // Swallow all errors: either startup never produced a server (nothing to stop),
-    // or stop() itself failed (nothing recoverable during teardown).
   }
 
   await Promise.all(

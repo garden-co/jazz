@@ -21,7 +21,7 @@ export class Db extends RuntimeDb {
     const key = JSON.stringify(schema);
 
     if (!this.nativeClients.has(key)) {
-      const tier = this.nativeConfig.tier ?? "worker";
+      const tier = this.nativeConfig.tier ?? "local";
       const runtime = createJazzRnRuntime({
         schema,
         appId: this.nativeConfig.appId,
@@ -43,7 +43,7 @@ export class Db extends RuntimeDb {
           jwtToken: this.nativeConfig.jwtToken,
           adminSecret: this.nativeConfig.adminSecret,
           tier,
-          defaultDurabilityTier: "worker",
+          defaultDurabilityTier: "local",
         },
         {
           onAuthFailure: (reason) => {
@@ -51,6 +51,17 @@ export class Db extends RuntimeDb {
           },
         },
       );
+
+      if (this.nativeConfig.serverUrl) {
+        client.connectTransport(
+          this.nativeConfig.serverUrl,
+          {
+            jwt_token: this.nativeConfig.jwtToken,
+            admin_secret: this.nativeConfig.adminSecret,
+          },
+          this.nativeConfig.serverPathPrefix,
+        );
+      }
 
       this.nativeClients.set(key, client);
     }

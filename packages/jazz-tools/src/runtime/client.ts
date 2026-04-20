@@ -9,26 +9,20 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
-  sendSyncPayload,
-  generateClientId,
   buildEndpointUrl,
   applyUserAuthHeaders,
-  createRuntimeSyncStreamController,
-  createSyncOutboxRouter,
-  isExpectedFetchAbortError,
-  SyncAuthError,
-  type SyncStreamController,
-  type SyncAuth,
   type AuthFailureReason,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
+import { mapAuthReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
+import { httpUrlToWs } from "./url.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -48,18 +42,25 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues): DirectInsertResult;
+  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
   insertWithSession?(
     table: string,
     values: InsertValues,
     write_context_json?: string | null,
+    object_id?: string | null,
   ): DirectInsertResult;
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
+  insertDurable(
+    table: string,
+    values: InsertValues,
+    tier: string,
+    object_id?: string | null,
+  ): Promise<Row>;
   insertDurableWithSession?(
     table: string,
     values: InsertValues,
     write_context_json: string | null | undefined,
     tier: string,
+    object_id?: string | null,
   ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
@@ -128,7 +129,8 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
-  onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
+  /** Route outbox messages to the transport layer. Required for WASM worker-bridge; no-op for NAPI/RN (Rust owns the transport). */
+  onSyncMessageToSend?(callback: RuntimeSyncOutboxCallback): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
@@ -137,16 +139,41 @@ export interface Runtime {
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
+  /** Connect to a Jazz server over WebSocket (Rust transport). */
+  connect?(url: string, auth_json: string): void;
+  /** Disconnect from the Jazz server and drop the transport handle. */
+  disconnect?(): void;
+  /** Push updated auth credentials into the live Rust transport. */
+  updateAuth?(auth_json: string): void;
+  /** Register a callback invoked when the Rust transport rejects the JWT. */
+  onAuthFailure?(callback: (reason: string) => void): void;
+}
+
+/**
+ * Authentication configuration for connecting to a Jazz server.
+ *
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_manager.rs`.
+ * All fields are optional; supply only the ones relevant to your auth mode.
+ */
+export interface AuthConfig {
+  /** JWT bearer token for user authentication. */
+  jwt_token?: string;
+  /** Backend service secret for server-to-server calls. */
+  backend_secret?: string;
+  /** Admin secret for privileged sync and `/admin/*` catalogue operations. */
+  admin_secret?: string;
+  /** Opaque session payload forwarded by a backend proxy. */
+  backend_session?: unknown;
 }
 
 /**
  * Persistence tier for durability guarantees.
  *
- * - `worker`: Persisted in web worker / local storage
+ * - `local`: Persisted in local durable storage
  * - `edge`: Persisted at edge server
  * - `global`: Persisted at global server
  */
-export type DurabilityTier = "worker" | "edge" | "global";
+export type DurabilityTier = "local" | "edge" | "global";
 export type LocalUpdatesMode = "immediate" | "deferred";
 export type QueryPropagation = "full" | "local-only";
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
@@ -168,6 +195,10 @@ export interface ResolvedQueryExecutionOptions {
 
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
+}
+
+interface TimestampOverrideOptions {
+  updatedAt?: number;
 }
 
 export type BatchMode = "direct" | "transactional";
@@ -209,6 +240,26 @@ export interface LocalBatchRecord {
   latestSettlement: BatchSettlement | null;
 }
 
+export interface CreateOptions extends TimestampOverrideOptions {
+  id?: string;
+}
+
+export interface CreateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
+  id?: string;
+}
+
+export interface UpsertOptions extends TimestampOverrideOptions {
+  id: string;
+}
+
+export interface UpsertDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
+  id: string;
+}
+
+export interface UpdateOptions extends TimestampOverrideOptions {}
+
+export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
+
 /**
  * A mutation error event emitted by {@link JazzClient.onMutationError}.
  * Contains enough information to understand the cause of the error and
@@ -239,6 +290,7 @@ export interface DirectMutationResult {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
+  updated_at?: number;
   batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
@@ -285,12 +337,12 @@ export function resolveDefaultDurabilityTier(
   }
 
   if (isBrowserRuntime()) {
-    return "worker";
+    return "local";
   }
 
   // In non-browser environments, default to edge when connected to a server.
-  // For local/in-memory runtimes without a server, keep worker semantics.
-  return context.serverUrl ? "edge" : "worker";
+  // For local/in-memory runtimes without a server, keep local semantics.
+  return context.serverUrl ? "edge" : "local";
 }
 
 export function resolveEffectiveQueryExecutionOptions(
@@ -495,66 +547,6 @@ function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | u
   return JSON.stringify(payload);
 }
 
-function generateBatchId(): string {
-  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
-  const bytes = new Uint8Array(16);
-
-  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
-    cryptoObj.getRandomValues(bytes);
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-  }
-
-  const timestamp = Date.now();
-  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
-  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
-  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
-  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
-  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
-  bytes[5] = timestamp & 0xff;
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function durabilityTierRank(tier: DurabilityTier): number {
-  switch (tier) {
-    case "worker":
-      return 0;
-    case "edge":
-      return 1;
-    case "global":
-      return 2;
-  }
-}
-
-function settlementSatisfiesTier(
-  settlement: BatchSettlement | null | undefined,
-  tier: DurabilityTier,
-): boolean {
-  if (!settlement) {
-    return false;
-  }
-
-  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
-    return false;
-  }
-
-  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
-}
-
-function rejectionFromSettlement(
-  settlement: BatchSettlement | null | undefined,
-): PersistedWriteRejectedError | null {
-  if (!settlement || settlement.kind !== "rejected") {
-    return null;
-  }
-  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
-}
-
 function readHeader(request: RequestLike, name: string): string | undefined {
   const lower = name.toLowerCase();
 
@@ -649,6 +641,11 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims };
 }
 
+function isObjectAlreadyExistsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("object already exists") || message.includes("Create failed: Conflict");
+}
+
 type BatchWriteContext = {
   batchMode: BatchMode;
   batchId: string;
@@ -661,6 +658,88 @@ function composeTargetBranchName(schemaContext: {
   user_branch: string;
 }): string {
   return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
+}
+
+function generateBatchId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  const bytes = new Uint8Array(16);
+
+  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
+    cryptoObj.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  const timestamp = Date.now();
+  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
+  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
+  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
+  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
+  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
+  bytes[5] = timestamp & 0xff;
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeUpdatedAt(updatedAt?: number): number | undefined {
+  if (updatedAt === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(updatedAt) || !Number.isInteger(updatedAt) || updatedAt < 0) {
+    throw new Error("Invalid updatedAt override. Expected a non-negative integer.");
+  }
+  return updatedAt;
+}
+
+function durabilityTierRank(tier: DurabilityTier): number {
+  switch (tier) {
+    case "local":
+      return 0;
+    case "edge":
+      return 1;
+    case "global":
+      return 2;
+  }
+}
+
+function settlementSatisfiesTier(
+  settlement: BatchSettlement | null | undefined,
+  tier: DurabilityTier,
+): boolean {
+  if (!settlement) {
+    return false;
+  }
+
+  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
+    return false;
+  }
+
+  return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
+}
+
+function rejectionFromSettlement(
+  settlement: BatchSettlement | null | undefined,
+): PersistedWriteRejectedError | null {
+  if (!settlement || settlement.kind !== "rejected") {
+    return null;
+  }
+  return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
+}
+
+export class PersistedWriteRejectedError extends Error {
+  readonly name = "PersistedWriteRejectedError";
+
+  constructor(
+    readonly batchId: string,
+    readonly code: string,
+    readonly reason: string,
+  ) {
+    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+  }
 }
 
 export class PersistedWrite<T> {
@@ -682,18 +761,6 @@ export class PersistedWrite<T> {
   async wait(): Promise<T> {
     await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
     return this.persistedValue;
-  }
-}
-
-export class PersistedWriteRejectedError extends Error {
-  readonly name = "PersistedWriteRejectedError";
-
-  constructor(
-    readonly batchId: string,
-    readonly code: string,
-    readonly reason: string,
-  ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
   }
 }
 
@@ -733,6 +800,7 @@ export class Transaction {
       values,
       this.session,
       this.attribution,
+      undefined,
       this.batchContext,
     );
   }
@@ -827,6 +895,7 @@ export class DirectBatch {
       values,
       this.session,
       this.attribution,
+      undefined,
       this.batchContext,
     );
   }
@@ -916,7 +985,7 @@ export class SessionClient {
   /**
    * Create a new row as this session's user.
    */
-  async create(table: string, values: InsertValues): Promise<string> {
+  async create(table: string, values: InsertValues, options?: CreateOptions): Promise<string> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -928,6 +997,10 @@ export class SessionClient {
         table,
         values,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.id ? { object_id: options.id } : {}),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -949,9 +1022,31 @@ export class SessionClient {
   }
 
   /**
+   * Create or update a row as this session's user using a caller-supplied id.
+   */
+  async upsert(table: string, values: InsertValues, options: UpsertOptions): Promise<void> {
+    try {
+      await this.create(table, values, options);
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.update(options.id, values as Record<string, Value>, {
+      updatedAt: options.updatedAt,
+    });
+  }
+
+  /**
    * Update a row as this session's user.
    */
-  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
+  async update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: UpdateOptions,
+  ): Promise<void> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -965,6 +1060,9 @@ export class SessionClient {
         object_id: objectId,
         updates: updateArray,
         schema_context: this.client.getSchemaContext(),
+        ...(options?.updatedAt !== undefined
+          ? { updated_at: normalizeUpdatedAt(options.updatedAt) }
+          : {}),
       },
       this.session,
     );
@@ -1053,20 +1151,10 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private streamController: SyncStreamController;
-  private serverClientId: string = generateClientId();
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
-  private useBackendSyncAuth = false;
-  private readonly onAuthFailure?: (reason: AuthFailureReason) => void;
-  private syncStarted = false;
-  private remoteSyncConnected: boolean;
-  private pendingRemoteSyncWaiters: Array<{
-    resolve: () => void;
-    reject: (error: Error) => void;
-  }> = [];
   /**
    * Promises created with {@link DirectBatch.wait} or {@TODO_link WriteHandle.wait}
    * that are waiting for a batch to be settled.
@@ -1084,9 +1172,34 @@ export class JazzClient {
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
-  private readonly inFlightServerSyncs = new Set<Promise<void>>();
-  private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+
+  private resolveSessionFromContext(): Session | null {
+    return resolveClientSessionStateSync({
+      appId: this.context.appId,
+      jwtToken: this.context.jwtToken,
+      cookieSession: this.context.cookieSession,
+    }).session;
+  }
+
+  private buildTransportAuthPayload(): {
+    jwt_token: string | null;
+    admin_secret?: string;
+    backend_secret?: string;
+  } {
+    const payload: {
+      jwt_token: string | null;
+      admin_secret?: string;
+      backend_secret?: string;
+    } = { jwt_token: this.context.jwtToken ?? null };
+    if (this.context.adminSecret) {
+      payload.admin_secret = this.context.adminSecret;
+    }
+    if (this.context.backendSecret) {
+      payload.backend_secret = this.context.backendSecret;
+    }
+    return payload;
+  }
 
   private constructor(
     runtime: Runtime,
@@ -1098,33 +1211,14 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
-    this.onAuthFailure = runtimeOptions?.onAuthFailure;
-    this.remoteSyncConnected = !context.serverUrl;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: context.appId,
-      jwtToken: context.jwtToken,
-    }).session;
-    this.streamController = createRuntimeSyncStreamController({
-      getRuntime: () => this.runtime,
-      getAuth: () => this.getSyncAuth(),
-      getSchemaHash: () => this.runtime.getSchemaHash(),
-      getClientId: () => this.serverClientId,
-      setClientId: (clientId) => {
-        this.serverClientId = clientId;
-      },
-      onConnected: () => {
-        this.remoteSyncConnected = true;
-        this.resolvePendingRemoteSyncWaiters();
-      },
-      onDisconnected: () => {
-        this.remoteSyncConnected = false;
-      },
-      onAuthFailure: (reason) => {
-        this.remoteSyncConnected = false;
-        this.rejectPendingRemoteSyncWaiters(new Error(`Sync auth failed: ${reason}`));
-        this.onAuthFailure?.(reason);
-      },
-    });
+    this.resolvedSession = this.resolveSessionFromContext();
+
+    if (runtimeOptions?.onAuthFailure) {
+      const handler = runtimeOptions.onAuthFailure;
+      this.runtime.onAuthFailure?.((reason: string) => {
+        handler(mapAuthReason(reason));
+      });
+    }
   }
 
   private wrapRuntime(runtime: Runtime): Runtime {
@@ -1181,11 +1275,6 @@ export class JazzClient {
       runtimeOptions,
     );
 
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
     return client;
   }
 
@@ -1215,19 +1304,7 @@ export class JazzClient {
       runtimeOptions?.useBinaryEncoding ?? false,
     );
 
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -1245,19 +1322,7 @@ export class JazzClient {
     context: AppContext,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ): JazzClient {
-    const client = new JazzClient(
-      runtime,
-      context,
-      resolveDefaultDurabilityTier(context),
-      runtimeOptions,
-    );
-
-    // Set up sync if server URL provided
-    if (context.serverUrl) {
-      client.setupSync(context.serverUrl, context.serverPathPrefix);
-    }
-
-    return client;
+    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
   /**
@@ -1320,10 +1385,6 @@ export class JazzClient {
     };
   }
 
-  /**
-   * Start an explicit transactional batch, optionally scoped to a session override.
-   * @internal
-   */
   beginTransactionInternal(session?: Session, attribution?: string): Transaction {
     return new Transaction(
       this,
@@ -1333,10 +1394,6 @@ export class JazzClient {
     );
   }
 
-  /**
-   * Start an explicit direct batch, optionally scoped to a session override.
-   * @internal
-   */
   beginDirectBatchInternal(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
@@ -1396,32 +1453,25 @@ export class JazzClient {
     if (!this.context.serverUrl) {
       throw new Error("serverUrl required for backend mode");
     }
-    this.useBackendSyncAuth = true;
-    this.streamController.updateAuth();
     return this;
   }
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.resolvedSession = resolveClientSessionStateSync({
-      appId: this.context.appId,
-      jwtToken,
-    }).session;
-    this.streamController.updateAuth();
+    this.resolvedSession = this.resolveSessionFromContext();
+    // Push the refreshed credentials into the Rust transport. `updateAuth`
+    // is optional on the Runtime interface because not every binding exposes
+    // it yet; bindings that do will route this to TransportControl::UpdateAuth.
+    // Carry forward admin/backend secrets from context — omitting them here
+    // would deserialise to None on the Rust side and silently erase any
+    // privileged credentials the transport was connected with.
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
-  private getSyncAuth(): SyncAuth {
-    if (this.useBackendSyncAuth) {
-      return {
-        backendSecret: this.context.backendSecret,
-        adminSecret: this.context.adminSecret,
-      };
-    }
-
-    return {
-      jwtToken: this.context.jwtToken,
-      adminSecret: this.context.adminSecret,
-    };
+  updateCookieSession(cookieSession?: Session): void {
+    this.context.cookieSession = cookieSession;
+    this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.updateAuth?.(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
   private normalizeQueryExecutionOptions(
@@ -1441,11 +1491,12 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchContext) {
+    if (!session && attribution === undefined && !batchContext && updatedAt === undefined) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchContext) {
+    if (attribution === undefined && session && !batchContext && updatedAt === undefined) {
       return JSON.stringify(session);
     }
 
@@ -1455,6 +1506,9 @@ export class JazzClient {
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
+    }
+    if (updatedAt !== undefined) {
+      payload.updated_at = normalizeUpdatedAt(updatedAt);
     }
     if (batchContext) {
       payload.batch_mode = batchContext.batchMode;
@@ -1697,8 +1751,15 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues): DirectInsertResult {
-    return this.createInternal(table, values);
+  create(table: string, values: InsertValues, options?: CreateOptions): DirectInsertResult {
+    return this.createInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
   }
 
   /**
@@ -1710,21 +1771,78 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
+    options?: CreateOptions,
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requireSessionWriteMethod("insertWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-          )
-        : this.runtime.insert(table, values);
+      effectiveSession ||
+      attribution !== undefined ||
+      batchContext ||
+      options?.updatedAt !== undefined
+        ? options?.id
+          ? this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options.updatedAt,
+              ),
+              options.id,
+            )
+          : this.requireSessionWriteMethod("insertWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(
+                effectiveSession,
+                attribution,
+                batchContext,
+                options?.updatedAt,
+              ),
+            )
+        : options?.id
+          ? this.runtime.insert(table, values, options.id)
+          : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
     };
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id, optionally scoped to a session.
+   * @internal
+   */
+  upsertInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    updatedAt?: number,
+  ): void {
+    try {
+      this.createInternal(table, values, session, attribution, {
+        id: objectId,
+        updatedAt,
+      });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    this.updateInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      undefined,
+      updatedAt,
+    );
   }
 
   /**
@@ -1733,9 +1851,20 @@ export class JazzClient {
   async createDurable(
     table: string,
     values: InsertValues,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     return this.createDurableInternal(table, values, undefined, undefined, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability.
+   */
+  async upsertDurable(
+    table: string,
+    values: InsertValues,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    await this.upsertDurableInternal(table, values, options.id, undefined, undefined, options);
   }
 
   /**
@@ -1747,19 +1876,29 @@ export class JazzClient {
     values: InsertValues,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: CreateDurabilityOptions,
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
-      effectiveSession || attribution !== undefined
-        ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution),
-            tier,
-          )
-        : await this.runtime.insertDurable(table, values, tier);
+      effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
+        ? options?.id
+          ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options.updatedAt),
+              tier,
+              options.id,
+            )
+          : await this.requireSessionWriteMethod("insertDurableWithSession")(
+              table,
+              values,
+              this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
+              tier,
+            )
+        : options?.id
+          ? await this.runtime.insertDurable(table, values, tier, options.id)
+          : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1804,6 +1943,41 @@ export class JazzClient {
   }
 
   /**
+   * Create or update a row with a caller-supplied id and wait for durability,
+   * optionally scoped to a session.
+   * @internal
+   */
+  async upsertDurableInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    options?: UpsertDurabilityOptions,
+  ): Promise<void> {
+    try {
+      await this.createDurableInternal(table, values, session, attribution, {
+        ...options,
+        id: objectId,
+      });
+      return;
+    } catch (error) {
+      if (!isObjectAlreadyExistsError(error)) {
+        throw error;
+      }
+    }
+
+    await this.updateDurableInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
+      options,
+      options?.updatedAt,
+    );
+  }
+
+  /**
    * Execute a query and return all matching rows.
    *
    * @param query Query builder or JSON-encoded query specification
@@ -1824,7 +1998,6 @@ export class JazzClient {
     options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    await this.waitForRemoteReadAvailability(normalizedOptions.tier);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
@@ -1841,8 +2014,19 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
-    return this.updateInternal(objectId, updates);
+  update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: UpdateOptions,
+  ): DirectMutationResult {
+    return this.updateInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      undefined,
+      options?.updatedAt,
+    );
   }
 
   /**
@@ -1855,13 +2039,14 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       return this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
     }
     return this.runtime.update(objectId, updates);
@@ -1873,9 +2058,16 @@ export class JazzClient {
   async updateDurable(
     objectId: string,
     updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
-    await this.updateDurableInternal(objectId, updates, undefined, undefined, options);
+    await this.updateDurableInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      options,
+      options?.updatedAt,
+    );
   }
 
   /**
@@ -1887,15 +2079,16 @@ export class JazzClient {
     updates: Record<string, Value>,
     session?: Session,
     attribution?: string,
-    options?: WriteDurabilityOptions,
+    options?: UpdateDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
@@ -1918,15 +2111,16 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): PersistedWrite<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const result =
-      effectiveSession || attribution !== undefined || batchContext
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
         ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
             objectId,
             updates,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
             tier,
           )
         : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
@@ -1949,12 +2143,13 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext) {
+    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
       return this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext),
+        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
     }
     return this.runtime.delete(objectId);
@@ -1976,13 +2171,14 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     options?: WriteDurabilityOptions,
+    updatedAt?: number,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined) {
+    if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
       await this.requireSessionWriteMethod("deleteDurableWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution),
+        this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
         tier,
       );
       return;
@@ -2000,14 +2196,15 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
     batchContext?: BatchWriteContext,
+    updatedAt?: number,
   ): PersistedWrite<void> {
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const result =
-      effectiveSession || attribution !== undefined || batchContext
+      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
         ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
             objectId,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
+            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
             tier,
           )
         : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
@@ -2082,6 +2279,34 @@ export class JazzClient {
    */
   unsubscribe(subscriptionId: number): void {
     this.runtime.unsubscribe(subscriptionId);
+  }
+
+  /**
+   * Connect to a Jazz server over WebSocket using the Rust transport layer.
+   *
+   * Accepts an HTTP/HTTPS server URL (e.g. "http://localhost:4000") and
+   * converts it to the corresponding WebSocket `/ws` endpoint URL before
+   * passing it to the underlying Rust runtime's `connect()`.  Already-WS URLs
+   * are passed through unchanged.
+   *
+   * @param url        Server URL — http(s):// or ws(s)://. `/ws` is appended automatically.
+   * @param auth       Authentication credentials for the connection.
+   * @param pathPrefix Optional path prefix inserted before `/ws` (e.g. `/apps/<id>`).
+   */
+  connectTransport(url: string, auth: AuthConfig, pathPrefix?: string): void {
+    if (!this.runtime.connect) {
+      throw new Error("Underlying runtime does not support connect()");
+    }
+    this.runtime.connect(httpUrlToWs(url, pathPrefix), JSON.stringify(auth));
+  }
+
+  /**
+   * Disconnect from the Jazz server and drop the Rust transport handle.
+   *
+   * No-op if the underlying runtime does not support disconnect().
+   */
+  disconnectTransport(): void {
+    this.runtime.disconnect?.();
   }
 
   /**
@@ -2165,81 +2390,6 @@ export class JazzClient {
       headers,
       body: JSON.stringify(body),
     });
-  }
-
-  /**
-   * Shutdown the client and release resources.
-   */
-  async shutdown(): Promise<void> {
-    this.resolvePendingRemoteSyncWaiters();
-    if (this.shutdownPromise) {
-      return await this.shutdownPromise;
-    }
-
-    this.shutdownPromise = (async () => {
-      this.shuttingDown = true;
-
-      // Stop accepting new server-bound outbox work before tearing down sync.
-      this.runtime.onSyncMessageToSend(() => undefined);
-      this.streamController.stop();
-      await this.waitForInFlightServerSyncs();
-
-      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
-      if (this.runtime.close) {
-        await this.runtime.close();
-      }
-    })();
-
-    return await this.shutdownPromise;
-  }
-
-  private setupSync(serverUrl: string, serverPathPrefix?: string): void {
-    this.syncStarted = true;
-    this.runtime.onSyncMessageToSend(
-      createSyncOutboxRouter({
-        logPrefix: "[client] ",
-        retryServerPayloads: true,
-        onServerPayload: (payload, isCatalogue) =>
-          this.sendSyncMessage(payload as string, isCatalogue),
-        onServerPayloadError: (error) => {
-          if (error instanceof SyncAuthError) {
-            this.streamController.notifyAuthFailure(error.reason);
-            return;
-          }
-
-          const isExpectedAbort = isExpectedFetchAbortError(error);
-          if (!isExpectedAbort) {
-            console.error("Sync POST error:", error);
-            this.streamController.notifyTransportFailure();
-          }
-        },
-      }),
-    );
-
-    // Connect to binary stream for incoming messages
-    this.streamController.start(serverUrl, serverPathPrefix);
-  }
-
-  private resolvePendingRemoteSyncWaiters(): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.resolve();
-    }
-  }
-
-  private rejectPendingRemoteSyncWaiters(error: Error): void {
-    if (this.pendingRemoteSyncWaiters.length === 0) {
-      return;
-    }
-
-    const waiters = this.pendingRemoteSyncWaiters.splice(0);
-    for (const waiter of waiters) {
-      waiter.reject(error);
-    }
   }
 
   private batchWaitOutcome(
@@ -2344,57 +2494,25 @@ export class JazzClient {
     });
   }
 
-  private async waitForRemoteReadAvailability(tier: DurabilityTier): Promise<void> {
-    if (
-      !this.syncStarted ||
-      !this.context.serverUrl ||
-      tier === "worker" ||
-      this.remoteSyncConnected
-    ) {
-      return;
+  /**
+   * Shutdown the client and release resources.
+   */
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) {
+      return await this.shutdownPromise;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      this.pendingRemoteSyncWaiters.push({ resolve, reject });
-    });
-  }
+    this.shutdownPromise = (async () => {
+      // Disconnect Rust-owned transport if present.
+      this.runtime.disconnect?.();
 
-  private async waitForInFlightServerSyncs(): Promise<void> {
-    while (this.inFlightServerSyncs.size > 0) {
-      await Promise.allSettled(this.inFlightServerSyncs);
-    }
-  }
+      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+      if (this.runtime.close) {
+        await this.runtime.close();
+      }
+    })();
 
-  private trackServerSync(pending: Promise<void>): Promise<void> {
-    let tracked: Promise<void>;
-    tracked = pending.finally(() => {
-      this.inFlightServerSyncs.delete(tracked);
-    });
-    this.inFlightServerSyncs.add(tracked);
-    return tracked;
-  }
-
-  private sendSyncMessage(payloadJson: string, isCatalogue: boolean): Promise<void> {
-    if (this.shuttingDown) {
-      return Promise.resolve();
-    }
-
-    const serverUrl = this.streamController.getServerUrl();
-    if (!serverUrl) return Promise.resolve();
-
-    return this.trackServerSync(
-      sendSyncPayload(
-        serverUrl,
-        payloadJson,
-        isCatalogue,
-        {
-          ...this.getSyncAuth(),
-          clientId: this.serverClientId,
-          pathPrefix: this.streamController.getPathPrefix(),
-        },
-        "[client] ",
-      ),
-    );
+    return await this.shutdownPromise;
   }
 }
 

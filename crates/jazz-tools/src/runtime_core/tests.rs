@@ -19,8 +19,18 @@ use crate::sync_manager::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
-type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSyncSender>;
+type TestCore = RuntimeCore<MemoryStorage, NoopScheduler>;
+type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler>;
+
+fn new_test_core<S: Storage, Sch: Scheduler>(
+    schema_manager: SchemaManager,
+    storage: S,
+    scheduler: Sch,
+) -> RuntimeCore<S, Sch> {
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+    core.set_sync_sender(Box::new(VecSyncSender::new()));
+    core
+}
 
 struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
@@ -102,6 +112,36 @@ impl Scheduler for CountingScheduler {
 }
 
 impl Storage for RowRegionReadFailingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         if self.fail_row_locator_scans {
             return Err(StorageError::IoError(
@@ -475,6 +515,36 @@ impl Storage for RowRegionReadFailingStorage {
 }
 
 impl Storage for LegacyPersistenceObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -838,6 +908,38 @@ impl Storage for LegacyPersistenceObservingStorage {
 }
 
 impl Storage for RowMutationObservingStorage {
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().row_mutation_calls += 1;
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
     fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
         self.inner.scan_row_locators()
     }
@@ -1261,6 +1363,72 @@ fn protected_documents_schema() -> Schema {
         .build()
 }
 
+fn session_exists_rel_teams_schema() -> Schema {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+
+    let team_select_policy = PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::TableScan {
+                    table: TableName::new("user_team_edges"),
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("user_team_edges", "team_id"),
+                    right: ColumnRef::scoped("__join_0", "id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("user_team_edges", "user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::scoped("__join_0", "id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Outer),
+                },
+            ]),
+        },
+    };
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("teams")
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(team_select_policy)
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .table(
+            TableSchema::builder("user_team_edges")
+                .column("user_id", ColumnType::Text)
+                .column("team_id", ColumnType::Uuid)
+                .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
+        )
+        .build()
+}
+
+fn structural_session_exists_rel_teams_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("teams").column("name", ColumnType::Text))
+        .table(
+            TableSchema::builder("user_team_edges")
+                .column("user_id", ColumnType::Text)
+                .column("team_id", ColumnType::Uuid),
+        )
+        .build()
+}
+
 fn users_insert_denied_authorization_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -1353,12 +1521,7 @@ fn create_runtime_with_schema_and_sync_manager(
 ) -> TestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1379,7 +1542,7 @@ fn create_runtime_with_storage_and_sync_manager(
 ) -> TestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1392,7 +1555,7 @@ fn create_runtime_with_boxed_storage(
     let app_id = AppId::from_name(app_name);
     let schema_manager =
         SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
     core.immediate_tick();
     core
 }
@@ -1401,6 +1564,238 @@ fn create_test_runtime() -> TestCore {
     create_runtime_with_schema(test_schema(), "test-app")
 }
 
+// ---------------------------------------------------------------------------
+// install_transport tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "transport-websocket")]
+mod install_transport_tests {
+    use super::*;
+    use crate::transport_manager::{AuthConfig, StreamAdapter, TickNotifier};
+
+    struct NopTick;
+    impl TickNotifier for NopTick {
+        fn notify(&self) {}
+    }
+
+    struct NopStreamAdapter;
+    impl StreamAdapter for NopStreamAdapter {
+        type Error = &'static str;
+        async fn connect(_url: &str) -> Result<Self, Self::Error> {
+            futures::future::pending::<()>().await;
+            unreachable!()
+        }
+        async fn send(&mut self, _data: &[u8]) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+        async fn close(&mut self) {}
+    }
+
+    #[test]
+    #[should_panic(expected = "install_transport called while a transport is already installed")]
+    fn install_transport_panics_if_transport_already_installed() {
+        let mut core = create_test_runtime();
+        // Install once.
+        let _first = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+        // Install a second time — must panic via debug_assert.
+        let _second = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+    }
+
+    #[test]
+    fn install_transport_seeds_catalogue_hash_and_declared_schema_hash() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        assert!(
+            core.transport.is_some(),
+            "transport handle should be installed"
+        );
+        let expected_hash = core.schema_manager().catalogue_state_hash();
+        let handle_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .catalogue_state_hash_for_test();
+        let expected_schema_hash = core.schema_manager().current_hash().to_string();
+        let handle_schema_hash = core
+            .transport
+            .as_ref()
+            .unwrap()
+            .declared_schema_hash_for_test();
+        assert_eq!(
+            handle_hash.as_deref(),
+            Some(expected_hash.as_str()),
+            "install_transport must seed the handle's catalogue_state_hash",
+        );
+        assert_eq!(
+            handle_schema_hash.as_deref(),
+            Some(expected_schema_hash.as_str()),
+            "install_transport must seed the handle's declared_schema_hash",
+        );
+    }
+
+    #[test]
+    fn install_transport_holds_initial_remote_query_frontier_while_connecting() {
+        let mut core = create_test_runtime();
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query should stay pending until the transport finishes connecting"
+        );
+    }
+
+    /// Guards the fix for CI expo-e2e failing when the WS transport never
+    /// completes: after the pending-server timeout elapses and any subsequent
+    /// tick runs, a held initial subscription must actually deliver against
+    /// local state — not just flip an internal flag.
+    #[test]
+    fn pending_server_frontier_releases_after_timeout() {
+        use crate::sync_manager::PENDING_SERVER_TIMEOUT;
+
+        let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
+        );
+
+        std::thread::sleep(PENDING_SERVER_TIMEOUT + std::time::Duration::from_millis(100));
+
+        // The timeout is a passive check; something must drive a settle after
+        // the deadline. In production any ambient activity does this; here we
+        // trigger an explicit tick.
+        core.immediate_tick();
+
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after timeout release, got {other:?}"),
+        }
+    }
+
+    /// When the transport emits `ConnectFailed` (offline DNS/TCP/TLS error
+    /// before the timeout), draining the event must release the held initial
+    /// subscription *and* deliver its first batch against local state. Flipping
+    /// the pending-server flag is not enough on its own — release also has to
+    /// re-run `process()` so `settle()` observes the state change.
+    #[test]
+    fn connect_failed_event_releases_and_delivers_held_subscription() {
+        let mut core = create_test_runtime();
+
+        let alice = core
+            .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap()
+            .0;
+
+        let _manager = crate::runtime_core::install_transport::<_, _, NopStreamAdapter, _>(
+            &mut core,
+            "ws://example.test/ws".to_string(),
+            AuthConfig::default(),
+            NopTick,
+        );
+
+        let server_id = core.transport.as_ref().unwrap().server_id;
+
+        let mut future = core.query_with_propagation(
+            Query::new("users"),
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        );
+
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            std::pin::Pin::new(&mut future).poll(&mut cx).is_pending(),
+            "remote query must stay held while transport is pending"
+        );
+
+        core.handle_transport_inbound_for_test(
+            server_id,
+            crate::transport_manager::TransportInbound::ConnectFailed {
+                reason: "dns lookup failed".into(),
+            },
+        );
+
+        match std::pin::Pin::new(&mut future).poll(&mut cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                assert_eq!(rows.len(), 1, "held subscription must deliver Alice");
+                assert_eq!(rows[0].0, alice);
+            }
+            other => panic!("expected Ready(Ok(_)) after ConnectFailed release, got {other:?}"),
+        }
+    }
+}
 fn documents_query_by_title(title: &str) -> Query {
     QueryBuilder::new("documents")
         .filter_eq("title", Value::Text(title.into()))
@@ -1912,7 +2307,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
     let mut server = create_runtime_with_schema_and_sync_manager(
         schema,
         "scope-bypass-subscription-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     let alice_session = Session::new("alice");
@@ -2130,7 +2525,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         documents_query_by_title(title),
         Some(bob_session.clone()),
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
             strict_transactions: false,
         },
@@ -2140,7 +2535,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut fresh_bob_query).poll(&mut cx).is_pending(),
-        "fresh bob full query should wait for Worker settlement instead of resolving from local empty state"
+        "fresh bob full query should wait for Local settlement instead of resolving from local empty state"
     );
 
     let server_outputs_after_fresh_bob_query = pump_server_with_three_clients(
@@ -2172,7 +2567,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
             );
         }
         Poll::Ready(Err(err)) => panic!("fresh bob full query should succeed: {err:?}"),
-        Poll::Pending => panic!("fresh bob full query should resolve after Worker settlement"),
+        Poll::Pending => panic!("fresh bob full query should resolve after Local settlement"),
     }
 }
 
@@ -2226,32 +2621,17 @@ fn create_3tier_rc() -> ThreeTierRC {
     // A = client (no tier)
     let sm_a = SyncManager::new();
     let mgr_a = SchemaManager::new(sm_a, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     // B = Worker server
-    let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id, "dev", "main").unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = new_test_core(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     // C = EdgeServer
     let sm_c = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mgr_c = SchemaManager::new(sm_c, schema, app_id, "dev", "main").unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = new_test_core(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -2461,27 +2841,17 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
 
     let mgr_a =
         SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
-    let mut a = RuntimeCore::new(
-        mgr_a,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut a = new_test_core(mgr_a, MemoryStorage::new(), NoopScheduler);
 
     let mgr_b = SchemaManager::new(
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
         schema.clone(),
         app_id,
         "dev",
         "main",
     )
     .unwrap();
-    let mut b = RuntimeCore::new(
-        mgr_b,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut b = new_test_core(mgr_b, MemoryStorage::new(), NoopScheduler);
 
     let mgr_c = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
@@ -2491,12 +2861,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
         "main",
     )
     .unwrap();
-    let mut c = RuntimeCore::new(
-        mgr_c,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut c = new_test_core(mgr_c, MemoryStorage::new(), NoopScheduler);
 
     let a_client_of_b = ClientId::new();
     let b_server_for_a = ServerId::new();
@@ -2778,12 +3143,7 @@ fn rc_local_write_without_outbox_still_schedules_batched_tick_for_flush() {
     let app_id = AppId::from_name("row-schedule-flush-without-outbox");
     let schema_manager =
         SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        scheduler.clone(),
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), scheduler.clone());
     core.immediate_tick();
     let scheduled_before = scheduler.schedule_count();
 
@@ -2829,7 +3189,7 @@ fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::QuerySettled {
             query_id: crate::sync_manager::QueryId(1),
-            tier: DurabilityTier::Worker,
+            tier: DurabilityTier::Local,
             through_seq: 1,
         },
     });
@@ -3018,7 +3378,7 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
             "users",
             user_insert_values(user_id, "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     assert!(!id.0.is_nil());
@@ -3035,7 +3395,7 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 }
@@ -3054,7 +3414,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3073,7 +3433,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
             branch_name,
             batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     core.immediate_tick();
@@ -3098,7 +3458,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3117,7 +3477,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
             branch_name,
             batch_id: row_batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     s.a.immediate_tick();
@@ -3147,7 +3507,7 @@ fn rc_insert_persisted_holds_until_correct_tier() {
     assert_eq!(
         receiver.try_recv(),
         Ok(None),
-        "Worker ack should not satisfy EdgeServer request"
+        "Local ack should not satisfy EdgeServer request"
     );
 
     pump_b_to_c(&mut s);
@@ -3169,7 +3529,7 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3177,8 +3537,8 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
-        Ok(Some(Err(rejection))) => panic!("Worker request should not reject: {rejection:?}"),
-        Ok(None) => panic!("EdgeServer ack should satisfy Worker request"),
+        Ok(Some(Err(rejection))) => panic!("Local request should not reject: {rejection:?}"),
+        Ok(None) => panic!("EdgeServer ack should satisfy Local request"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 }
@@ -3191,7 +3551,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3222,7 +3582,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             branch_name,
             batch_id,
             state: None,
-            confirmed_tier: Some(DurabilityTier::Worker),
+            confirmed_tier: Some(DurabilityTier::Local),
         },
     });
     s.a.immediate_tick();
@@ -3238,7 +3598,7 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -3443,7 +3803,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3460,7 +3820,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         payload: SyncPayload::BatchSettlement {
             settlement: crate::batch_fate::BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Worker,
+                confirmed_tier: DurabilityTier::Local,
                 visible_members: vec![crate::batch_fate::VisibleBatchMember {
                     object_id: row_id,
                     branch_name,
@@ -3491,7 +3851,7 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3607,7 +3967,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     let ((second_row_id, _), mut second_receiver) =
@@ -3615,7 +3975,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3636,7 +3996,7 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
             visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(
                 visible_members.len(),
                 2,
@@ -3668,7 +4028,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3709,7 +4069,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -3728,6 +4088,7 @@ fn rc_transactional_insert_stays_local_until_authority_receives_it() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3776,6 +4137,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3818,7 +4180,7 @@ fn rc_transactional_insert_is_accepted_when_replayed_to_reconnected_upstream() {
         history_rows[0].state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(history_rows[0].confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(history_rows[0].batch_id(), batch_id);
 
     let worker_row =
@@ -3843,6 +4205,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3874,7 +4237,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(worker_row.batch_id(), batch_id);
 
     assert_eq!(
@@ -3896,7 +4259,7 @@ fn rc_transactional_insert_is_accepted_by_first_durable_upstream() {
         client_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(client_row.confirmed_tier, Some(DurabilityTier::Local));
     assert_eq!(client_row.batch_id(), batch_id);
 }
 
@@ -3910,6 +4273,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -3920,7 +4284,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -3958,7 +4322,7 @@ fn rc_transactional_insert_is_accepted_only_after_batch_is_sealed() {
         worker_row.state,
         crate::row_histories::RowState::VisibleTransactional
     );
-    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Worker));
+    assert_eq!(worker_row.confirmed_tier, Some(DurabilityTier::Local));
 
     assert_eq!(
         receiver.try_recv(),
@@ -3981,6 +4345,7 @@ fn rc_transactional_update_can_modify_row_inserted_earlier_in_same_batch() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -4053,6 +4418,7 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -4118,6 +4484,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let open_write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4128,7 +4495,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&open_write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4144,6 +4511,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let sealed_write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -4167,7 +4535,7 @@ fn rc_transactional_batch_rejects_writes_after_local_seal() {
             "users",
             user_insert_values(ObjectId::new(), "Carol"),
             Some(&sealed_write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap_err();
     assert!(matches!(
@@ -4218,6 +4586,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4228,7 +4597,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4274,7 +4643,7 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -4295,6 +4664,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4305,7 +4675,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4347,7 +4717,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         settled_record.latest_settlement,
         Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![crate::batch_fate::VisibleBatchMember {
                 object_id: row_id,
                 branch_name,
@@ -4375,7 +4745,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
     let ((second_row_id, _second_row_values), mut second_receiver) =
@@ -4383,7 +4753,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4432,7 +4802,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             visible_members,
         } => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(visible_members.len(), 2);
             assert!(visible_members.iter().any(|member| {
                 member.object_id == first_row_id
@@ -4460,7 +4830,7 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
             visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
-            assert_eq!(confirmed_tier, DurabilityTier::Worker);
+            assert_eq!(confirmed_tier, DurabilityTier::Local);
             assert_eq!(visible_members.len(), 2);
             assert!(visible_members.iter().any(|member| {
                 member.object_id == first_row_id
@@ -4483,6 +4853,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4495,7 +4866,7 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4530,6 +4901,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -4542,7 +4914,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4598,7 +4970,7 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "direct-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4627,7 +4999,7 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4731,7 +5103,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "transactional-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4767,7 +5139,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4851,7 +5223,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema,
         "transactional-ack-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4881,7 +5253,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -4949,7 +5321,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     let mut worker = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-reject-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     worker
         .schema_manager_mut()
@@ -4979,7 +5351,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5050,7 +5422,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-seal-recovery-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     old_runtime
         .storage_mut()
@@ -5084,7 +5456,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         schema,
         "transactional-restart-seal-recovery-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     let settlement = restarted
@@ -5096,7 +5468,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         settlement,
         crate::batch_fate::BatchSettlement::AcceptedTransaction {
             batch_id: settled_batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             ref visible_members,
         } if settled_batch_id == batch_id
             && *visible_members == vec![crate::batch_fate::VisibleBatchMember {
@@ -5153,7 +5525,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-invalid-seal-recovery-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     for row_id in [main_row_id, draft_row_id] {
         old_runtime
@@ -5195,7 +5567,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         schema,
         "transactional-restart-invalid-seal-recovery-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     assert_eq!(
@@ -5276,7 +5648,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
     let mut old_runtime = create_runtime_with_schema_and_sync_manager(
         schema.clone(),
         "transactional-restart-frontier-conflict-test",
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
     for row_id in [existing_row_id, conflicting_row_id, staged_row_id] {
         old_runtime
@@ -5339,7 +5711,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
         schema,
         "transactional-restart-frontier-conflict-test",
         storage,
-        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
     );
 
     assert_eq!(
@@ -5389,6 +5761,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5399,7 +5772,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5505,6 +5878,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5515,7 +5889,7 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5573,6 +5947,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -5594,7 +5969,7 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             Some(&write_context),
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5684,7 +6059,7 @@ fn rc_update_persisted_resolves_on_ack() {
             id,
             vec![("name".into(), Value::Text("Bob".into()))],
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5694,7 +6069,7 @@ fn rc_update_persisted_resolves_on_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Update receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Update receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Update receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 
@@ -5712,7 +6087,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
 
     let mut receiver =
-        s.a.delete_persisted(id, None, DurabilityTier::Worker)
+        s.a.delete_persisted(id, None, DurabilityTier::Local)
             .unwrap();
 
     pump_a_to_b(&mut s);
@@ -5721,7 +6096,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     match receiver.try_recv() {
         Ok(Some(Ok(()))) => {}
         Ok(Some(Err(rejection))) => panic!("Delete receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Delete receiver should be resolved after Worker ack"),
+        Ok(None) => panic!("Delete receiver should be resolved after Local ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
 
@@ -5739,7 +6114,7 @@ fn rc_multiple_persisted_inserts_independent() {
             "users",
             user_insert_values(ObjectId::new(), "Alice"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5748,7 +6123,7 @@ fn rc_multiple_persisted_inserts_independent() {
             "users",
             user_insert_values(ObjectId::new(), "Bob"),
             None,
-            DurabilityTier::Worker,
+            DurabilityTier::Local,
         )
         .unwrap();
 
@@ -5802,7 +6177,7 @@ fn rc_query_settled_tier_holds() {
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -5813,7 +6188,7 @@ fn rc_query_settled_tier_holds() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should be pending before Local settlement"
     );
 
     pump_a_to_b(&mut s);
@@ -5855,7 +6230,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         "Query should wait for the initial remote frontier"
     );
 
-    // Worker frontier completion is enough to unblock the first snapshot. With
+    // Local frontier completion is enough to unblock the first snapshot. With
     // immediate local updates, the locally-authored row should still be visible
     // even though it has not reached EdgeServer durability yet.
     pump_a_to_b(&mut s);
@@ -5872,14 +6247,22 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
 }
 
 #[test]
-fn rc_query_settled_tier_empty_resolves() {
+fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
     let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    // Keep the row local-only so B replies with an empty remote scope snapshot.
+    s.a.batched_tick();
+    s.a.sync_sender().take();
 
     let mut future = s.a.query_with_propagation(
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -5890,7 +6273,429 @@ fn rc_query_settled_tier_empty_resolves() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should wait for the initial remote frontier"
+    );
+
+    s.a.batched_tick();
+    let a_out = s.a.sync_sender().take();
+    for entry in a_out {
+        if entry.destination == Destination::Server(s.b_server_for_a)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+
+    let b_out = s.b.sync_sender().take();
+    assert!(
+        b_out.iter().any(|entry| matches!(
+            entry.payload,
+            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+        )),
+        "Expected an empty remote scope snapshot from B"
+    );
+    for entry in b_out {
+        if entry.destination == Destination::Client(s.a_client_of_b) {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the local row visible"
+            );
+            assert_eq!(results[0].0, id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "session-exists-rel-query",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let (team_id, _row_values) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    // Keep the policy context row local-only so the query must honor immediate
+    // local updates instead of relying on an upstream scope snapshot.
+    client.batched_tick();
+    client.sync_sender().take();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QueryScopeSnapshot { .. })),
+        "server without a published permissions head should not advertise an authoritative scope snapshot"
+    );
+    for entry in server_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the session-visible team"
+            );
+            assert_eq!(results[0].0, team_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
+ {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "backend-session-exists-rel-query",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let (team_id, _row_values) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    client.batched_tick();
+    client.sync_sender().take();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    let server_outbox = server.sync_sender().take();
+    for entry in server_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
+            );
+            assert_eq!(results[0].0, team_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+ {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "backend-session-exists-rel-synced",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let (team_id, _row_values) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
+    for entry in server.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.batched_tick();
+    client.immediate_tick();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    for entry in server.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Synced policy context rows should keep the session-visible team"
+            );
+            assert_eq!(results[0].0, team_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_settled_tier_empty_resolves() {
+    let mut s = create_3tier_rc();
+
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Local),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should be pending before Local settlement"
     );
 
     // No rows inserted anywhere; query should still resolve once settled tier is reached.
@@ -5961,7 +6766,7 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
             "users",
             second_visible.batch_id,
             None,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         )
         .unwrap();
 
@@ -5970,7 +6775,7 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
             strict_transactions: false,
         },
@@ -5999,6 +6804,190 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
 }
 
 #[test]
+fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean),
+        )
+        .build();
+    let mut core = create_runtime_with_schema_and_sync_manager(
+        schema.clone(),
+        "tier-aware-merged-row",
+        SyncManager::new(),
+    );
+    let branch_name = core.schema_manager().branch_name().to_string();
+    let descriptor = &schema[&TableName::new("todos")].columns;
+
+    let (row_id, _) = core
+        .insert(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text("base".into())),
+                ("done".to_string(), Value::Boolean(false)),
+            ]),
+            None,
+        )
+        .unwrap();
+    core.immediate_tick();
+
+    let base = core
+        .storage()
+        .load_visible_region_row("todos", &branch_name, row_id)
+        .unwrap()
+        .expect("base visible row");
+    core.storage_mut()
+        .patch_row_region_rows_by_batch(
+            "todos",
+            base.batch_id,
+            None,
+            Some(DurabilityTier::GlobalServer),
+        )
+        .unwrap();
+    let base = core
+        .storage()
+        .load_visible_region_row("todos", &branch_name, row_id)
+        .unwrap()
+        .expect("patched base visible row");
+
+    let edge_title = crate::row_histories::StoredRowBatch::new(
+        row_id,
+        branch_name.clone(),
+        vec![base.batch_id()],
+        encode_row(
+            descriptor,
+            &[Value::Text("edge-title".into()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        crate::metadata::RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+    let worker_done = crate::row_histories::StoredRowBatch::new(
+        row_id,
+        branch_name.clone(),
+        vec![base.batch_id()],
+        encode_row(
+            descriptor,
+            &[Value::Text("base".into()), Value::Boolean(true)],
+        )
+        .unwrap(),
+        crate::metadata::RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+        HashMap::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+
+    core.storage_mut()
+        .append_history_region_rows("todos", &[edge_title.clone(), worker_done.clone()])
+        .unwrap();
+    core.storage_mut()
+        .upsert_visible_region_rows(
+            "todos",
+            std::slice::from_ref(
+                &crate::row_histories::VisibleRowEntry::rebuild_with_descriptor(
+                    descriptor,
+                    &[base.clone(), edge_title.clone(), worker_done.clone()],
+                )
+                .unwrap()
+                .expect("merged visible entry"),
+            ),
+        )
+        .unwrap();
+
+    let worker_preview = core
+        .storage()
+        .load_visible_region_row_for_tier("todos", &branch_name, row_id, DurabilityTier::Local)
+        .unwrap()
+        .expect("worker preview");
+    let edge_preview = core
+        .storage()
+        .load_visible_region_row_for_tier("todos", &branch_name, row_id, DurabilityTier::EdgeServer)
+        .unwrap()
+        .expect("edge preview");
+    let global_preview = core
+        .storage()
+        .load_visible_region_row_for_tier(
+            "todos",
+            &branch_name,
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("global preview");
+    assert_eq!(
+        decode_row(descriptor, &worker_preview.data).unwrap(),
+        vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+    );
+    assert_eq!(
+        decode_row(descriptor, &edge_preview.data).unwrap(),
+        vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+    );
+    assert_eq!(
+        decode_row(descriptor, &global_preview.data).unwrap(),
+        vec![Value::Text("base".into()), Value::Boolean(false)]
+    );
+
+    let worker_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Local),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let edge_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+    let global_rows = execute_runtime_query_with_durability_and_propagation(
+        &mut core,
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::GlobalServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    );
+
+    assert_eq!(
+        worker_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("edge-title".into()), Value::Boolean(true)]
+        )]
+    );
+    assert_eq!(
+        edge_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+        )]
+    );
+    assert_eq!(
+        global_rows,
+        vec![(
+            row_id,
+            vec![Value::Text("base".into()), Value::Boolean(false)]
+        )]
+    );
+}
+
+#[test]
 fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut s = create_3tier_rc();
 
@@ -6014,12 +7003,12 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.batched_tick();
     s.b.sync_sender().take();
 
-    // One-shot settled query on A should wait for Worker settlement.
+    // One-shot settled query on A should wait for Local settlement.
     let mut future = s.a.query_with_propagation(
         Query::new("users"),
         None,
         ReadDurabilityOptions {
-            tier: Some(DurabilityTier::Worker),
+            tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
             strict_transactions: false,
         },
@@ -6030,7 +7019,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut cx = std::task::Context::from_waker(&waker);
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should be pending before Worker settlement"
+        "Query should be pending before Local settlement"
     );
 
     // Deliver A -> B query subscription and let B compute response traffic.
@@ -6135,7 +7124,7 @@ fn rc_subscribe_settled_tier() {
             },
             None,
             ReadDurabilityOptions {
-                tier: Some(DurabilityTier::Worker),
+                tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
                 strict_transactions: false,
             },
@@ -6150,7 +7139,7 @@ fn rc_subscribe_settled_tier() {
 
     assert!(
         received.lock().unwrap().is_empty(),
-        "Callback should not fire before Worker settlement"
+        "Callback should not fire before Local settlement"
     );
 
     pump_a_to_b(&mut s);
@@ -6207,7 +7196,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     );
     drop(calls);
 
-    // Worker frontier completion is enough to unblock the first snapshot. With
+    // Local frontier completion is enough to unblock the first snapshot. With
     // immediate local updates, the locally-authored row is shown immediately
     // while its EdgeServer durability is still pending.
     pump_a_to_b(&mut s);
@@ -6266,10 +7255,92 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
 }
 
 #[test]
+fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_snapshot() {
+    let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    // Keep the row local-only so B replies with an empty remote scope snapshot.
+    s.a.batched_tick();
+    s.a.sync_sender().take();
+
+    let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                received_clone
+                    .lock()
+                    .unwrap()
+                    .push(decode_added_rows(&delta));
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::EdgeServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+                strict_transactions: false,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    s.a.batched_tick();
+    let a_out = s.a.sync_sender().take();
+    for entry in a_out {
+        if entry.destination == Destination::Server(s.b_server_for_a)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+
+    let b_out = s.b.sync_sender().take();
+    assert!(
+        b_out.iter().any(|entry| matches!(
+            entry.payload,
+            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+        )),
+        "Expected an empty remote scope snapshot from B"
+    );
+    for entry in b_out {
+        if entry.destination == Destination::Client(s.a_client_of_b) {
+            s.a.park_sync_message(InboxEntry {
+                source: Source::Server(s.b_server_for_a),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Frontier completion should emit one initial snapshot"
+    );
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "Initial snapshot should keep the local row"
+    );
+    assert_eq!(calls[0][0].0, id);
+}
+
+#[test]
 fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     // alice strict-subscribes at EdgeServer durability
     //   alice stages one transactional row locally
-    //   worker frontier completion unblocks the first snapshot
+    //   local frontier completion unblocks the first snapshot
     //   the row should appear via alice's local pending overlay even before EdgeServer settlement
     //   later EdgeServer settlement should not emit the same row again
     let mut s = create_3tier_rc();
@@ -6297,6 +7368,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -6323,7 +7395,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     assert_eq!(
         calls.len(),
         1,
-        "worker frontier completion should unblock the first snapshot"
+        "local frontier completion should unblock the first snapshot"
     );
     assert_eq!(
         calls[0].len(),
@@ -6347,7 +7419,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
 #[test]
 fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejected() {
     // alice strict-subscribes at EdgeServer durability
-    //   worker frontier first opens the subscription with an empty snapshot
+    //   local frontier first opens the subscription with an empty snapshot
     //   alice then stages one transactional row locally
     //   the row appears only through the local pending overlay
     //   a replayable rejected batch settlement should remove that overlay immediately
@@ -6385,6 +7457,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: None,
         target_branch_name: None,
@@ -6447,12 +7520,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
     let schema = test_schema();
     let app_id = AppId::from_name("durability-test");
     let mgr_d = SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
-    let mut d = RuntimeCore::new(
-        mgr_d,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut d = new_test_core(mgr_d, MemoryStorage::new(), NoopScheduler);
 
     let d_client_of_b = ClientId::new();
     let b_server_for_d = ServerId::new();
@@ -6476,6 +7544,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
     let write_context = WriteContext {
         session: None,
         attribution: None,
+        updated_at: None,
         batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
         batch_id: Some(batch_id),
         target_branch_name: None,
@@ -6515,7 +7584,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
             },
             None,
             ReadDurabilityOptions {
-                tier: Some(DurabilityTier::Worker),
+                tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
                 strict_transactions: true,
             },
@@ -6987,12 +8056,7 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     // NO immediate_tick() here — matches WASM openPersistent flow
 
     // persist_schema — stages a catalogue object before the first tick
@@ -7052,18 +8116,40 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
 }
 
 #[test]
+fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+
+    core.batched_tick();
+
+    let outbox = core
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .take_outbox();
+    assert!(
+        outbox
+            .iter()
+            .any(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id)),
+        "batched_tick without a transport should leave server-bound outbox entries intact"
+    );
+}
+
+#[test]
 fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
     let schema = test_schema();
     let app_id = AppId::from_name("test-app");
     let schema_hash = SchemaHash::compute(&schema);
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     core.persist_schema();
     core.publish_permissions_bundle(
@@ -7120,12 +8206,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let app_id = AppId::from_name("test-app");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
 
     let schema_obj_id = core.persist_schema();
     let ((row_object_id, _), _) = core
@@ -7196,12 +8277,7 @@ fn create_fk_runtime() -> TestCore {
     let app_id = AppId::from_name("fk-test");
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-    let mut core = RuntimeCore::new(
-        schema_manager,
-        MemoryStorage::new(),
-        NoopScheduler,
-        VecSyncSender::new(),
-    );
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
     core.immediate_tick();
     core
 }

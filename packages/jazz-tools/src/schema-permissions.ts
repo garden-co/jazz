@@ -235,6 +235,14 @@ function normalizeRelationExprForWasm(expr: RelExpr): RelExpr {
     };
   }
 
+  if ("Union" in expr) {
+    return {
+      Union: {
+        inputs: expr.Union.inputs.map((input) => normalizeRelationExprForWasm(input)),
+      },
+    };
+  }
+
   if ("Join" in expr) {
     return {
       Join: {

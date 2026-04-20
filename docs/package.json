@@ -5,6 +5,8 @@
   "scripts": {
     "build": "next build",
     "dev": "cd .. && next dev ./docs",
+    "prebuild": "fumadocs-mdx",
+    "predev": "fumadocs-mdx",
     "start": "next start",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx"

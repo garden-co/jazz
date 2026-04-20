@@ -18,7 +18,7 @@ export interface RemoteBrowserDbWaitForTitleInput {
   id: string;
   title: string;
   timeoutMs: number;
-  tier?: "worker" | "edge";
+  tier?: "local" | "edge";
 }
 
 interface RemoteBrowserDbState {

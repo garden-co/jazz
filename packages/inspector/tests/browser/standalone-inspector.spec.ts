@@ -42,6 +42,7 @@ async function openTodosTable(page: Page) {
   const tableLink = page.getByRole("link", { name: "View todos data" });
   await expect(tableLink).toBeVisible({ timeout: 5_000 });
   await tableLink.click();
+  await page.getByRole("columnheader", { name: "title" }).click();
 
   await expectTodosTableLoaded(page);
 }
@@ -93,14 +94,26 @@ test.describe("connection page", () => {
     await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
   });
 
-  test("reset connection returns to onboarding", async ({ page }) => {
+  test("edit connection opens a prefilled form and reset returns to onboarding", async ({
+    page,
+  }) => {
     await page.goto("/");
     await storeStandaloneConfig(page);
     await page.reload();
 
+    await expect(page.getByRole("button", { name: "Edit connection" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Edit connection" }).click();
+
+    await expect(page.getByRole("heading", { name: "Edit connection" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
+    await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
+    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
     await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible();
+
     await page.getByRole("button", { name: "Reset connection" }).click();
     await expect(page.getByRole("heading", { name: "Connect to Jazz server" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue("");
   });
 });
 
@@ -122,6 +135,10 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"type": "Text"')).toBeVisible();
     await expect(page.getByText('"name": "done"')).toBeVisible();
     await expect(page.getByText('"type": "Boolean"')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "todos permissions" })).toBeVisible();
+    await expect(
+      page.getByText("No published sync-server permissions found for this app."),
+    ).toBeVisible();
   });
 
   test("discards queued inline text edits without persisting them", async ({ page }) => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDbFromClient } from "./db.js";
 import type { AuthState } from "./auth-state.js";
+import type { Session } from "./context.js";
 
 function toBase64Url(value: unknown): string {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
@@ -28,7 +29,45 @@ function makeDbWithJwt(jwtToken: string) {
   return { db, runtimeClient };
 }
 
+function makeDbWithCookieSession(cookieSession: Session) {
+  const runtimeClient = {
+    updateAuthToken: vi.fn(),
+    updateCookieSession: vi.fn(),
+  };
+
+  const db = createDbFromClient(
+    {
+      appId: "cookie-auth-app",
+      cookieSession,
+    },
+    runtimeClient as any,
+  );
+
+  return { db, runtimeClient };
+}
+
 describe("Db auth state", () => {
+  it("returns the initial cookie auth state", () => {
+    const { db } = makeDbWithCookieSession({
+      user_id: "alice",
+      claims: {
+        role: "reader",
+        auth_mode: "external",
+        subject: "alice-subject",
+        issuer: "https://issuer.example",
+      },
+    });
+
+    expect(db.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "cookie",
+      session: {
+        user_id: "alice",
+        claims: expect.objectContaining({ role: "reader" }),
+      },
+    });
+  });
+
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
       user_id: "alice",
@@ -181,6 +220,49 @@ describe("Db auth state", () => {
       session: {
         user_id: "alice",
       },
+    });
+  });
+
+  it("updates mirrored cookie auth for the same principal", () => {
+    const { db, runtimeClient } = makeDbWithCookieSession({
+      user_id: "alice",
+      claims: {
+        role: "reader",
+        auth_mode: "external",
+        subject: "alice-subject",
+        issuer: "https://issuer.example",
+      },
+    });
+    const refreshed: Session = {
+      user_id: "alice",
+      claims: {
+        role: "writer",
+        auth_mode: "external",
+        subject: "alice-subject",
+        issuer: "https://issuer.example",
+      },
+    };
+    const states: AuthState[] = [];
+
+    const stop = db.onAuthChanged((state) => {
+      states.push(state);
+    });
+
+    db.updateCookieSession(refreshed);
+    stop();
+
+    expect(runtimeClient.updateCookieSession).toHaveBeenCalledWith(refreshed);
+    expect(db.getAuthState()).toMatchObject({
+      status: "authenticated",
+      transport: "cookie",
+      session: {
+        user_id: "alice",
+        claims: expect.objectContaining({ role: "writer" }),
+      },
+    });
+    expect(states.at(-1)).toMatchObject({
+      status: "authenticated",
+      transport: "cookie",
     });
   });
 });

@@ -71,7 +71,7 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 Pass a tier when you need the first result to be authoritative at a specific level&hairsp;—&hairsp;for example, when a user has just navigated to a page and a stale local snapshot would mislead them.
 
-- `"worker"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
+- `"local"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
 - `"edge"`&hairsp;—&hairsp;Wait for the nearest sync server to respond. The default on backends and servers. A good middle ground when you want confirmation that the query has fetched data from the network.
 - `"global"`&hairsp;—&hairsp;Wait for the central server. Use when you need a globally-consistent snapshot, accepting the extra round-trip latency.
 

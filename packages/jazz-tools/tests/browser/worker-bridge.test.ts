@@ -27,6 +27,7 @@ import {
   getTestingServerInfo,
   getTestingServerJwtForUser,
   getTestingServerNetworkDebug,
+  type TestingServerInfo,
   unblockTestingServerNetwork,
 } from "./testing-server.js";
 import {
@@ -333,7 +334,7 @@ describe("Worker Bridge with OPFS", () => {
     title: string,
     label: string,
     timeoutMs: number,
-    tier?: "worker" | "edge",
+    tier?: "local" | "edge",
   ): Promise<Record<string, unknown>[]> {
     try {
       return await waitForRemoteBrowserDbTitle({ id, title, timeoutMs, tier });
@@ -510,7 +511,7 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        const row = await db1.one(allTodos, { tier: "worker" });
+        const row = await db1.one(allTodos, { tier: "local" });
         return row?.id === id;
       },
       8_000,
@@ -527,7 +528,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const persistedRow = await db2.one(allTodos, { tier: "worker" });
+    const persistedRow = await db2.one(allTodos, { tier: "local" });
     expect(persistedRow?.id).toBe(id);
   });
 
@@ -578,7 +579,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const persistedRows = await db2.all(allTodos, { tier: "worker" });
+    const persistedRows = await db2.all(allTodos, { tier: "local" });
     expect(persistedRows.length).toEqual(0);
   });
 
@@ -608,7 +609,7 @@ describe("Worker Bridge with OPFS", () => {
       return originalPostMessage(message, { transfer });
     }) as Worker["postMessage"];
 
-    await expect(db.all(allTodos, { tier: "worker" })).rejects.toThrow(
+    await expect(db.all(allTodos, { tier: "local" })).rejects.toThrow(
       "Worker init failed: forced bridge init failure for query test",
     );
 
@@ -651,13 +652,13 @@ describe("Worker Bridge with OPFS", () => {
     const { id } = await db.insertDurable(
       todos,
       { title: "Original", done: false },
-      { tier: "worker" },
+      { tier: "local" },
     );
-    const pending = db.updateDurable(todos, id, { done: true }, { tier: "worker" });
+    const pending = db.updateDurable(todos, id, { done: true }, { tier: "local" });
     expect(pending).toBeInstanceOf(Promise);
     await pending;
 
-    const results = await db.all(allTodos, { tier: "worker" });
+    const results = await db.all(allTodos, { tier: "local" });
     expect(results.length).toBe(1);
     expect(results[0].done).toBe(true);
   });
@@ -693,15 +694,15 @@ describe("Worker Bridge with OPFS", () => {
     const { id } = await db.insertDurable(
       todos,
       { title: "Ephemeral", done: false },
-      { tier: "worker" },
+      { tier: "local" },
     );
-    expect((await db.all(allTodos, { tier: "worker" })).length).toBe(1);
+    expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
 
-    const pending = db.deleteDurable(todos, id, { tier: "worker" });
+    const pending = db.deleteDurable(todos, id, { tier: "local" });
     expect(pending).toBeInstanceOf(Promise);
     await pending;
 
-    const results = await db.all(allTodos, { tier: "worker" });
+    const results = await db.all(allTodos, { tier: "local" });
     expect(results.length).toBe(0);
   });
 
@@ -719,12 +720,12 @@ describe("Worker Bridge with OPFS", () => {
     await db1.shutdown();
 
     // New Db with same dbName — worker reopens OPFS, main thread starts empty.
-    // Using "worker" settled tier makes the query wait for the worker's
+    // Using "local" settled tier makes the query wait for the worker's
     // QuerySettled response, ensuring OPFS data arrives before resolving.
     const db2 = track(
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
     );
-    const after = await db2.all(allTodos, { tier: "worker" });
+    const after = await db2.all(allTodos, { tier: "local" });
     expect(after.length).toBe(1);
     expect(after[0].title).toBe("Survive reload");
     expect(after[0].done).toBe(true);
@@ -737,9 +738,9 @@ describe("Worker Bridge with OPFS", () => {
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
     );
 
-    // insert({ tier: "worker" }) ensures data is in OPFS WAL before we crash
-    await db1.insertDurable(todos, { title: "Crash-proof", done: false }, { tier: "worker" });
-    await db1.insertDurable(todos, { title: "Also survives", done: true }, { tier: "worker" });
+    // insert({ tier: "local" }) ensures data is in OPFS WAL before we crash
+    await db1.insertDurable(todos, { title: "Crash-proof", done: false }, { tier: "local" });
+    await db1.insertDurable(todos, { title: "Also survives", done: true }, { tier: "local" });
 
     // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
@@ -759,7 +760,7 @@ describe("Worker Bridge with OPFS", () => {
     const db2 = track(
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
     );
-    const after = await db2.all(allTodos, { tier: "worker" });
+    const after = await db2.all(allTodos, { tier: "local" });
     expect(after.length).toBe(2);
 
     const titles = after.map((r) => r.title).sort();
@@ -790,7 +791,7 @@ describe("Worker Bridge with OPFS", () => {
     setTimeout(() => writable.close(), 100);
 
     const db = track(await dbPromise);
-    const rows = await db.all(allTodos, { tier: "worker" });
+    const rows = await db.all(allTodos, { tier: "local" });
     expect(rows).toEqual([]);
   });
 
@@ -802,24 +803,114 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insertDurable(todos, { title: "Should be deleted", done: false }, { tier: "worker" });
-    const before = await db.all(allTodos, { tier: "worker" });
+    await db.insertDurable(todos, { title: "Should be deleted", done: false }, { tier: "local" });
+    const before = await db.all(allTodos, { tier: "local" });
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
 
     await db.deleteClientStorage();
 
-    const afterDelete = await db.all(allTodos, { tier: "worker" });
+    const afterDelete = await db.all(allTodos, { tier: "local" });
     expect(afterDelete).toEqual([]);
 
     const {
       value: { id },
     } = db.insert(todos, { title: "Fresh after delete", done: true });
-    const afterReinsert = await db.all(allTodos, { tier: "worker" });
+    const afterReinsert = await db.all(allTodos, { tier: "local" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
     expect(afterReinsert[0].title).toBe("Fresh after delete");
     expect(afterReinsert[0].done).toBe(true);
+  });
+
+  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
+    const dbName = uniqueDbName("delete-storage-follower");
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    await leader.insertDurable(
+      todos,
+      { title: "Leader data before follower wipe", done: false },
+      { tier: "local" },
+    );
+    await follower.insertDurable(
+      todos,
+      { title: "Follower data before follower wipe", done: true },
+      { tier: "local" },
+    );
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "local" });
+        const followerRows = await follower.all(allTodos, { tier: "local" });
+        return leaderRows.length === 2 && followerRows.length === 2;
+      },
+      8000,
+      "Leader and follower should both observe pre-wipe rows",
+    );
+
+    await follower.deleteClientStorage();
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "local" });
+        const followerRows = await follower.all(allTodos, { tier: "local" });
+        return leaderRows.length === 0 && followerRows.length === 0;
+      },
+      12000,
+      "Follower-initiated storage wipe should clear both leader and follower namespaces",
+    );
+
+    const marker = `fresh-after-follower-wipe-${Date.now()}`;
+    await leader.insertDurable(todos, { title: marker, done: false }, { tier: "local" });
+
+    await waitForCondition(
+      async () => {
+        const leaderRows = await leader.all(allTodos, { tier: "local" });
+        const followerRows = await follower.all(allTodos, { tier: "local" });
+        const leaderHas = leaderRows.some((row) => row.title === marker);
+        const followerHas = followerRows.some((row) => row.title === marker);
+        return leaderHas && followerHas;
+      },
+      12000,
+      "Both tabs should recover cleanly after follower-initiated storage wipe",
+    );
+  });
+
+  it("logout with wipeData clears browser storage before the next session opens", async () => {
+    const dbName = uniqueDbName("logout-wipe");
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    await db.insertDurable(
+      todos,
+      { title: "Should be wiped on logout", done: false },
+      {
+        tier: "local",
+      },
+    );
+    expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
+
+    await db.logout({ wipeData: true });
+    untrack(db);
+
+    const reopened = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName },
+      }),
+    );
+    const rows = await reopened.all(allTodos, { tier: "local" });
+    expect(rows).toEqual([]);
   });
 
   it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
@@ -829,7 +920,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // Initialize worker/main runtimes with schema v2 from client context.
-    await seeded.all(allCatalogueTodos, { tier: "worker" });
+    await seeded.all(allCatalogueTodos, { tier: "local" });
 
     // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
     await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
@@ -849,7 +940,7 @@ describe("Worker Bridge with OPFS", () => {
     const offline = track(
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
     );
-    await offline.all(allCatalogueTodos, { tier: "worker" });
+    await offline.all(allCatalogueTodos, { tier: "local" });
 
     await waitForCondition(
       async () => {
@@ -862,7 +953,7 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        await offline.all(allCatalogueTodos, { tier: "worker" });
+        await offline.all(allCatalogueTodos, { tier: "local" });
         const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
         return hasRestoredCatalogueState(mainState);
       },
@@ -872,10 +963,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 90_000);
 
   // -------------------------------------------------------------------------
-  // 5. Durable insert resolves at worker tier
+  // 5. Durable insert resolves at local tier
   // -------------------------------------------------------------------------
 
-  it("insert resolves when worker acks", async () => {
+  it("insert resolves when local acks", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -883,11 +974,11 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // insert("worker") should resolve once the worker's OPFS has it
+    // insert("local") should resolve once the worker's OPFS has it
     const { id } = await db.insertDurable(
       todos,
       { title: "Durable", done: false },
-      { tier: "worker" },
+      { tier: "local" },
     );
     expect(id).toBeTruthy();
     expect(typeof id).toBe("string");
@@ -975,14 +1066,20 @@ describe("Worker Bridge with OPFS", () => {
 
   it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
-    const db = await createSyncedDb(ctx, "subscribe-initial-snapshot", sharedLocalAuthToken);
+    const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-initial-snapshot");
+    const db = await createSyncedDb(
+      ctx,
+      "subscribe-initial-snapshot",
+      sharedLocalAuthToken,
+      syncServer,
+    );
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
       const { id } = await db.insertDurable(
         todos,
         { title: `seeded-${i}`, done: i % 2 === 0 },
-        { tier: "worker" },
+        { tier: "local" },
       );
       insertedIds.push(id);
     }
@@ -1011,14 +1108,15 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const { appId, serverUrl, adminSecret } =
+      await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
     const db = track(
       await createDb({
         appId,
         driver: { type: "persistent", dbName: uniqueDbName("subscribe-initial-jwt") },
         serverUrl,
         adminSecret,
-        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt"),
+        jwtToken: await getTestingServerJwtForUser("subscribe-initial-jwt", undefined, appId),
       }),
     );
 
@@ -1027,7 +1125,7 @@ describe("Worker Bridge with OPFS", () => {
       const { id } = await db.insertDurable(
         todos,
         { title: `seeded-jwt-${i}`, done: i % 2 === 0 },
-        { tier: "worker" },
+        { tier: "local" },
       );
       insertedIds.push(id);
     }
@@ -1088,13 +1186,14 @@ describe("Worker Bridge with OPFS", () => {
   // -------------------------------------------------------------------------
 
   it("propagates synced row from client A to client B", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-a-to-b");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken, syncServer);
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title, done: false }, { tier: "local" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -1109,13 +1208,14 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("propagates synced row from client B to client A", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-b-to-a");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken, syncServer);
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbB.insertDurable(todos, { title, done: true }, { tier: "worker" }),
+      dbB.insertDurable(todos, { title, done: true }, { tier: "local" }),
       10000,
       "B insert(worker) did not resolve",
     );
@@ -1184,7 +1284,7 @@ describe("Worker Bridge with OPFS", () => {
     const inserted = db.insert(todos, { title: "Rejected later", done: false });
     const waitPromise = inserted.wait({ tier: "edge" });
 
-    const todosAfterInsert = await db.all(allTodos, { tier: "worker" });
+    const todosAfterInsert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterInsert.length).toBe(1);
 
     await unblockTestingServerNetwork(serverUrl);
@@ -1194,7 +1294,7 @@ describe("Worker Bridge with OPFS", () => {
       (rows) => rows.length === 0,
       "offline insert should be reverted once rejected by the server",
       10_000,
-      "worker",
+      "local",
     );
 
     // `InsertHandle.wait` rejects
@@ -1208,9 +1308,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("recovers sync after browser-side network loss with B in a separate context", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-recover");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken);
+    const { appId, serverUrl, adminSecret } = syncServer;
+    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken, syncServer);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -1225,7 +1326,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const baselineTitle = `baseline-network-recover-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
       10000,
       "Baseline insert(worker) did not resolve",
     );
@@ -1249,7 +1350,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const recoveredTitle = `network-recovered-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: recoveredTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: recoveredTitle, done: false }, { tier: "local" }),
       10000,
       "Recovered insert(worker) did not resolve",
     );
@@ -1271,16 +1372,22 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the first fresh edge query completes without needing a second client recreate
    */
   it("replays a fresh edge query once upstream attaches after init", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("edge-late-attach");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { serverUrl } = await getTestingServerInfo();
-    const dbWriter = await createSyncedDb(ctx, "edge-late-attach-writer", sharedLocalAuthToken);
+    const { serverUrl } = syncServer;
+    const dbWriter = await createSyncedDb(
+      ctx,
+      "edge-late-attach-writer",
+      sharedLocalAuthToken,
+      syncServer,
+    );
     const writerProbe = attachWorkerMessageProbe(dbWriter);
     let probeProbe: WorkerMessageProbe | null = null;
 
     try {
       const baselineTitle = `edge-late-baseline-${Date.now()}`;
       await withTimeout(
-        dbWriter.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+        dbWriter.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
         10000,
         "Baseline insert(worker) did not resolve",
       );
@@ -1303,7 +1410,12 @@ describe("Worker Bridge with OPFS", () => {
       await blockTestingServerNetwork(serverUrl);
       await sleep(250);
 
-      const dbProbe = await createSyncedDb(ctx, "edge-late-attach-probe", sharedLocalAuthToken);
+      const dbProbe = await createSyncedDb(
+        ctx,
+        "edge-late-attach-probe",
+        sharedLocalAuthToken,
+        syncServer,
+      );
       probeProbe = attachWorkerMessageProbe(dbProbe);
       const probeRowsPromise = waitForTodos(
         dbProbe,
@@ -1344,9 +1456,10 @@ describe("Worker Bridge with OPFS", () => {
    *   expected: the earlier offline worker write also promotes to B + fresh edge client
    */
   it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-offline");
     const sharedLocalAuthToken = generateAuthSecret();
-    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
-    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
+    const { appId, serverUrl, adminSecret } = syncServer;
+    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
     const dbAProbe = attachWorkerMessageProbe(dbA);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
@@ -1362,7 +1475,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const baselineTitle = `baseline-before-offline-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
       10000,
       "Baseline insert(worker) did not resolve",
     );
@@ -1375,11 +1488,15 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await blockTestingServerNetwork(serverUrl);
+    // Disconnect the WS transport so the block takes effect immediately.
+    // Playwright route blocking only intercepts new connections; the existing
+    // WebSocket must be closed explicitly for the offline simulation to hold.
+    (dbA as any).workerBridge?.disconnectUpstream?.();
     await sleep(250);
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: offlineTitle, done: true }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: offlineTitle, done: true }, { tier: "local" }),
       10000,
       "Offline insert(worker) did not resolve",
     );
@@ -1389,7 +1506,7 @@ describe("Worker Bridge with OPFS", () => {
       (rows) => rows.some((row) => row.title === offlineTitle),
       "A sees offline worker row locally",
       10000,
-      "worker",
+      "local",
     );
 
     await expect(
@@ -1402,6 +1519,8 @@ describe("Worker Bridge with OPFS", () => {
     ).rejects.toThrow();
 
     await unblockTestingServerNetwork(serverUrl);
+    // Re-establish the worker's upstream WebSocket now that the network is live again.
+    (dbA as any).workerBridge?.reconnectUpstream?.();
     await sleep(250);
 
     (dbA as any).sendLifecycleHint?.("freeze");
@@ -1411,7 +1530,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const postReconnectTitle = `post-reconnect-control-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: postReconnectTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: postReconnectTitle, done: false }, { tier: "local" }),
       10000,
       "Post-reconnect control insert(worker) did not resolve",
     );
@@ -1421,7 +1540,7 @@ describe("Worker Bridge with OPFS", () => {
       (rows) => rows.some((row) => row.title === postReconnectTitle),
       "A sees control row locally after reconnect",
       10000,
-      "worker",
+      "local",
     );
     await waitForRemoteTodoTitle(
       remoteDbId,
@@ -1440,7 +1559,12 @@ describe("Worker Bridge with OPFS", () => {
 
     let dbProbeTrace: WorkerMessageProbe | null = null;
     try {
-      const dbProbe = await createSyncedDb(ctx, "sync-offline-probe", sharedLocalAuthToken);
+      const dbProbe = await createSyncedDb(
+        ctx,
+        "sync-offline-probe",
+        sharedLocalAuthToken,
+        syncServer,
+      );
       dbProbeTrace = attachWorkerMessageProbe(dbProbe);
       const rowsOnProbe = await waitForTodos(
         dbProbe,
@@ -1483,7 +1607,7 @@ describe("Worker Bridge with OPFS", () => {
       ),
     );
 
-    await dbA.insertDurable(todos, { title: "local-only-local-1", done: true }, { tier: "worker" });
+    await dbA.insertDurable(todos, { title: "local-only-local-1", done: true }, { tier: "local" });
 
     // Wait for initial local-only snapshot.
     await waitForCondition(
@@ -1517,9 +1641,10 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   it("local-only subscriptions do not receive rows from sync server", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("sync-local-only");
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken, syncServer);
+    const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken, syncServer);
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
@@ -1541,7 +1666,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: remoteTitle, done: false }, { tier: "worker" }),
+      dbA.insertDurable(todos, { title: remoteTitle, done: false }, { tier: "local" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -1604,8 +1729,8 @@ describe("Worker Bridge with OPFS", () => {
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "worker" });
-        const followerRows = await follower.all(allTodos, { tier: "worker" });
+        const leaderRows = await leader.all(allTodos, { tier: "local" });
+        const followerRows = await follower.all(allTodos, { tier: "local" });
         const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
         const followerHas = followerRows.some((row) => row.title === "Routed via leader");
         return leaderHas && followerHas;
@@ -1641,7 +1766,7 @@ describe("Worker Bridge with OPFS", () => {
     } = follower.insert(todos, { title: "Post-failover", done: true });
     await waitForCondition(
       async () => {
-        const rows = await follower.all(allTodos, { tier: "worker" });
+        const rows = await follower.all(allTodos, { tier: "local" });
         return rows.some((row) => row.id === id && row.title === "Post-failover");
       },
       8000,
@@ -1673,19 +1798,19 @@ describe("Worker Bridge with OPFS", () => {
     );
     const currentLeader = await waitForSingleLeader([survivor, reopened]);
     const currentFollower = currentLeader === survivor ? reopened : survivor;
-    await currentLeader.all(allTodos, { tier: "worker" });
+    await currentLeader.all(allTodos, { tier: "local" });
 
     const marker = `reopen-${Date.now()}`;
     await withTimeout(
-      currentFollower.insertDurable(todos, { title: marker, done: false }, { tier: "worker" }),
+      currentFollower.insertDurable(todos, { title: marker, done: false }, { tier: "local" }),
       10000,
       "Follower insert during reopen re-election did not resolve",
     );
 
     await waitForCondition(
       async () => {
-        const leaderRows = await currentLeader.all(allTodos, { tier: "worker" });
-        const followerRows = await currentFollower.all(allTodos, { tier: "worker" });
+        const leaderRows = await currentLeader.all(allTodos, { tier: "local" });
+        const followerRows = await currentFollower.all(allTodos, { tier: "local" });
         const leaderHas = leaderRows.some((row) => row.title === marker);
         const followerHas = followerRows.some((row) => row.title === marker);
         return leaderHas && followerHas;
@@ -1705,9 +1830,46 @@ async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "worker" | "edge",
+  tier?: "local" | "edge",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishSyncServerSchemaAndPermissions(scope: string): Promise<TestingServerInfo> {
+  const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { serverUrl, adminSecret } = testingServer;
+  const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    adminSecret,
+    schema: app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  await publishStoredPermissions(serverUrl, {
+    adminSecret,
+    schemaHash,
+    permissions: {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+      projects: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
+        },
+        delete: { using: { type: "True" } },
+      },
+    },
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+  });
+
+  return testingServer;
 }
 
 function hasRestoredCatalogueState(state: DebugSchemaState): boolean {

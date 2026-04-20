@@ -565,7 +565,7 @@ pub fn test_visible_region_uses_flat_bytes_when_schema_known(
         RowProvenance::for_insert("alice".to_string(), 100),
         HashMap::new(),
         RowState::VisibleDirect,
-        Some(DurabilityTier::Worker),
+        Some(DurabilityTier::Local),
     );
     let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
 
@@ -621,7 +621,7 @@ pub fn test_visible_region_does_not_write_separate_batch_side_index(
         RowProvenance::for_insert("alice".to_string(), 100),
         HashMap::new(),
         RowState::VisibleDirect,
-        Some(DurabilityTier::Worker),
+        Some(DurabilityTier::Local),
     );
     let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
 
@@ -690,7 +690,7 @@ pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Stora
             "users",
             version.batch_id,
             None,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         )
         .unwrap();
 
@@ -923,7 +923,7 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
         true,
         Some(BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![VisibleBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(91)),
                 branch_name: crate::object::BranchName::new("main"),
@@ -1220,7 +1220,7 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         true,
         Some(BatchSettlement::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Worker,
+            confirmed_tier: DurabilityTier::Local,
             visible_members: vec![VisibleBatchMember {
                 object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(111)),
                 branch_name: crate::object::BranchName::new("main"),

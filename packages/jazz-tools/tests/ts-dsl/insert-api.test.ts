@@ -49,7 +49,7 @@ describe("TS Insert API", () => {
   it("can wait for row to be persisted up to a specific durability tier", async () => {
     const projectHandle = db.insert(app.projects, { name: "Test Project" });
 
-    await expect(projectHandle.wait({ tier: "worker" })).resolves.toBeUndefined();
+    await expect(projectHandle.wait({ tier: "local" })).resolves.toBeUndefined();
     const { value: project } = projectHandle;
     expect(project).toEqual({
       id: expect.any(String),
@@ -66,7 +66,7 @@ describe("TS Insert API", () => {
       assigneesIds: [],
     });
 
-    await expect(todoHandle.wait({ tier: "worker" })).resolves.toBeUndefined();
+    await expect(todoHandle.wait({ tier: "local" })).resolves.toBeUndefined();
     const { value: todo } = todoHandle;
     expect(todo).toEqual({
       id: expect.any(String),

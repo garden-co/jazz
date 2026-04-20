@@ -180,14 +180,14 @@ fn run_memory_benchmark(scale: usize) {
 fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
     let qm = core.schema_manager().query_manager();
 
-    let (catalogue, connections, subscriptions, queues, sm_total) = qm.sync_manager().memory_size();
-
+    let (catalogue, connections, subscriptions, queues, sync_total) =
+        qm.sync_manager().memory_size();
     let sync_manager = SyncManagerMemory {
         catalogue,
         connections,
         subscriptions,
         queues,
-        total: sm_total,
+        total: sync_total,
     };
 
     // Get QueryManager memory breakdown
@@ -200,7 +200,7 @@ fn compute_memory_breakdown(core: &BenchRuntime) -> MemoryBreakdown {
         total: qm_total,
     };
 
-    let total = sm_total + qm_total;
+    let total = sync_total + qm_total;
 
     MemoryBreakdown {
         sync_manager,

@@ -2,10 +2,15 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
-use std::collections::HashMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 
 use serde_json::json;
 use smallvec::smallvec;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::{Layer, Registry};
 
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -16,13 +21,16 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema, TableName,
     TablePolicies, TableSchema, Value,
 };
-use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch};
+use crate::row_histories::{BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
 use crate::schema_manager::encoding::encode_schema;
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::{
+    HistoryRowBytes, IndexMutation, MemoryStorage, OpfsBTreeStorage, OwnedHistoryRowBytes,
+    OwnedVisibleRowBytes, RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
+};
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_row_history::{
     apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
-    put_test_row_metadata, seeded_memory_storage,
+    persist_test_schema, put_test_row_metadata, seeded_memory_storage,
 };
 
 #[derive(Debug, Clone)]
@@ -116,6 +124,328 @@ fn create_query_manager(
 /// Get the current branch name from a QueryManager.
 fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
+}
+
+struct CountingCatalogueUpsertsStorage {
+    inner: MemoryStorage,
+    catalogue_upserts: Cell<usize>,
+}
+
+impl CountingCatalogueUpsertsStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            catalogue_upserts: Cell::new(0),
+        }
+    }
+
+    fn catalogue_upserts(&self) -> usize {
+        self.catalogue_upserts.get()
+    }
+}
+
+impl Storage for CountingCatalogueUpsertsStorage {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_raw_table_mutations(mutations)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[OwnedHistoryRowBytes],
+        visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn upsert_catalogue_entry(
+        &mut self,
+        entry: &crate::catalogue::CatalogueEntry,
+    ) -> Result<(), StorageError> {
+        self.catalogue_upserts.set(self.catalogue_upserts.get() + 1);
+        self.inner.upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: crate::object::ObjectId,
+    ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.inner.load_catalogue_entry(object_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedEvent {
+    level: tracing::Level,
+    message: Option<String>,
+    fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct EventCollector {
+    events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+}
+
+impl EventCollector {
+    fn snapshot(&self) -> Vec<CapturedEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl<S> Layer<S> for EventCollector
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = CapturedEventVisitor::default();
+        event.record(&mut visitor);
+        self.events.lock().unwrap().push(CapturedEvent {
+            level: *event.metadata().level(),
+            message: visitor.message,
+            fields: visitor.fields,
+        });
+    }
+}
+
+#[derive(Default)]
+struct CapturedEventVisitor {
+    message: Option<String>,
+    fields: BTreeMap<String, String>,
+}
+
+impl CapturedEventVisitor {
+    fn record_value(&mut self, field: &Field, value: String) {
+        if field.name() == "message" {
+            self.message = Some(value.clone());
+        }
+        self.fields.insert(field.name().to_string(), value);
+    }
+}
+
+impl Visit for CapturedEventVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.record_value(field, format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.record_value(field, value.to_string());
+    }
+}
+
+struct FailOnIndexColumnStorage {
+    inner: MemoryStorage,
+    failing_column: &'static str,
+}
+
+impl FailOnIndexColumnStorage {
+    fn new(failing_column: &'static str) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            failing_column,
+        }
+    }
+}
+
+impl Storage for FailOnIndexColumnStorage {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_raw_table_mutations(mutations)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[HistoryRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_row_bytes(table, rows)
+    }
+
+    fn upsert_visible_region_row_bytes(
+        &mut self,
+        table: &str,
+        rows: &[VisibleRowBytes<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_row_bytes(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[OwnedHistoryRowBytes],
+        visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[StoredRowBatch],
+        visible_entries: &[VisibleRowEntry],
+        encoded_history_rows: &[OwnedHistoryRowBytes],
+        encoded_visible_rows: &[OwnedVisibleRowBytes],
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn apply_index_mutations(
+        &mut self,
+        index_mutations: &[IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        if index_mutations.iter().any(|mutation| {
+            matches!(
+                mutation,
+                IndexMutation::Insert { column, .. } | IndexMutation::Remove { column, .. }
+                    if *column == self.failing_column
+            )
+        }) {
+            return Err(StorageError::IoError(format!(
+                "simulated index failure for column {}",
+                self.failing_column
+            )));
+        }
+        self.inner.apply_index_mutations(index_mutations)
+    }
+
+    fn upsert_catalogue_entry(
+        &mut self,
+        entry: &crate::catalogue::CatalogueEntry,
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: crate::object::ObjectId,
+    ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.inner.load_catalogue_entry(object_id)
+    }
 }
 
 fn get_branch_for_user_branch(qm: &QueryManager, user_branch: &str) -> String {
@@ -239,6 +569,32 @@ fn direct_query_manager_bootstrap_persists_canonical_schema_bytes_for_flat_row_s
     );
 }
 
+#[test]
+fn direct_query_manager_catalogues_known_schemas_only_once_per_storage() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::new();
+
+    let first = vec![Value::Text("Alice".into()), Value::Integer(1)];
+    qm.insert(&mut storage, "users", &first)
+        .expect("first insert should succeed");
+    let first_upserts = storage.catalogue_upserts();
+    assert!(
+        first_upserts >= 1,
+        "first insert should catalogue the current schema"
+    );
+
+    let second = vec![Value::Text("Bob".into()), Value::Integer(2)];
+    qm.insert(&mut storage, "users", &second)
+        .expect("second insert should succeed");
+
+    assert_eq!(
+        storage.catalogue_upserts(),
+        first_upserts,
+        "ordinary writes should not recatalogue unchanged schemas on the same storage",
+    );
+}
+
 fn add_row_commit(
     storage: &mut MemoryStorage,
     object_id: ObjectId,
@@ -317,6 +673,18 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
             "payload",
             ColumnType::Json { schema },
         )])
+        .into(),
+    );
+    out
+}
+
+fn visual_description_schema() -> Schema {
+    let mut out = Schema::new();
+    out.insert(
+        TableName::new("visual_description"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("config", ColumnType::Json { schema: None }).nullable(),
+        ])
         .into(),
     );
     out
@@ -439,6 +807,136 @@ fn update_rejects_json_schema_violation() {
         rows[0].1,
         vec![Value::Text("{\"name\":\"ok\"}".to_string())]
     );
+}
+
+#[test]
+fn synced_insert_log_includes_failing_index_column() {
+    let collector = EventCollector::default();
+    let subscriber = Registry::default().with(collector.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let sync_manager = SyncManager::new();
+    let schema = json_documents_schema(None);
+    let descriptor = schema[&TableName::new("documents")].columns.clone();
+
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema.clone(), "dev", "main");
+
+    let mut storage = FailOnIndexColumnStorage::new("payload");
+    persist_test_schema(&mut storage, &schema);
+
+    let branch = get_branch(&qm);
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
+    put_test_row_metadata(&mut storage, row_id, metadata);
+
+    let raw_json = json!({
+        "content": "x".repeat(4_096),
+        "kind": "payload"
+    })
+    .to_string();
+    let row_data = encode_row(&descriptor, &[Value::Text(raw_json)]).unwrap();
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: None,
+            row: stored_row_commit(smallvec![], row_data, 1_000, row_id.to_string()).to_row(
+                row_id,
+                &branch,
+                RowState::VisibleDirect,
+            ),
+        },
+    });
+    qm.process(&mut storage);
+
+    let event = collector
+        .snapshot()
+        .into_iter()
+        .find(|event| {
+            event.level == tracing::Level::ERROR
+                && event.message.as_deref() == Some("failed to update indices for synced insert")
+        })
+        .expect("synced insert failure should be logged");
+
+    assert_eq!(
+        event.fields.get("index_column").map(String::as_str),
+        Some("payload")
+    );
+    assert_eq!(
+        event.fields.get("table").map(String::as_str),
+        Some("documents")
+    );
+}
+
+#[test]
+fn synced_insert_many_large_json_configs_survive_opfs_splits() {
+    let collector = EventCollector::default();
+    let subscriber = Registry::default().with(collector.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let sync_manager = SyncManager::new();
+    let schema = visual_description_schema();
+    let descriptor = schema[&TableName::new("visual_description")]
+        .columns
+        .clone();
+
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema.clone(), "dev", "main");
+
+    let mut storage = OpfsBTreeStorage::memory(4 * 1024 * 1024).expect("open opfs storage");
+    persist_test_schema(&mut storage, &schema);
+
+    let branch = get_branch(&qm);
+    let table = "visual_description";
+    let max_index_value_segment_len =
+        5 * 1024 - (4 + table.len() + 1 + "config".len() + 1 + branch.len() + 1 + 32);
+    let max_inline_text_bytes = (max_index_value_segment_len / 2).saturating_sub(1);
+    let json_overhead = "{\"config\":\"\"}".len();
+    let shared_prefix = "a".repeat(max_inline_text_bytes - json_overhead - 8);
+
+    for i in 0..128 {
+        let row_id = ObjectId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        put_test_row_metadata(&mut storage, row_id, metadata);
+
+        let payload = if i % 8 == 7 {
+            format!("{{\"config\":\"b{i:08x}\"}}")
+        } else {
+            format!("{{\"config\":\"{shared_prefix}{i:08x}\"}}")
+        };
+        let row_data = encode_row(&descriptor, &[Value::Text(payload)]).unwrap();
+
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::RowBatchCreated {
+                metadata: None,
+                row: stored_row_commit(smallvec![], row_data, 1_000 + i as u64, row_id.to_string())
+                    .to_row(row_id, &branch, RowState::VisibleDirect),
+            },
+        });
+    }
+
+    qm.process(&mut storage);
+
+    let failures = collector
+        .snapshot()
+        .into_iter()
+        .filter(|event| {
+            event.level == tracing::Level::ERROR
+                && event.message.as_deref() == Some("failed to update indices for synced insert")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        failures.is_empty(),
+        "synced inserts should not hit opfs split failures: {failures:?}"
+    );
+
+    let query = qm.query(table).build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query synced rows");
+    assert_eq!(rows.len(), 128, "all synced rows should remain queryable");
 }
 
 #[test]
@@ -2291,6 +2789,173 @@ fn update_passes_filter_emits_addition() {
 }
 
 #[test]
+fn synced_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("users")
+        .filter_ge("score", Value::Integer(75))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(30)],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
+fn synced_boolean_eq_update_that_fails_filter_emits_removal_delta() {
+    use crate::query_manager::encoding::encode_row;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("todos"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+            ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ),
+            ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+        ])
+        .into(),
+    );
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), schema);
+    let branch = get_branch(&qm);
+
+    let query = qm
+        .query("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[
+                Value::Text("watch-me".into()),
+                Value::Boolean(false),
+                Value::Null,
+                Value::Null,
+                Value::Array(vec![Value::Text("x".into())]),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    let base_batch_id = handle.batch_id;
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    assert_eq!(updates[0].delta.added[0].id, handle.row_id);
+
+    let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("done", ColumnType::Boolean),
+        ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+        ColumnDescriptor::new("owner_id", ColumnType::Uuid).nullable(),
+        ColumnDescriptor::new(
+            "tags",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+        ),
+        ColumnDescriptor::new("payload", ColumnType::Bytea).nullable(),
+    ]);
+    let updated_data = encode_row(
+        &descriptor,
+        &[
+            Value::Text("watch-me".into()),
+            Value::Boolean(true),
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![Value::Text("x".into())]),
+            Value::Null,
+        ],
+    )
+    .unwrap();
+    let synced_commit = stored_row_commit(
+        smallvec![base_batch_id],
+        updated_data,
+        base_timestamp + 1,
+        handle.row_id.to_string(),
+    );
+    receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, synced_commit);
+
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0].delta.removed.len(),
+        1,
+        "synced boolean update should remove the row when it no longer matches the filter"
+    );
+    assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    assert!(updates[0].delta.added.is_empty());
+    assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
 fn update_still_passes_filter_emits_update() {
     // Verify: row passes filter, update still passes filter -> update delta
 
@@ -2816,9 +3481,9 @@ fn delete_already_deleted_row_fails() {
 }
 
 #[test]
-fn soft_delete_with_concurrent_tips_uses_lww() {
+fn soft_delete_with_concurrent_tips_merges_preserved_content() {
     // Test that soft deleting an object with two concurrent tips results
-    // in a soft delete commit with content from the LWW winner (highest timestamp).
+    // in a soft delete commit with merged content from both field updates.
     use crate::object::BranchName;
     use crate::query_manager::encoding::encode_row;
 
@@ -2856,10 +3521,10 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         .clone();
     let base_timestamp = load_visible_row(&storage, handle.row_id, &branch).updated_at;
 
-    // Commit A: lower timestamp, content "TipA"
+    // Commit A: lower timestamp, update the first user column only.
     let content_a = encode_row(
         &descriptor,
-        &[Value::Text("TipA".into()), Value::Integer(100)],
+        &[Value::Text("TipA".into()), Value::Integer(0)],
     )
     .unwrap();
     let commit_a = stored_row_commit(
@@ -2869,10 +3534,10 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         handle.row_id.to_string(),
     );
 
-    // Commit B: higher timestamp, content "TipB" - this should win
+    // Commit B: higher timestamp, update the second user column only.
     let content_b = encode_row(
         &descriptor,
-        &[Value::Text("TipB".into()), Value::Integer(200)],
+        &[Value::Text("Original".into()), Value::Integer(200)],
     )
     .unwrap();
     let commit_b = stored_row_commit(
@@ -2898,7 +3563,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     assert!(tips.contains(&commit_a_id));
     assert!(tips.contains(&commit_b_id));
 
-    // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
+    // Now soft delete - should preserve merged content from both concurrent tips.
     let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
 
     // Get the delete commit and verify its content
@@ -2910,8 +3575,9 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         "visible row should be the delete version"
     );
     assert_eq!(
-        delete_row.data, content_b,
-        "Soft delete should preserve content from LWW winner"
+        decode_row(&descriptor, &delete_row.data).unwrap(),
+        vec![Value::Text("TipA".into()), Value::Integer(200)],
+        "Soft delete should preserve merged content from the conflicted frontier"
     );
     assert_eq!(delete_row.delete_kind, Some(DeleteKind::Soft));
 
@@ -2919,7 +3585,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let query = qm.query("users").include_deleted().build();
     let results = execute_query(&mut qm, &mut storage, query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1[0], Value::Text("TipB".into()));
+    assert_eq!(results[0].1[0], Value::Text("TipA".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
 }
 
@@ -7313,6 +7979,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
             query: Box::new(query),
             session: Some(session),
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8035,6 +8702,7 @@ fn server_builds_query_graph_on_subscription() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8098,6 +8766,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8184,6 +8853,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
             query: Box::new(invalid_query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8237,6 +8907,7 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
             query: Box::new(valid_query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     server_qm.process(&mut storage);
@@ -8336,6 +9007,7 @@ fn server_pushes_new_matches() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8435,6 +9107,7 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
                 query: Box::new(query),
                 session: None,
                 propagation,
+                policy_context_tables: vec![],
             },
         });
     }
@@ -8498,6 +9171,7 @@ fn server_does_not_push_non_matching() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8617,7 +9291,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     use crate::sync_manager::{Destination, DurabilityTier, ServerId, SyncPayload};
     use uuid::Uuid;
 
-    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let schema = test_schema();
     let (mut worker_qm, _storage) = create_query_manager(sync_manager, schema);
 
@@ -8644,7 +9318,7 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
     assert_eq!(
         query_subs.len(),
         0,
-        "worker-tier local-only subscription should not be sent to upstream sync server"
+        "local-tier local-only subscription should not be sent to upstream sync server"
     );
 }
 
@@ -8813,6 +9487,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 
@@ -8863,6 +9538,7 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -8905,6 +9581,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -8959,6 +9636,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -9035,6 +9713,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
     mid_tier.process(&mut storage);
@@ -9927,6 +10606,937 @@ fn e2e_permissions_prevent_new_row_sync() {
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
 }
 
+#[test]
+fn local_subscription_does_not_filter_rows_without_remote_scope() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "plain local subscriptions should ignore remote scope"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
+fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let sub_id = qm
+        .subscribe_with_sync(
+            qm.query("users").build(),
+            None,
+            Some(crate::sync_manager::DurabilityTier::Local),
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed subscriptions should keep local rows until a remote scope snapshot arrives"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
+fn sync_backed_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            policies: TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        },
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    client
+        .insert(
+            &mut client_io,
+            "documents",
+            &[
+                Value::Text("Alice's doc".into()),
+                Value::Text("alice".into()),
+            ],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::Local),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed session subscriptions should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![
+            Value::Text("Alice's doc".into()),
+            Value::Text("alice".into())
+        ]
+    );
+}
+
+#[test]
+fn sync_backed_exists_rel_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("user_team_edges"),
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("team_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::unscoped("user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the related-row grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed EXISTS policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn sync_backed_exists_session_subscription_keeps_local_rows_when_server_scope_is_empty() {
+    use crate::query_manager::policy::{CmpOp, OUTER_ROW_SESSION_PREFIX, PolicyValue};
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "user_team_edges".into(),
+                condition: Box::new(PolicyExpr::And(vec![
+                    PolicyExpr::Cmp {
+                        column: "team_id".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "id".into(),
+                        ]),
+                    },
+                    PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                ])),
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the correlated EXISTS grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed EXISTS policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_server_scope_is_empty()
+{
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    let local_sub_id = client
+        .subscribe_with_session(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    assert_eq!(
+        client.get_subscription_results(local_sub_id).len(),
+        1,
+        "local session subscriptions should already see the joined EXISTS_REL grant"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed joined EXISTS_REL policies should keep local rows even when the server scope is empty"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn fail_closed_server_does_not_emit_scope_snapshot_before_permissions_head() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let mut structural_server_schema = Schema::new();
+    structural_server_schema.insert(
+        TableName::new("teams"),
+        TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+            "name",
+            ColumnType::Text,
+        )])),
+    );
+    structural_server_schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, structural_server_schema);
+    server.require_authorization_schema();
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let team_row = client
+        .insert(&mut client_io, "teams", &[Value::Text("Alice".into())])
+        .unwrap();
+    let edge_row = client
+        .insert(
+            &mut client_io,
+            "user_team_edges",
+            &[Value::Text("alice".into()), Value::Uuid(team_row.row_id)],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+
+    client.clear_local_pending_row_overlay("teams", team_row.row_id);
+    client.clear_local_pending_row_overlay("user_team_edges", edge_row.row_id);
+    client.process(&mut client_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("alice")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    assert!(
+        !client
+            .sync_manager()
+            .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
+        "server without a published permissions head should not advertise an authoritative remote scope yet"
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "sync-backed immediate local updates should keep locally visible rows until an authoritative remote scope snapshot exists"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
+}
+
+#[test]
+fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
+        ValueRef,
+    };
+    use crate::sync_manager::DurabilityTier;
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                rel: RelExpr::Filter {
+                    input: Box::new(RelExpr::Join {
+                        left: Box::new(RelExpr::TableScan {
+                            table: TableName::new("user_team_edges"),
+                        }),
+                        right: Box::new(RelExpr::TableScan {
+                            table: TableName::new("teams"),
+                        }),
+                        on: vec![JoinCondition {
+                            left: ColumnRef::scoped("user_team_edges", "team_id"),
+                            right: ColumnRef::scoped("__join_0", "id"),
+                        }],
+                        join_kind: JoinKind::Inner,
+                    }),
+                    predicate: PredicateExpr::And(vec![
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("user_team_edges", "user_id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                        },
+                        PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("__join_0", "id"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Outer),
+                        },
+                    ]),
+                },
+            }),
+        },
+    );
+    schema.insert(
+        TableName::new("user_team_edges"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+            ColumnDescriptor::new("team_id", ColumnType::Uuid),
+        ])),
+    );
+
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let (mut qm, storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut qm, &storage, server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    qm.subscribe_with_sync(
+        qm.query("teams").build(),
+        Some(PolicySession::new("alice")),
+        Some(DurabilityTier::EdgeServer),
+    )
+    .unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .into_iter()
+        .find_map(|entry| match entry.payload {
+            SyncPayload::QuerySubscription {
+                policy_context_tables,
+                ..
+            } => Some(policy_context_tables),
+            _ => None,
+        })
+        .expect("subscription should be forwarded upstream");
+
+    assert!(
+        forwarded.iter().any(|table| table == "user_team_edges"),
+        "EXISTS_REL subscriptions should declare their policy-context tables upstream"
+    );
+}
+
+#[test]
+fn backend_sync_subscription_without_handshake_session_keeps_local_rows_without_permissions_head() {
+    use crate::sync_manager::ClientRole;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("identity_key", ColumnType::Text).nullable(),
+            ]),
+            policies: TablePolicies::new().with_select(PolicyExpr::eq_session(
+                "identity_key",
+                vec!["user_id".into()],
+            )),
+        },
+    );
+
+    let mut structural_server_schema = Schema::new();
+    structural_server_schema.insert(
+        TableName::new("teams"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("identity_key", ColumnType::Text).nullable(),
+        ])),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, structural_server_schema);
+    server.require_authorization_schema();
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    server
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let team_row = client
+        .insert(
+            &mut client_io,
+            "teams",
+            &[Value::Text("Bob".into()), Value::Text("bob".into())],
+        )
+        .unwrap();
+    client.process(&mut client_io);
+    client.clear_local_pending_row_overlay("teams", team_row.row_id);
+    client.process(&mut client_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("teams").build(),
+            Some(PolicySession::new("bob")),
+            Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    assert!(
+        !client
+            .sync_manager()
+            .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
+        "backend-authenticated clients without a handshake session should still treat missing permissions head as non-authoritative"
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "session payload queries should keep locally visible rows until an authoritative remote scope exists"
+    );
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Bob".into()), Value::Text("bob".into())]
+    );
+}
+
+#[test]
+fn synced_subscription_filters_rows_removed_from_remote_scope() {
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("recursive_folders"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+                    .nullable()
+                    .references("recursive_folders"),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::or(vec![
+                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                PolicyExpr::and(vec![
+                    PolicyExpr::IsNotNull {
+                        column: "parent_id".into(),
+                    },
+                    PolicyExpr::inherits(Operation::Select, "parent_id"),
+                ]),
+            ])),
+        ),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let root_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let child_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap()
+        .row_id;
+    let _grand_id = server
+        .insert(
+            &mut server_io,
+            "recursive_folders",
+            &[
+                Value::Text("carol".into()),
+                Value::Text("Grand".into()),
+                Value::Uuid(child_id),
+            ],
+        )
+        .unwrap()
+        .row_id;
+    server.process(&mut server_io);
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("recursive_folders").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+    assert_eq!(client.get_subscription_results(sub_id).len(), 1);
+
+    server
+        .update(
+            &mut server_io,
+            child_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root_id),
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+    assert_eq!(client.get_subscription_results(sub_id).len(), 3);
+
+    server
+        .update(
+            &mut server_io,
+            child_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Null,
+            ],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let remote_scope = client
+        .sync_manager()
+        .remote_query_scope(crate::sync_manager::QueryId(sub_id.0));
+    assert_eq!(
+        remote_scope,
+        [(root_id, crate::object::BranchName::new(get_branch(&client)))]
+            .into_iter()
+            .collect()
+    );
+
+    let subscription = client
+        .subscriptions
+        .get(&sub_id)
+        .expect("client subscription");
+    assert_eq!(subscription.current_ordered_ids, vec![root_id]);
+    assert_eq!(subscription.current_visible_rows.len(), 1);
+    assert_eq!(
+        decode_row(
+            &subscription.graph.combined_descriptor,
+            &subscription.current_visible_rows[&root_id].data
+        )
+        .unwrap(),
+        vec![
+            Value::Text("alice".into()),
+            Value::Text("Root".into()),
+            Value::Null
+        ]
+    );
+}
+
 /// E2E: In a 3-tier topology, upstream must sync policy-evaluation dependencies.
 ///
 /// Scenario:
@@ -10180,6 +11790,7 @@ fn push_query_subscription(
             query: Box::new(query),
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
         },
     });
 }

@@ -206,7 +206,7 @@ fn row_state_column_type() -> ColumnType {
 fn confirmed_tier_column_type() -> ColumnType {
     ColumnType::Enum {
         variants: vec![
-            "worker".to_string(),
+            "local".to_string(),
             "edge".to_string(),
             "global".to_string(),
         ],
@@ -293,6 +293,17 @@ fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
         ColumnDescriptor::new("_jazz_worker_batch_id", ColumnType::BatchId).nullable(),
         ColumnDescriptor::new("_jazz_edge_batch_id", ColumnType::BatchId).nullable(),
         ColumnDescriptor::new("_jazz_global_batch_id", ColumnType::BatchId).nullable(),
+        ColumnDescriptor::new(
+            "_jazz_winner_batch_pool",
+            ColumnType::Array {
+                element: Box::new(ColumnType::BatchId),
+            },
+        )
+        .nullable(),
+        ColumnDescriptor::new("_jazz_current_winner_ordinals", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_worker_winner_ordinals", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_edge_winner_ordinals", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("_jazz_global_winner_ordinals", ColumnType::Bytea).nullable(),
     ]);
     columns
 }
@@ -321,6 +332,11 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
         optional_batch_id_to_value(entry.worker_batch_id),
         optional_batch_id_to_value(entry.edge_batch_id),
         optional_batch_id_to_value(entry.global_batch_id),
+        winner_batch_pool_to_value(&entry.winner_batch_pool),
+        optional_winner_ordinals_to_value(entry.current_winner_ordinals.as_deref()),
+        optional_winner_ordinals_to_value(entry.worker_winner_ordinals.as_deref()),
+        optional_winner_ordinals_to_value(entry.edge_winner_ordinals.as_deref()),
+        optional_winner_ordinals_to_value(entry.global_winner_ordinals.as_deref()),
     ]);
     values
 }
@@ -488,7 +504,7 @@ fn row_state_to_value(state: RowState) -> Value {
 fn durability_tier_to_value(tier: DurabilityTier) -> Value {
     Value::Text(
         match tier {
-            DurabilityTier::Worker => "worker",
+            DurabilityTier::Local => "local",
             DurabilityTier::EdgeServer => "edge",
             DurabilityTier::GlobalServer => "global",
         }
@@ -510,6 +526,28 @@ fn optional_batch_id_to_value(batch_id: Option<BatchId>) -> Value {
 
 fn batch_ids_to_value(batch_ids: &[BatchId]) -> Value {
     Value::Array(batch_ids.iter().copied().map(batch_id_to_value).collect())
+}
+
+fn winner_batch_pool_to_value(batch_ids: &[BatchId]) -> Value {
+    if batch_ids.is_empty() {
+        Value::Null
+    } else {
+        batch_ids_to_value(batch_ids)
+    }
+}
+
+fn encode_winner_ordinals(ordinals: &[u16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(ordinals.len() * 2);
+    for ordinal in ordinals {
+        bytes.extend_from_slice(&ordinal.to_le_bytes());
+    }
+    bytes
+}
+
+fn optional_winner_ordinals_to_value(ordinals: Option<&[u16]>) -> Value {
+    ordinals
+        .map(|ordinals| Value::Bytea(encode_winner_ordinals(ordinals)))
+        .unwrap_or(Value::Null)
 }
 
 fn decode_batch_ids_array_bytes(data: &[u8], label: &str) -> Result<Vec<BatchId>, EncodingError> {
@@ -590,6 +628,11 @@ fn decode_bool_bytes(bytes: &[u8], label: &str) -> Result<bool, EncodingError> {
 
 fn decode_row_state_bytes(bytes: &[u8]) -> Result<RowState, EncodingError> {
     match bytes {
+        [0] => Ok(RowState::StagingPending),
+        [1] => Ok(RowState::Superseded),
+        [2] => Ok(RowState::Rejected),
+        [3] => Ok(RowState::VisibleDirect),
+        [4] => Ok(RowState::VisibleTransactional),
         b"staging_pending" => Ok(RowState::StagingPending),
         b"superseded" => Ok(RowState::Superseded),
         b"rejected" => Ok(RowState::Rejected),
@@ -607,7 +650,10 @@ fn decode_optional_durability_tier_bytes(
 ) -> Result<Option<DurabilityTier>, EncodingError> {
     match bytes {
         None => Ok(None),
-        Some(b"worker") => Ok(Some(DurabilityTier::Worker)),
+        Some([0]) => Ok(Some(DurabilityTier::Local)),
+        Some([1]) => Ok(Some(DurabilityTier::EdgeServer)),
+        Some([2]) => Ok(Some(DurabilityTier::GlobalServer)),
+        Some(b"local") => Ok(Some(DurabilityTier::Local)),
         Some(b"edge") => Ok(Some(DurabilityTier::EdgeServer)),
         Some(b"global") => Ok(Some(DurabilityTier::GlobalServer)),
         Some(bytes) => Err(malformed(format!(
@@ -622,6 +668,8 @@ fn decode_optional_delete_kind_bytes(
 ) -> Result<Option<DeleteKind>, EncodingError> {
     match bytes {
         None => Ok(None),
+        Some([0]) => Ok(Some(DeleteKind::Soft)),
+        Some([1]) => Ok(Some(DeleteKind::Hard)),
         Some(b"soft") => Ok(Some(DeleteKind::Soft)),
         Some(b"hard") => Ok(Some(DeleteKind::Hard)),
         Some(bytes) => Err(malformed(format!(
@@ -645,6 +693,28 @@ fn decode_optional_batch_id_bytes(bytes: Option<&[u8]>) -> Result<Option<BatchId
     bytes
         .map(|bytes| decode_required_batch_id_bytes(bytes, "optional"))
         .transpose()
+}
+
+fn decode_optional_winner_ordinals_bytes(
+    bytes: Option<&[u8]>,
+    label: &str,
+    expected_len: usize,
+) -> Result<Option<Vec<u16>>, EncodingError> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.len() != expected_len * 2 {
+        return Err(malformed(format!(
+            "{label} expected {} bytes for {expected_len} columns, got {}",
+            expected_len * 2,
+            bytes.len()
+        )));
+    }
+    let mut ordinals = Vec::with_capacity(expected_len);
+    for chunk in bytes.chunks_exact(2) {
+        ordinals.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    Ok(Some(ordinals))
 }
 
 fn decode_metadata_entry_row_bytes(bytes: &[u8]) -> Result<(String, String), EncodingError> {
@@ -909,6 +979,30 @@ pub(crate) fn decode_flat_visible_row_entry_with_codecs(
         global_batch_id: decode_optional_batch_id_bytes(column_bytes_with_layout(
             descriptor, layout, data, 11,
         )?)?,
+        winner_batch_pool: match column_bytes_with_layout(descriptor, layout, data, 12)? {
+            None => Vec::new(),
+            Some(bytes) => decode_batch_ids_array_bytes(bytes, "winner_batch_pool")?,
+        },
+        current_winner_ordinals: decode_optional_winner_ordinals_bytes(
+            column_bytes_with_layout(descriptor, layout, data, 13)?,
+            "current_winner_ordinals",
+            codecs.user_descriptor.columns.len(),
+        )?,
+        worker_winner_ordinals: decode_optional_winner_ordinals_bytes(
+            column_bytes_with_layout(descriptor, layout, data, 14)?,
+            "worker_winner_ordinals",
+            codecs.user_descriptor.columns.len(),
+        )?,
+        edge_winner_ordinals: decode_optional_winner_ordinals_bytes(
+            column_bytes_with_layout(descriptor, layout, data, 15)?,
+            "edge_winner_ordinals",
+            codecs.user_descriptor.columns.len(),
+        )?,
+        global_winner_ordinals: decode_optional_winner_ordinals_bytes(
+            column_bytes_with_layout(descriptor, layout, data, 16)?,
+            "global_winner_ordinals",
+            codecs.user_descriptor.columns.len(),
+        )?,
     })
 }
 
@@ -1142,6 +1236,17 @@ pub struct VisibleRowEntry {
     pub worker_batch_id: Option<BatchId>,
     pub edge_batch_id: Option<BatchId>,
     pub global_batch_id: Option<BatchId>,
+    pub winner_batch_pool: Vec<BatchId>,
+    pub current_winner_ordinals: Option<Vec<u16>>,
+    pub worker_winner_ordinals: Option<Vec<u16>>,
+    pub edge_winner_ordinals: Option<Vec<u16>>,
+    pub global_winner_ordinals: Option<Vec<u16>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComputedVisiblePreview {
+    row: StoredRowBatch,
+    winner_batch_ids: Option<Vec<BatchId>>,
 }
 
 impl VisibleRowEntry {
@@ -1152,13 +1257,18 @@ impl VisibleRowEntry {
             worker_batch_id: None,
             edge_batch_id: None,
             global_batch_id: None,
+            winner_batch_pool: Vec::new(),
+            current_winner_ordinals: None,
+            worker_winner_ordinals: None,
+            edge_winner_ordinals: None,
+            global_winner_ordinals: None,
         }
     }
 
     pub fn rebuild(current_row: StoredRowBatch, history_rows: &[StoredRowBatch]) -> Self {
         let current_batch_id = current_row.batch_id();
         let branch_frontier = branch_frontier(history_rows);
-        let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Worker);
+        let worker = latest_visible_version_for_tier(history_rows, DurabilityTier::Local);
         let worker_batch_id = worker.filter(|batch_id| *batch_id != current_batch_id);
 
         let edge = latest_visible_version_for_tier(history_rows, DurabilityTier::EdgeServer);
@@ -1173,7 +1283,79 @@ impl VisibleRowEntry {
             worker_batch_id,
             edge_batch_id,
             global_batch_id,
+            winner_batch_pool: Vec::new(),
+            current_winner_ordinals: None,
+            worker_winner_ordinals: None,
+            edge_winner_ordinals: None,
+            global_winner_ordinals: None,
         }
+    }
+
+    pub fn rebuild_with_descriptor(
+        user_descriptor: &RowDescriptor,
+        history_rows: &[StoredRowBatch],
+    ) -> Result<Option<Self>, EncodingError> {
+        let Some(current_preview) =
+            build_computed_visible_preview(user_descriptor, history_rows, None)?
+        else {
+            return Ok(None);
+        };
+        let current_row = current_preview.row.clone();
+        let branch_frontier = branch_frontier(history_rows);
+        let worker_preview = build_computed_visible_preview(
+            user_descriptor,
+            history_rows,
+            Some(DurabilityTier::Local),
+        )?;
+        let edge_preview = build_computed_visible_preview(
+            user_descriptor,
+            history_rows,
+            Some(DurabilityTier::EdgeServer),
+        )?;
+        let global_preview = build_computed_visible_preview(
+            user_descriptor,
+            history_rows,
+            Some(DurabilityTier::GlobalServer),
+        )?;
+
+        let mut winner_batch_pool = Vec::new();
+        let mut pool_ordinals = HashMap::new();
+        let current_winner_ordinals = assign_winner_ordinals(
+            current_preview.winner_batch_ids.as_deref(),
+            &mut winner_batch_pool,
+            &mut pool_ordinals,
+        )?;
+        let (worker_batch_id, worker_winner_ordinals) = preview_override_sidecar(
+            &current_preview,
+            worker_preview.as_ref(),
+            &mut winner_batch_pool,
+            &mut pool_ordinals,
+        )?;
+        let (edge_batch_id, edge_winner_ordinals) = preview_override_sidecar(
+            &current_preview,
+            edge_preview.as_ref(),
+            &mut winner_batch_pool,
+            &mut pool_ordinals,
+        )?;
+        let (global_batch_id, global_winner_ordinals) = preview_override_sidecar(
+            &current_preview,
+            global_preview.as_ref(),
+            &mut winner_batch_pool,
+            &mut pool_ordinals,
+        )?;
+
+        Ok(Some(Self {
+            current_row,
+            branch_frontier,
+            worker_batch_id,
+            edge_batch_id,
+            global_batch_id,
+            winner_batch_pool,
+            current_winner_ordinals,
+            worker_winner_ordinals,
+            edge_winner_ordinals,
+            global_winner_ordinals,
+        }))
     }
 
     pub fn current_batch_id(&self) -> BatchId {
@@ -1187,11 +1369,453 @@ impl VisibleRowEntry {
         }
 
         match tier {
-            DurabilityTier::Worker => self.worker_batch_id,
+            DurabilityTier::Local => self.worker_batch_id,
             DurabilityTier::EdgeServer => self.edge_batch_id,
             DurabilityTier::GlobalServer => self.global_batch_id,
         }
     }
+
+    fn winner_ordinals_for_tier(&self, tier: DurabilityTier) -> Option<&[u16]> {
+        match tier {
+            DurabilityTier::Local => self.worker_winner_ordinals.as_deref(),
+            DurabilityTier::EdgeServer => self.edge_winner_ordinals.as_deref(),
+            DurabilityTier::GlobalServer => self.global_winner_ordinals.as_deref(),
+        }
+    }
+
+    pub fn materialize_preview_for_tier_from_loaded_rows(
+        &self,
+        user_descriptor: &RowDescriptor,
+        tier: DurabilityTier,
+        row_by_batch_id: &HashMap<BatchId, StoredRowBatch>,
+    ) -> Result<Option<StoredRowBatch>, EncodingError> {
+        if tier_satisfies(self.current_row.confirmed_tier, tier) {
+            return Ok(Some(self.current_row.clone()));
+        }
+
+        let Some(preview_batch_id) = self.batch_id_for_tier(tier) else {
+            return Ok(None);
+        };
+        let Some(metadata_row) = row_by_batch_id.get(&preview_batch_id).cloned() else {
+            return Err(malformed(format!(
+                "missing preview metadata row for batch {preview_batch_id}"
+            )));
+        };
+        let Some(ordinals) = self.winner_ordinals_for_tier(tier) else {
+            return Ok(Some(metadata_row));
+        };
+
+        let mut decoded_rows = HashMap::<BatchId, Vec<Value>>::new();
+        let mut merged_values = Vec::with_capacity(ordinals.len());
+        let mut contributing_rows = Vec::new();
+        for (column_index, ordinal) in ordinals.iter().enumerate() {
+            let pool_index = usize::from(*ordinal);
+            let Some(batch_id) = self.winner_batch_pool.get(pool_index).copied() else {
+                return Err(malformed(format!(
+                    "winner ordinal {pool_index} out of range for pool size {}",
+                    self.winner_batch_pool.len()
+                )));
+            };
+            let Some(row) = row_by_batch_id.get(&batch_id) else {
+                return Err(malformed(format!(
+                    "missing winner row for batch {batch_id} in preview reconstruction"
+                )));
+            };
+            let values = if let Some(values) = decoded_rows.get(&batch_id) {
+                values
+            } else {
+                let values = flat_user_values(user_descriptor, &row.data)?;
+                decoded_rows.insert(batch_id, values);
+                decoded_rows
+                    .get(&batch_id)
+                    .expect("decoded row values should be cached")
+            };
+            merged_values.push(values[column_index].clone());
+            contributing_rows.push(row);
+        }
+
+        let mut confirmed_tier = metadata_row.confirmed_tier;
+        for row in contributing_rows {
+            confirmed_tier = match (confirmed_tier, row.confirmed_tier) {
+                (Some(existing), Some(incoming)) => Some(existing.min(incoming)),
+                _ => None,
+            };
+            if confirmed_tier.is_none() {
+                break;
+            }
+        }
+
+        let data = match metadata_row.delete_kind {
+            Some(DeleteKind::Hard) => Vec::new(),
+            _ => encode_row(user_descriptor, &merged_values)?,
+        };
+
+        Ok(Some(StoredRowBatch {
+            confirmed_tier,
+            data: data.into(),
+            is_deleted: metadata_row.delete_kind.is_some(),
+            ..metadata_row
+        }))
+    }
+
+    pub fn materialize_preview_for_tier_with_storage<H: Storage + ?Sized>(
+        &self,
+        io: &H,
+        table: &str,
+        user_descriptor: &RowDescriptor,
+        tier: DurabilityTier,
+    ) -> Result<Option<StoredRowBatch>, StorageError> {
+        if tier_satisfies(self.current_row.confirmed_tier, tier) {
+            return Ok(Some(self.current_row.clone()));
+        }
+
+        let Some(preview_batch_id) = self.batch_id_for_tier(tier) else {
+            return Ok(None);
+        };
+
+        let mut row_by_batch_id = HashMap::new();
+        let Some(metadata_row) = io.load_history_row_batch(
+            table,
+            self.current_row.branch.as_str(),
+            self.current_row.row_id,
+            preview_batch_id,
+        )?
+        else {
+            return Err(StorageError::IoError(format!(
+                "missing history row for preview batch {preview_batch_id}"
+            )));
+        };
+        row_by_batch_id.insert(preview_batch_id, metadata_row);
+
+        if let Some(ordinals) = self.winner_ordinals_for_tier(tier) {
+            for ordinal in ordinals {
+                let pool_index = usize::from(*ordinal);
+                let Some(batch_id) = self.winner_batch_pool.get(pool_index).copied() else {
+                    return Err(StorageError::IoError(format!(
+                        "winner ordinal {pool_index} out of range for pool size {}",
+                        self.winner_batch_pool.len()
+                    )));
+                };
+                if row_by_batch_id.contains_key(&batch_id) {
+                    continue;
+                }
+                let Some(row) = io.load_history_row_batch(
+                    table,
+                    self.current_row.branch.as_str(),
+                    self.current_row.row_id,
+                    batch_id,
+                )?
+                else {
+                    return Err(StorageError::IoError(format!(
+                        "missing history row for winner batch {batch_id}"
+                    )));
+                };
+                row_by_batch_id.insert(batch_id, row);
+            }
+        }
+
+        self.materialize_preview_for_tier_from_loaded_rows(user_descriptor, tier, &row_by_batch_id)
+            .map_err(|err| StorageError::IoError(format!("materialize tier preview: {err}")))
+    }
+}
+
+fn visible_rows_for_tier(
+    history_rows: &[StoredRowBatch],
+    required_tier: Option<DurabilityTier>,
+) -> Vec<&StoredRowBatch> {
+    history_rows
+        .iter()
+        .filter(|row| {
+            row.state.is_visible()
+                && required_tier
+                    .map(|tier| tier_satisfies(row.confirmed_tier, tier))
+                    .unwrap_or(true)
+        })
+        .collect()
+}
+
+fn latest_common_ancestor<'a>(
+    frontier: &[&'a StoredRowBatch],
+    row_by_batch_id: &HashMap<BatchId, &'a StoredRowBatch>,
+) -> Option<&'a StoredRowBatch> {
+    let mut common_ancestors: Option<std::collections::HashSet<BatchId>> = None;
+
+    for tip in frontier {
+        let mut stack = vec![tip.batch_id()];
+        let mut ancestors = std::collections::HashSet::new();
+        while let Some(batch_id) = stack.pop() {
+            if !ancestors.insert(batch_id) {
+                continue;
+            }
+            if let Some(row) = row_by_batch_id.get(&batch_id) {
+                stack.extend(row.parents.iter().copied());
+            }
+        }
+
+        common_ancestors = Some(match common_ancestors {
+            None => ancestors,
+            Some(mut existing) => {
+                existing.retain(|batch_id| ancestors.contains(batch_id));
+                existing
+            }
+        });
+    }
+
+    common_ancestors?
+        .into_iter()
+        .filter_map(|batch_id| row_by_batch_id.get(&batch_id).copied())
+        .max_by_key(|row| (row.updated_at, row.batch_id()))
+}
+
+fn delete_winner<'a>(frontier: &[&'a StoredRowBatch]) -> Option<&'a StoredRowBatch> {
+    frontier
+        .iter()
+        .copied()
+        .filter(|row| row.delete_kind.is_some())
+        .max_by(|left, right| {
+            let left_rank = match left.delete_kind {
+                Some(DeleteKind::Hard) => 2u8,
+                Some(DeleteKind::Soft) => 1u8,
+                None => 0u8,
+            };
+            let right_rank = match right.delete_kind {
+                Some(DeleteKind::Hard) => 2u8,
+                Some(DeleteKind::Soft) => 1u8,
+                None => 0u8,
+            };
+            (left_rank, left.updated_at, left.batch_id()).cmp(&(
+                right_rank,
+                right.updated_at,
+                right.batch_id(),
+            ))
+        })
+}
+
+fn computed_visible_preview_matches(
+    current: &ComputedVisiblePreview,
+    candidate: &ComputedVisiblePreview,
+) -> bool {
+    current.row == candidate.row && current.winner_batch_ids == candidate.winner_batch_ids
+}
+
+fn current_winner_batch_id(
+    column_winner: Option<&StoredRowBatch>,
+    fallback: &StoredRowBatch,
+) -> BatchId {
+    column_winner
+        .map(StoredRowBatch::batch_id)
+        .unwrap_or_else(|| fallback.batch_id())
+}
+
+fn assign_winner_ordinals(
+    winner_batch_ids: Option<&[BatchId]>,
+    winner_batch_pool: &mut Vec<BatchId>,
+    pool_ordinals: &mut HashMap<BatchId, u16>,
+) -> Result<Option<Vec<u16>>, EncodingError> {
+    let Some(winner_batch_ids) = winner_batch_ids else {
+        return Ok(None);
+    };
+
+    let mut ordinals = Vec::with_capacity(winner_batch_ids.len());
+    for batch_id in winner_batch_ids {
+        let ordinal = if let Some(existing) = pool_ordinals.get(batch_id) {
+            *existing
+        } else {
+            let ordinal = u16::try_from(winner_batch_pool.len())
+                .map_err(|_| malformed("winner batch pool exceeds u16 ordinal capacity"))?;
+            winner_batch_pool.push(*batch_id);
+            pool_ordinals.insert(*batch_id, ordinal);
+            ordinal
+        };
+        ordinals.push(ordinal);
+    }
+
+    Ok(Some(ordinals))
+}
+
+fn preview_override_sidecar(
+    current_preview: &ComputedVisiblePreview,
+    candidate_preview: Option<&ComputedVisiblePreview>,
+    winner_batch_pool: &mut Vec<BatchId>,
+    pool_ordinals: &mut HashMap<BatchId, u16>,
+) -> Result<(Option<BatchId>, Option<Vec<u16>>), EncodingError> {
+    let Some(candidate_preview) = candidate_preview else {
+        return Ok((None, None));
+    };
+    if computed_visible_preview_matches(current_preview, candidate_preview) {
+        return Ok((None, None));
+    }
+
+    Ok((
+        Some(candidate_preview.row.batch_id()),
+        assign_winner_ordinals(
+            candidate_preview.winner_batch_ids.as_deref(),
+            winner_batch_pool,
+            pool_ordinals,
+        )?,
+    ))
+}
+
+fn build_computed_visible_preview(
+    user_descriptor: &RowDescriptor,
+    history_rows: &[StoredRowBatch],
+    required_tier: Option<DurabilityTier>,
+) -> Result<Option<ComputedVisiblePreview>, EncodingError> {
+    let visible_rows = visible_rows_for_tier(history_rows, required_tier);
+    if visible_rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut non_tips = std::collections::BTreeSet::new();
+    for row in &visible_rows {
+        for parent in &row.parents {
+            non_tips.insert(*parent);
+        }
+    }
+    let mut frontier: Vec<_> = visible_rows
+        .iter()
+        .copied()
+        .filter(|row| !non_tips.contains(&row.batch_id()))
+        .collect();
+    frontier.sort_by_key(|row| (row.updated_at, row.batch_id()));
+    frontier.dedup_by_key(|row| row.batch_id());
+    let Some(latest_tip) = frontier.last().copied() else {
+        return Ok(None);
+    };
+    if frontier.len() == 1 {
+        return Ok(Some(ComputedVisiblePreview {
+            row: latest_tip.clone(),
+            winner_batch_ids: None,
+        }));
+    }
+
+    let row_by_batch_id = visible_rows
+        .iter()
+        .copied()
+        .map(|row| (row.batch_id(), row))
+        .collect::<HashMap<_, _>>();
+    let ancestor = latest_common_ancestor(&frontier, &row_by_batch_id);
+
+    let ancestor_values = match ancestor {
+        Some(row) => flat_user_values(user_descriptor, &row.data)?,
+        None => user_descriptor
+            .columns
+            .iter()
+            .map(|_| Value::Null)
+            .collect(),
+    };
+    let frontier_values = frontier
+        .iter()
+        .map(|row| flat_user_values(user_descriptor, &row.data))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut merged_values = Vec::with_capacity(user_descriptor.columns.len());
+    let mut contributing_rows: Vec<&StoredRowBatch> = Vec::new();
+    let mut winner_batch_ids = Vec::with_capacity(user_descriptor.columns.len());
+
+    for column_index in 0..user_descriptor.columns.len() {
+        let ancestor_value = ancestor_values[column_index].clone();
+        let mut best_changed: Option<&StoredRowBatch> = None;
+        let mut best_value = ancestor_value.clone();
+
+        for (row, row_values) in frontier.iter().zip(frontier_values.iter()) {
+            let candidate_value = row_values[column_index].clone();
+            if candidate_value == ancestor_value {
+                continue;
+            }
+            if best_changed
+                .map(|current| {
+                    (row.updated_at, row.batch_id()) > (current.updated_at, current.batch_id())
+                })
+                .unwrap_or(true)
+            {
+                best_changed = Some(*row);
+                best_value = candidate_value;
+            }
+        }
+
+        merged_values.push(best_value);
+        let winner_row = best_changed.or(ancestor).unwrap_or(latest_tip);
+        winner_batch_ids.push(current_winner_batch_id(Some(winner_row), latest_tip));
+        contributing_rows.push(winner_row);
+    }
+
+    let delete_winner = delete_winner(&frontier);
+    let metadata_row = delete_winner.unwrap_or_else(|| {
+        contributing_rows
+            .iter()
+            .copied()
+            .max_by_key(|row| (row.updated_at, row.batch_id()))
+            .unwrap_or(latest_tip)
+    });
+
+    let mut confirmed_tier: Option<DurabilityTier> = None;
+    for tier in contributing_rows
+        .iter()
+        .copied()
+        .chain(delete_winner)
+        .map(|row| row.confirmed_tier)
+    {
+        let Some(tier) = tier else {
+            confirmed_tier = None;
+            break;
+        };
+        confirmed_tier = Some(match confirmed_tier {
+            Some(existing) => existing.min(tier),
+            None => tier,
+        });
+    }
+
+    let data = match delete_winner.and_then(|row| row.delete_kind) {
+        Some(DeleteKind::Hard) => Vec::new(),
+        _ => encode_row(user_descriptor, &merged_values)?,
+    };
+
+    let row = StoredRowBatch {
+        row_id: metadata_row.row_id,
+        batch_id: metadata_row.batch_id,
+        branch: metadata_row.branch.clone(),
+        parents: metadata_row.parents.clone(),
+        updated_at: metadata_row.updated_at,
+        created_by: metadata_row.created_by.clone(),
+        created_at: metadata_row.created_at,
+        updated_by: metadata_row.updated_by.clone(),
+        state: metadata_row.state,
+        confirmed_tier,
+        delete_kind: delete_winner.and_then(|row| row.delete_kind),
+        is_deleted: delete_winner.is_some(),
+        data: data.into(),
+        metadata: metadata_row.metadata.clone(),
+    };
+
+    let winner_batch_ids = if winner_batch_ids
+        .iter()
+        .all(|batch_id| *batch_id == metadata_row.batch_id())
+        && row.data == metadata_row.data
+        && row.confirmed_tier == metadata_row.confirmed_tier
+        && row.delete_kind == metadata_row.delete_kind
+        && row.is_deleted == metadata_row.is_deleted
+    {
+        None
+    } else {
+        Some(winner_batch_ids)
+    };
+
+    Ok(Some(ComputedVisiblePreview {
+        row,
+        winner_batch_ids,
+    }))
+}
+
+pub(crate) fn visible_row_preview_from_history_rows(
+    user_descriptor: &RowDescriptor,
+    history_rows: &[StoredRowBatch],
+    required_tier: Option<DurabilityTier>,
+) -> Result<Option<StoredRowBatch>, EncodingError> {
+    Ok(
+        build_computed_visible_preview(user_descriptor, history_rows, required_tier)?
+            .map(|preview| preview.row),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1231,19 +1855,21 @@ fn rebuild_visible_entry_from_history<H: Storage>(
     table: &str,
     object_id: ObjectId,
     branch_name: &SharedString,
+    user_descriptor: &RowDescriptor,
 ) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
     let history_rows = load_branch_history(io, table, object_id, branch_name)?;
-    Ok(visible_entry_from_history_rows(&history_rows))
+    visible_entry_from_history_rows(user_descriptor, &history_rows).map_err(|err| {
+        RowHistoryError::StorageError(StorageError::IoError(format!(
+            "rebuild visible entry: {err}"
+        )))
+    })
 }
 
-fn visible_entry_from_history_rows(history_rows: &[StoredRowBatch]) -> Option<VisibleRowEntry> {
-    let current_row = history_rows
-        .iter()
-        .filter(|row| row.state.is_visible())
-        .max_by_key(|row| (row.updated_at, row.batch_id()))
-        .cloned()?;
-
-    Some(VisibleRowEntry::rebuild(current_row, history_rows))
+fn visible_entry_from_history_rows(
+    user_descriptor: &RowDescriptor,
+    history_rows: &[StoredRowBatch],
+) -> Result<Option<VisibleRowEntry>, EncodingError> {
+    VisibleRowEntry::rebuild_with_descriptor(user_descriptor, history_rows)
 }
 
 fn load_previous_visible_entry<H: Storage>(
@@ -1251,243 +1877,17 @@ fn load_previous_visible_entry<H: Storage>(
     table: &str,
     object_id: ObjectId,
     branch_name: &SharedString,
+    user_descriptor: &RowDescriptor,
 ) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
     match io.load_visible_region_entry(table, branch_name.as_str(), object_id) {
-        Ok(entry) => Ok(entry),
-        Err(_) => rebuild_visible_entry_from_history(io, table, object_id, branch_name),
+        Ok(Some(entry)) => Ok(Some(entry)),
+        Ok(None) => {
+            rebuild_visible_entry_from_history(io, table, object_id, branch_name, user_descriptor)
+        }
+        Err(_) => {
+            rebuild_visible_entry_from_history(io, table, object_id, branch_name, user_descriptor)
+        }
     }
-}
-
-fn latest_row_wins(candidate: &StoredRowBatch, current: &StoredRowBatch) -> bool {
-    (candidate.updated_at, candidate.batch_id()) > (current.updated_at, current.batch_id())
-}
-
-fn branch_frontier_after_append(
-    previous_frontier: &[BatchId],
-    appended_row: &StoredRowBatch,
-) -> Vec<BatchId> {
-    let appended_batch_id = appended_row.batch_id();
-    let mut frontier = previous_frontier
-        .iter()
-        .copied()
-        .filter(|batch_id| !appended_row.parents.contains(batch_id))
-        .collect::<Vec<_>>();
-    if !frontier.contains(&appended_batch_id) {
-        frontier.push(appended_batch_id);
-    }
-    frontier.sort();
-    frontier.dedup();
-    frontier
-}
-
-fn latest_visible_version_after_append<H: Storage>(
-    io: &H,
-    table: &str,
-    appended_row: &StoredRowBatch,
-    previous_winner_id: Option<BatchId>,
-) -> Result<Option<BatchId>, RowHistoryError> {
-    if !appended_row.state.is_visible() {
-        return Ok(previous_winner_id);
-    }
-
-    let appended_batch_id = appended_row.batch_id();
-    let Some(previous_winner_id) = previous_winner_id else {
-        return Ok(Some(appended_batch_id));
-    };
-
-    if previous_winner_id == appended_batch_id {
-        return Ok(Some(appended_batch_id));
-    }
-
-    let Some(previous_winner) = io
-        .load_history_row_batch(
-            table,
-            appended_row.branch.as_str(),
-            appended_row.row_id,
-            previous_winner_id,
-        )
-        .map_err(RowHistoryError::StorageError)?
-    else {
-        return Err(RowHistoryError::StorageError(StorageError::IoError(
-            format!(
-                "missing history row {previous_winner_id:?} for row {}",
-                appended_row.row_id
-            ),
-        )));
-    };
-
-    if latest_row_wins(appended_row, &previous_winner) {
-        Ok(Some(appended_batch_id))
-    } else {
-        Ok(Some(previous_winner_id))
-    }
-}
-
-fn visible_entry_after_append<H: Storage>(
-    io: &H,
-    table: &str,
-    previous_entry: Option<&VisibleRowEntry>,
-    appended_row: &StoredRowBatch,
-) -> Result<Option<VisibleRowEntry>, RowHistoryError> {
-    let Some(previous_entry) = previous_entry else {
-        return Ok(appended_row
-            .state
-            .is_visible()
-            .then(|| VisibleRowEntry::new(appended_row.clone())));
-    };
-
-    let branch_frontier =
-        branch_frontier_after_append(&previous_entry.branch_frontier, appended_row);
-
-    if !appended_row.state.is_visible() {
-        let mut next = previous_entry.clone();
-        next.branch_frontier = branch_frontier;
-        return Ok(Some(next));
-    }
-
-    let current_row = if latest_row_wins(appended_row, &previous_entry.current_row) {
-        appended_row.clone()
-    } else {
-        previous_entry.current_row.clone()
-    };
-    let current_batch_id = current_row.batch_id();
-
-    let worker_batch_id = latest_visible_version_after_append(
-        io,
-        table,
-        appended_row,
-        previous_entry.batch_id_for_tier(DurabilityTier::Worker),
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-    let edge_batch_id = latest_visible_version_after_append(
-        io,
-        table,
-        appended_row,
-        previous_entry.batch_id_for_tier(DurabilityTier::EdgeServer),
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-    let global_batch_id = latest_visible_version_after_append(
-        io,
-        table,
-        appended_row,
-        previous_entry.batch_id_for_tier(DurabilityTier::GlobalServer),
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-
-    Ok(Some(VisibleRowEntry {
-        current_row,
-        branch_frontier,
-        worker_batch_id,
-        edge_batch_id,
-        global_batch_id,
-    }))
-}
-
-fn winner_after_tier_upgrade<H: Storage>(
-    io: &H,
-    table: &str,
-    entry: &VisibleRowEntry,
-    current_row: &StoredRowBatch,
-    patched_row: &StoredRowBatch,
-    required_tier: DurabilityTier,
-) -> Result<Option<BatchId>, RowHistoryError> {
-    let patched_batch_id = patched_row.batch_id();
-    if !patched_row.state.is_visible()
-        || patched_row
-            .confirmed_tier
-            .is_none_or(|tier| tier < required_tier)
-    {
-        return Ok(entry.batch_id_for_tier(required_tier));
-    }
-
-    if current_row.batch_id() == patched_batch_id
-        || current_row
-            .confirmed_tier
-            .is_some_and(|tier| tier >= required_tier)
-    {
-        return Ok(Some(current_row.batch_id()));
-    }
-
-    let Some(previous_winner_id) = entry.batch_id_for_tier(required_tier) else {
-        return Ok(Some(patched_batch_id));
-    };
-
-    if previous_winner_id == patched_batch_id {
-        return Ok(Some(patched_batch_id));
-    }
-
-    let Some(previous_winner) = io
-        .load_history_row_batch(
-            table,
-            patched_row.branch.as_str(),
-            patched_row.row_id,
-            previous_winner_id,
-        )
-        .map_err(RowHistoryError::StorageError)?
-    else {
-        return Err(RowHistoryError::StorageError(StorageError::IoError(
-            format!(
-                "missing tier winner {previous_winner_id:?} for row {}",
-                patched_row.row_id
-            ),
-        )));
-    };
-
-    if latest_row_wins(patched_row, &previous_winner) {
-        Ok(Some(patched_batch_id))
-    } else {
-        Ok(Some(previous_winner_id))
-    }
-}
-
-fn visible_entry_after_tier_upgrade<H: Storage>(
-    io: &H,
-    table: &str,
-    entry: VisibleRowEntry,
-    patched_row: &StoredRowBatch,
-) -> Result<VisibleRowEntry, RowHistoryError> {
-    let current_row = if entry.current_row.batch_id() == patched_row.batch_id() {
-        patched_row.clone()
-    } else {
-        entry.current_row.clone()
-    };
-    let current_batch_id = current_row.batch_id();
-
-    let worker_batch_id = winner_after_tier_upgrade(
-        io,
-        table,
-        &entry,
-        &current_row,
-        patched_row,
-        DurabilityTier::Worker,
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-    let edge_batch_id = winner_after_tier_upgrade(
-        io,
-        table,
-        &entry,
-        &current_row,
-        patched_row,
-        DurabilityTier::EdgeServer,
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-    let global_batch_id = winner_after_tier_upgrade(
-        io,
-        table,
-        &entry,
-        &current_row,
-        patched_row,
-        DurabilityTier::GlobalServer,
-    )?
-    .filter(|batch_id| *batch_id != current_batch_id);
-
-    Ok(VisibleRowEntry {
-        current_row,
-        branch_frontier: entry.branch_frontier,
-        worker_batch_id,
-        edge_batch_id,
-        global_batch_id,
-    })
 }
 
 fn visibility_change_from_applied(
@@ -1554,7 +1954,15 @@ pub fn apply_row_batch<H: Storage>(
     let table = row_locator.table.to_string();
     let batch_id = row.batch_id();
     let branch = SharedString::from(branch_name.as_str().to_string());
-    let previous_entry = load_previous_visible_entry(io, &table, object_id, &branch)?;
+    let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
+        .map_err(RowHistoryError::StorageError)?;
+    let previous_entry = load_previous_visible_entry(
+        io,
+        &table,
+        object_id,
+        &branch,
+        context.user_descriptor.as_ref(),
+    )?;
     let previous_visible = previous_entry
         .as_ref()
         .map(|entry| entry.current_row.clone());
@@ -1569,6 +1977,8 @@ pub fn apply_row_batch<H: Storage>(
         }
     }
 
+    let mut patched_history = load_branch_history(io, &table, object_id, &branch)?;
+
     if let Some(existing_row) = io
         .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
         .map_err(RowHistoryError::StorageError)?
@@ -1580,8 +1990,21 @@ pub fn apply_row_batch<H: Storage>(
             visibility_change: None,
         });
     }
-
-    let current_entry = visible_entry_after_append(io, &table, previous_entry.as_ref(), &row)?;
+    if let Some(existing) = patched_history
+        .iter_mut()
+        .find(|candidate| candidate.batch_id() == batch_id)
+    {
+        *existing = row.clone();
+    } else {
+        patched_history.push(row.clone());
+    }
+    let current_entry =
+        visible_entry_from_history_rows(context.user_descriptor.as_ref(), &patched_history)
+            .map_err(|err| {
+                RowHistoryError::StorageError(StorageError::IoError(format!(
+                    "rebuild visible entry after append: {err}"
+                )))
+            })?;
     let current_visible = current_entry
         .as_ref()
         .map(|entry| entry.current_row.clone());
@@ -1598,8 +2021,6 @@ pub fn apply_row_batch<H: Storage>(
         && visible_entries[0].current_row.batch_id() == row.batch_id();
 
     if visible_entries.is_empty() || can_encode_visible_with_row_context {
-        let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
-            .map_err(RowHistoryError::StorageError)?;
         let encoded_history = crate::storage::encode_history_row_bytes_with_context(&context, &row)
             .map_err(RowHistoryError::StorageError)?;
         let encoded_visible = if let Some(entry) = visible_entries.first() {
@@ -1661,11 +2082,6 @@ pub fn patch_row_batch_state<H: Storage>(
     let row_locator = row_locator_from_storage(io, object_id)?;
     let table = row_locator.table.to_string();
     let branch = SharedString::from(branch_name.as_str().to_string());
-    let previous_entry = load_previous_visible_entry(io, &table, object_id, &branch)?;
-    let previous_visible = previous_entry
-        .as_ref()
-        .map(|entry| entry.current_row.clone());
-
     let mut patched_row = io
         .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
         .map_err(RowHistoryError::StorageError)?
@@ -1673,6 +2089,18 @@ pub fn patch_row_batch_state<H: Storage>(
     if patched_row.branch.as_str() != branch_name.as_str() {
         return Ok(None);
     }
+    let context = crate::storage::resolve_history_row_write_context(io, &table, &patched_row)
+        .map_err(RowHistoryError::StorageError)?;
+    let previous_entry = load_previous_visible_entry(
+        io,
+        &table,
+        object_id,
+        &branch,
+        context.user_descriptor.as_ref(),
+    )?;
+    let previous_visible = previous_entry
+        .as_ref()
+        .map(|entry| entry.current_row.clone());
 
     if let Some(state) = state {
         patched_row.state = state;
@@ -1683,25 +2111,22 @@ pub fn patch_row_batch_state<H: Storage>(
         (None, incoming) => incoming,
     };
 
-    let patched_entry = match previous_entry {
-        Some(entry) if state.is_none() => Some(visible_entry_after_tier_upgrade(
-            io,
-            &table,
-            entry,
-            &patched_row,
-        )?),
-        _ => {
-            let mut history_rows = load_branch_history(io, &table, object_id, &branch)?;
-            let Some(existing) = history_rows
-                .iter_mut()
-                .find(|candidate| candidate.batch_id() == batch_id)
-            else {
-                return Err(RowHistoryError::ObjectNotFound(object_id));
-            };
-            *existing = patched_row.clone();
-            visible_entry_from_history_rows(&history_rows)
-        }
+    let mut history_rows = load_branch_history(io, &table, object_id, &branch)?;
+    let Some(existing) = history_rows
+        .iter_mut()
+        .find(|candidate| candidate.batch_id() == batch_id)
+    else {
+        return Err(RowHistoryError::ObjectNotFound(object_id));
     };
+    *existing = patched_row.clone();
+    let patched_entry =
+        visible_entry_from_history_rows(context.user_descriptor.as_ref(), &history_rows).map_err(
+            |err| {
+                RowHistoryError::StorageError(StorageError::IoError(format!(
+                    "rebuild visible entry after patch: {err}"
+                )))
+            },
+        )?;
     let visible_entries: Vec<_> = patched_entry.iter().cloned().collect();
     if patched_entry.is_some() {
         io.apply_row_mutation(
@@ -1751,7 +2176,7 @@ fn latest_visible_version_for_tier(
 
 fn branch_frontier(history_rows: &[StoredRowBatch]) -> Vec<BatchId> {
     let mut non_tips = std::collections::BTreeSet::new();
-    for row in history_rows {
+    for row in history_rows.iter().filter(|row| row.state.is_visible()) {
         for parent in &row.parents {
             non_tips.insert(*parent);
         }
@@ -1759,6 +2184,7 @@ fn branch_frontier(history_rows: &[StoredRowBatch]) -> Vec<BatchId> {
 
     let mut tips: Vec<_> = history_rows
         .iter()
+        .filter(|row| row.state.is_visible())
         .map(StoredRowBatch::batch_id)
         .filter(|batch_id| !non_tips.contains(batch_id))
         .collect();
@@ -1816,9 +2242,9 @@ mod tests {
             )
             .expect("encode current row"),
             RowProvenance::for_update(&global.row_provenance(), "bob".to_string(), 30),
-            HashMap::from([("source".to_string(), "worker".to_string())]),
+            HashMap::from([("source".to_string(), "local".to_string())]),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let entry = VisibleRowEntry {
             current_row: current,
@@ -1826,6 +2252,11 @@ mod tests {
             worker_batch_id: None,
             edge_batch_id: Some(global.batch_id()),
             global_batch_id: Some(global.batch_id()),
+            winner_batch_pool: Vec::new(),
+            current_winner_ordinals: None,
+            worker_winner_ordinals: None,
+            edge_winner_ordinals: None,
+            global_winner_ordinals: None,
         };
 
         let encoded =
@@ -1895,7 +2326,7 @@ mod tests {
             RowProvenance::for_update(&edge.row_provenance(), "alice".to_string(), 30),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let history = vec![global.clone(), edge.clone(), current.clone()];
 
@@ -1906,7 +2337,7 @@ mod tests {
         assert_eq!(entry.edge_batch_id, Some(edge.batch_id()));
         assert_eq!(entry.global_batch_id, Some(global.batch_id()));
         assert_eq!(
-            entry.batch_id_for_tier(DurabilityTier::Worker),
+            entry.batch_id_for_tier(DurabilityTier::Local),
             Some(current.batch_id())
         );
         assert_eq!(
@@ -1921,7 +2352,7 @@ mod tests {
 
     #[test]
     fn visible_row_entry_returns_none_when_no_version_meets_required_tier() {
-        let current = visible_row(30, Some(DurabilityTier::Worker));
+        let current = visible_row(30, Some(DurabilityTier::Local));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
         assert_eq!(entry.branch_frontier, vec![current.batch_id()]);
@@ -1931,7 +2362,7 @@ mod tests {
 
     #[test]
     fn visible_row_entry_preserves_multiple_branch_tips() {
-        let base = visible_row(10, Some(DurabilityTier::Worker));
+        let base = visible_row(10, Some(DurabilityTier::Local));
         let left = StoredRowBatch::new(
             base.row_id,
             "main",
@@ -1940,7 +2371,7 @@ mod tests {
             RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
         let right = StoredRowBatch::new(
             base.row_id,
@@ -1950,7 +2381,7 @@ mod tests {
             RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         let entry = VisibleRowEntry::rebuild(right.clone(), &[base, left.clone(), right.clone()]);
@@ -1958,6 +2389,423 @@ mod tests {
         assert_eq!(
             entry.branch_frontier,
             vec![left.batch_id(), right.batch_id()]
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_merges_conflicting_field_updates() {
+        let descriptor = user_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let left = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("alice-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let right = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &descriptor,
+            &[base, left.clone(), right.clone()],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+
+        assert_eq!(
+            decode_row(&descriptor, &entry.current_row.data).unwrap(),
+            vec![Value::Text("alice-title".into()), Value::Boolean(true)]
+        );
+        assert_eq!(entry.current_row.batch_id(), right.batch_id());
+        assert_eq!(entry.current_row.updated_by.as_str(), "bob");
+        assert_eq!(
+            entry.branch_frontier,
+            vec![left.batch_id(), right.batch_id()]
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_merges_accepted_transactional_rows_but_ignores_staging_and_rejected_rows()
+    {
+        let descriptor = user_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let accepted_transaction = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("txn-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::Local),
+        );
+        let direct = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let staging = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[
+                    Value::Text("staging-should-not-win".into()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "mallory".to_string(), 30),
+            HashMap::new(),
+            RowState::StagingPending,
+            None,
+        );
+        let rejected = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[
+                    Value::Text("rejected-should-not-win".into()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "mallory".to_string(), 31),
+            HashMap::new(),
+            RowState::Rejected,
+            None,
+        );
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &descriptor,
+            &[
+                base,
+                accepted_transaction,
+                direct.clone(),
+                staging,
+                rejected,
+            ],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+
+        assert_eq!(
+            decode_row(&descriptor, &entry.current_row.data).unwrap(),
+            vec![Value::Text("txn-title".into()), Value::Boolean(true)]
+        );
+        assert_eq!(entry.current_row.batch_id(), direct.batch_id());
+        assert_eq!(entry.current_row.updated_by.as_str(), "bob");
+    }
+
+    #[test]
+    fn visible_row_entry_roundtrips_current_winner_ordinals() {
+        let descriptor = user_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let left = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("alice-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let right = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(
+            &descriptor,
+            &[base, left.clone(), right.clone()],
+        )
+        .unwrap()
+        .expect("merged visible entry");
+        assert_eq!(
+            entry.winner_batch_pool,
+            vec![left.batch_id(), right.batch_id()]
+        );
+        assert_eq!(entry.current_winner_ordinals, Some(vec![0, 1]));
+
+        let encoded =
+            encode_flat_visible_row_entry(&descriptor, &entry).expect("encode merged visible row");
+        let decoded = decode_flat_visible_row_entry(
+            &descriptor,
+            entry.current_row.row_id,
+            entry.current_row.branch.as_str(),
+            &encoded,
+        )
+        .expect("decode merged visible row");
+
+        assert_eq!(decoded.winner_batch_pool, entry.winner_batch_pool);
+        assert_eq!(
+            decoded.current_winner_ordinals,
+            entry.current_winner_ordinals
+        );
+        assert_eq!(decoded.edge_winner_ordinals, None);
+        assert_eq!(decoded.global_winner_ordinals, None);
+    }
+
+    #[test]
+    fn visible_row_entry_materializes_tier_preview_when_batch_id_matches_current() {
+        let descriptor = user_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
+        );
+        let worker_done = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let edge_title = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("edge-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 30),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let history_rows = vec![base.clone(), worker_done.clone(), edge_title.clone()];
+        let row_by_batch_id = history_rows
+            .iter()
+            .cloned()
+            .map(|row| (row.batch_id(), row))
+            .collect::<HashMap<_, _>>();
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(&descriptor, &history_rows)
+            .unwrap()
+            .expect("visible entry");
+
+        assert_eq!(entry.current_row.batch_id(), edge_title.batch_id());
+        assert_eq!(entry.edge_batch_id, Some(edge_title.batch_id()));
+        assert_eq!(entry.edge_winner_ordinals, None);
+
+        let edge_preview = entry
+            .materialize_preview_for_tier_from_loaded_rows(
+                &descriptor,
+                DurabilityTier::EdgeServer,
+                &row_by_batch_id,
+            )
+            .unwrap()
+            .expect("edge preview");
+        assert_eq!(
+            decode_row(&descriptor, &edge_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(false)]
+        );
+    }
+
+    #[test]
+    fn visible_row_entry_persists_merged_tier_override_ordinals() {
+        let descriptor = user_descriptor();
+        let base = StoredRowBatch::new(
+            ObjectId::new(),
+            "main",
+            Vec::new(),
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::GlobalServer),
+        );
+        let edge_title = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("edge-title".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "alice".to_string(), 20),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let edge_done = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![base.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("task".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&base.row_provenance(), "bob".to_string(), 21),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::EdgeServer),
+        );
+        let worker_current = StoredRowBatch::new(
+            base.row_id,
+            "main",
+            vec![edge_title.batch_id(), edge_done.batch_id()],
+            encode_row(
+                &descriptor,
+                &[Value::Text("edge-title".into()), Value::Boolean(true)],
+            )
+            .unwrap(),
+            RowProvenance::for_update(&edge_done.row_provenance(), "charlie".to_string(), 30),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            Some(DurabilityTier::Local),
+        );
+        let history_rows = vec![
+            base.clone(),
+            edge_title.clone(),
+            edge_done.clone(),
+            worker_current.clone(),
+        ];
+        let row_by_batch_id = history_rows
+            .iter()
+            .cloned()
+            .map(|row| (row.batch_id(), row))
+            .collect::<HashMap<_, _>>();
+
+        let entry = VisibleRowEntry::rebuild_with_descriptor(&descriptor, &history_rows)
+            .unwrap()
+            .expect("visible entry");
+
+        assert_eq!(entry.current_row.batch_id(), worker_current.batch_id());
+        assert_eq!(entry.current_winner_ordinals, None);
+        assert_eq!(entry.edge_batch_id, Some(edge_done.batch_id()));
+        assert_eq!(
+            entry.winner_batch_pool,
+            vec![edge_title.batch_id(), edge_done.batch_id()]
+        );
+        assert_eq!(entry.edge_winner_ordinals, Some(vec![0, 1]));
+
+        let edge_preview = entry
+            .materialize_preview_for_tier_from_loaded_rows(
+                &descriptor,
+                DurabilityTier::EdgeServer,
+                &row_by_batch_id,
+            )
+            .unwrap()
+            .expect("edge preview");
+        assert_eq!(edge_preview.batch_id(), edge_done.batch_id());
+        assert_eq!(
+            decode_row(&descriptor, &edge_preview.data).unwrap(),
+            vec![Value::Text("edge-title".into()), Value::Boolean(true)]
         );
     }
 
@@ -2052,7 +2900,7 @@ mod tests {
     #[test]
     fn flat_visible_row_common_case_omits_empty_arrays_and_metadata() {
         let descriptor = user_descriptor();
-        let current = visible_row(10, Some(DurabilityTier::Worker));
+        let current = visible_row(10, Some(DurabilityTier::Local));
         let entry = VisibleRowEntry::rebuild(current.clone(), std::slice::from_ref(&current));
 
         let encoded =
@@ -2127,11 +2975,11 @@ mod tests {
             .expect("encode user row"),
             RowProvenance::for_insert("alice".to_string(), 100),
             HashMap::from([
-                ("source".to_string(), "worker".to_string()),
+                ("source".to_string(), "local".to_string()),
                 ("kind".to_string(), "task".to_string()),
             ]),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         let encoded =
@@ -2192,6 +3040,60 @@ mod tests {
     }
 
     #[test]
+    fn flat_history_row_binary_compacts_hot_enums_to_single_bytes() {
+        let user_descriptor = user_descriptor();
+        let mut row = StoredRowBatch::new(
+            ObjectId::from_uuid(Uuid::from_u128(45)),
+            "main",
+            vec![BatchId([4; 16])],
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("Compact".into()), Value::Boolean(false)],
+            )
+            .expect("encode user row"),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::EdgeServer),
+        );
+        row.delete_kind = Some(DeleteKind::Hard);
+
+        let encoded =
+            encode_flat_history_row(&user_descriptor, &row).expect("encode flat history row");
+        let descriptor = history_row_physical_descriptor(&user_descriptor);
+        let layout = crate::row_format::compiled_row_layout(&descriptor);
+
+        let state = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_state").unwrap(),
+        )
+        .expect("read state bytes")
+        .expect("state should be present");
+        let tier = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_confirmed_tier").unwrap(),
+        )
+        .expect("read tier bytes")
+        .expect("tier should be present");
+        let delete_kind = crate::row_format::column_bytes_with_layout(
+            &descriptor,
+            layout.as_ref(),
+            &encoded,
+            descriptor.column_index("_jazz_delete_kind").unwrap(),
+        )
+        .expect("read delete kind bytes")
+        .expect("delete kind should be present");
+
+        assert_eq!(state.len(), 1);
+        assert_eq!(tier.len(), 1);
+        assert_eq!(delete_kind.len(), 1);
+    }
+
+    #[test]
     fn direct_row_writes_use_batch_identity() {
         let provenance = RowProvenance::for_insert("alice".to_string(), 100);
         let first = StoredRowBatch::new(
@@ -2202,7 +3104,7 @@ mod tests {
             provenance.clone(),
             HashMap::new(),
             RowState::VisibleDirect,
-            Some(DurabilityTier::Worker),
+            Some(DurabilityTier::Local),
         );
 
         assert_eq!(

@@ -17,11 +17,17 @@ import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   DirectBatch as RuntimeDirectBatch,
   JazzClient,
-  loadWasmModule,
   type LocalBatchRecord,
   type MutationErrorEvent,
+  loadWasmModule,
   PersistedWrite as RuntimePersistedWrite,
   Transaction as RuntimeTransaction,
+  type CreateDurabilityOptions,
+  type CreateOptions,
+  type UpdateDurabilityOptions,
+  type UpdateOptions,
+  type UpsertDurabilityOptions,
+  type UpsertOptions,
   type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -37,6 +43,7 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
+import { resolveClientSessionSync } from "./client-session.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -46,7 +53,7 @@ import {
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery } from "./query-builder-shape.js";
+import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -56,9 +63,29 @@ import {
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
+const STORAGE_RESET_REQUEST_RETRY_MS = 200;
+const STORAGE_RESET_REQUEST_TIMEOUT_MS = 5_000;
+const STORAGE_RESET_DISCOVERY_WINDOW_MS = 600;
+const STORAGE_RESET_ACK_QUIET_MS = 150;
 
 function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createOperationId(prefix: string): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return `${prefix}-${cryptoObj.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function toError(error: unknown, fallbackMessage: string): Error {
+  return error instanceof Error ? error : new Error(error ? String(error) : fallbackMessage);
 }
 
 /**
@@ -81,6 +108,8 @@ export interface DbConfig {
   userBranch?: string;
   /** JWT token for server authentication */
   jwtToken?: string;
+  /** Mirrored session for local permission evaluation when sync auth uses cookies. */
+  cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
@@ -95,6 +124,37 @@ export interface DbConfig {
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
+}
+
+function trimOptionalString(value?: string | null): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** @internal Derive the default browser persistence namespace for this Db config. */
+export function resolveDefaultPersistentDbName(config: DbConfig): string {
+  const driver = resolveStorageDriver(config.driver);
+  const explicitDbName = trimOptionalString(
+    (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
+  );
+  if (explicitDbName) {
+    return explicitDbName;
+  }
+
+  const sessionUserId = resolveClientSessionSync({
+    appId: config.appId,
+    jwtToken: config.jwtToken,
+  })?.user_id;
+
+  if (!sessionUserId) {
+    return config.appId;
+  }
+
+  return `${config.appId}::${encodeURIComponent(sessionUserId)}`;
 }
 
 /**
@@ -127,6 +187,10 @@ export interface ActiveQuerySubscriptionTrace {
   stack?: string;
 }
 
+export interface LogoutOptions {
+  wipeData?: boolean;
+}
+
 type ActiveQuerySubscriptionTraceListener = (
   traces: readonly ActiveQuerySubscriptionTrace[],
 ) => void;
@@ -139,6 +203,40 @@ type RuntimeQueryTracePayload = {
   table: string;
   branches: string[];
 };
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+};
+
+type StorageResetContext = {
+  requestId: string;
+  initiatedBySelf: boolean;
+  coordinatorTabId: string | null;
+  begun: boolean;
+  completed: boolean;
+  preparePromise: Promise<string> | null;
+  completion: Deferred<void>;
+};
+
+type StorageResetCoordinatorState = {
+  requestId: string;
+  startedAtMs: number;
+  lastAckAtMs: number;
+  ackedNamespacesByTabId: Map<string, string>;
+  runPromise: Promise<void> | null;
+};
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function trimSubscriptionTraceStack(stack: string | undefined): string | undefined {
   if (!stack) {
@@ -198,6 +296,48 @@ function resolveHopOutputTable(
     currentTable = relation.toTable;
   }
   return currentTable;
+}
+
+function resolveBuiltRelationOutputTable(schema: WasmSchema, relation: BuiltRelation): string {
+  if (relation.union) {
+    const first = relation.union.inputs[0];
+    if (!first) {
+      throw new Error("union(...) requires at least one relation.");
+    }
+    const firstTable = resolveBuiltRelationOutputTable(schema, first);
+    for (const input of relation.union.inputs.slice(1)) {
+      const inputTable = resolveBuiltRelationOutputTable(schema, input);
+      if (inputTable !== firstTable) {
+        throw new Error("union(...) requires all relations to output the same table.");
+      }
+    }
+    return firstTable;
+  }
+
+  const seedTable = relation.gather?.seed
+    ? resolveBuiltRelationOutputTable(schema, relation.gather.seed)
+    : relation.table;
+  if (!seedTable) {
+    throw new Error("gather(...) seed relation is missing table metadata.");
+  }
+  const hops = relation.hops ?? [];
+  return hops.length > 0 ? resolveHopOutputTable(schema, seedTable, hops) : seedTable;
+}
+
+function resolveBuiltQueryOutputTable(
+  schema: WasmSchema,
+  builtQuery: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  if (builtQuery.gather?.seed) {
+    const gatherTable = resolveBuiltRelationOutputTable(schema, builtQuery.gather.seed);
+    return builtQuery.hops.length > 0
+      ? resolveHopOutputTable(schema, gatherTable, builtQuery.hops)
+      : gatherTable;
+  }
+
+  return builtQuery.hops.length > 0
+    ? resolveHopOutputTable(schema, builtQuery.table, builtQuery.hops)
+    : builtQuery.table;
 }
 
 function resolveSchemaWithTable(
@@ -612,7 +752,43 @@ interface FollowerCloseMessage {
   term: number;
 }
 
-type TabSyncMessage = FollowerSyncMessage | LeaderSyncMessage | FollowerCloseMessage;
+interface StorageResetRequestMessage {
+  type: "storage-reset-request";
+  requestId: string;
+  fromTabId: string;
+  toLeaderTabId: string | null;
+  term: number;
+}
+
+interface StorageResetBeginMessage {
+  type: "storage-reset-begin";
+  requestId: string;
+  coordinatorTabId: string;
+  term: number;
+}
+
+interface StorageResetAckMessage {
+  type: "storage-reset-ack";
+  requestId: string;
+  fromTabId: string;
+  namespace: string;
+}
+
+interface StorageResetFinishedMessage {
+  type: "storage-reset-finished";
+  requestId: string;
+  success: boolean;
+  errorMessage?: string;
+}
+
+type TabSyncMessage =
+  | FollowerSyncMessage
+  | LeaderSyncMessage
+  | FollowerCloseMessage
+  | StorageResetRequestMessage
+  | StorageResetBeginMessage
+  | StorageResetAckMessage
+  | StorageResetFinishedMessage;
 
 function resolveBroadcastChannelCtor(): (new (name: string) => BroadcastChannelLike) | null {
   const ctor = (globalThis as { BroadcastChannel?: unknown }).BroadcastChannel;
@@ -651,6 +827,39 @@ function isTabSyncMessage(value: unknown): value is TabSyncMessage {
       typeof message.fromTabId === "string" &&
       typeof message.toLeaderTabId === "string" &&
       typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-request") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.fromTabId === "string" &&
+      (typeof message.toLeaderTabId === "string" || message.toLeaderTabId === null) &&
+      typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-begin") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.coordinatorTabId === "string" &&
+      typeof message.term === "number"
+    );
+  }
+
+  if (message.type === "storage-reset-ack") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.fromTabId === "string" &&
+      typeof message.namespace === "string"
+    );
+  }
+
+  if (message.type === "storage-reset-finished") {
+    return (
+      typeof message.requestId === "string" &&
+      typeof message.success === "boolean" &&
+      (typeof message.errorMessage === "string" || message.errorMessage === undefined)
     );
   }
 
@@ -715,6 +924,8 @@ export class Db {
   private readonly leaderPeerIds = new Set<string>();
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
+  private activeStorageReset: StorageResetContext | null = null;
+  private storageResetCoordinator: StorageResetCoordinatorState | null = null;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -834,6 +1045,30 @@ export class Db {
     return true;
   }
 
+  protected applyCookieSessionUpdate(session: Session | null): boolean {
+    const cookieSession = session ?? undefined;
+    const previousSession = this.config.cookieSession;
+    const previousState = this.authStateStore.getState();
+    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
+
+    if (!sessionChanged && nextState === previousState) {
+      return false;
+    }
+
+    this.config.cookieSession = cookieSession;
+
+    for (const client of this.clients.values()) {
+      client.updateCookieSession(cookieSession);
+    }
+
+    this.workerBridge?.updateAuth({
+      jwtToken: this.config.jwtToken,
+    });
+
+    return true;
+  }
+
   /**
    * Create a Db instance with pre-loaded WASM module.
    * @internal Use createDb() instead.
@@ -859,7 +1094,7 @@ export class Db {
     if (persistentDriver.type !== "persistent") {
       throw new Error("Worker-backed Db requires driver.type='persistent'");
     }
-    db.primaryDbName = persistentDriver.dbName ?? config.appId;
+    db.primaryDbName = resolveDefaultPersistentDbName(config);
     db.workerDbName = db.primaryDbName;
 
     try {
@@ -936,9 +1171,10 @@ export class Db {
           env: this.config.env,
           userBranch: this.config.userBranch,
           jwtToken: this.config.jwtToken,
+          cookieSession: this.config.cookieSession,
           adminSecret: this.config.adminSecret,
-          tier: this.worker ? undefined : "worker",
-          // Keep worker-bridged browser clients on worker durability by default.
+          tier: this.worker ? undefined : "local",
+          // Keep worker-bridged browser clients on local durability by default.
           // For direct (non-worker) clients connected to a server, default to edge.
           defaultDurabilityTier: this.worker
             ? undefined
@@ -959,6 +1195,20 @@ export class Db {
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
+      }
+
+      this.attachMutationErrorHandler(client);
+      // Direct (non-worker) clients with a serverUrl must open their own
+      // Rust transport — the worker bridge is not doing it for them.
+      if (!this.worker && this.config.serverUrl) {
+        client.connectTransport(
+          this.config.serverUrl,
+          {
+            jwt_token: this.config.jwtToken,
+            admin_secret: this.config.adminSecret,
+          },
+          this.config.serverPathPrefix,
+        );
       }
 
       this.attachMutationErrorHandler(client);
@@ -988,20 +1238,6 @@ export class Db {
       }),
     );
   }
-
-  protected wrapPersistedWrite<T>(
-    client: JazzClient,
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => client.localBatchRecord(pendingWrite.batchId()),
-      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   /**
    * Wait for the worker bridge to be initialized (if in worker mode).
    * No-op if not using a worker.
@@ -1018,7 +1254,7 @@ export class Db {
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
-    if (!options?.tier || options.tier === "worker") {
+    if (!options?.tier || options.tier === "local") {
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();
@@ -1052,6 +1288,18 @@ export class Db {
       throw new Error("Worker bridge is only available for driver.type='persistent'");
     }
 
+    // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
+    // fallback WASM URL for non-bundled contexts where wasmModule.default() may fail.
+    const runtimeSources = this.config.runtimeSources;
+    let fallbackWasmUrl: string | undefined;
+    if (!runtimeSources?.workerUrl && !runtimeSources?.baseUrl && !runtimeSources?.wasmUrl) {
+      const locationHref = typeof location !== "undefined" ? location.href : undefined;
+      if (!resolveRuntimeConfigSyncInitInput(runtimeSources)) {
+        fallbackWasmUrl =
+          resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources) ?? undefined;
+      }
+    }
+
     return {
       schemaJson,
       appId: this.config.appId,
@@ -1063,6 +1311,7 @@ export class Db {
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
       runtimeSources: this.config.runtimeSources,
+      fallbackWasmUrl,
       logLevel: this.config.logLevel,
     };
   }
@@ -1100,6 +1349,326 @@ export class Db {
 
   private postSyncChannelMessage(message: TabSyncMessage): void {
     this.syncChannel?.postMessage(message);
+  }
+
+  private getOrCreateStorageResetContext(
+    requestId: string,
+    initiatedBySelf: boolean,
+  ): StorageResetContext {
+    if (this.activeStorageReset?.requestId === requestId) {
+      if (initiatedBySelf) {
+        this.activeStorageReset.initiatedBySelf = true;
+      }
+      return this.activeStorageReset;
+    }
+
+    const completion = createDeferred<void>();
+    // Suppress unhandled rejection warnings for remote-initiated resets that
+    // have no local caller awaiting the completion promise.
+    void completion.promise.catch(() => undefined);
+
+    const context: StorageResetContext = {
+      requestId,
+      initiatedBySelf,
+      coordinatorTabId: null,
+      begun: false,
+      completed: false,
+      preparePromise: null,
+      completion,
+    };
+    this.activeStorageReset = context;
+    return context;
+  }
+
+  private clearStorageResetContext(requestId: string): void {
+    if (this.activeStorageReset?.requestId === requestId) {
+      this.activeStorageReset = null;
+    }
+    if (this.storageResetCoordinator?.requestId === requestId) {
+      this.storageResetCoordinator = null;
+    }
+  }
+
+  private resolveStorageResetContext(context: StorageResetContext): void {
+    if (context.completed) {
+      return;
+    }
+    context.completed = true;
+    context.completion.resolve();
+    this.clearStorageResetContext(context.requestId);
+  }
+
+  private rejectStorageResetContext(context: StorageResetContext, error: unknown): void {
+    if (context.completed) {
+      return;
+    }
+    context.completed = true;
+    context.completion.reject(toError(error, "Browser storage reset failed"));
+    this.clearStorageResetContext(context.requestId);
+  }
+
+  private async prepareForStorageReset(
+    context: StorageResetContext,
+    coordinatorTabId: string,
+  ): Promise<string> {
+    if (context.preparePromise) {
+      return await context.preparePromise;
+    }
+
+    context.begun = true;
+    context.coordinatorTabId = coordinatorTabId;
+    context.preparePromise = (async () => {
+      if (this.bridgeReady) {
+        await this.bridgeReady;
+      }
+
+      const namespace = this.currentWorkerNamespace();
+      await this.shutdownWorkerAndClientsForStorageReset();
+
+      if (this.tabId && coordinatorTabId !== this.tabId) {
+        this.postSyncChannelMessage({
+          type: "storage-reset-ack",
+          requestId: context.requestId,
+          fromTabId: this.tabId,
+          namespace,
+        });
+      }
+
+      return namespace;
+    })();
+
+    return await context.preparePromise;
+  }
+
+  private async waitForStorageResetQuiescence(
+    coordinator: StorageResetCoordinatorState,
+  ): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      const elapsed = now - coordinator.startedAtMs;
+      const idleMs = now - coordinator.lastAckAtMs;
+      if (elapsed >= STORAGE_RESET_DISCOVERY_WINDOW_MS && idleMs >= STORAGE_RESET_ACK_QUIET_MS) {
+        return;
+      }
+      await sleep(25);
+    }
+  }
+
+  private async collectStorageResetNamespaces(
+    extraNamespaces: Iterable<string>,
+  ): Promise<string[]> {
+    const namespaces = new Set<string>();
+    const primaryDbName = this.primaryDbName;
+    if (primaryDbName) {
+      namespaces.add(primaryDbName);
+    }
+    for (const namespace of extraNamespaces) {
+      namespaces.add(namespace);
+    }
+
+    if (!primaryDbName) {
+      return [...namespaces];
+    }
+
+    const rootDirectory = await navigator.storage.getDirectory();
+    const rootWithEntries = rootDirectory as FileSystemDirectoryHandle & {
+      entries?: () => AsyncIterable<[string, FileSystemHandle]>;
+    };
+    if (typeof rootWithEntries.entries !== "function") {
+      return [...namespaces];
+    }
+
+    const suffix = ".opfsbtree";
+    const fallbackPrefix = `${primaryDbName}__fallback__`;
+
+    for await (const [name] of rootWithEntries.entries()) {
+      if (!name.endsWith(suffix)) continue;
+      const namespace = name.slice(0, -suffix.length);
+      if (namespace === primaryDbName || namespace.startsWith(fallbackPrefix)) {
+        namespaces.add(namespace);
+      }
+    }
+
+    return [...namespaces];
+  }
+
+  private async resumeAfterStorageReset(): Promise<void> {
+    if (this.worker || this.isShuttingDown) {
+      return;
+    }
+    this.worker = await Db.spawnWorker(this.config.runtimeSources);
+  }
+
+  private async runSingleTabStorageReset(context: StorageResetContext): Promise<void> {
+    const coordinatorTabId = this.tabId ?? "single-tab-reset";
+    let resultError: Error | null = null;
+
+    try {
+      const namespace = await this.prepareForStorageReset(context, coordinatorTabId);
+      const namespaces = await this.collectStorageResetNamespaces([namespace]);
+      for (const candidate of namespaces) {
+        await this.removeOpfsNamespaceFile(candidate);
+      }
+    } catch (error) {
+      resultError = toError(error, "Browser storage reset failed");
+    }
+
+    try {
+      await this.resumeAfterStorageReset();
+    } catch (error) {
+      if (!resultError) {
+        resultError = toError(error, "Failed to restart browser worker after storage reset");
+      }
+    }
+
+    if (resultError) {
+      throw resultError;
+    }
+  }
+
+  private async startStorageResetAsCoordinator(context: StorageResetContext): Promise<void> {
+    if (this.storageResetCoordinator?.requestId === context.requestId) {
+      return await (this.storageResetCoordinator.runPromise ?? context.completion.promise);
+    }
+
+    if (!this.tabId || this.tabRole !== "leader") {
+      throw new Error("Storage reset coordination requires the current tab to be the leader.");
+    }
+
+    const coordinator: StorageResetCoordinatorState = {
+      requestId: context.requestId,
+      startedAtMs: Date.now(),
+      lastAckAtMs: Date.now(),
+      ackedNamespacesByTabId: new Map(),
+      runPromise: null,
+    };
+    this.storageResetCoordinator = coordinator;
+
+    coordinator.runPromise = (async () => {
+      let resultError: Error | null = null;
+
+      try {
+        this.postSyncChannelMessage({
+          type: "storage-reset-begin",
+          requestId: context.requestId,
+          coordinatorTabId: this.tabId!,
+          term: this.currentLeaderTerm,
+        });
+
+        const localNamespace = await this.prepareForStorageReset(context, this.tabId!);
+        coordinator.ackedNamespacesByTabId.set(this.tabId!, localNamespace);
+        coordinator.lastAckAtMs = Date.now();
+
+        await this.waitForStorageResetQuiescence(coordinator);
+
+        const namespaces = await this.collectStorageResetNamespaces(
+          coordinator.ackedNamespacesByTabId.values(),
+        );
+        for (const namespace of namespaces) {
+          await this.removeOpfsNamespaceFile(namespace);
+        }
+      } catch (error) {
+        resultError = toError(error, "Browser storage reset failed");
+      }
+
+      try {
+        await this.resumeAfterStorageReset();
+      } catch (error) {
+        if (!resultError) {
+          resultError = toError(error, "Failed to restart browser worker after storage reset");
+        }
+      }
+
+      this.postSyncChannelMessage({
+        type: "storage-reset-finished",
+        requestId: context.requestId,
+        success: resultError === null,
+        ...(resultError ? { errorMessage: resultError.message } : {}),
+      });
+
+      if (resultError) {
+        throw resultError;
+      }
+    })()
+      .then(() => {
+        this.resolveStorageResetContext(context);
+      })
+      .catch((error) => {
+        this.rejectStorageResetContext(context, error);
+      })
+      .finally(() => {
+        if (this.storageResetCoordinator?.requestId === context.requestId) {
+          this.storageResetCoordinator = null;
+        }
+      });
+
+    await coordinator.runPromise;
+  }
+
+  private async requestCoordinatedStorageReset(): Promise<void> {
+    if (!this.syncChannel || !this.tabId) {
+      const requestId = createOperationId("storage-reset");
+      const context = this.getOrCreateStorageResetContext(requestId, true);
+      try {
+        await this.runSingleTabStorageReset(context);
+        this.resolveStorageResetContext(context);
+      } catch (error) {
+        this.rejectStorageResetContext(context, error);
+      }
+      await context.completion.promise;
+      return;
+    }
+
+    if (this.activeStorageReset) {
+      await this.activeStorageReset.completion.promise;
+      return;
+    }
+
+    const requestId = createOperationId("storage-reset");
+    const context = this.getOrCreateStorageResetContext(requestId, true);
+
+    if (this.tabRole === "leader") {
+      await this.startStorageResetAsCoordinator(context);
+      return;
+    }
+
+    const deadline = Date.now() + STORAGE_RESET_REQUEST_TIMEOUT_MS;
+    while (!context.begun) {
+      if ((this.tabRole as LeaderRole) === "leader") {
+        await this.startStorageResetAsCoordinator(context);
+        return;
+      }
+
+      this.postSyncChannelMessage({
+        type: "storage-reset-request",
+        requestId,
+        fromTabId: this.tabId,
+        toLeaderTabId: this.currentLeaderTabId,
+        term: this.currentLeaderTerm,
+      });
+
+      const settled = await Promise.race([
+        context.completion.promise.then(
+          () => true,
+          () => true,
+        ),
+        sleep(STORAGE_RESET_REQUEST_RETRY_MS).then(() => false),
+      ]);
+      if (settled) {
+        await context.completion.promise;
+        return;
+      }
+
+      if (Date.now() >= deadline) {
+        const error = new Error(
+          "Timed out waiting for the leader tab to begin browser storage reset.",
+        );
+        this.rejectStorageResetContext(context, error);
+        throw error;
+      }
+    }
+
+    await context.completion.promise;
   }
 
   private attachLifecycleHooks(): void {
@@ -1158,6 +1727,18 @@ export class Db {
     if (!isTabSyncMessage(raw)) return;
 
     switch (raw.type) {
+      case "storage-reset-request":
+        this.handleStorageResetRequest(raw);
+        return;
+      case "storage-reset-begin":
+        this.handleStorageResetBegin(raw);
+        return;
+      case "storage-reset-ack":
+        this.handleStorageResetAck(raw);
+        return;
+      case "storage-reset-finished":
+        this.handleStorageResetFinished(raw);
+        return;
       case "follower-sync":
         this.handleFollowerSync(raw);
         return;
@@ -1168,6 +1749,67 @@ export class Db {
         this.handleFollowerClose(raw);
         return;
     }
+  }
+
+  private handleStorageResetRequest(message: StorageResetRequestMessage): void {
+    if (this.tabRole !== "leader") return;
+    if (!this.tabId) return;
+    if (message.fromTabId === this.tabId) return;
+    if (message.toLeaderTabId && message.toLeaderTabId !== this.tabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+    if (this.activeStorageReset && this.activeStorageReset.requestId !== message.requestId) return;
+
+    const context = this.getOrCreateStorageResetContext(message.requestId, false);
+    void this.startStorageResetAsCoordinator(context).catch(() => undefined);
+  }
+
+  private handleStorageResetBegin(message: StorageResetBeginMessage): void {
+    if (!this.currentLeaderTabId) return;
+    if (message.coordinatorTabId !== this.currentLeaderTabId) return;
+    if (message.term !== this.currentLeaderTerm) return;
+    if (message.coordinatorTabId === this.tabId) return;
+    if (this.activeStorageReset && this.activeStorageReset.requestId !== message.requestId) return;
+
+    const context = this.getOrCreateStorageResetContext(message.requestId, false);
+    context.begun = true;
+    context.coordinatorTabId = message.coordinatorTabId;
+
+    void this.prepareForStorageReset(context, message.coordinatorTabId).catch((error) => {
+      this.rejectStorageResetContext(context, error);
+    });
+  }
+
+  private handleStorageResetAck(message: StorageResetAckMessage): void {
+    const coordinator = this.storageResetCoordinator;
+    if (!coordinator || coordinator.requestId !== message.requestId) return;
+
+    coordinator.ackedNamespacesByTabId.set(message.fromTabId, message.namespace);
+    coordinator.lastAckAtMs = Date.now();
+  }
+
+  private handleStorageResetFinished(message: StorageResetFinishedMessage): void {
+    const context = this.activeStorageReset;
+    if (!context || context.requestId !== message.requestId || context.completed) return;
+
+    void (async () => {
+      let resultError: Error | null = message.success
+        ? null
+        : new Error(message.errorMessage ?? "Browser storage reset failed");
+
+      try {
+        await this.resumeAfterStorageReset();
+      } catch (error) {
+        if (!resultError) {
+          resultError = toError(error, "Failed to restart browser worker after storage reset");
+        }
+      }
+
+      if (resultError) {
+        this.rejectStorageResetContext(context, resultError);
+      } else {
+        this.resolveStorageResetContext(context);
+      }
+    })();
   }
 
   private handleFollowerSync(message: FollowerSyncMessage): void {
@@ -1425,19 +2067,27 @@ export class Db {
   }
 
   private static async spawnWorker(runtimeSources?: RuntimeSourcesConfig): Promise<Worker> {
-    const locationHref = typeof location !== "undefined" ? location.href : undefined;
-    const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
-    const wasmUrl = syncInitInput
-      ? null
-      : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
-    const workerUrl = appendWorkerRuntimeWasmUrl(
-      resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
-      wasmUrl,
-    );
+    let worker: Worker;
 
-    const worker = new Worker(workerUrl, {
-      type: "module",
-    });
+    if (runtimeSources?.workerUrl || runtimeSources?.baseUrl) {
+      // Explicit worker location — use dynamic URL resolution.
+      const locationHref = typeof location !== "undefined" ? location.href : undefined;
+      const syncInitInput = resolveRuntimeConfigSyncInitInput(runtimeSources);
+      const wasmUrl = syncInitInput
+        ? null
+        : resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources);
+      const workerUrl = appendWorkerRuntimeWasmUrl(
+        resolveRuntimeConfigWorkerUrl(import.meta.url, locationHref, runtimeSources),
+        wasmUrl,
+      );
+      worker = new Worker(workerUrl, { type: "module" });
+    } else {
+      // Static URL pattern — bundlers (Turbopack, webpack, Vite) detect this
+      // and automatically bundle the worker script + its WASM dependency.
+      worker = new Worker(new URL("../worker/jazz-worker.js", import.meta.url), {
+        type: "module",
+      });
+    }
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Worker bootstrap timeout")), 15000);
@@ -1464,6 +2114,10 @@ export class Db {
 
   updateAuthToken(jwtToken: string | null): void {
     this.applyAuthUpdate(jwtToken);
+  }
+
+  updateCookieSession(cookieSession: Session | null): void {
+    this.applyCookieSessionUpdate(cookieSession);
   }
 
   getAuthState(): AuthState {
@@ -1560,12 +2214,18 @@ export class Db {
    * @param data Init object with column values
    * @returns Insert handle containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): InsertHandle<T> {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
-    const row = client.create(table._table, values);
+    const row = options
+      ? client.create(table._table, values, options)
+      : client.create(table._table, values);
     return new InsertHandle(transformRow(row, table._schema, table._table), row.batchId, client);
   }
 
@@ -1580,7 +2240,7 @@ export class Db {
   async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options: { tier: DurabilityTier },
+    options: CreateDurabilityOptions,
   ): Promise<T> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
@@ -1594,21 +2254,13 @@ export class Db {
     return transformRow(row, table._schema, table._table);
   }
 
-  /**
-   * Insert a new row and keep a replayable handle for later durability settlement.
-   */
   insertPersisted<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
     const client = this.getClient(table._schema);
-    const inputSchema = resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const pendingWrite = client.createPersisted(table._table, values, options);
     return this.wrapPersistedWrite(
       client,
@@ -1618,12 +2270,45 @@ export class Db {
   }
 
   /**
+   * Create or update a row with a caller-supplied id without waiting for durability.
+   */
+  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+    const client = this.getClient(table._schema);
+    const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    client.upsert(table._table, values, options);
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id and wait for durability.
+   */
+  async upsertDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    const client = this.getClient(table._schema);
+    const inputSchema = resolveSchemaWithTable(
+      table._schema,
+      normalizeRuntimeSchema(client.getSchema()),
+      table._table,
+    );
+    await this.ensureBridgeReady();
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await client.upsertDurable(table._table, values, options);
+  }
+
+  /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    return new WriteHandle(client.update(id, updates).batchId, client);
+    return new WriteHandle(client.update(id, updates, options).batchId, client);
   }
 
   /**
@@ -1633,7 +2318,7 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
     const inputSchema = resolveSchemaWithTable(
@@ -1646,29 +2331,19 @@ export class Db {
     await client.updateDurable(id, updates, options);
   }
 
-  /**
-   * Update a row and keep a replayable handle for later durability settlement.
-   */
   updatePersisted<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const client = this.getClient(table._schema);
-    const inputSchema = resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     const pendingWrite = client.updatePersisted(id, updates, options);
     return this.wrapPersistedWrite(
       client,
       pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => {
-        return undefined;
-      },
+      () => undefined,
     );
   }
 
@@ -1693,9 +2368,6 @@ export class Db {
     await client.deleteDurable(id, options);
   }
 
-  /**
-   * Delete a row and keep a replayable handle for later durability settlement.
-   */
   deletePersisted<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
@@ -1706,9 +2378,7 @@ export class Db {
     return this.wrapPersistedWrite(
       client,
       pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => {
-        return undefined;
-      },
+      () => undefined,
     );
   }
 
@@ -1745,15 +2415,16 @@ export class Db {
   /**
    * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
    *
-   * This only deletes `${namespace}.opfsbtree` for the current namespace and does not touch
-   * localStorage-based local-first auth state.
+   * This clears the primary namespace plus any active follower fallback namespaces for the same
+   * browser app/database. It does not touch localStorage-based local-first auth state.
    *
    * Behavior:
    * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
-   * - Leader tab only (throws on follower tabs and asks to close other tabs)
+   * - Can be initiated from either leader or follower tabs
+   * - Coordinates worker shutdown over the tab sync channel before deleting OPFS files
    * - Serializes with worker reconfigure operations
-   * - Tears down worker + clients, deletes OPFS file, respawns worker
-   * - If file deletion fails, still respawns worker and then rethrows the deletion error
+   * - Tears down worker + clients, deletes OPFS files, respawns workers
+   * - If deletion fails, all participating tabs still respawn their workers before surfacing the error
    */
   async deleteClientStorage(): Promise<void> {
     if (resolveStorageDriver(this.config.driver).type !== "persistent") {
@@ -1768,34 +2439,7 @@ export class Db {
     }
 
     const operation = this.workerReconfigure.then(async () => {
-      if (this.tabRole !== "leader") {
-        console.error(
-          "deleteClientStorage() can only run from the leader tab. Close other tabs and retry.",
-        );
-        return;
-      }
-
-      const namespace = this.currentWorkerNamespace();
-
-      // Wait for any in-flight bridge init before we tear down worker state.
-      if (this.bridgeReady) {
-        await this.bridgeReady;
-      }
-
-      await this.shutdownWorkerAndClientsForStorageReset();
-
-      let deleteError: unknown = null;
-      try {
-        await this.removeOpfsNamespaceFile(namespace);
-      } catch (error) {
-        deleteError = error;
-      }
-
-      this.worker = await Db.spawnWorker(this.config.runtimeSources);
-
-      if (deleteError) {
-        throw deleteError;
-      }
+      await this.requestCoordinatedStorageReset();
     });
 
     this.workerReconfigure = operation.then(
@@ -1804,6 +2448,21 @@ export class Db {
     );
 
     await operation;
+  }
+
+  /**
+   * Release the current Db instance for logout flows.
+   *
+   * When `wipeData` is enabled in browser persistent mode, Jazz first coordinates a cross-tab OPFS
+   * wipe and then shuts this Db down. Callers should still sign out of their external auth provider
+   * separately and recreate `JazzProvider` / `Db` after logout.
+   */
+  async logout(options: LogoutOptions = {}): Promise<void> {
+    if (options.wipeData) {
+      await this.deleteClientStorage();
+    }
+
+    await this.shutdown();
   }
 
   /**
@@ -1818,14 +2477,11 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await client.query(translateQuery(builderJson, planningSchema), options);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -1928,12 +2584,9 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
@@ -2072,6 +2725,19 @@ export class Db {
     this.notifyActiveQuerySubscriptionTraceListeners();
   }
 
+  protected wrapPersistedWrite<T>(
+    client: JazzClient,
+    pendingWrite: RuntimePersistedWrite<Row | void>,
+    transformValue: (value: Row | void) => T,
+  ): DbPersistedWrite<T> {
+    return new DbPersistedWrite(
+      pendingWrite,
+      transformValue,
+      () => client.localBatchRecord(pendingWrite.batchId()),
+      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
+    );
+  }
+
   private parseRuntimeQueryTracePayload(
     queryJson: string,
     fallbackTable: string,
@@ -2138,8 +2804,23 @@ class ClientBackedDb extends Db {
   override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     return this.runtimeClient.onMutationError(listener);
   }
+  override updateCookieSession(cookieSession: Session | null): void {
+    if (this.hasScopedAuthState) {
+      return;
+    }
 
-  override insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+    if (!this.applyCookieSessionUpdate(cookieSession)) {
+      return;
+    }
+
+    this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
+  }
+
+  override insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): InsertHandle<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
@@ -2148,6 +2829,7 @@ class ClientBackedDb extends Db {
       values,
       this.session,
       this.attribution,
+      options,
     );
     return new InsertHandle(
       transformRow(row, table._schema, table._table),
@@ -2159,7 +2841,7 @@ class ClientBackedDb extends Db {
   override async insertDurable<T, Init>(
     table: TableProxy<T, Init>,
     data: Init,
-    options: { tier: DurabilityTier },
+    options: CreateDurabilityOptions,
   ): Promise<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2172,6 +2854,42 @@ class ClientBackedDb extends Db {
       options,
     );
     return transformRow(row, table._schema, table._table);
+  }
+
+  override upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): void {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    this.runtimeClient.upsertInternal(
+      table._table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
+    );
+  }
+
+  override async upsertDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertDurabilityOptions,
+  ): Promise<void> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await this.runtimeClient.upsertDurableInternal(
+      table._table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options,
+    );
   }
 
   override insertPersisted<T, Init>(
@@ -2200,6 +2918,7 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
+    options?: UpdateOptions,
   ): WriteHandle {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2209,15 +2928,17 @@ class ClientBackedDb extends Db {
       updates,
       this.session,
       this.attribution,
-    ).batchId;
-    return new WriteHandle(batchId, this.runtimeClient);
+      undefined,
+      options?.updatedAt,
+    );
+    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2228,6 +2949,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      options?.updatedAt,
     );
   }
 
@@ -2235,7 +2957,7 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
+    options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
@@ -2246,6 +2968,8 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      undefined,
+      options?.updatedAt,
     );
     return this.wrapPersistedWrite(
       this.runtimeClient,
@@ -2277,6 +3001,7 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options,
+      undefined,
     );
     return this.wrapPersistedWrite(
       this.runtimeClient,
@@ -2285,31 +3010,23 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override beginTransaction<T, Init>(_table: TableProxy<T, Init>): DbTransaction {
+  override beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
+    const client = this.runtimeClient;
     return new DbTransaction(
-      this.runtimeClient,
-      this.runtimeClient.beginTransactionInternal(this.session, this.attribution),
+      client,
+      client.beginTransactionInternal(this.session, this.attribution),
       (candidateTable, operation) =>
-        assertTableBelongsToClient(
-          candidateTable,
-          this.runtimeClient,
-          () => this.runtimeClient,
-          operation,
-        ),
+        assertTableBelongsToClient(candidateTable, client, () => client, operation),
     );
   }
 
-  override beginDirectBatch<T, Init>(_table: TableProxy<T, Init>): DbDirectBatch {
+  override beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
+    const client = this.runtimeClient;
     return new DbDirectBatch(
-      this.runtimeClient,
-      this.runtimeClient.beginDirectBatchInternal(this.session, this.attribution),
+      client,
+      client.beginDirectBatchInternal(this.session, this.attribution),
       (candidateTable, operation) =>
-        assertTableBelongsToClient(
-          candidateTable,
-          this.runtimeClient,
-          () => this.runtimeClient,
-          operation,
-        ),
+        assertTableBelongsToClient(candidateTable, client, () => client, operation),
     );
   }
 
@@ -2318,10 +3035,7 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
     await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
@@ -2329,7 +3043,7 @@ class ClientBackedDb extends Db {
       this.session,
       options,
     );
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
@@ -2349,12 +3063,9 @@ class ClientBackedDb extends Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
-    const outputTable =
-      builtQuery.hops.length > 0
-        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
-        : query._table;
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -2410,8 +3121,11 @@ function isBrowser(): boolean {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
-  if (config.auth && config.jwtToken) {
-    throw new Error("DbConfig error: auth and jwtToken are mutually exclusive");
+  if (config.auth && (config.jwtToken || config.cookieSession)) {
+    throw new Error("DbConfig error: auth, jwtToken, and cookieSession are mutually exclusive");
+  }
+  if (config.jwtToken && config.cookieSession) {
+    throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
 
   let resolvedConfig = { ...config };

@@ -21,7 +21,7 @@ use crate::sync_manager::{
 
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::policy::Operation;
+use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
@@ -189,8 +189,13 @@ pub(crate) struct QuerySubscription {
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
     pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
+    /// Extra tables whose rows must be available locally to evaluate this
+    /// subscription's bundled policy context.
+    pub(crate) policy_context_tables: Vec<String>,
     /// Whether this subscription uses post-settle auth filtering instead of graph policies.
     pub(crate) uses_explicit_authorization_filtering: bool,
+    /// Whether visible rows must stay aligned to the latest upstream query scope.
+    pub(crate) sync_backed: bool,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
     /// Schema mismatch warnings already emitted for the latest settled state.
@@ -246,6 +251,17 @@ pub(super) struct PolicyCheckState {
     pub(super) pending_check: PendingPermissionCheck,
 }
 
+#[derive(Debug)]
+pub(super) struct WriteTableCacheEntry {
+    pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) row_locator: RowLocator,
+    pub(super) insert_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
+    pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) select_policy: Option<Arc<PolicyExpr>>,
+}
+
 /// Server-side query subscription state.
 ///
 /// When a client sends a QuerySubscription, the server builds a QueryGraph
@@ -262,6 +278,9 @@ pub(super) struct ServerQuerySubscription {
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
     pub(super) branches: Vec<String>,
+    /// Extra tables whose rows must be synced so downstream clients can
+    /// reproduce bundled policy context locally.
+    pub(super) policy_context_tables: Vec<String>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -400,9 +419,36 @@ pub struct QueryManager {
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
     pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
+
+    /// Schema hashes that still need catalogue persistence for the current
+    /// storage namespace.
+    pub(super) pending_catalogue_schema_hashes: HashSet<SchemaHash>,
+
+    /// Storage namespaces where all live schemas have already been upserted
+    /// into the catalogue for this manager.
+    pub(super) catalogued_storage_namespaces: HashSet<usize>,
+
+    /// Application id for catalogue schema persistence, when available.
+    pub(super) catalogue_app_id: Option<String>,
+
+    /// Per-schema, per-table write metadata cached to avoid cloning policy
+    /// trees and descriptors on every hot write.
+    pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
 }
 
 impl QueryManager {
+    fn mark_schema_catalogue_dirty(&mut self, schema_hash: SchemaHash) {
+        self.pending_catalogue_schema_hashes.insert(schema_hash);
+        self.catalogued_storage_namespaces.clear();
+    }
+
+    fn mark_all_live_schemas_catalogue_dirty(&mut self) {
+        for schema_hash in self.schema_context.all_live_hashes() {
+            self.pending_catalogue_schema_hashes.insert(schema_hash);
+        }
+        self.catalogued_storage_namespaces.clear();
+    }
+
     pub(super) fn finalize_schema_warnings(
         reported: &mut HashSet<SchemaWarningKey>,
         warnings: Vec<SchemaWarning>,
@@ -470,7 +516,16 @@ impl QueryManager {
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
+            pending_catalogue_schema_hashes: HashSet::new(),
+            catalogued_storage_namespaces: HashSet::new(),
+            catalogue_app_id: None,
+            write_table_cache: HashMap::new(),
         }
+    }
+
+    pub fn set_catalogue_app_id(&mut self, app_id: impl Into<String>) {
+        self.catalogue_app_id = Some(app_id.into());
+        self.catalogued_storage_namespaces.clear();
     }
 
     /// Set the current schema (the one this client writes to).
@@ -503,6 +558,7 @@ impl QueryManager {
             None
         };
         self.authorization_schema_required = false;
+        self.write_table_cache.clear();
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -510,6 +566,8 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
+        self.pending_catalogue_schema_hashes.clear();
+        self.mark_schema_catalogue_dirty(self.schema_context.current_hash);
     }
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
@@ -522,6 +580,15 @@ impl QueryManager {
     pub fn require_authorization_schema(&mut self) {
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_authorization_state(&self) -> (RowPolicyMode, bool, bool) {
+        (
+            self.row_policy_mode,
+            self.authorization_schema_required,
+            self.authorization_schema.is_some(),
+        )
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -552,6 +619,7 @@ impl QueryManager {
         // Update branch -> schema hash map
         self.branch_schema_map
             .insert(branch.as_str().to_string(), hash);
+        self.mark_schema_catalogue_dirty(hash);
 
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
@@ -578,6 +646,7 @@ impl QueryManager {
 
                     self.branch_schema_map
                         .insert(branch.as_str().to_string(), hash);
+                    self.mark_schema_catalogue_dirty(hash);
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -646,44 +715,58 @@ impl QueryManager {
     }
 
     pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
     ) -> Result<(), StorageError> {
         if !self.schema_context.is_initialized() {
             return Ok(());
         }
 
-        let mut known_schemas = Vec::with_capacity(self.schema_context.live_schemas.len() + 1);
-        known_schemas.push((
-            self.schema_context.current_hash,
-            self.schema_context.current_schema.clone(),
-        ));
-        known_schemas.extend(
-            self.schema_context
-                .live_schemas
-                .iter()
-                .map(|(hash, schema)| (*hash, schema.clone())),
-        );
-
-        for (schema_hash, schema) in known_schemas {
-            let object_id = schema_hash.to_object_id();
-            if storage.load_catalogue_entry(object_id)?.is_some() {
-                continue;
-            }
-
-            storage.upsert_catalogue_entry(&CatalogueEntry {
-                object_id,
-                metadata: HashMap::from([
-                    (
-                        MetadataKey::Type.to_string(),
-                        ObjectType::CatalogueSchema.to_string(),
-                    ),
-                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-                ]),
-                content: encode_schema(&schema),
-            })?;
+        let storage_namespace = storage.storage_cache_namespace();
+        if !self
+            .catalogued_storage_namespaces
+            .contains(&storage_namespace)
+        {
+            self.mark_all_live_schemas_catalogue_dirty();
+        }
+        if self.pending_catalogue_schema_hashes.is_empty() {
+            return Ok(());
         }
 
+        let mut pending_hashes = self
+            .pending_catalogue_schema_hashes
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        pending_hashes.sort_by_key(|schema_hash| schema_hash.to_string());
+
+        for schema_hash in pending_hashes {
+            let Some(schema) = self.schema_context.get_schema(&schema_hash) else {
+                self.pending_catalogue_schema_hashes.remove(&schema_hash);
+                continue;
+            };
+            let object_id = schema_hash.to_object_id();
+            let mut metadata = storage
+                .load_catalogue_entry(object_id)?
+                .map(|entry| entry.metadata)
+                .unwrap_or_default();
+            metadata.insert(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            );
+            metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
+            if let Some(app_id) = &self.catalogue_app_id {
+                metadata.insert(MetadataKey::AppId.to_string(), app_id.clone());
+            }
+            storage.upsert_catalogue_entry(&CatalogueEntry {
+                object_id,
+                metadata,
+                content: encode_schema(schema),
+            })?;
+            self.pending_catalogue_schema_hashes.remove(&schema_hash);
+        }
+
+        self.catalogued_storage_namespaces.insert(storage_namespace);
         Ok(())
     }
 
@@ -737,8 +820,11 @@ impl QueryManager {
                     compile_row_policy_mode,
                 ) {
                     Ok(new_graph) => {
+                        let policy_context_tables =
+                            Self::policy_context_tables_for_graph(&new_graph);
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.policy_context_tables = policy_context_tables;
                         sub.uses_explicit_authorization_filtering =
                             uses_explicit_authorization_filtering;
                         sub.needs_recompile = false;
@@ -1032,9 +1118,14 @@ impl QueryManager {
                 let branch_schema_map = &self.branch_schema_map;
                 let row_loader =
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                        let durability_tier = if subscription.settled_once
+                        let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
-                            && subscription.pending_local_row_ids.contains(&id)
+                            && !self
+                                .sync_manager
+                                .has_remote_query_scope_snapshot(QueryId(sub_id.0));
+                        let durability_tier = if lacks_authoritative_remote_scope
+                            || (subscription.local_updates == LocalUpdates::Immediate
+                                && subscription.pending_local_row_ids.contains(&id))
                         {
                             None
                         } else {
@@ -1078,9 +1169,14 @@ impl QueryManager {
                 );
             }
 
-            if !subscription.settled_once && !subscription.query_frontier_complete {
+            if !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
                 // Graph state updated by settle(), but don't deliver until the
-                // initial upstream frontier has been replayed.
+                // initial upstream frontier has been replayed — or until every
+                // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
+                // which means nothing upstream is going to replay.
                 tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
@@ -1099,6 +1195,21 @@ impl QueryManager {
             } else {
                 subscription.graph.current_output_tuples()
             };
+
+            if subscription.sync_backed
+                && subscription.query_frontier_complete
+                && self
+                    .sync_manager
+                    .has_remote_query_scope_snapshot(QueryId(sub_id.0))
+                && (subscription.propagation == QueryPropagation::Full
+                    || !self.sync_manager.has_durability_identity())
+            {
+                visible_tuples = self.filter_synced_query_scope_tuples(
+                    QueryId(sub_id.0),
+                    &subscription.pending_local_row_ids,
+                    visible_tuples,
+                );
+            }
 
             if subscription.strict_transactions {
                 visible_tuples = self.filter_strict_transaction_tuples(
@@ -1143,7 +1254,9 @@ impl QueryManager {
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
                 subscription.has_pending_local_updates = false;
-                subscription.pending_local_row_ids.clear();
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
             } else if !visible_delta.is_empty() {
                 let ordered = build_ordered_delta_with_post_ids(
                     &subscription.current_ordered_ids,
@@ -1167,7 +1280,9 @@ impl QueryManager {
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
                 subscription.has_pending_local_updates = false;
-                subscription.pending_local_row_ids.clear();
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
             }
 
             self.subscriptions.insert(sub_id, subscription);
@@ -1392,7 +1507,7 @@ impl QueryManager {
             return;
         }
 
-        if old_row.is_none() || update.is_new_object {
+        if old_row.is_none() {
             if apply_index_mutations
                 && let Err(error) = Self::update_indices_for_insert_on_branch(
                     storage,
@@ -1407,7 +1522,8 @@ impl QueryManager {
                     table = branch_table,
                     branch,
                     object_id = %update.object_id,
-                    %error,
+                    index_column = error.column.as_str(),
+                    error = %error.source,
                     "failed to update indices for synced insert"
                 );
             }
@@ -2066,6 +2182,27 @@ impl QueryManager {
                         )
                         .and_then(|flattened| flattened.to_single_row())
                 }
+            })
+            .collect()
+    }
+
+    fn filter_synced_query_scope_tuples(
+        &self,
+        query_id: QueryId,
+        pending_local_row_ids: &HashSet<ObjectId>,
+        tuples: Vec<Tuple>,
+    ) -> Vec<Tuple> {
+        let remote_scope = self.sync_manager.remote_query_scope(query_id);
+        tuples
+            .into_iter()
+            .filter(|tuple| {
+                tuple.id_iter().any(|id| {
+                    pending_local_row_ids.contains(&id)
+                        || self.pending_local_row_batches.contains_key(&id)
+                }) || tuple
+                    .provenance()
+                    .iter()
+                    .any(|scoped_object| remote_scope.contains(scoped_object))
             })
             .collect()
     }

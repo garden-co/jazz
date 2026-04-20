@@ -906,6 +906,7 @@ async fn select_policy_excludes_rows_from_join_results() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("team_memberships", READY_TIMEOUT)
         .connect()
         .await;
@@ -991,6 +992,7 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("admin")
+        .as_admin()
         .ready_on("team_documents", READY_TIMEOUT)
         .connect()
         .await;
@@ -1673,7 +1675,6 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 ///   broken:   owner="bob", title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "TODO: sync transport does not guarantee delivery order - writes from the same client can arrive at the server out of sequence"]
 async fn single_client_operations_reach_server_in_causal_order() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()

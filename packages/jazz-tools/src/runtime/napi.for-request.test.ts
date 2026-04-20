@@ -94,9 +94,10 @@ async function createTestContext(
     driver: { type: "persistent", dataPath },
     serverUrl: server.url,
     backendSecret,
+    adminSecret,
     env: "test",
     userBranch: "main",
-    tier: "worker",
+    tier: "local",
   });
 
   onTestFinished(async () => {
@@ -304,6 +305,7 @@ describe("forRequest auth and policy", () => {
       driver: { type: "persistent", dataPath: join(readerDataRoot, "runtime.db") },
       serverUrl: server.url,
       backendSecret,
+      adminSecret,
       env: "test",
       userBranch: "main",
     });

@@ -10,60 +10,81 @@ export const ChatList = () => {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const myProfile = useMyProfile();
 
   const memberships =
     useAll(app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true })) ?? [];
 
-  const createPublicChat = () => {
+  const createPublicChat = async () => {
     if (!userId || !myProfile) return;
 
-    const { value: chat } = db.insert(app.chats, {
-      isPublic: true,
-      createdBy: userId,
-    });
-    db.insert(app.chatMembers, { chatId: chat.id, userId });
-    db.insert(app.messages, {
-      chatId: chat.id,
-      text: "Hello world",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
+    const chat = await db.insertDurable(
+      app.chats,
+      {
+        isPublic: true,
+        createdBy: userId,
+      },
+      sharedWriteOptions,
+    );
+    await db.insertDurable(app.chatMembers, { chatId: chat.id, userId }, sharedWriteOptions);
+    await db.insertDurable(
+      app.messages,
+      {
+        chatId: chat.id,
+        text: "Hello world",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      },
+      sharedWriteOptions,
+    );
     navigate(`/#/chat/${chat.id}`);
   };
 
-  const createPrivateChat = () => {
+  const createPrivateChat = async () => {
     if (!userId || !myProfile) return;
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const { value: chat } = db.insert(app.chats, {
-      isPublic: false,
-      createdBy: userId,
-      joinCode: shareCode,
-    });
-    db.insert(app.chatMembers, {
-      chatId: chat.id,
-      userId,
-      joinCode: shareCode,
-    });
-    db.insert(app.messages, {
-      chatId: chat.id,
-      text: "This is a private chat.",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
+    const chat = await db.insertDurable(
+      app.chats,
+      {
+        isPublic: false,
+        createdBy: userId,
+        joinCode: shareCode,
+      },
+      sharedWriteOptions,
+    );
+    await db.insertDurable(
+      app.chatMembers,
+      {
+        chatId: chat.id,
+        userId,
+        joinCode: shareCode,
+      },
+      sharedWriteOptions,
+    );
+    await db.insertDurable(
+      app.messages,
+      {
+        chatId: chat.id,
+        text: "This is a private chat.",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      },
+      sharedWriteOptions,
+    );
     navigate(`/#/chat/${chat.id}`);
   };
 
   return (
     <div className="p-2 flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2">
-        <Button onClick={createPublicChat}>
+        <Button onClick={() => void createPublicChat()}>
           <MessageSquarePlusIcon /> New Chat
         </Button>
-        <Button variant="outline" onClick={createPrivateChat}>
+        <Button variant="outline" onClick={() => void createPrivateChat()}>
           <LockIcon /> New Private Chat
         </Button>
       </div>
