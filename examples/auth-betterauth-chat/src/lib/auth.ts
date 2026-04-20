@@ -77,14 +77,13 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
           keyPairConfig: { alg: "ES256" },
         },
         jwt: {
-          expirationTime: "10s",
+          expirationTime: "1h",
           issuer,
           definePayload: ({
             user,
           }: {
             user: { id: string; name: string; role?: string | string[] };
           }) => ({
-            jazz_principal_id: user.id,
             claims: {
               role: Array.isArray(user.role) ? user.role[0] : (user.role ?? ""),
             },

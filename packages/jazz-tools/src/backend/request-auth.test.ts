@@ -201,12 +201,11 @@ describe("backend request auth", () => {
     ).rejects.toThrow(/local-first/i);
   });
 
-  it("verifies external JWTs via JWKS and uses the shared session mapping", async () => {
+  it("verifies external JWTs via JWKS and returns a session keyed by sub", async () => {
     const jwks = await JwksServer.start();
     servers.add(jwks);
     const token = signHs256Jwt({
       sub: "user-subject",
-      jazz_principal_id: "principal-123",
       iss: "https://issuer.example",
       claims: { role: "editor" },
     });
@@ -224,7 +223,7 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
-      user_id: "principal-123",
+      user_id: "user-subject",
       claims: {
         role: "editor",
         subject: "user-subject",
@@ -234,7 +233,7 @@ describe("backend request auth", () => {
     });
   });
 
-  it("verifies external JWTs via a static JWK and uses the shared session mapping", async () => {
+  it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
     const token = signHs256Jwt({
       sub: "user-subject",
       jazz_principal_id: "principal-123",
@@ -260,7 +259,7 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
-      user_id: "principal-123",
+      user_id: "user-subject",
       claims: {
         role: "editor",
         subject: "user-subject",

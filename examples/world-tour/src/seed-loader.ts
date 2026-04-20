@@ -18,7 +18,7 @@ export async function ensureData(
   let bandId: string;
 
   if (existingBands.length === 0) {
-    const band = db.insert(app.bands, { name: defaultBandName });
+    const { value: band } = db.insert(app.bands, { name: defaultBandName });
     bandId = band.id;
   } else {
     bandId = existingBands[0].id;
@@ -37,8 +37,8 @@ export async function ensureData(
   for (const v of seedVenues) {
     if (!existingNames.has(v.name)) {
       try {
-        const result = db.insert(app.venues, v);
-        if (result?.id) insertedVenues.push(result);
+        const { value: venue } = db.insert(app.venues, v);
+        insertedVenues.push(venue);
       } catch (err) {
         console.warn("[ensureData] venue insert skipped:", (err as Error).message);
       }

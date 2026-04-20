@@ -79,6 +79,24 @@ fn column_descriptor_deserializes_payload_with_default() {
 }
 
 #[test]
+fn column_descriptor_deserializes_payload_with_merge_strategy() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"count",
+            "column_type":{"type":"Integer"},
+            "nullable":false,
+            "merge_strategy":"Counter"
+        }"#,
+    )
+    .expect("deserialize column descriptor with merge strategy");
+
+    assert_eq!(col.name, "count");
+    assert_eq!(col.column_type, ColumnType::Integer);
+    assert!(!col.nullable);
+    assert_eq!(col.merge_strategy, Some(ColumnMergeStrategy::Counter));
+}
+
+#[test]
 fn row_descriptor_column_lookup() {
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Uuid),
@@ -175,6 +193,21 @@ fn tuple_element_id() {
     assert!(!elem.is_materialized());
     assert!(elem.content().is_none());
     assert!(elem.batch_id().is_none());
+}
+
+#[test]
+fn row_descriptor_hash_changes_when_merge_strategy_changes() {
+    let lww = RowDescriptor::new(vec![ColumnDescriptor::new("count", ColumnType::Integer)]);
+    let counter = RowDescriptor::new(vec![
+        ColumnDescriptor::new("count", ColumnType::Integer)
+            .merge_strategy(ColumnMergeStrategy::Counter),
+    ]);
+
+    assert_ne!(
+        lww.content_hash(),
+        counter.content_hash(),
+        "changing only the merge strategy should change the schema hash"
+    );
 }
 
 #[test]

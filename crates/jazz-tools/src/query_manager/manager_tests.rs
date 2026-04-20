@@ -8860,17 +8860,23 @@ fn server_sends_error_for_uncompilable_query_subscription() {
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let error_reason = outbox
+    let (code, reason) = outbox
         .iter()
         .find_map(|entry| match (&entry.destination, &entry.payload) {
             (
                 Destination::Client(id),
-                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
-            ) if *id == client_id && *query_id == QueryId(42) => Some(reason.clone()),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(42) => {
+                Some((code.clone(), reason.clone()))
+            }
             _ => None,
-        });
-    let reason = error_reason
+        })
         .expect("Server should send an error payload when query subscription compilation fails");
+    assert_eq!(code, "query_compilation_failed");
     assert!(
         reason.contains("query_id 42"),
         "error reason should include query id context: {reason}"
@@ -8941,16 +8947,23 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     );
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let rejection_reason = outbox
+    let (rejection_code, rejection_reason) = outbox
         .iter()
         .find_map(|entry| match (&entry.destination, &entry.payload) {
             (
                 Destination::Client(id),
-                SyncPayload::Error(SyncError::QuerySubscriptionRejected { query_id, reason }),
-            ) if *id == client_id && *query_id == QueryId(7) => Some(reason.clone()),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(7) => {
+                Some((code.clone(), reason.clone()))
+            }
             _ => None,
         })
         .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert_eq!(rejection_code, "query_recompile_failed");
     assert!(
         rejection_reason.contains("query recompilation failed for query_id 7"),
         "rejection should include query id context: {rejection_reason}"
@@ -11064,7 +11077,7 @@ fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_serv
 }
 
 #[test]
-fn fail_closed_server_does_not_emit_scope_snapshot_before_permissions_head() {
+fn fail_closed_server_withholds_session_scope_before_permissions_head() {
     use crate::query_manager::relation_ir::{
         ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
         ValueRef,
@@ -11181,16 +11194,14 @@ fn fail_closed_server_does_not_emit_scope_snapshot_before_permissions_head() {
         !client
             .sync_manager()
             .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
-        "server without a published permissions head should not advertise an authoritative remote scope yet"
+        "server without a published permissions head should not advertise an authoritative remote scope"
     );
 
-    let results = client.get_subscription_results(sub_id);
-    assert_eq!(
-        results.len(),
-        1,
-        "sync-backed immediate local updates should keep locally visible rows until an authoritative remote scope snapshot exists"
+    let failures = client.take_failed_subscriptions();
+    assert!(
+        failures.is_empty(),
+        "missing permissions head should not surface an explicit subscription failure yet: {failures:?}"
     );
-    assert_eq!(results[0].1, vec![Value::Text("Alice".into())]);
 }
 
 #[test]
@@ -11278,7 +11289,7 @@ fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
 }
 
 #[test]
-fn backend_sync_subscription_without_handshake_session_keeps_local_rows_without_permissions_head() {
+fn backend_sync_subscription_without_handshake_session_stays_unscoped_without_permissions_head() {
     use crate::sync_manager::ClientRole;
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;
@@ -11354,18 +11365,13 @@ fn backend_sync_subscription_without_handshake_session_keeps_local_rows_without_
         !client
             .sync_manager()
             .has_remote_query_scope_snapshot(crate::sync_manager::QueryId(sub_id.0)),
-        "backend-authenticated clients without a handshake session should still treat missing permissions head as non-authoritative"
+        "backend-authenticated clients without a handshake session should not receive an authoritative remote scope"
     );
 
-    let results = client.get_subscription_results(sub_id);
-    assert_eq!(
-        results.len(),
-        1,
-        "session payload queries should keep locally visible rows until an authoritative remote scope exists"
-    );
-    assert_eq!(
-        results[0].1,
-        vec![Value::Text("Bob".into()), Value::Text("bob".into())]
+    let failures = client.take_failed_subscriptions();
+    assert!(
+        failures.is_empty(),
+        "missing permissions head should not surface an explicit subscription failure yet: {failures:?}"
     );
 }
 

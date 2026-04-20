@@ -17,10 +17,10 @@ describe("TS Delete API", () => {
     await db.shutdown();
   });
 
-  it("deletes rows synchronously without returning a promise", async () => {
-    const project = db.insert(app.projects, { name: "Test Project" });
+  it("deletes rows synchronously and returns a write handle", async () => {
+    const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-    const todo = db.insert(app.todos, {
+    const { value: todo } = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
@@ -30,36 +30,33 @@ describe("TS Delete API", () => {
     });
 
     const result = db.delete(app.todos, todo.id);
-    expect(result).toBeUndefined();
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }));
     expect(rows).toEqual([]);
   });
 
   it("can wait for deletes to be persisted up to a specific durability tier", async () => {
-    const project = await db.insertDurable(
-      app.projects,
-      { name: "Test Project" },
-      { tier: "local" },
-    );
+    const projectHandle = db.insert(app.projects, { name: "Test Project" });
+    await projectHandle.wait({ tier: "local" });
+    const { value: project } = projectHandle;
+
     const owner = insertUser(db);
-    const todo = await db.insertDurable(
-      app.todos,
-      {
-        title: "Test Todo",
-        done: false,
-        tags: ["tag1", "tag2"],
-        projectId: project.id,
-        ownerId: owner.id,
-        assigneesIds: [],
-      },
-      { tier: "local" },
-    );
+    const todoHandle = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
+    });
+    await todoHandle.wait({ tier: "local" });
+    const { value: todo } = todoHandle;
 
-    const pending = db.deleteDurable(app.todos, todo.id, { tier: "local" });
-    expect(pending).toBeInstanceOf(Promise);
-
-    await pending;
+    const pending = db.delete(app.todos, todo.id);
+    await pending.wait({ tier: "local" });
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(rows).toEqual([]);

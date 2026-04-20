@@ -6,15 +6,17 @@ export function uniqueDbName(label: string): string {
 }
 
 export function insertUser(db: Db, name = "Test User"): User {
-  return db.insert(app.users, { name, friendsIds: [] });
+  const { value: user } = db.insert(app.users, { name, friendsIds: [] });
+  return user;
 }
 
 export function insertProject(db: Db, name = "Test Project"): Project {
-  return db.insert(app.projects, { name });
+  const { value: project } = db.insert(app.projects, { name });
+  return project;
 }
 
 export function insertTodo(db: Db, data: Partial<Todo>): Todo {
-  return db.insert(app.todos, {
+  const { value: todo } = db.insert(app.todos, {
     title: data.title ?? "Test Todo",
     done: data.done ?? false,
     tags: data.tags ?? [],
@@ -22,4 +24,5 @@ export function insertTodo(db: Db, data: Partial<Todo>): Todo {
     ownerId: data.ownerId,
     assigneesIds: data.assigneesIds ?? [],
   });
+  return todo;
 }

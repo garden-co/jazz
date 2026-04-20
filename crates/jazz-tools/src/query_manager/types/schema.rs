@@ -149,6 +149,11 @@ impl ColumnType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnMergeStrategy {
+    Counter,
+}
+
 /// Interned column name type.
 /// Pointer-sized (8 bytes), Copy, fast equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -226,6 +231,9 @@ pub struct ColumnDescriptor {
     /// Optional schema-level default used for omitted values on insert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+    /// Optional per-column merge strategy. Absence means MRCA-relative LWW.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_strategy: Option<ColumnMergeStrategy>,
 }
 
 impl ColumnDescriptor {
@@ -236,6 +244,7 @@ impl ColumnDescriptor {
             nullable: false,
             references: None,
             default: None,
+            merge_strategy: None,
         }
     }
 
@@ -257,6 +266,29 @@ impl ColumnDescriptor {
     pub fn default(mut self, value: Value) -> Self {
         self.default = Some(value);
         self
+    }
+
+    pub fn merge_strategy(mut self, strategy: ColumnMergeStrategy) -> Self {
+        self.merge_strategy = Some(strategy);
+        self
+    }
+
+    pub fn validate_merge_strategy(&self) -> Result<(), String> {
+        match self.merge_strategy {
+            None => Ok(()),
+            Some(ColumnMergeStrategy::Counter) => {
+                if self.nullable || self.column_type != ColumnType::Integer {
+                    Err(format!(
+                        "counter merge strategy is only supported on non-nullable INTEGER columns, got {} ({:?}, nullable={})",
+                        self.name_str(),
+                        self.column_type,
+                        self.nullable
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 

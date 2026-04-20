@@ -794,6 +794,7 @@ mod tests {
                 nullable: false,
                 references: Some(TableName::new("folders")),
                 default: None,
+                merge_strategy: None,
             },
             ColumnDescriptor::new("title", ColumnType::Text),
         ]);

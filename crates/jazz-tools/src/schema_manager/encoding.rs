@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, SchemaHash, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V4 as u8;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V5 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -34,6 +34,8 @@ enum SchemaEncodingVersion {
     V3 = 3,
     // v4 schemas include column defaults.
     V4 = 4,
+    // v5 schemas include column merge strategies.
+    V5 = 5,
 }
 
 impl SchemaEncodingVersion {
@@ -43,6 +45,7 @@ impl SchemaEncodingVersion {
             2 => Some(Self::V2),
             3 => Some(Self::V3),
             4 => Some(Self::V4),
+            5 => Some(Self::V5),
             _ => None,
         }
     }
@@ -56,7 +59,11 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4)
+        matches!(self, Self::V4 | Self::V5)
+    }
+
+    fn has_column_merge_strategies(self) -> bool {
+        matches!(self, Self::V5)
     }
 }
 
@@ -114,7 +121,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V4;
+    let version = SchemaEncodingVersion::V5;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -261,6 +268,15 @@ fn encode_column_descriptor_with_version(
             None => buf.push(0),
         }
     }
+    if version.has_column_merge_strategies() {
+        match col.merge_strategy {
+            Some(ColumnMergeStrategy::Counter) => {
+                buf.push(1);
+                buf.push(1);
+            }
+            None => buf.push(0),
+        }
+    }
 }
 
 fn decode_column_descriptor_with_version(
@@ -290,6 +306,24 @@ fn decode_column_descriptor_with_version(
     } else {
         None
     };
+    let merge_strategy = if version.has_column_merge_strategies() {
+        let has_merge_strategy = read_u8(data, offset)? != 0;
+        if has_merge_strategy {
+            match read_u8(data, offset)? {
+                1 => Some(ColumnMergeStrategy::Counter),
+                tag => {
+                    return Err(CatalogueEncodingError::InvalidTypeTag {
+                        tag,
+                        context: "column_merge_strategy",
+                    });
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
@@ -297,6 +331,7 @@ fn decode_column_descriptor_with_version(
         nullable,
         references,
         default,
+        merge_strategy,
     })
 }
 
@@ -1881,6 +1916,27 @@ mod tests {
             docs.columns.column("raw_payload").unwrap().column_type,
             ColumnType::Json { schema: None }
         );
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_column_merge_strategy() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("counters"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("value", ColumnType::Integer)
+                    .merge_strategy(ColumnMergeStrategy::Counter),
+            ])),
+        );
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let table = decoded
+            .get(&TableName::new("counters"))
+            .expect("decoded counters table");
+        let column = table.columns.column("value").expect("counter column");
+
+        assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
     }
 
     #[test]

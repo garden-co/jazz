@@ -47,13 +47,13 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues, object_id?: string | null): Row;
+  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
   insertWithSession?(
     table: string,
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
-  ): Row;
+  ): DirectInsertResult;
   insertDurable(
     table: string,
     values: InsertValues,
@@ -67,12 +67,12 @@ export interface Runtime {
     tier: string,
     object_id?: string | null,
   ): Promise<Row>;
-  update(object_id: string, values: Record<string, Value>): void;
+  update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): void;
+  ): DirectMutationResult;
   updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
@@ -80,8 +80,8 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
-  delete(object_id: string): void;
-  deleteWithSession?(object_id: string, write_context_json?: string | null): void;
+  delete(object_id: string): DirectMutationResult;
+  deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
   deleteDurable(object_id: string, tier: string): Promise<void>;
   deleteDurableWithSession?(
     object_id: string,
@@ -190,6 +190,16 @@ export interface QueryExecutionOptions {
   visibility?: QueryVisibility;
 }
 
+type TransactionQueryOverlay = {
+  batchId: string;
+  branchName: string;
+  rowIds: string[];
+};
+
+type InternalQueryExecutionOptions = QueryExecutionOptions & {
+  transactionOverlay?: TransactionQueryOverlay;
+};
+
 export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
@@ -197,6 +207,10 @@ export interface ResolvedQueryExecutionOptions {
   strictTransactions: boolean;
   visibility: QueryVisibility;
 }
+
+type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
+  transactionOverlay?: TransactionQueryOverlay;
+};
 
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
@@ -226,13 +240,13 @@ export type BatchSettlement =
       reason: string;
     }
   | {
-      kind: "durable_direct";
+      kind: "durableDirect";
       batchId: string;
       confirmedTier: DurabilityTier;
       visibleMembers: VisibleBatchMember[];
     }
   | {
-      kind: "accepted_transaction";
+      kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
       visibleMembers: VisibleBatchMember[];
@@ -241,7 +255,6 @@ export type BatchSettlement =
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
-  requestedTier: DurabilityTier;
   sealed: boolean;
   latestSettlement: BatchSettlement | null;
 }
@@ -267,11 +280,30 @@ export interface UpdateOptions extends TimestampOverrideOptions {}
 export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
 
 /**
+ * A mutation error event emitted by {@link JazzClient.onMutationError}.
+ * Contains enough information to understand the cause of the error and
+ * correlate it with a specific mutation.
+ */
+export interface MutationErrorEvent {
+  code: string;
+  reason: string;
+  batch: LocalBatchRecord;
+}
+
+/**
  * Query row result.
  */
 export interface Row {
   id: string;
   values: Value[];
+}
+
+export interface DirectInsertResult extends Row {
+  batchId: string;
+}
+
+export interface DirectMutationResult {
+  batchId: string;
 }
 
 interface WriteContextPayload {
@@ -511,11 +543,16 @@ function getScheduler(): (task: () => void) => void {
   return (task: () => void) => queueMicrotask(task);
 }
 
-function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
+function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     strict_transactions?: boolean;
+    transaction_overlay?: {
+      batch_id: string;
+      branch_name: string;
+      row_ids: string[];
+    };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
@@ -526,8 +563,20 @@ function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | u
   if (options.strictTransactions) {
     payload.strict_transactions = true;
   }
+  if (options.transactionOverlay && options.transactionOverlay.rowIds.length > 0) {
+    payload.transaction_overlay = {
+      batch_id: options.transactionOverlay.batchId,
+      branch_name: options.transactionOverlay.branchName,
+      row_ids: options.transactionOverlay.rowIds,
+    };
+  }
 
-  if (!payload.propagation && !payload.local_updates && !payload.strict_transactions) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.strict_transactions &&
+    !payload.transaction_overlay
+  ) {
     return undefined;
   }
 
@@ -712,7 +761,7 @@ function settlementSatisfiesTier(
     return false;
   }
 
-  if (settlement.kind !== "durable_direct" && settlement.kind !== "accepted_transaction") {
+  if (settlement.kind !== "durableDirect" && settlement.kind !== "acceptedTransaction") {
     return false;
   }
 
@@ -764,6 +813,7 @@ export class PersistedWrite<T> {
 
 export class Transaction {
   private committed = false;
+  private readonly touchedRowIds = new Set<string>();
 
   constructor(
     private readonly client: JazzClient,
@@ -772,10 +822,26 @@ export class Transaction {
     private readonly attribution?: string,
   ) {}
 
-  private ensureWritable(): void {
+  private ensureActive(): void {
     if (this.committed) {
       throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
     }
+  }
+
+  private markTouchedRow(rowId: string): void {
+    this.touchedRowIds.add(rowId);
+  }
+
+  private queryOptions(options?: QueryExecutionOptions): InternalQueryExecutionOptions {
+    return {
+      ...options,
+      localUpdates: "deferred",
+      transactionOverlay: {
+        batchId: this.batchContext.batchId,
+        branchName: this.batchContext.targetBranchName,
+        rowIds: [...this.touchedRowIds],
+      },
+    };
   }
 
   batchId(): string {
@@ -791,9 +857,9 @@ export class Transaction {
     return batchId;
   }
 
-  create(table: string, values: InsertValues): Row {
-    this.ensureWritable();
-    return this.client.createInternal(
+  create(table: string, values: InsertValues): DirectInsertResult {
+    this.ensureActive();
+    const row = this.client.createInternal(
       table,
       values,
       this.session,
@@ -801,6 +867,8 @@ export class Transaction {
       undefined,
       this.batchContext,
     );
+    this.markTouchedRow(row.id);
+    return row;
   }
 
   createPersisted(
@@ -808,8 +876,8 @@ export class Transaction {
     values: InsertValues,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<Row> {
-    this.ensureWritable();
-    return this.client.createPersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.createPersistedInternal(
       table,
       values,
       this.session,
@@ -817,17 +885,21 @@ export class Transaction {
       options,
       this.batchContext,
     );
+    this.markTouchedRow(pendingWrite.value().id);
+    return pendingWrite;
   }
 
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.ensureWritable();
-    this.client.updateInternal(
+  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
+    this.ensureActive();
+    const result = this.client.updateInternal(
       objectId,
       updates,
       this.session,
       this.attribution,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return result;
   }
 
   updatePersisted(
@@ -835,8 +907,8 @@ export class Transaction {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.updatePersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.updatePersistedInternal(
       objectId,
       updates,
       this.session,
@@ -844,22 +916,38 @@ export class Transaction {
       options,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return pendingWrite;
   }
 
-  delete(objectId: string): void {
-    this.ensureWritable();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  delete(objectId: string): DirectMutationResult {
+    this.ensureActive();
+    const result = this.client.deleteInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
+    this.markTouchedRow(objectId);
+    return result;
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    this.ensureWritable();
-    return this.client.deletePersistedInternal(
+    this.ensureActive();
+    const pendingWrite = this.client.deletePersistedInternal(
       objectId,
       this.session,
       this.attribution,
       options,
       this.batchContext,
     );
+    this.markTouchedRow(objectId);
+    return pendingWrite;
+  }
+
+  async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
+    this.ensureActive();
+    return this.client.queryInternal(query, this.session, this.queryOptions(options));
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -887,7 +975,7 @@ export class DirectBatch {
     return this.batchContext.batchId;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     return this.client.createInternal(
       table,
       values,
@@ -913,8 +1001,8 @@ export class DirectBatch {
     );
   }
 
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.client.updateInternal(
+  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
+    return this.client.updateInternal(
       objectId,
       updates,
       this.session,
@@ -938,8 +1026,8 @@ export class DirectBatch {
     );
   }
 
-  delete(objectId: string): void {
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  delete(objectId: string): DirectMutationResult {
+    return this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
@@ -1153,6 +1241,10 @@ export class JazzClient {
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
+  /**
+   * Promises created with {@link DirectBatch.wait} or {@TODO_link WriteHandle.wait}
+   * that are waiting for a batch to be settled.
+   */
   private readonly pendingBatchWaiters = new Map<
     string,
     Array<{
@@ -1161,6 +1253,10 @@ export class JazzClient {
       reject: (error: Error) => void;
     }>
   >();
+  /**
+   * Listeners attached with {@link JazzClient.onMutationError} that are notified when a batch is rejected.
+   */
+  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private shutdownPromise: Promise<void> | null = null;
 
@@ -1217,8 +1313,10 @@ export class JazzClient {
         const value = Reflect.get(target, property, receiver);
         if (property === "onSyncMessageReceived" && typeof value === "function") {
           return (payload: Uint8Array | string, seq?: number | null) => {
+            const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
             value.call(target, payload, seq);
             this.flushPendingBatchWaiters();
+            this.flushUnhandledMutationErrors(batchesWithPendingWaiters);
           };
         }
         if (typeof value === "function") {
@@ -1396,12 +1494,25 @@ export class JazzClient {
     return [...records].sort((left, right) => left.batchId.localeCompare(right.batchId));
   }
 
-  acknowledgeRejectedBatch(batchId: string): boolean {
+  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.mutationErrorListeners.add(listener);
+    this.flushUnhandledMutationErrors();
+    return () => {
+      this.mutationErrorListeners.delete(listener);
+    };
+  }
+
+  private acknowledgeRejectedBatchInternal(batchId: string): boolean {
     const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
     const acknowledged = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batchId);
     if (acknowledged && rejection) {
       this.acknowledgedRejectedBatchErrors.set(batchId, rejection);
     }
+    return acknowledged;
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean {
+    const acknowledged = this.acknowledgeRejectedBatchInternal(batchId);
     this.flushPendingBatchWaiters();
     return acknowledged;
   }
@@ -1446,12 +1557,19 @@ export class JazzClient {
   }
 
   private normalizeQueryExecutionOptions(
-    options?: QueryExecutionOptions,
-  ): ResolvedQueryExecutionOptions {
-    return resolveEffectiveQueryExecutionOptions(
+    options?: InternalQueryExecutionOptions,
+  ): ResolvedInternalQueryExecutionOptions {
+    const resolved = resolveEffectiveQueryExecutionOptions(
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
     );
+    if (!options?.transactionOverlay) {
+      return resolved;
+    }
+    return {
+      ...resolved,
+      transactionOverlay: options.transactionOverlay,
+    };
   }
 
   private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
@@ -1722,15 +1840,15 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues, options?: CreateOptions): Row {
+  create(table: string, values: InsertValues, options?: CreateOptions): DirectInsertResult {
     return this.createInternal(table, values, undefined, undefined, options);
   }
 
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
-  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
+  upsert(table: string, values: InsertValues, options: UpsertOptions): DirectMutationResult {
+    return this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
   }
 
   /**
@@ -1744,7 +1862,7 @@ export class JazzClient {
     attribution?: string,
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
-  ): Row {
+  ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession ||
@@ -1793,20 +1911,20 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
-  ): void {
+  ): DirectMutationResult {
     try {
-      this.createInternal(table, values, session, attribution, {
+      const created = this.createInternal(table, values, session, attribution, {
         id: objectId,
         updatedAt,
       });
-      return;
+      return { batchId: created.batchId };
     } catch (error) {
       if (!isObjectAlreadyExistsError(error)) {
         throw error;
       }
     }
 
-    this.updateInternal(
+    return this.updateInternal(
       objectId,
       values as Record<string, Value>,
       session,
@@ -1981,7 +2099,7 @@ export class JazzClient {
   async queryInternal(
     query: string | QueryInput,
     session?: Session,
-    options?: QueryExecutionOptions,
+    options?: InternalQueryExecutionOptions,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);
@@ -2000,8 +2118,19 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): void {
-    this.updateInternal(objectId, updates, undefined, undefined, undefined, options?.updatedAt);
+  update(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: UpdateOptions,
+  ): DirectMutationResult {
+    return this.updateInternal(
+      objectId,
+      updates,
+      undefined,
+      undefined,
+      undefined,
+      options?.updatedAt,
+    );
   }
 
   /**
@@ -2015,17 +2144,16 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
-  ): void {
+  ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      this.requireSessionWriteMethod("updateWithSession")(
+      return this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
         this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
-      return;
     }
-    this.runtime.update(objectId, updates);
+    return this.runtime.update(objectId, updates);
   }
 
   /**
@@ -2110,8 +2238,8 @@ export class JazzClient {
   /**
    * Delete a row by ID without waiting for durability.
    */
-  delete(objectId: string): void {
-    this.deleteInternal(objectId);
+  delete(objectId: string): DirectMutationResult {
+    return this.deleteInternal(objectId);
   }
 
   /**
@@ -2124,16 +2252,15 @@ export class JazzClient {
     attribution?: string,
     batchContext?: BatchWriteContext,
     updatedAt?: number,
-  ): void {
+  ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      this.requireSessionWriteMethod("deleteWithSession")(
+      return this.requireSessionWriteMethod("deleteWithSession")(
         objectId,
         this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
       );
-      return;
     }
-    this.runtime.delete(objectId);
+    return this.runtime.delete(objectId);
   }
 
   /**
@@ -2403,6 +2530,7 @@ export class JazzClient {
       return;
     }
 
+    const rejectedBatchIdsHandledByWaiters = new Set<string>();
     for (const [batchId, waiters] of this.pendingBatchWaiters) {
       const remaining: typeof waiters = [];
       for (const waiter of waiters) {
@@ -2413,6 +2541,7 @@ export class JazzClient {
         }
         if (outcome.error) {
           waiter.reject(outcome.error);
+          rejectedBatchIdsHandledByWaiters.add(batchId);
         } else {
           waiter.resolve();
         }
@@ -2422,6 +2551,44 @@ export class JazzClient {
       } else {
         this.pendingBatchWaiters.delete(batchId);
       }
+    }
+
+    for (const batchId of rejectedBatchIdsHandledByWaiters) {
+      this.acknowledgeRejectedBatchInternal(batchId);
+    }
+  }
+
+  private flushUnhandledMutationErrors(
+    batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
+  ): void {
+    for (const record of this.localBatchRecords()) {
+      const settlement = record.latestSettlement;
+      if (!settlement || settlement.kind !== "rejected") {
+        continue;
+      }
+      if (batchesHandledByLiveWaiters.has(record.batchId)) {
+        continue;
+      }
+      if ((this.pendingBatchWaiters.get(record.batchId)?.length ?? 0) > 0) {
+        continue;
+      }
+
+      const event: MutationErrorEvent = {
+        code: settlement.code,
+        reason: settlement.reason,
+        batch: record,
+      };
+
+      if (this.mutationErrorListeners.size === 0) {
+        // If there are no listeners configured, we log the error to the console by default.
+        console.error("Unhandled Jazz mutation error", event);
+      } else {
+        for (const listener of this.mutationErrorListeners) {
+          listener(event);
+        }
+      }
+
+      this.acknowledgeRejectedBatchInternal(record.batchId);
     }
   }
 

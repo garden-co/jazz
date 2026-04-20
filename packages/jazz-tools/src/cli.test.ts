@@ -349,6 +349,21 @@ function storedRootSchemaWithReorderedColumns() {
   };
 }
 
+function storedCounterSchema() {
+  return {
+    counters: {
+      columns: [
+        {
+          name: "value",
+          column_type: { type: "Integer" },
+          nullable: false,
+          merge_strategy: "Counter",
+        },
+      ],
+    },
+  };
+}
+
 function storedSchemaResponse(
   schema: object,
   publishedAt: number | null = null,
@@ -766,6 +781,118 @@ describe("cli migrations", () => {
     expect(logs).toContain(
       "No reviewed migration file needed because this schema change does not require row transformations.",
     );
+  });
+
+  it("skips creating a migration file for merge-strategy-only schema changes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "2121212121212121212121212121212121212121212121212121212121212121";
+    const toHash = "3131313131313131313131313131313131313131313131313131313131313131";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [{ name: "value", column_type: { type: "Integer" }, nullable: false }],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse(storedCounterSchema());
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
+    expect(logs).toContain(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+  });
+
+  it("preserves merge strategy markers in generated migration schema witnesses", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
+    const toHash = "5151515151515151515151515151515151515151515151515151515151515151";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [
+              {
+                name: "value",
+                column_type: { type: "Integer" },
+                nullable: false,
+                merge_strategy: "Counter",
+              },
+              { name: "label", column_type: { type: "Text" }, nullable: false },
+            ],
+          },
+        });
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return storedSchemaResponse({
+          counters: {
+            columns: [
+              {
+                name: "value",
+                column_type: { type: "Integer" },
+                nullable: false,
+                merge_strategy: "Counter",
+              },
+              { name: "label", column_type: { type: "Text" }, nullable: true },
+            ],
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result: filePath } = await captureConsoleLogs(() =>
+      createMigration({
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromHash.slice(0, 12),
+        toHash: toHash.slice(0, 12),
+      }),
+    );
+
+    expect(filePath).not.toBeNull();
+    if (!filePath) {
+      throw new Error("Expected createMigration() to return a migration file path.");
+    }
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain('"value": s.int().merge("counter"),');
   });
 
   it("still creates a migration file for nullability-only schema changes", async () => {

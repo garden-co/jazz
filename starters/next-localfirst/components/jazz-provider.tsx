@@ -25,7 +25,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
   );
 }
 
-function buildConfig(localFirstSecret: string): DbConfig {
+function buildConfig(secret: string): DbConfig {
   if (!APP_ID || !SERVER_URL) {
     const missing = [
       !APP_ID && "NEXT_PUBLIC_JAZZ_APP_ID",
@@ -40,6 +40,6 @@ function buildConfig(localFirstSecret: string): DbConfig {
   return {
     appId: APP_ID,
     serverUrl: SERVER_URL,
-    auth: { localFirstSecret },
+    secret,
   };
 }

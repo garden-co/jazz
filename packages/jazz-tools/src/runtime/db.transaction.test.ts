@@ -52,6 +52,23 @@ function todoTable() {
   >;
 }
 
+function todoQuery() {
+  const schema = todoSchema();
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: {} as { id: string; title: string; done: boolean },
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+      });
+    },
+  };
+}
+
 function makeLocalBatchRecord(
   batchId: string,
   mode: LocalBatchRecord["mode"] = "transactional",
@@ -59,7 +76,6 @@ function makeLocalBatchRecord(
   return {
     batchId,
     mode,
-    requestedTier: "global",
     sealed: false,
     latestSettlement: null,
   };
@@ -82,7 +98,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Transactional" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-tx",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-tx-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-tx-update", undefined);
     const persistedDelete = makePendingWrite("batch-tx-delete", undefined);
@@ -109,7 +126,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Transactional", done: false });
+    const { value: inserted } = tx.insert(table, { title: "Transactional", done: false });
     tx.update(table, "todo-1", { done: true });
     tx.delete(table, "todo-1");
     const persisted = tx.insertPersisted(
@@ -180,6 +197,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Session transaction" },
           { type: "Boolean", value: true },
         ],
+        batchId: "batch-session-tx",
       })),
       createPersisted: vi.fn(() =>
         makePendingWrite("batch-session-persisted", {
@@ -213,7 +231,7 @@ describe("Db transactions", () => {
     );
 
     const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Session transaction", done: true });
+    const { value: inserted } = tx.insert(table, { title: "Session transaction", done: true });
     const persisted = tx.insertPersisted(table, {
       title: "Session transaction",
       done: true,
@@ -240,6 +258,7 @@ describe("Db transactions", () => {
           { type: "Text", value: "Closed" },
           { type: "Boolean", value: false },
         ],
+        batchId: "batch-closed",
       })),
       createPersisted: vi.fn(),
       update: vi.fn(),
@@ -267,6 +286,98 @@ describe("Db transactions", () => {
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
     expect(runtimeTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it("supports typed reads scoped to the open transaction", async () => {
+    const table = todoTable();
+    const query = todoQuery();
+    const runtimeRow: Row = {
+      id: "todo-read-1",
+      values: [
+        { type: "Text", value: "Transactional read" },
+        { type: "Boolean", value: false },
+      ],
+    };
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-read"),
+      create: vi.fn(() => runtimeRow),
+      createPersisted: vi.fn(() => makePendingWrite("batch-read-insert", runtimeRow)),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      query: vi.fn(async () => [runtimeRow]),
+      commit: vi.fn(() => "batch-read"),
+      localBatchRecord: vi.fn((batchId = "batch-read") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const tx = db.beginTransaction(table);
+    tx.insert(table, { title: "Transactional read", done: false });
+
+    await expect(tx.all(query)).resolves.toEqual([
+      {
+        id: "todo-read-1",
+        title: "Transactional read",
+        done: false,
+      },
+    ]);
+    await expect(tx.one(query)).resolves.toEqual({
+      id: "todo-read-1",
+      title: "Transactional read",
+      done: false,
+    });
+
+    expect(runtimeTransaction.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects db transaction reads after commit", async () => {
+    const table = todoTable();
+    const query = todoQuery();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-read-closed"),
+      create: vi.fn(() => ({
+        id: "todo-closed-read",
+        values: [
+          { type: "Text", value: "Closed read" },
+          { type: "Boolean", value: false },
+        ],
+      })),
+      createPersisted: vi.fn(),
+      update: vi.fn(),
+      updatePersisted: vi.fn(),
+      delete: vi.fn(),
+      deletePersisted: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(() => "batch-read-closed"),
+      localBatchRecord: vi.fn((batchId = "batch-read-closed") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read-closed")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-transaction" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+    expect(tx.commit()).toBe("batch-read-closed");
+
+    await expect(tx.all(query)).rejects.toThrow(/committed/i);
+    expect(runtimeTransaction.query).not.toHaveBeenCalled();
   });
 
   it("rejects db transaction writes against a different client/schema", () => {
@@ -323,7 +434,8 @@ describe("Db transactions", () => {
         { type: "Text", value: "Direct batch" },
         { type: "Boolean", value: false },
       ],
-    };
+      batchId: "batch-direct",
+    } as Row;
     const persistedInsert = makePendingWrite("batch-direct-insert", runtimeRow);
     const persistedUpdate = makePendingWrite("batch-direct-update", undefined);
     const persistedDelete = makePendingWrite("batch-direct-delete", undefined);
@@ -351,7 +463,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const batch = db.beginDirectBatch(table);
-    const inserted = batch.insert(table, { title: "Direct batch", done: false });
+    const { value: inserted } = batch.insert(table, { title: "Direct batch", done: false });
     batch.update(table, "todo-direct-1", { done: true });
     batch.delete(table, "todo-direct-1");
     const persisted = batch.insertPersisted(

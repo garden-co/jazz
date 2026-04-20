@@ -36,7 +36,7 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
@@ -51,6 +51,13 @@ use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowBatchKey, ServerId,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryLocalOverlay {
+    pub batch_id: BatchId,
+    pub branch_name: BranchName,
+    pub row_ids: Vec<ObjectId>,
+}
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -168,10 +175,23 @@ impl From<QueryError> for RuntimeError {
     }
 }
 
+/// Convert a `QueryError` from a write path, preserving the
+/// `AnonymousWriteDenied` variant and mapping anything else to `WriteError`.
+pub(crate) fn write_error_from_query(e: QueryError) -> RuntimeError {
+    match e {
+        QueryError::AnonymousWriteDenied { table, operation } => {
+            RuntimeError::AnonymousWriteDenied { table, operation }
+        }
+        other => RuntimeError::WriteError(other.to_string()),
+    }
+}
+
 /// Type alias for query results.
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.
 pub type InsertedRow = (ObjectId, Vec<Value>);
+/// Type alias for plain insert results that carry the inserted row plus its logical batch id.
+pub type DirectInsertResult = (InsertedRow, BatchId);
 
 /// Structured rejection returned by persisted writes when their batch is rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
