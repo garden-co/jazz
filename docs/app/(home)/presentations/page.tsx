@@ -7,8 +7,8 @@ export const metadata: Metadata = {
   description: "Slides and talk decks powered by the same MDX pipeline as the docs and blog.",
 };
 
-export default function PresentationsIndexPage() {
-  const decks = getPresentationDecks();
+export default async function PresentationsIndexPage() {
+  const decks = await getPresentationDecks();
 
   return (
     <div className="w-full">
@@ -22,8 +22,8 @@ export default function PresentationsIndexPage() {
               Talks built from the same MDX stack
             </h1>
             <p className="max-w-[38rem] text-lg leading-relaxed text-fd-muted-foreground sm:text-xl">
-              Decks live in content files, can share components with the homepage and blog, and run
-              in a dedicated full-screen presenter view.
+              Each deck now lives in one MDX file, can share components with the homepage and blog,
+              and runs in a dedicated full-screen presenter view.
             </p>
           </div>
           <div className="mt-18 grid gap-x-12 gap-y-12 md:grid-cols-2 lg:gap-x-16">
