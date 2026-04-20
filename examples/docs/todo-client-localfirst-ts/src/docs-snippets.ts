@@ -246,19 +246,17 @@ export function clearNullableTodoFields(db: Db, todoId: string) {
 
 // #region writing-durability-tier-ts
 export async function writeTodoWithDurabilityTiers(db: Db) {
-  const { id } = await db.insertDurable(
-    app.todos,
-    {
+  const { id } = await db
+    .insert(app.todos, {
       title: "Write docs with durability tier",
       done: false,
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
-    },
-    { tier: "edge" },
-  );
+    })
+    .wait({ tier: "edge" });
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteDurable(app.todos, id, { tier: "global" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
 }
 // #endregion writing-durability-tier-ts
 

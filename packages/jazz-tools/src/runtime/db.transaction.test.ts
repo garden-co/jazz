@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { JazzClient, LocalBatchRecord, Row } from "./client.js";
+import {
+  InsertHandle,
+  WriteHandle,
+  type JazzClient,
+  type LocalBatchRecord,
+  type Row,
+} from "./client.js";
 import type { Session } from "./context.js";
 
 class TestDb extends Db {
@@ -89,6 +95,20 @@ function makePendingWrite<T>(batchId: string, value: T) {
   };
 }
 
+function makeHandleClient(): JazzClient {
+  return {
+    waitForPersistedBatch: vi.fn(async () => undefined),
+  } as unknown as JazzClient;
+}
+
+function makeInsertHandle<T>(value: T, batchId: string): InsertHandle<T> {
+  return new InsertHandle(value, batchId, makeHandleClient());
+}
+
+function makeWriteHandle(batchId: string): WriteHandle {
+  return new WriteHandle(batchId, makeHandleClient());
+}
+
 describe("Db transactions", () => {
   it("creates a typed db transaction seeded by a table schema", async () => {
     const table = todoTable();
@@ -105,11 +125,11 @@ describe("Db transactions", () => {
     const persistedDelete = makePendingWrite("batch-tx-delete", undefined);
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-tx"),
-      create: vi.fn(() => runtimeRow),
+      create: vi.fn(() => makeInsertHandle(runtimeRow, "batch-tx")),
       createPersisted: vi.fn(() => persistedInsert),
-      update: vi.fn(),
+      update: vi.fn(() => makeWriteHandle("batch-tx")),
       updatePersisted: vi.fn(() => persistedUpdate),
-      delete: vi.fn(),
+      delete: vi.fn(() => makeWriteHandle("batch-tx")),
       deletePersisted: vi.fn(() => persistedDelete),
       commit: vi.fn(() => "batch-tx"),
       localBatchRecord: vi.fn((batchId = "batch-tx") => makeLocalBatchRecord(batchId)),
@@ -191,14 +211,19 @@ describe("Db transactions", () => {
     };
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-session-tx"),
-      create: vi.fn(() => ({
-        id: "todo-2",
-        values: [
-          { type: "Text", value: "Session transaction" },
-          { type: "Boolean", value: true },
-        ],
-        batchId: "batch-session-tx",
-      })),
+      create: vi.fn(() =>
+        makeInsertHandle(
+          {
+            id: "todo-2",
+            values: [
+              { type: "Text", value: "Session transaction" },
+              { type: "Boolean", value: true },
+            ],
+            batchId: "batch-session-tx",
+          } as Row,
+          "batch-session-tx",
+        ),
+      ),
       createPersisted: vi.fn(() =>
         makePendingWrite("batch-session-persisted", {
           id: "todo-2",
@@ -208,9 +233,9 @@ describe("Db transactions", () => {
           ],
         } satisfies Row),
       ),
-      update: vi.fn(),
+      update: vi.fn(() => makeWriteHandle("batch-session-tx")),
       updatePersisted: vi.fn(() => makePendingWrite("batch-session-update", undefined)),
-      delete: vi.fn(),
+      delete: vi.fn(() => makeWriteHandle("batch-session-tx")),
       deletePersisted: vi.fn(() => makePendingWrite("batch-session-delete", undefined)),
       commit: vi.fn(() => "batch-session-tx"),
       localBatchRecord: vi.fn((batchId = "batch-session-tx") => makeLocalBatchRecord(batchId)),
@@ -252,14 +277,19 @@ describe("Db transactions", () => {
     const table = todoTable();
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-closed"),
-      create: vi.fn(() => ({
-        id: "todo-closed",
-        values: [
-          { type: "Text", value: "Closed" },
-          { type: "Boolean", value: false },
-        ],
-        batchId: "batch-closed",
-      })),
+      create: vi.fn(() =>
+        makeInsertHandle(
+          {
+            id: "todo-closed",
+            values: [
+              { type: "Text", value: "Closed" },
+              { type: "Boolean", value: false },
+            ],
+            batchId: "batch-closed",
+          } as Row,
+          "batch-closed",
+        ),
+      ),
       createPersisted: vi.fn(),
       update: vi.fn(),
       updatePersisted: vi.fn(),
@@ -300,7 +330,7 @@ describe("Db transactions", () => {
     };
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-read"),
-      create: vi.fn(() => runtimeRow),
+      create: vi.fn(() => makeInsertHandle(runtimeRow, "batch-read")),
       createPersisted: vi.fn(() => makePendingWrite("batch-read-insert", runtimeRow)),
       update: vi.fn(),
       updatePersisted: vi.fn(),
@@ -441,11 +471,11 @@ describe("Db transactions", () => {
     const persistedDelete = makePendingWrite("batch-direct-delete", undefined);
     const runtimeBatch = {
       batchId: vi.fn(() => "batch-direct"),
-      create: vi.fn(() => runtimeRow),
+      create: vi.fn(() => makeInsertHandle(runtimeRow, "batch-direct")),
       createPersisted: vi.fn(() => persistedInsert),
-      update: vi.fn(),
+      update: vi.fn(() => makeWriteHandle("batch-direct")),
       updatePersisted: vi.fn(() => persistedUpdate),
-      delete: vi.fn(),
+      delete: vi.fn(() => makeWriteHandle("batch-direct")),
       deletePersisted: vi.fn(() => persistedDelete),
       localBatchRecord: vi.fn((batchId = "batch-direct") =>
         makeLocalBatchRecord(batchId, "direct"),

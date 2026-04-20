@@ -73,7 +73,7 @@ Mutations are methods on the database handle. All three take a table as their fi
 
 ### Partial updates and nullable fields
 
-`update(...)` and `updateDurable(...)` only modify the keys you pass.
+`update(...)` only modifies the keys you pass.
 Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.

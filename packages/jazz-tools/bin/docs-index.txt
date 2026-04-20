@@ -5009,15 +5009,14 @@ policies.
 
   const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5091,15 +5090,14 @@ Returns the file row; store its id on your own table.
     mimeType: "application/octet-stream",
   });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
-    },
-    { tier: "edge" },
-  );
+    }
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5386,7 +5384,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 
 ### Partial updates and nullable fields
 
-`update(...)` and `updateDurable(...)` only modify the keys you pass.
+`update(...)` only modify the keys you pass.
 Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
@@ -5425,7 +5423,7 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
 
     ```ts
 
-  const { id } = await db.insertDurable(
+  const { id } = await db.insert(
     app.todos,
     {
       title: "Write docs with durability tier",
@@ -5433,11 +5431,10 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteDurable(app.todos, id, { tier: "global" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
 }
 ```
 

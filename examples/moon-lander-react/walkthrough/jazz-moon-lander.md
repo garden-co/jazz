@@ -370,16 +370,19 @@ Every player's position, velocity, fuel level, and mode are written to the `play
 if (!this.dbRowId) return;
 if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
 this.lastSynced = { ...state };
-this.db.updateDurable(app.players, this.dbRowId, state, { tier: "edge" });
+this.db.update(app.players, this.dbRowId, state).wait({ tier: "edge" });
 ```
 
 Player insert happens once, after the edge subscription has settled:
 
 ```typescript
 // src/jazz/SyncManager.ts - setInputs(), after settled
-this.db.insertDurable(app.players, state, { tier: "edge" }).then((row) => {
-  this.dbRowId = row.id;
-});
+this.db
+  .insert(app.players, state)
+  .wait({ tier: "edge" })
+  .then((row) => {
+    this.dbRowId = row.id;
+  });
 ```
 
 Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` subscription updates automatically, keeping the remote lander in sync. (`ne` is Jazz's "not equal" operator, which excludes the local player's own row.)
@@ -388,15 +391,13 @@ Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` sub
 
 ## Jazz API surface used in Moon Lander
 
-| API                                           | Used for                                                                     |
-| --------------------------------------------- | ---------------------------------------------------------------------------- |
-| `JazzProvider`                                | Wrap the app; handles WASM worker + OPFS + sync internally                   |
-| `useDb()`                                     | Access the db write API from any component                                   |
-| `useAll(query, tier?)`                        | Live subscription; re-renders on every remote or local change                |
-| `db.insert(table, data)`                      | Eventually consistent insert. Instant local update, propagates in background |
-| `db.update(table, id, data)`                  | Eventually consistent update. Instant local update, propagates in background |
-| `db.delete(table, id)`                        | Eventually consistent delete. Used before re-inserting a released deposit    |
-| `db.insertDurable(table, data, { tier })`     | Durable insert. Promise resolves when tier confirms                          |
-| `db.updateDurable(table, id, data, { tier })` | Durable update. Used for player state sync at `"edge"` tier                  |
+| API                          | Used for                                                                     |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `JazzProvider`               | Wrap the app; handles WASM worker + OPFS + sync internally                   |
+| `useDb()`                    | Access the db write API from any component                                   |
+| `useAll(query, tier?)`       | Live subscription; re-renders on every remote or local change                |
+| `db.insert(table, data)`     | Eventually consistent insert. Instant local update, propagates in background |
+| `db.update(table, id, data)` | Eventually consistent update. Instant local update, propagates in background |
+| `db.delete(table, id)`       | Eventually consistent delete. Used before re-inserting a released deposit    |
 
 **Key insight:** the entire multiplayer state of a real-time game (positions, collectibles, inventory, chat) is managed with these eight API calls. No custom server, no WebSocket handlers, no conflict resolution code.

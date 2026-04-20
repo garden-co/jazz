@@ -53,40 +53,14 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
-  insertDurable(
-    table: string,
-    values: InsertValues,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
-  insertDurableWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
-  updateDurableWithSession?(
-    object_id: string,
-    values: Record<string, Value>,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  deleteDurable(object_id: string, tier: string): Promise<void>;
-  deleteDurableWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
   insertPersistedWithSession?(
     table: string,
@@ -107,8 +81,8 @@ export interface Runtime {
     write_context_json: string | null | undefined,
     tier: string,
   ): PersistedMutationResult;
-  loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
-  loadLocalBatchRecords?(): LocalBatchRecord[];
+  loadLocalBatchRecord(batch_id: string): LocalBatchRecord | null;
+  loadLocalBatchRecords(): LocalBatchRecord[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
   query(
@@ -810,6 +784,55 @@ export class PersistedWrite<T> {
   }
 }
 
+/**
+ * Returned by upsert, update, and delete operations. Allows waiting for the
+ * write to be persisted at a given durability tier.
+ */
+export class WriteHandle<T = void> {
+  readonly #client: JazzClient;
+
+  constructor(
+    readonly batchId: string,
+    client: JazzClient,
+  ) {
+    this.#client = client;
+  }
+
+  /**
+   * Wait for the write to be persisted at a given durability tier.
+   */
+  async wait(options: { tier: DurabilityTier }): Promise<T> {
+    return this.#client.waitForPersistedBatch(this.batchId, options.tier) as Promise<T>;
+  }
+
+  protected client(): JazzClient {
+    return this.#client;
+  }
+}
+
+/**
+ * Returned by insert operations. Allows getting the inserted value and
+ * waiting for the write to be persisted at a given durability tier.
+ */
+export class InsertHandle<T> extends WriteHandle<T> {
+  constructor(
+    readonly value: T,
+    batchId: string,
+    client: JazzClient,
+  ) {
+    super(batchId, client);
+  }
+
+  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+    await super.wait(options);
+    return this.value;
+  }
+
+  mapValue<U>(transformValue: (value: T) => U): InsertHandle<U> {
+    return new InsertHandle(transformValue(this.value), this.batchId, this.client());
+  }
+}
+
 export class Transaction {
   private committed = false;
   private readonly touchedRowIds = new Set<string>();
@@ -856,9 +879,9 @@ export class Transaction {
     return batchId;
   }
 
-  create(table: string, values: InsertValues): DirectInsertResult {
+  create(table: string, values: InsertValues): InsertHandle<Row> {
     this.ensureActive();
-    const row = this.client.createInternal(
+    const handle = this.client.createHandleInternal(
       table,
       values,
       this.session,
@@ -866,8 +889,8 @@ export class Transaction {
       undefined,
       this.batchContext,
     );
-    this.markTouchedRow(row.id);
-    return row;
+    this.markTouchedRow(handle.value.id);
+    return handle;
   }
 
   createPersisted(
@@ -888,9 +911,9 @@ export class Transaction {
     return pendingWrite;
   }
 
-  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
+  update(objectId: string, updates: Record<string, Value>): WriteHandle {
     this.ensureActive();
-    const result = this.client.updateInternal(
+    const result = this.client.updateHandleInternal(
       objectId,
       updates,
       this.session,
@@ -919,9 +942,9 @@ export class Transaction {
     return pendingWrite;
   }
 
-  delete(objectId: string): DirectMutationResult {
+  delete(objectId: string): WriteHandle {
     this.ensureActive();
-    const result = this.client.deleteInternal(
+    const result = this.client.deleteHandleInternal(
       objectId,
       this.session,
       this.attribution,
@@ -974,8 +997,8 @@ export class DirectBatch {
     return this.batchContext.batchId;
   }
 
-  create(table: string, values: InsertValues): DirectInsertResult {
-    return this.client.createInternal(
+  create(table: string, values: InsertValues): InsertHandle<Row> {
+    return this.client.createHandleInternal(
       table,
       values,
       this.session,
@@ -1000,8 +1023,8 @@ export class DirectBatch {
     );
   }
 
-  update(objectId: string, updates: Record<string, Value>): DirectMutationResult {
-    return this.client.updateInternal(
+  update(objectId: string, updates: Record<string, Value>): WriteHandle {
+    return this.client.updateHandleInternal(
       objectId,
       updates,
       this.session,
@@ -1025,8 +1048,13 @@ export class DirectBatch {
     );
   }
 
-  delete(objectId: string): DirectMutationResult {
-    return this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
+  delete(objectId: string): WriteHandle {
+    return this.client.deleteHandleInternal(
+      objectId,
+      this.session,
+      this.attribution,
+      this.batchContext,
+    );
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
@@ -1257,6 +1285,7 @@ export class JazzClient {
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
+  private pendingBatchWaitPollTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
 
   private resolveSessionFromContext(): Session | null {
@@ -1617,15 +1646,7 @@ export class JazzClient {
   }
 
   private requireSessionWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "insertWithSession"
-      | "insertDurableWithSession"
-      | "updateWithSession"
-      | "updateDurableWithSession"
-      | "deleteWithSession"
-      | "deleteDurableWithSession"
-    >,
+    T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
@@ -1839,15 +1860,46 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues, options?: CreateOptions): DirectInsertResult {
-    return this.createInternal(table, values, undefined, undefined, options);
+  create(table: string, values: InsertValues, options?: CreateOptions): InsertHandle<Row> {
+    return this.createHandleInternal(table, values, undefined, undefined, options);
+  }
+
+  createHandleInternal(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: CreateOptions,
+    batchContext?: BatchWriteContext,
+  ): InsertHandle<Row> {
+    const row = this.createInternal(table, values, session, attribution, options, batchContext);
+    return new InsertHandle(row, row.batchId, this);
   }
 
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
-  upsert(table: string, values: InsertValues, options: UpsertOptions): DirectMutationResult {
-    return this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
+  upsert(table: string, values: InsertValues, options: UpsertOptions): WriteHandle {
+    return this.upsertHandleInternal(
+      table,
+      values,
+      options.id,
+      undefined,
+      undefined,
+      options.updatedAt,
+    );
+  }
+
+  upsertHandleInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    updatedAt?: number,
+  ): WriteHandle {
+    const result = this.upsertInternal(table, values, objectId, session, attribution, updatedAt);
+    return new WriteHandle(result.batchId, this);
   }
 
   /**
@@ -1933,81 +1985,6 @@ export class JazzClient {
     );
   }
 
-  /**
-   * Insert a new row into a table and wait for durability at the requested tier.
-   */
-  async createDurable(
-    table: string,
-    values: InsertValues,
-    options?: CreateDurabilityOptions,
-  ): Promise<Row> {
-    return this.createDurableInternal(table, values, undefined, undefined, options);
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id and wait for durability.
-   */
-  async upsertDurable(
-    table: string,
-    values: InsertValues,
-    options: UpsertDurabilityOptions,
-  ): Promise<void> {
-    await this.upsertDurableInternal(table, values, options.id, undefined, undefined, options);
-  }
-
-  /**
-   * Insert a new row into a table and wait for durability, optionally scoped to a session.
-   * @internal
-   */
-  async createDurableInternal(
-    table: string,
-    values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: CreateDurabilityOptions,
-  ): Promise<Row> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    let row;
-    try {
-      row =
-        effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
-          ? options?.id
-            ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-                table,
-                values,
-                this.encodeWriteContext(
-                  effectiveSession,
-                  attribution,
-                  undefined,
-                  options.updatedAt,
-                ),
-                tier,
-                options.id,
-              )
-            : await this.requireSessionWriteMethod("insertDurableWithSession")(
-                table,
-                values,
-                this.encodeWriteContext(
-                  effectiveSession,
-                  attribution,
-                  undefined,
-                  options?.updatedAt,
-                ),
-                tier,
-              )
-          : options?.id
-            ? await this.runtime.insertDurable(table, values, tier, options.id)
-            : await this.runtime.insertDurable(table, values, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
-    return {
-      ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
-    };
-  }
-
   createPersisted(
     table: string,
     values: InsertValues,
@@ -2043,41 +2020,6 @@ export class JazzClient {
         this.getSchema(),
       ),
     });
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id and wait for durability,
-   * optionally scoped to a session.
-   * @internal
-   */
-  async upsertDurableInternal(
-    table: string,
-    values: InsertValues,
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: UpsertDurabilityOptions,
-  ): Promise<void> {
-    try {
-      await this.createDurableInternal(table, values, session, attribution, {
-        ...options,
-        id: objectId,
-      });
-      return;
-    } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
-        throw error;
-      }
-    }
-
-    await this.updateDurableInternal(
-      objectId,
-      values as Record<string, Value>,
-      session,
-      attribution,
-      options,
-      options?.updatedAt,
-    );
   }
 
   /**
@@ -2117,12 +2059,8 @@ export class JazzClient {
   /**
    * Update a row by ID without waiting for durability.
    */
-  update(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateOptions,
-  ): DirectMutationResult {
-    return this.updateInternal(
+  update(objectId: string, updates: Record<string, Value>, options?: UpdateOptions): WriteHandle {
+    return this.updateHandleInternal(
       objectId,
       updates,
       undefined,
@@ -2130,6 +2068,25 @@ export class JazzClient {
       undefined,
       options?.updatedAt,
     );
+  }
+
+  updateHandleInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    attribution?: string,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): WriteHandle {
+    const result = this.updateInternal(
+      objectId,
+      updates,
+      session,
+      attribution,
+      batchContext,
+      updatedAt,
+    );
+    return new WriteHandle(result.batchId, this);
   }
 
   /**
@@ -2153,54 +2110,6 @@ export class JazzClient {
       );
     }
     return this.runtime.update(objectId, updates);
-  }
-
-  /**
-   * Update a row by ID and wait for durability at the requested tier.
-   */
-  async updateDurable(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateDurabilityOptions,
-  ): Promise<void> {
-    await this.updateDurableInternal(
-      objectId,
-      updates,
-      undefined,
-      undefined,
-      options,
-      options?.updatedAt,
-    );
-  }
-
-  /**
-   * Update a row by ID and wait for durability, optionally scoped to a session.
-   * @internal
-   */
-  async updateDurableInternal(
-    objectId: string,
-    updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    options?: UpdateDurabilityOptions,
-    updatedAt?: number,
-  ): Promise<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    try {
-      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-        await this.requireSessionWriteMethod("updateDurableWithSession")(
-          objectId,
-          updates,
-          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-          tier,
-        );
-        return;
-      }
-      await this.runtime.updateDurable(objectId, updates, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
   }
 
   updatePersisted(
@@ -2237,8 +2146,19 @@ export class JazzClient {
   /**
    * Delete a row by ID without waiting for durability.
    */
-  delete(objectId: string): DirectMutationResult {
-    return this.deleteInternal(objectId);
+  delete(objectId: string): WriteHandle {
+    return this.deleteHandleInternal(objectId);
+  }
+
+  deleteHandleInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    batchContext?: BatchWriteContext,
+    updatedAt?: number,
+  ): WriteHandle {
+    const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
+    return new WriteHandle(result.batchId, this);
   }
 
   /**
@@ -2260,41 +2180,6 @@ export class JazzClient {
       );
     }
     return this.runtime.delete(objectId);
-  }
-
-  /**
-   * Delete a row by ID and wait for durability at the requested tier.
-   */
-  async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
-    await this.deleteDurableInternal(objectId, undefined, undefined, options);
-  }
-
-  /**
-   * Delete a row by ID and wait for durability, optionally scoped to a session.
-   * @internal
-   */
-  async deleteDurableInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    updatedAt?: number,
-  ): Promise<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    try {
-      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-        await this.requireSessionWriteMethod("deleteDurableWithSession")(
-          objectId,
-          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-          tier,
-        );
-        return;
-      }
-      await this.runtime.deleteDurable(objectId, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
   }
 
   deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
@@ -2556,6 +2441,36 @@ export class JazzClient {
     }
   }
 
+  private ensurePendingBatchWaitPolling(): void {
+    if (this.pendingBatchWaitPollTimer !== null) {
+      return;
+    }
+    if (this.pendingBatchWaiters.size === 0) {
+      return;
+    }
+
+    // Rust-owned transports can settle batch records without routing through
+    // JS `onSyncMessageReceived`, so poll retained batch metadata while waits
+    // are outstanding.
+    this.pendingBatchWaitPollTimer = setTimeout(() => {
+      this.pendingBatchWaitPollTimer = null;
+      const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
+      this.flushPendingBatchWaiters();
+      this.flushUnhandledMutationErrors(batchesWithPendingWaiters);
+
+      this.ensurePendingBatchWaitPolling();
+    }, 20);
+  }
+
+  private cancelPendingBatchWaitPolling(): void {
+    if (this.pendingBatchWaitPollTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.pendingBatchWaitPollTimer);
+    this.pendingBatchWaitPollTimer = null;
+  }
+
   private flushUnhandledMutationErrors(
     batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
   ): void {
@@ -2601,6 +2516,7 @@ export class JazzClient {
       waiters.push({ tier, resolve, reject });
       this.pendingBatchWaiters.set(batchId, waiters);
       this.flushPendingBatchWaiters();
+      this.ensurePendingBatchWaitPolling();
     });
   }
 
@@ -2613,6 +2529,8 @@ export class JazzClient {
     }
 
     this.shutdownPromise = (async () => {
+      this.cancelPendingBatchWaitPolling();
+
       // Disconnect Rust-owned transport if present.
       this.runtime.disconnect?.();
 

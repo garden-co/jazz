@@ -9,7 +9,7 @@ Rust server registers no matching route (`crates/jazz-tools/src/routes.rs`
 only exposes `/schema/*`, `/admin/*`, `/health`, `/ws`). Any caller that lands
 here today gets a 404 wrapped in `new Error("Create failed: <statusText>")`.
 
-The real durable-write path on modern clients is `Runtime.insertDurable(...)`
+The real durable-write path on modern clients is `Runtime.insert(...).wait({ tier })`
 (WASM/NAPI/UniFFI), which drives writes over the WS transport. So these three
 HTTP methods and the `JazzClient.sendRequest` plumbing that supports them are
 dead code that still ships bundle weight and a misleading API.
