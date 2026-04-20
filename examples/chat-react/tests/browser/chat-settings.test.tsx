@@ -53,7 +53,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      auth?: { localFirstSecret: string };
+      secret?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -289,7 +289,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-alice"),
       serverUrl,
-      auth: { localFirstSecret: await testSecret(`settings-alice-${Date.now()}`) },
+      secret: await testSecret(`settings-alice-${Date.now()}`),
     });
 
     await waitFor(
@@ -312,7 +312,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("members-bob"),
       serverUrl,
-      auth: { localFirstSecret: await testSecret(`settings-bob-${Date.now()}`) },
+      secret: await testSecret(`settings-bob-${Date.now()}`),
     });
 
     // Wait for Bob to see the chat
