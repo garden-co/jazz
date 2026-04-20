@@ -1837,6 +1837,19 @@ impl WasmRuntime {
 }
 
 // ============================================================================
+// WasmRuntime — crate-internal accessors (not exposed to JS)
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+impl WasmRuntime {
+    /// Expose the inner `Rc<RefCell<WasmCoreType>>` to crate-internal consumers
+    /// (e.g. `worker_host::WorkerHost`).  Not exported to JS.
+    pub(crate) fn inner_core(&self) -> &Rc<RefCell<WasmCoreType>> {
+        &self.core
+    }
+}
+
+// ============================================================================
 // WasmTickNotifier
 // ============================================================================
 
