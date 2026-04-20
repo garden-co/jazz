@@ -49,6 +49,7 @@
 #![allow(clippy::new_without_default)]
 
 pub mod driver_bridge;
+pub mod post_message_stream;
 pub mod query;
 pub mod runtime;
 pub mod types;
