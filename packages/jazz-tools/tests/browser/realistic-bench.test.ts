@@ -1604,26 +1604,22 @@ async function seedPermissionDataset(
   const allowedFolders: string[] = [];
   const deniedFolders: string[] = [];
   const ts = nowMicros();
-  const { id: allowedRootId } = await db.insertDurable(
-    folderTable,
-    {
+  const { id: allowedRootId } = await db
+    .insert(folderTable, {
       parent_id: null,
       owner_id: owners.allowedOwnerId,
       title: "allowed-root",
       updated_at: ts,
-    },
-    durabilityOptions(tier),
-  );
-  const { id: deniedRootId } = await db.insertDurable(
-    folderTable,
-    {
+    })
+    .wait(durabilityOptions(tier));
+  const { id: deniedRootId } = await db
+    .insert(folderTable, {
       parent_id: null,
       owner_id: owners.deniedOwnerId,
       title: "denied-root",
       updated_at: ts + 1,
-    },
-    durabilityOptions(tier),
-  );
+    })
+    .wait(durabilityOptions(tier));
   allowedFolders.push(allowedRootId);
   deniedFolders.push(deniedRootId);
 
@@ -1633,18 +1629,16 @@ async function seedPermissionDataset(
     const parent = allowedChain
       ? allowedFolders[allowedFolders.length - 1]
       : deniedFolders[deniedFolders.length - 1];
-    const { id } = await db.insertDurable(
-      folderTable,
-      {
+    const { id } = await db
+      .insert(folderTable, {
         parent_id: parent,
         // Keep allowed-chain folders owned by the allowed principal so that
         // permissioned document updates can validate folder FKs locally.
         owner_id: allowedChain ? owners.allowedOwnerId : owners.deniedOwnerId,
         title: `folder-${i}`,
         updated_at: ts + i,
-      },
-      durabilityOptions(tier),
-    );
+      })
+      .wait(durabilityOptions(tier));
     if (allowedChain) {
       allowedFolders.push(id);
     } else {
@@ -1668,17 +1662,15 @@ async function seedPermissionDataset(
         ? owners.allowedOwnerId
         : owners.intermediateOwnerId
       : owners.deniedOwnerId;
-    const { id } = await db.insertDurable(
-      documentTable,
-      {
+    const { id } = await db
+      .insert(documentTable, {
         folder_id: folderId,
         editor_id: editorId,
         body: `doc-${i}`,
         revision: 0,
         updated_at: ts + 10_000 + i,
-      },
-      durabilityOptions(tier),
-    );
+      })
+      .wait(durabilityOptions(tier));
     if (useAllowed) {
       allowedDocumentIds.push(id);
       if (editorId === owners.allowedOwnerId) {

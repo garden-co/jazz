@@ -99,18 +99,16 @@ export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
 
 // #region writing-durability-expo
 export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
-  const { id } = await db.insertDurable(
-    app.todos,
-    {
+  const { id } = await db
+    .insert(app.todos, {
       title: todoTitle,
       done: false,
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
-    },
-    { tier: "local" },
-  );
+    })
+    .wait({ tier: "local" });
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "local" });
-  await db.deleteDurable(app.todos, id, { tier: "local" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "local" });
+  await db.delete(app.todos, id).wait({ tier: "local" });
 }
 // #endregion writing-durability-expo

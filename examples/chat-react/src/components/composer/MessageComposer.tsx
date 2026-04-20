@@ -27,20 +27,17 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
       if (!userId || !myProfile) return;
       if (!html.trim()) return;
 
-      void db
-        .insertDurable(
-          app.messages,
-          {
-            chatId,
-            text: html.trim(),
-            senderId: myProfile.id,
-            createdAt: new Date(),
-          },
-          sharedWriteOptions,
-        )
-        .catch((error) => {
+      const messageInsertHandle = db.insert(app.messages, {
+        chatId,
+        text: html.trim(),
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      });
+      if (sharedWriteOptions) {
+        messageInsertHandle.wait(sharedWriteOptions).catch((error) => {
           console.error("failed to send message", error);
         });
+      }
     },
     [userId, chatId, db, myProfile, sharedWriteOptions],
   );
@@ -53,28 +50,29 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
 
       const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
 
-      const message = await db.insertDurable(
-        app.messages,
-        {
-          chatId,
-          text: "",
-          senderId: myProfile.id,
-          createdAt: new Date(),
-        },
-        sharedWriteOptions,
-      );
+      const messageInsertHandle = db.insert(app.messages, {
+        chatId,
+        text: "",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      });
+      const message = messageInsertHandle.value;
 
-      await db.insertDurable(
-        app.attachments,
-        {
-          messageId: message.id,
-          type: attachment.type,
-          name: attachment.file.name,
-          fileId: storedFile.id,
-          size: attachment.file.size,
-        },
-        sharedWriteOptions,
-      );
+      const attachmentInsertHandle = db.insert(app.attachments, {
+        messageId: message.id,
+        type: attachment.type,
+        name: attachment.file.name,
+        fileId: storedFile.id,
+        size: attachment.file.size,
+      });
+
+      if (sharedWriteOptions) {
+        await Promise.all(
+          [messageInsertHandle, attachmentInsertHandle].map((handle) =>
+            handle.wait(sharedWriteOptions),
+          ),
+        );
+      }
     },
     [userId, chatId, db, myProfile, sharedWriteOptions],
   );

@@ -31,24 +31,25 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
     void (async () => {
-      const canvas = await db.insertDurable(
-        app.canvases,
-        {
-          chatId,
-          createdAt: new Date(),
-        },
-        sharedWriteOptions,
-      );
-      await db.insertDurable(
-        app.messages,
-        {
-          chatId,
-          text: `[Canvas: ${canvas.id}]`,
-          senderId: myProfile.id,
-          createdAt: new Date(),
-        },
-        sharedWriteOptions,
-      );
+      const canvasInsertHandle = db.insert(app.canvases, {
+        chatId,
+        createdAt: new Date(),
+      });
+      const canvas = canvasInsertHandle.value;
+      const messageInsertHandle = db.insert(app.messages, {
+        chatId,
+        text: `[Canvas: ${canvas.id}]`,
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      });
+
+      if (sharedWriteOptions) {
+        await Promise.all(
+          [canvasInsertHandle, messageInsertHandle].map((handle) =>
+            handle.wait(sharedWriteOptions),
+          ),
+        );
+      }
     })().catch((error) => {
       console.error("failed to create canvas", error);
     });

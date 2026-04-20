@@ -19,27 +19,28 @@ export const CreateChatRedirect = () => {
     initialized.current = true;
 
     void (async () => {
-      const chat = await db.insertDurable(
-        app.chats,
-        {
-          isPublic: true,
-          createdBy: userId,
-        },
-        sharedWriteOptions,
-      );
+      const chatInsertHandle = db.insert(app.chats, {
+        isPublic: true,
+        createdBy: userId,
+      });
+      const chat = chatInsertHandle.value;
 
-      await db.insertDurable(app.chatMembers, { chatId: chat.id, userId }, sharedWriteOptions);
+      const memberInsertHandle = db.insert(app.chatMembers, { chatId: chat.id, userId });
 
-      await db.insertDurable(
-        app.messages,
-        {
-          chatId: chat.id,
-          text: "Hello world",
-          senderId: myProfile.id,
-          createdAt: new Date(),
-        },
-        sharedWriteOptions,
-      );
+      const messageInsertHandle = db.insert(app.messages, {
+        chatId: chat.id,
+        text: "Hello world",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      });
+
+      if (sharedWriteOptions) {
+        await Promise.all(
+          [chatInsertHandle, memberInsertHandle, messageInsertHandle].map((handle) =>
+            handle.wait(sharedWriteOptions),
+          ),
+        );
+      }
 
       navigate(`/#/chat/${chat.id}`);
     })().catch((error) => {

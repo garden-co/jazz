@@ -30,6 +30,8 @@ export {
   type UpsertOptions,
   type WriteDurabilityOptions,
   type WasmModule,
+  type InsertHandle,
+  type WriteHandle,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {
@@ -44,8 +46,6 @@ export {
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,
-  type InsertHandle,
-  WriteHandle,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";

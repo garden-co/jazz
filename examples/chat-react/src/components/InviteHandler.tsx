@@ -36,16 +36,14 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     if (!chatLoaded || handled.current || !userId || !myProfile) return;
     handled.current = true;
 
-    void db
-      .insertDurable(
-        app.chatMembers,
-        {
-          chatId,
-          userId,
-          joinCode: code,
-        },
-        sharedWriteOptions,
-      )
+    const write = db.insert(app.chatMembers, {
+      chatId,
+      userId,
+      joinCode: code,
+    });
+
+    void write
+      .wait({ tier: "edge" })
       .then(() => {
         navigate(`/#/chat/${chatId}`);
       })

@@ -30,9 +30,12 @@ export function useMyProfile(): Profile | null {
     createdForUser.add(userId);
     const profile = { userId, name: getRandomUsername() };
     if (sharedWriteOptions) {
-      void db.insertDurable(app.profiles, profile, sharedWriteOptions).catch(() => {
-        createdForUser.delete(userId);
-      });
+      void db
+        .insert(app.profiles, profile)
+        .wait(sharedWriteOptions)
+        .catch(() => {
+          createdForUser.delete(userId);
+        });
       return;
     }
     db.insert(app.profiles, profile);

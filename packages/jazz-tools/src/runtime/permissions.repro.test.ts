@@ -235,9 +235,8 @@ describe("runtime permission repros for recursive gather and qualified predicate
     );
 
     const db = context.asBackend(reproApp);
-    const bobTeam = await db.insertDurable(
-      reproApp.teams,
-      {
+    const bobTeam = await db
+      .insert(reproApp.teams, {
         name: "Bob",
         route_key: "bob",
         corporation_id: "corp",
@@ -245,29 +244,24 @@ describe("runtime permission repros for recursive gather and qualified predicate
         identity_key: "bob",
         system_owned: false,
         archived: false,
-      },
-      { tier: "edge" },
-    );
-    await db.insertDurable(
-      reproApp.team_access_edges,
-      {
+      })
+      .wait({ tier: "edge" });
+    await db
+      .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
         team: bobTeam.id,
         grant_role: "viewer",
         administrator: false,
-      },
-      { tier: "edge" },
-    );
-    await db.insertDurable(
-      reproApp.team_access_edges,
-      {
+      })
+      .wait({ tier: "edge" });
+    await db
+      .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
         team: bobTeam.id,
         grant_role: "manager",
         administrator: true,
-      },
-      { tier: "edge" },
-    );
+      })
+      .wait({ tier: "edge" });
 
     const bobDb = context.forSession(
       {

@@ -2,9 +2,9 @@
  * SyncManager — all Jazz writes for the game.
  *
  * Jazz write APIs used here:
- *   db.insertDurable(table, data, { tier })    — create a new row (fires WHERE ENTRY cross-client)
- *   db.updateDurable(table, id, data, { tier }) — update fields (fires WHERE EXIT/ENTRY cross-client)
- *   db.deleteDurable(table, id, { tier })  — delete a row (local only — server can't forward deleted objects)
+ *   db.insert(table, data, { tier })    — create a new row (fires WHERE ENTRY cross-client)
+ *   db.update(table, id, data, { tier }) — update fields (fires WHERE EXIT/ENTRY cross-client)
+ *   db.delete(table, id, { tier })  — delete a row (local only — server can't forward deleted objects)
  *
  * The "edge" tier broadcasts the write to all connected clients' live
  * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
@@ -133,11 +133,12 @@ export class SyncManager {
 
   sendMessage(text: string): void {
     this.db
-      .insertDurable(
-        app.chat_messages,
-        { playerId: this.playerId, message: text, createdAt: Math.floor(Date.now() / 1000) },
-        { tier: "edge" },
-      )
+      .insert(app.chat_messages, {
+        playerId: this.playerId,
+        message: text,
+        createdAt: Math.floor(Date.now() / 1000),
+      })
+      .wait({ tier: "edge" })
       .catch(console.error);
   }
 
@@ -146,7 +147,7 @@ export class SyncManager {
     if (!this.dbRowId) return;
     if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
     this.lastSynced = { ...state };
-    this.db.updateDurable(app.players, this.dbRowId, state, { tier: "edge" }).catch(console.error);
+    this.db.update(app.players, this.dbRowId, state).wait({ tier: "edge" }).catch(console.error);
   }
 
   setInputs(inputs: SyncInputs): void {
@@ -158,7 +159,8 @@ export class SyncManager {
       if (this.latestState) {
         this.lastSynced = { ...this.latestState };
         this.db
-          .updateDurable(app.players, this.dbRowId, this.latestState, { tier: "edge" })
+          .update(app.players, this.dbRowId, this.latestState)
+          .wait({ tier: "edge" })
           .catch(console.error);
       }
     }
@@ -177,7 +179,8 @@ export class SyncManager {
         this.insertingPlayer = true;
         const state = this.latestState;
         this.db
-          .insertDurable(app.players, state, { tier: "edge" })
+          .insert(app.players, state)
+          .wait({ tier: "edge" })
           .then((row) => {
             if (!this.dbRowId) {
               this.dbRowId = row.id;
@@ -199,12 +202,8 @@ export class SyncManager {
           this.releasingIds.add(d.id);
           this.collectedByThis.delete(d.id);
           this.db
-            .updateDurable(
-              app.fuel_deposits,
-              d.id,
-              { collected: false, collectedBy: "" },
-              { tier: "edge" },
-            )
+            .update(app.fuel_deposits, d.id, { collected: false, collectedBy: "" })
+            .wait({ tier: "edge" })
             .finally(() => this.releasingIds.delete(d.id))
             .catch(console.error);
         }
@@ -214,12 +213,8 @@ export class SyncManager {
           this.releasingIds.add(id);
           this.collectedByThis.delete(id);
           this.db
-            .updateDurable(
-              app.fuel_deposits,
-              id,
-              { collected: false, collectedBy: "" },
-              { tier: "edge" },
-            )
+            .update(app.fuel_deposits, id, { collected: false, collectedBy: "" })
+            .wait({ tier: "edge" })
             .finally(() => this.releasingIds.delete(id))
             .catch(console.error);
         }
@@ -325,17 +320,15 @@ export async function reconcileDeposits(
         // Deterministic seed so concurrent clients generate the same positions
         const slotSeed = i * 1000 + deposits.length + j;
         ops.push(
-          db.insertDurable(
-            app.fuel_deposits,
-            {
+          db
+            .insert(app.fuel_deposits, {
               fuelType: ft,
               positionX: Math.floor(seededRand(slotSeed) * MOON_SURFACE_WIDTH),
               createdAt: nowS,
               collected: false,
               collectedBy: "",
-            },
-            { tier: "edge" },
-          ),
+            })
+            .wait({ tier: "edge" }),
         );
       }
     } else if (diff < 0) {
@@ -343,12 +336,12 @@ export async function reconcileDeposits(
       const sorted = [...deposits].sort((a, b) => b.createdAt - a.createdAt);
       for (let j = 0; j < -diff; j++) {
         ops.push(
-          db.updateDurable(
-            app.fuel_deposits,
-            sorted[j].id,
-            { collected: true, collectedBy: "__trimmed__" },
-            { tier: "edge" },
-          ),
+          db
+            .update(app.fuel_deposits, sorted[j].id, {
+              collected: true,
+              collectedBy: "__trimmed__",
+            })
+            .wait({ tier: "edge" }),
         );
       }
     }
