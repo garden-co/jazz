@@ -1758,8 +1758,8 @@ export class JazzClient {
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
-  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
+  upsert(table: string, values: InsertValues, options: UpsertOptions): DirectMutationResult {
+    return this.upsertInternal(table, values, options.id, undefined, undefined, options.updatedAt);
   }
 
   /**
@@ -1822,20 +1822,20 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
-  ): void {
+  ): DirectMutationResult {
     try {
-      this.createInternal(table, values, session, attribution, {
+      const created = this.createInternal(table, values, session, attribution, {
         id: objectId,
         updatedAt,
       });
-      return;
+      return { batchId: created.batchId };
     } catch (error) {
       if (!isObjectAlreadyExistsError(error)) {
         throw error;
       }
     }
 
-    this.updateInternal(
+    return this.updateInternal(
       objectId,
       values as Record<string, Value>,
       session,

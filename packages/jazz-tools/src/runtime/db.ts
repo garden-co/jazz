@@ -389,7 +389,8 @@ function backendScopedAuthState(session?: Session | null): AuthState {
 }
 
 /**
- * Returned by update and delete operations. Allows waiting for the write to be persisted at a given durability tier.
+ * Returned by upsert, update, and delete operations. Allows waiting for the
+ * write to be persisted at a given durability tier.
  */
 export class WriteHandle {
   readonly #client: JazzClient;
@@ -2272,10 +2273,14 @@ export class Db {
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Partial<Init>,
+    options: UpsertOptions,
+  ): WriteHandle {
     const client = this.getClient(table._schema);
     const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    client.upsert(table._table, values, options);
+    return new WriteHandle(client.upsert(table._table, values, options).batchId, client);
   }
 
   /**
@@ -2860,11 +2865,11 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     data: Partial<Init>,
     options: UpsertOptions,
-  ): void {
+  ): WriteHandle {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.upsertInternal(
+    const batchId = this.runtimeClient.upsertInternal(
       table._table,
       values,
       options.id,
@@ -2872,6 +2877,7 @@ class ClientBackedDb extends Db {
       this.attribution,
       options.updatedAt,
     );
+    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async upsertDurable<T, Init>(

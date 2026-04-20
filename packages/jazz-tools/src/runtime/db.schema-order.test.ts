@@ -229,7 +229,11 @@ describe("Db runtime schema order", () => {
       },
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => void>();
+    const upsert = vi.fn<(...args: [string, InsertValues, { id: string }]) => DirectMutationResult>(
+      () => ({
+        batchId: "batch-upsert",
+      }),
+    );
     const client = {
       getSchema: () => new Map(),
       upsert,
@@ -245,9 +249,9 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    expect(
-      db.upsert(table, { title: "Buy milk", done: false }, { id: externalId }),
-    ).toBeUndefined();
+    expect(db.upsert(table, { title: "Buy milk", done: false }, { id: externalId })).toMatchObject({
+      batchId: "batch-upsert",
+    });
 
     expect(upsert).toHaveBeenCalledWith(
       "todos",
