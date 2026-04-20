@@ -864,23 +864,10 @@ impl QueryManager {
 
         let mut failed_server: Vec<(ClientId, QueryId, String, String, QueryPropagation)> =
             Vec::new();
-        let missing_permissions_head =
-            self.authorization_schema_required && self.authorization_schema.is_none();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
-                if missing_permissions_head && sub.session.is_some() {
-                    failed_server.push((
-                        *client_id,
-                        *query_id,
-                        "permissions_head_missing".to_string(),
-                        Self::missing_permissions_head_reason().to_string(),
-                        sub.propagation,
-                    ));
-                    continue;
-                }
-
                 let query_for_compile =
                     Self::query_for_server_compile(&sub.query, &sub.schema_context);
                 let compile_schema: Schema = sub

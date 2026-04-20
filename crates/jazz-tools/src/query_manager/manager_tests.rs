@@ -11077,7 +11077,7 @@ fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_serv
 }
 
 #[test]
-fn fail_closed_server_rejects_session_query_before_permissions_head() {
+fn fail_closed_server_withholds_session_scope_before_permissions_head() {
     use crate::query_manager::relation_ir::{
         ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
         ValueRef,
@@ -11197,19 +11197,10 @@ fn fail_closed_server_rejects_session_query_before_permissions_head() {
         "server without a published permissions head should not advertise an authoritative remote scope"
     );
 
-    let results = client.get_subscription_results(sub_id);
-    assert!(
-        results.is_empty(),
-        "session-scoped synced queries should be rejected instead of keeping local rows"
-    );
     let failures = client.take_failed_subscriptions();
-    assert_eq!(failures.len(), 1, "expected one subscription failure");
-    assert_eq!(failures[0].subscription_id, sub_id);
-    assert_eq!(failures[0].code, "permissions_head_missing");
     assert!(
-        failures[0].reason.contains("no published permissions head"),
-        "unexpected rejection reason: {}",
-        failures[0].reason
+        failures.is_empty(),
+        "missing permissions head should not surface an explicit subscription failure yet: {failures:?}"
     );
 }
 
@@ -11298,7 +11289,7 @@ fn synced_session_query_for_exists_rel_sends_policy_context_tables_upstream() {
 }
 
 #[test]
-fn backend_sync_subscription_without_handshake_session_is_rejected_without_permissions_head() {
+fn backend_sync_subscription_without_handshake_session_stays_unscoped_without_permissions_head() {
     use crate::sync_manager::ClientRole;
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;
@@ -11377,19 +11368,10 @@ fn backend_sync_subscription_without_handshake_session_is_rejected_without_permi
         "backend-authenticated clients without a handshake session should not receive an authoritative remote scope"
     );
 
-    let results = client.get_subscription_results(sub_id);
-    assert!(
-        results.is_empty(),
-        "session payload queries should be rejected instead of falling back to local rows"
-    );
     let failures = client.take_failed_subscriptions();
-    assert_eq!(failures.len(), 1, "expected one subscription failure");
-    assert_eq!(failures[0].subscription_id, sub_id);
-    assert_eq!(failures[0].code, "permissions_head_missing");
     assert!(
-        failures[0].reason.contains("no published permissions head"),
-        "unexpected rejection reason: {}",
-        failures[0].reason
+        failures.is_empty(),
+        "missing permissions head should not surface an explicit subscription failure yet: {failures:?}"
     );
 }
 
