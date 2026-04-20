@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drift detector for the six Jazz starters.
+// Drift detector for the nine Jazz starters.
 //
 // Verifies that files meant to be identical actually are, and that every
 // README follows the same section order. Runs in CI / lefthook and also
@@ -23,6 +23,7 @@ const STARTERS = {
     "starters/sveltekit-localfirst",
     "starters/sveltekit-hybrid",
   ],
+  react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -31,14 +32,20 @@ const STARTERS = {
 const HORIZONTAL_FILES = {
   next: ["schema.ts", "permissions.ts", "components/todo-widget.tsx"],
   sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
+  react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
 };
 
 // Files that should be byte-identical across both frameworks (a "vertical"
 // parity rule on top of the horizontal one). We resolve them per framework
 // via HORIZONTAL_FILES — the logical name is the dict key.
 const CROSS_FRAMEWORK_FILES = [
-  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts" },
-  { logical: "permissions", next: "permissions.ts", sveltekit: "src/lib/permissions.ts" },
+  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts", react: "schema.ts" },
+  {
+    logical: "permissions",
+    next: "permissions.ts",
+    sveltekit: "src/lib/permissions.ts",
+    react: "permissions.ts",
+  },
 ];
 
 // README sections required in every starter, in this order. Per-mode
