@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type DirectInsertResult, type Row, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  type DirectInsertResult,
+  type DirectMutationResult,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
 
 const schemaWithTodos = {
@@ -30,6 +35,10 @@ async function flushMicrotasks(): Promise<void> {
 
 function mockRow(id = "todo-1"): DirectInsertResult {
   return { id, values: [], batchId: `batch-${id}` };
+}
+
+function mockMutation(batchId = "batch-id"): DirectMutationResult {
+  return { batchId };
 }
 
 function makeClient() {
@@ -454,7 +463,7 @@ describe("JazzClient.forRequest", () => {
   it("passes transaction overlay options to runtime query for transaction reads", async () => {
     const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
       [];
-    let writeContextJson: string | undefined;
+    let writeContextJson: string | null | undefined;
 
     const runtime: Runtime = {
       insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
@@ -462,10 +471,10 @@ describe("JazzClient.forRequest", () => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
-      update: () => {},
-      updateWithSession: () => {},
-      delete: () => {},
-      deleteWithSession: () => {},
+      update: () => mockMutation(),
+      updateWithSession: () => mockMutation(),
+      delete: () => mockMutation(),
+      deleteWithSession: () => mockMutation(),
       query: async (
         queryJson: string,
         sessionJson?: string | null,
