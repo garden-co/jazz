@@ -35,7 +35,8 @@ pub struct Session {
     /// User-defined claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
     pub claims: JsonValue,
     /// Auth mode (external / local-first / anonymous). Derived from JWT `iss`.
-    #[serde(default)]
+    /// Accepts `authMode` (camelCase) on the wire for parity with the TS client.
+    #[serde(default, alias = "authMode")]
     pub auth_mode: AuthMode,
 }
 
@@ -387,6 +388,13 @@ mod tests {
             let back: Session = serde_json::from_str(&json).unwrap();
             assert_eq!(back.auth_mode, mode);
         }
+    }
+
+    #[test]
+    fn session_auth_mode_accepts_camel_case_alias() {
+        let json = r#"{"user_id":"u","claims":{},"authMode":"anonymous"}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.auth_mode, AuthMode::Anonymous);
     }
 
     #[test]

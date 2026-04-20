@@ -89,13 +89,6 @@ export const auth = betterAuth({
         expirationTime: "1h",
         issuer: APP_ORIGIN,
         getSubject: ({ user }: { user: { id: string } }) => user.id,
-        // Tell the Jazz server which principal this external JWT maps to.
-        // Without this, the server would derive a namespaced external ID from
-        // the issuer + subject, which wouldn't match the $createdBy value
-        // stored by the anonymous localFirst client.
-        definePayload: ({ user }: { user: { id: string } }) => ({
-          jazz_principal_id: user.id,
-        }),
       },
     }),
     // sveltekitCookies must be the last plugin
