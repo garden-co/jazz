@@ -32,6 +32,7 @@ pub use runtime_tokio as jazz_tokio;
 
 pub mod transport_protocol;
 pub use transport_protocol as jazz_transport;
+pub mod peer_stream_pump;
 pub mod transport_manager;
 #[cfg(feature = "transport-websocket")]
 pub mod ws_stream;
