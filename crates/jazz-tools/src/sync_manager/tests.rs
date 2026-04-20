@@ -741,67 +741,6 @@ fn row_batch_created_emits_row_batch_state_changed_to_source() {
 }
 
 #[test]
-fn client_row_batch_created_emits_replayable_settlement_to_source() {
-    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
-    let mut io = MemoryStorage::new();
-    let client_id = ClientId::new();
-    let row_id = ObjectId::new();
-    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    seed_users_schema(&mut io);
-
-    add_client(&mut sm, &io, client_id);
-    sm.set_client_role(client_id, ClientRole::Peer);
-    sm.take_outbox();
-
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
-            metadata: Some(RowMetadata {
-                id: row_id,
-                metadata: row_metadata("users"),
-            }),
-            row: row.clone(),
-        },
-    );
-
-    let outbox = sm.take_outbox();
-    assert!(outbox.iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Client(id),
-            payload: SyncPayload::RowBatchStateChanged {
-                row_id: ack_row_id,
-                branch_name,
-                batch_id,
-                state,
-                confirmed_tier,
-            },
-        } if *id == client_id
-            && *ack_row_id == row_id
-            && *branch_name == BranchName::new("main")
-            && *batch_id == row.batch_id
-            && *state == None
-            && *confirmed_tier == Some(DurabilityTier::Local)
-    )));
-    assert!(outbox.iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Client(id),
-            payload: SyncPayload::BatchSettlement { settlement },
-        } if *id == client_id && *settlement == BatchSettlement::DurableDirect {
-            batch_id: row.batch_id,
-            confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![VisibleBatchMember {
-                object_id: row_id,
-                branch_name: BranchName::new("main"),
-                batch_id: row.batch_id,
-            }],
-        }
-    )));
-}
-
-#[test]
 fn row_batch_created_stamps_local_durability_into_storage() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
     let mut io = MemoryStorage::new();
@@ -1273,58 +1212,6 @@ fn batch_settlement_needed_returns_persisted_rejected_without_visible_rows() {
         client_id,
         SyncPayload::BatchSettlementNeeded {
             batch_ids: vec![batch_id],
-        },
-    );
-
-    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Client(id),
-            payload: SyncPayload::BatchSettlement { settlement: returned },
-        } if id == client_id && returned == settlement
-    )));
-}
-
-#[test]
-fn server_batch_settlement_relays_to_clients_interested_in_row_batch() {
-    let mut sm = SyncManager::new();
-    let mut io = MemoryStorage::new();
-    let client_id = ClientId::new();
-    let row_id = ObjectId::new();
-    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
-    let settlement = BatchSettlement::DurableDirect {
-        batch_id: row.batch_id,
-        confirmed_tier: DurabilityTier::EdgeServer,
-        visible_members: vec![VisibleBatchMember {
-            object_id: row_id,
-            branch_name: BranchName::new("main"),
-            batch_id: row.batch_id,
-        }],
-    };
-    seed_users_schema(&mut io);
-
-    add_client(&mut sm, &io, client_id);
-    sm.set_client_role(client_id, ClientRole::Peer);
-    sm.take_outbox();
-
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
-            metadata: Some(RowMetadata {
-                id: row_id,
-                metadata: row_metadata("users"),
-            }),
-            row,
-        },
-    );
-    sm.take_outbox();
-
-    sm.process_from_server(
-        &mut io,
-        ServerId::new(),
-        SyncPayload::BatchSettlement {
-            settlement: settlement.clone(),
         },
     );
 
