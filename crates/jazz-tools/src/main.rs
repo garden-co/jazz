@@ -35,6 +35,29 @@ fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> b
     }
 }
 
+fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("JWT public key cannot be empty".to_string());
+    }
+
+    if trimmed.starts_with('{') || trimmed.starts_with("-----BEGIN") {
+        return Ok(trimmed.to_string());
+    }
+
+    let path = std::path::Path::new(trimmed);
+    if path.exists() {
+        return std::fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read JWT public key file '{}': {error}",
+                path.display()
+            )
+        });
+    }
+
+    Ok(trimmed.to_string())
+}
+
 #[derive(Parser)]
 #[command(name = "jazz-tools")]
 #[command(bin_name = "jazz-tools")]
@@ -77,6 +100,12 @@ enum Commands {
         /// URL to fetch JWKS keys for JWT validation (production)
         #[arg(long, env = "JAZZ_JWKS_URL")]
         jwks_url: Option<String>,
+
+        /// Single JWK JSON object or PEM public key for JWT validation.
+        ///
+        /// Accepts inline contents or a path to a file containing the key.
+        #[arg(long, env = "JAZZ_JWT_PUBLIC_KEY", conflicts_with = "jwks_url")]
+        jwt_public_key: Option<String>,
 
         /// Cookie name used for browser auth on the `/ws` upgrade.
         #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
@@ -143,6 +172,7 @@ async fn main() {
             data_dir,
             in_memory,
             jwks_url,
+            jwt_public_key,
             auth_cookie_name,
             allow_local_first_auth,
             backend_secret,
@@ -155,9 +185,21 @@ async fn main() {
             let node_env_mode = resolve_node_env_mode();
             let allow_local_first_auth =
                 resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
+            let jwt_public_key = match jwt_public_key {
+                Some(value) => match resolve_jwt_public_key_input(value) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        eprintln!("Server error: {error}");
+                        shutdown_tracing();
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
 
             let auth_config = AuthConfig {
                 jwks_url,
+                jwt_public_key,
                 auth_cookie_name,
                 allow_local_first_auth,
                 backend_secret,
@@ -239,6 +281,23 @@ mod tests {
                 allow_local_first_auth,
                 ..
             } => assert!(allow_local_first_auth),
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_parses_jwt_public_key_flag() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "test-app",
+            "--jwt-public-key",
+            r#"{"kty":"oct","kid":"test-kid","alg":"HS256","k":"c2VjcmV0"}"#,
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server { .. } => {}
             _ => panic!("expected server command"),
         }
     }

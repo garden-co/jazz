@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type Db } from "jazz-tools/backend";
+import { createJazzContext, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -55,6 +55,7 @@ export interface TodoServerConfig {
   backendSecret?: string;
   adminSecret?: string;
   jwksUrl?: string;
+  jwtPublicKey?: BackendJwtPublicKey;
   allowLocalFirstAuth?: boolean;
 }
 
@@ -75,6 +76,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
   const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
+  const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
   const allowLocalFirstAuth =
     config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
 
@@ -94,6 +96,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     backendSecret,
     adminSecret,
     jwksUrl,
+    jwtPublicKey,
     allowLocalFirstAuth,
     env: "dev",
     userBranch: "main",

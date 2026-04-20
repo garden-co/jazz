@@ -1,4 +1,5 @@
 import { NapiRuntime } from "jazz-napi";
+import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -17,6 +18,7 @@ export interface BackendQuerySchemaSource {
 }
 
 export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuerySchemaSource;
+export type BackendJwtPublicKey = JWK | string;
 
 export type BackendDriver =
   | {
@@ -47,6 +49,8 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   tier?: "local" | "edge" | "global";
   /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
   jwksUrl?: string;
+  /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
+  jwtPublicKey?: BackendJwtPublicKey;
   /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
@@ -58,6 +62,12 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
+  }
+
+  if (config.jwksUrl !== undefined && config.jwtPublicKey !== undefined) {
+    throw new Error(
+      "Backend auth config cannot set both jwksUrl and jwtPublicKey. Pick one external JWT verification mode.",
+    );
   }
 }
 
@@ -288,6 +298,7 @@ export class JazzContext {
     return await resolveRequestSession(request, {
       appId: this.config.appId,
       jwksUrl: this.config.jwksUrl,
+      jwtPublicKey: this.config.jwtPublicKey,
       allowLocalFirstAuth: this.config.allowLocalFirstAuth,
     });
   }

@@ -107,6 +107,20 @@ impl TestServer {
         Self::start_inner(0, data_dir, jwks_server, false, vec![]).await
     }
 
+    /// Start a test server with a single static JWT verification key instead of JWKS.
+    pub async fn start_with_jwt_public_key(public_key: Value) -> Self {
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
+        Self::start_inner(
+            0,
+            data_dir,
+            jwks_server,
+            false,
+            vec![("JAZZ_JWT_PUBLIC_KEY", public_key.to_string())],
+        )
+        .await
+    }
+
     /// Start a test server with programmable JWKS responses.
     ///
     /// The JWKS server returns `responses[N]` for the Nth request,

@@ -2,6 +2,7 @@ export {
   createJazzContext,
   JazzContext,
   type BackendContextConfig,
+  type BackendJwtPublicKey,
   type BackendQuerySchemaSource,
   type BackendSchemaInput,
   type BackendSchemaSource,
