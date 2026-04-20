@@ -152,6 +152,7 @@ Use an explicit transaction when several writes should settle together after an 
 const tx = db.beginTransaction(app.todos);
 
 tx.insert(app.todos, { title: "Draft copy", done: false });
+const stagedDrafts = await tx.all(app.todos.where({ done: false }));
 tx.update(app.todos, todoId, { done: true });
 
 const batchId = tx.commit();
@@ -169,4 +170,5 @@ batch.update(app.todos, todoId, { done: true });
 console.log(batch.batchId());
 ```
 
-Both builders can also issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.
+`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
+Both builders can issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.

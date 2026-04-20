@@ -1915,6 +1915,27 @@ fn execute_runtime_query_with_durability_and_propagation(
     }
 }
 
+fn execute_runtime_query_with_local_overlay(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+    durability: ReadDurabilityOptions,
+    propagation: crate::sync_manager::QueryPropagation,
+    overlay: QueryLocalOverlay,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    let mut future =
+        core.query_with_local_overlay(query, session, durability, propagation, overlay);
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => results,
+        Poll::Ready(Err(err)) => panic!("query should succeed: {err:?}"),
+        Poll::Pending => panic!("query should resolve immediately"),
+    }
+}
+
 fn decode_added_rows(delta: &SubscriptionDelta) -> Vec<(ObjectId, Vec<Value>)> {
     delta
         .ordered_delta
@@ -6452,6 +6473,493 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
                 "Immediate local updates should keep the local row visible"
             );
             assert_eq!(results[0].0, id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_local_transaction_overlay_shows_only_the_requested_staged_insert() {
+    let mut core = create_runtime_with_schema(test_schema(), "query-local-transaction-overlay");
+    let branch_name = core.schema_manager().branch_name();
+
+    let alice_batch = BatchId::new();
+    let bob_batch = BatchId::new();
+
+    let alice_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(alice_batch),
+        target_branch_name: None,
+    };
+    let bob_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(bob_batch),
+        target_branch_name: None,
+    };
+
+    let ((alice_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "alice-draft"),
+            Some(&alice_context),
+        )
+        .unwrap();
+    let ((_bob_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "bob-draft"),
+            Some(&bob_context),
+        )
+        .unwrap();
+
+    let alice_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id: alice_batch,
+            branch_name,
+            row_ids: vec![alice_id],
+        },
+    );
+
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].0, alice_id);
+    assert_eq!(alice_rows[0].1[1], Value::Text("alice-draft".into()));
+}
+
+#[test]
+fn rc_query_local_transaction_overlay_keeps_same_row_updates_isolated_by_batch() {
+    let mut core = create_runtime_with_schema(test_schema(), "query-local-transaction-same-row");
+    let branch_name = core.schema_manager().branch_name();
+
+    let ((row_id, _), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "shared"), None)
+        .unwrap();
+
+    let alice_batch = BatchId::new();
+    let bob_batch = BatchId::new();
+
+    let alice_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(alice_batch),
+        target_branch_name: None,
+    };
+    let bob_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(bob_batch),
+        target_branch_name: None,
+    };
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("alice-draft".into()))],
+        Some(&alice_context),
+    )
+    .unwrap();
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("bob-draft".into()))],
+        Some(&bob_context),
+    )
+    .unwrap();
+
+    let visible_rows = execute_runtime_query(&mut core, Query::new("users"), None);
+    assert_eq!(visible_rows.len(), 1);
+    assert_eq!(visible_rows[0].1[1], Value::Text("shared".into()));
+
+    let alice_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id: alice_batch,
+            branch_name: branch_name.clone(),
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].1[1], Value::Text("alice-draft".into()));
+
+    let bob_rows = execute_runtime_query_with_local_overlay(
+        &mut core,
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions::default(),
+        crate::sync_manager::QueryPropagation::Full,
+        QueryLocalOverlay {
+            batch_id: bob_batch,
+            branch_name,
+            row_ids: vec![row_id],
+        },
+    );
+    assert_eq!(bob_rows.len(), 1);
+    assert_eq!(bob_rows[0].1[1], Value::Text("bob-draft".into()));
+}
+
+#[test]
+fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "session-exists-rel-query",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let ((team_id, _row_values), _) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    // Keep the policy context row local-only so the query must honor immediate
+    // local updates instead of relying on an upstream scope snapshot.
+    client.batched_tick();
+    client.sync_sender().take();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QueryScopeSnapshot { .. })),
+        "server without a published permissions head should not advertise an authoritative scope snapshot"
+    );
+    for entry in server_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the session-visible team"
+            );
+            assert_eq!(results[0].0, team_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
+ {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "backend-session-exists-rel-query",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let ((team_id, _row_values), _) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    client.batched_tick();
+    client.sync_sender().take();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    let server_outbox = server.sync_sender().take();
+    for entry in server_outbox {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
+            );
+            assert_eq!(results[0].0, team_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after frontier completion"),
+    }
+}
+
+#[test]
+fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+ {
+    let schema = session_exists_rel_teams_schema();
+    let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        structural_session_exists_rel_teams_schema(),
+        "backend-session-exists-rel-synced",
+        SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer),
+    );
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .require_authorization_schema();
+
+    let alice_session = Session::new("alice");
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    server
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Backend);
+    client.add_server(server_id);
+
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let ((team_id, _row_values), _) = client
+        .insert(
+            "teams",
+            HashMap::from([("name".to_string(), Value::Text("Alice".into()))]),
+            None,
+        )
+        .unwrap();
+    client
+        .insert(
+            "user_team_edges",
+            HashMap::from([
+                ("user_id".to_string(), Value::Text("alice".into())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
+            None,
+        )
+        .unwrap();
+
+    pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
+    for entry in server.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.batched_tick();
+    client.immediate_tick();
+
+    let mut future = client.query_with_propagation(
+        Query::new("teams"),
+        Some(alice_session),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+            strict_transactions: false,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(server_id)
+            && matches!(entry.payload, SyncPayload::QuerySubscription { .. })
+        {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    server.batched_tick();
+    server.immediate_tick();
+
+    for entry in server.sync_sender().take() {
+        if entry.destination == Destination::Client(client_id) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    client.batched_tick();
+    client.immediate_tick();
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Synced policy context rows should keep the session-visible team"
+            );
+            assert_eq!(results[0].0, team_id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
         Poll::Pending => panic!("Query should resolve after frontier completion"),

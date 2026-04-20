@@ -461,7 +461,7 @@ export class DbTransaction {
     ) => void,
   ) {}
 
-  private ensureWritable(): void {
+  private ensureActive(): void {
     if (this.committed) {
       throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already committed`);
     }
@@ -474,6 +474,10 @@ export class DbTransaction {
       normalizeRuntimeSchema(this.client.getSchema()),
       table._table,
     );
+  }
+
+  private assertOwnsQuery<T>(query: QueryBuilder<T>): void {
+    this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
   }
 
   private wrapPersistedWrite<T>(
@@ -502,7 +506,7 @@ export class DbTransaction {
   }
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
-    this.ensureWritable();
+    this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -521,7 +525,7 @@ export class DbTransaction {
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
-    this.ensureWritable();
+    this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -534,7 +538,7 @@ export class DbTransaction {
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
-    this.ensureWritable();
+    this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -550,7 +554,7 @@ export class DbTransaction {
     data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
-    this.ensureWritable();
+    this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
@@ -564,7 +568,7 @@ export class DbTransaction {
   }
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
-    this.ensureWritable();
+    this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     const result = this.runtimeTransaction.delete(id);
     return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
@@ -575,13 +579,35 @@ export class DbTransaction {
     id: string,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<void> {
-    this.ensureWritable();
+    this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
     return this.wrapPersistedWrite(
       pendingWrite as RuntimePersistedWrite<Row | void>,
       () => undefined,
     );
+  }
+
+  async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    this.ensureActive();
+    this.assertOwnsQuery(query);
+    const runtimeSchema = normalizeRuntimeSchema(this.client.getSchema());
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await this.runtimeTransaction.query(
+      translateQuery(builderJson, planningSchema),
+      options,
+    );
+    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+  }
+
+  async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    const results = await this.all(query, options);
+    return results[0] ?? null;
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
