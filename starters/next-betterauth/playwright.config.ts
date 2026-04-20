@@ -21,6 +21,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "pnpm dev",
+    env: { BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production" },
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: 60_000,
