@@ -38,6 +38,12 @@ declare module "jazz-wasm" {
     /** Wire the main-thread WasmRuntime outbox to the worker. */
     installOnRuntime(runtime: import("jazz-wasm").WasmRuntime): void;
 
+    /**
+     * Set (or clear) the JS callback for `Destination::Server` outbox entries.
+     * Pass `undefined` to restore leader mode (forward to worker).
+     */
+    setServerPayloadForwarder(cb: ((payload: Uint8Array) => void) | undefined): void;
+
     // Callback setters (worker → main).
     set_on_ready(cb: () => void): void;
     /** Called with a Uint8Array when a sync frame arrives from the worker. */
@@ -51,21 +57,6 @@ declare module "jazz-wasm" {
     set_on_error(cb: (msg: string) => void): void;
   }
 
-  type SyncOutboxCallbackArgs =
-    | [
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-      ]
-    | [
-        err: unknown,
-        destinationKind: "server" | "client",
-        destinationId: string,
-        payload: string | Uint8Array,
-        isCatalogue: boolean,
-      ];
-  type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
 
   export default function init(input?: unknown): Promise<void>;
@@ -148,7 +139,6 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-    onSyncMessageToSend(callback: SyncOutboxCallback): void;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
     addClient(): string;

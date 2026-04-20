@@ -6,17 +6,15 @@
  * as the "server" for the main thread's runtime.
  *
  * The WorkerClient owns the postMessage/onmessage wire protocol (binary
- * WorkerFrame encoding). This shim preserves:
- *   - Phase state machine (idle → initializing → ready → …)
- *   - pendingSyncPayloadsForWorker + flushPendingSyncToWorker
- *   - upstreamServerReady deferred promise
- *   - serverPayloadForwarder callback
+ * WorkerFrame encoding) AND the outbox drainer: `installOnRuntime` hooks
+ * directly into the Rust RuntimeCore outbox so all outbound sync messages
+ * (client- and server-bound) are routed through the WorkerClient without
+ * going via the TS `onSyncMessageToSend` callback.
  */
 
 import type { Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
-import { createSyncOutboxRouter } from "./sync-transport.js";
 import { WorkerClient } from "jazz-wasm";
 
 /**
@@ -69,11 +67,10 @@ interface WorkerBridgeState {
   upstreamServerConnected: boolean;
   upstreamServerReady: Promise<void>;
   resolveUpstreamServerReady: (() => void) | null;
-  pendingSyncPayloadsForWorker: Uint8Array[];
-  syncBatchFlushQueued: boolean;
+  /** True while a server-payload forwarder is installed (follower mode). */
+  hasServerPayloadForwarder: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
-  serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
 function createDeferredPromise(): { promise: Promise<void>; resolve: () => void } {
@@ -109,12 +106,16 @@ export class WorkerBridge {
       upstreamServerConnected: false,
       upstreamServerReady: upstreamReady.promise,
       resolveUpstreamServerReady: upstreamReady.resolve,
-      pendingSyncPayloadsForWorker: [],
-      syncBatchFlushQueued: false,
+      hasServerPayloadForwarder: false,
       peerSyncListener: null,
       authFailureListener: null,
-      serverPayloadForwarder: null,
     };
+
+    // Wire the Rust outbox drainer: all outbound sync messages (client- and
+    // server-bound) are handled by WorkerClient.installOnRuntime.  Server-
+    // bound entries go to the worker (leader mode) or to the JS forwarder
+    // set via setServerPayloadForwarder (follower mode).
+    this.client.installOnRuntime(this.runtime as any);
 
     // Wire worker → main: incoming sync messages from worker
     this.client.set_on_sync((bytes: Uint8Array) => {
@@ -140,24 +141,6 @@ export class WorkerBridge {
     this.client.set_on_auth_failed((reason: string) => {
       this.state.authFailureListener?.(reason as AuthFailureReason);
     });
-
-    // Wire main → worker: outgoing sync messages from runtime via WorkerClient outbox.
-    // The WorkerClient.installOnRuntime installs a ClientOutboxHandle on the Rust core
-    // so server-bound payloads are encoded as WorkerFrame::Sync and sent to the worker.
-    // We still need the TS-level router for the serverPayloadForwarder path.
-    this.runtime.onSyncMessageToSend?.(
-      createSyncOutboxRouter({
-        onServerPayload: (payload) => {
-          if (this.isDisposedLike()) return;
-
-          if (this.state.serverPayloadForwarder) {
-            this.state.serverPayloadForwarder(payload as Uint8Array);
-          } else {
-            this.enqueueSyncMessageForWorker(payload as Uint8Array);
-          }
-        },
-      }),
-    );
 
     // Register a server so the runtime sends sync messages to it
     this.runtime.addServer();
@@ -212,7 +195,6 @@ export class WorkerBridge {
           throw new Error("Worker init response arrived after bridge left initializing state");
         }
         this.transition({ type: "INIT_OK", clientId });
-        this.flushPendingSyncToWorker();
         return clientId;
       })
       .catch((error: unknown) => {
@@ -264,14 +246,21 @@ export class WorkerBridge {
     return this.state.workerClientId;
   }
 
+  /**
+   * Set (or clear) the JS callback that receives `Destination::Server` outbox
+   * entries.  When set (follower / leader-election hand-off mode), server-bound
+   * payloads are passed to `forwarder` instead of being sent to the worker.
+   * Pass `null` to restore leader mode.
+   */
   setServerPayloadForwarder(forwarder: ((payload: Uint8Array) => void) | null): void {
     if (this.isDisposedLike()) return;
-    this.state.serverPayloadForwarder = forwarder;
+    this.state.hasServerPayloadForwarder = forwarder !== null;
+    this.client.setServerPayloadForwarder(forwarder ?? undefined);
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {
     if (!this.state.expectsUpstreamServer) return;
-    if (this.state.serverPayloadForwarder) return;
+    if (this.state.hasServerPayloadForwarder) return;
     if (this.state.upstreamServerConnected) return;
     await this.state.upstreamServerReady;
   }
@@ -323,37 +312,6 @@ export class WorkerBridge {
     this.client.peer_close(peerId);
   }
 
-  private enqueueSyncMessageForWorker(payload: Uint8Array): void {
-    if (this.isDisposedLike()) return;
-
-    this.state.pendingSyncPayloadsForWorker.push(payload);
-    if (this.state.syncBatchFlushQueued) return;
-
-    this.state.syncBatchFlushQueued = true;
-    queueMicrotask(() => {
-      if (this.isDisposedLike()) {
-        this.state.syncBatchFlushQueued = false;
-        this.state.pendingSyncPayloadsForWorker = [];
-        return;
-      }
-      this.state.syncBatchFlushQueued = false;
-      this.flushPendingSyncToWorker();
-    });
-  }
-
-  private flushPendingSyncToWorker(): void {
-    if (this.state.phase !== "ready" || this.state.pendingSyncPayloadsForWorker.length === 0) {
-      return;
-    }
-
-    const payloads = this.state.pendingSyncPayloadsForWorker;
-    this.state.pendingSyncPayloadsForWorker = [];
-
-    for (const bytes of payloads) {
-      this.client.send_sync(bytes);
-    }
-  }
-
   private markUpstreamServerConnected(): void {
     this.state.upstreamServerConnected = true;
     const resolver = this.state.resolveUpstreamServerReady;
@@ -394,7 +352,6 @@ export class WorkerBridge {
       case "INIT_FAILED":
         if (this.state.phase !== "initializing") return;
         this.state.phase = "failed";
-        this.state.syncBatchFlushQueued = false;
         return;
       case "SHUTDOWN_CALLED":
         if (this.state.phase === "disposed" || this.state.phase === "shutting-down") return;
@@ -405,16 +362,7 @@ export class WorkerBridge {
       case "SHUTDOWN_FINISHED":
         if (this.state.phase === "disposed") return;
         this.state.phase = "disposed";
-        this.disposeInternals();
         return;
     }
-  }
-
-  private disposeInternals(): void {
-    this.state.pendingSyncPayloadsForWorker = [];
-    this.state.serverPayloadForwarder = null;
-    this.state.peerSyncListener = null;
-    this.state.syncBatchFlushQueued = false;
-    this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }

@@ -191,6 +191,7 @@ vi.mock("jazz-wasm", () => {
     private initResolve: ((id: string) => void) | null = null;
     private initReject: ((e: Error) => void) | null = null;
     private shutdownResolve: (() => void) | null = null;
+    private serverPayloadForwarderCb: ((p: Uint8Array) => void) | undefined = undefined;
 
     constructor(worker: any) {
       this.underlying = worker;
@@ -293,6 +294,9 @@ vi.mock("jazz-wasm", () => {
       this.underlying.postMessage({ type: "simulate-crash" });
     }
     installOnRuntime(_runtime: unknown): void {}
+    setServerPayloadForwarder(cb: ((p: Uint8Array) => void) | undefined): void {
+      this.serverPayloadForwarderCb = cb;
+    }
     set_on_ready(_cb: () => void): void {}
     set_on_sync(cb: (b: Uint8Array) => void): void {
       this.onSyncCb = cb;
@@ -317,13 +321,9 @@ vi.mock("jazz-wasm", () => {
 // ---------------------------------------------------------------------------
 
 function createRuntimeHarness() {
-  let outboundHandler: ((...args: unknown[]) => void) | null = null;
   const receivedFromWorker: Uint8Array[] = [];
 
   const runtime = {
-    onSyncMessageToSend(handler: (...args: unknown[]) => void) {
-      outboundHandler = handler;
-    },
     onSyncMessageReceived(payload: Uint8Array) {
       receivedFromWorker.push(payload);
     },
@@ -334,17 +334,6 @@ function createRuntimeHarness() {
   return {
     runtime,
     receivedFromWorker,
-    emitServerPayload(payload: unknown) {
-      if (!outboundHandler) {
-        throw new Error("Runtime sync handler is not installed");
-      }
-      outboundHandler(
-        "server",
-        "server-1",
-        new TextEncoder().encode(JSON.stringify(payload)),
-        false,
-      );
-    },
   };
 }
 
@@ -361,48 +350,39 @@ function makeBridgeOptions(): WorkerBridgeOptions {
 describe("WorkerBridge race harness", () => {
   const enc = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
 
-  it("WB-U01 queues outbound sync until init completes", async () => {
+  it("WB-U01 init completes and bridge transitions to ready", async () => {
+    // Outbound sync buffering before init is now owned by the Rust WorkerClient
+    // (installOnRuntime drainer) and the WorkerHost pending_sync_messages buffer.
+    // The TS bridge transitions to ready and returns the assigned client id.
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
-    const { runtime, emitServerPayload } = createRuntimeHarness();
+    const { runtime } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
     const initPromise = bridge.init(makeBridgeOptions());
 
-    emitServerPayload({ kind: "sub", seq: 1 });
-    emitServerPayload({ kind: "sub", seq: 2 });
-
     expect(worker.script.droppedSyncPayloads).toEqual([]);
-    expect(worker.script.receivedSyncPayloads).toEqual([]);
 
     worker.script.completeInit("worker-client-1");
     await expect(initPromise).resolves.toBe("worker-client-1");
     expect(bridge.getWorkerClientId()).toBe("worker-client-1");
-
-    expect(worker.script.receivedSyncPayloads).toEqual([
-      enc({ kind: "sub", seq: 1 }),
-      enc({ kind: "sub", seq: 2 }),
-    ]);
+    expect((bridge as any).state.phase).toBe("ready");
   });
 
-  it("WB-U02 preserves outbound ordering across init boundary", async () => {
+  it("WB-U02 init memoizes in-flight promise across the init boundary", async () => {
+    // The TS bridge memoizes the init promise.  Outbound sync ordering across
+    // the init boundary is guaranteed by the Rust WorkerClient drainer.
     const worker = new FakeWorker({ dropSyncBeforeInit: true });
-    const { runtime, emitServerPayload } = createRuntimeHarness();
+    const { runtime } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
-    const initPromise = bridge.init(makeBridgeOptions());
+    const initPromiseA = bridge.init(makeBridgeOptions());
+    const initPromiseB = bridge.init(makeBridgeOptions());
+    expect(initPromiseA).toBe(initPromiseB);
 
-    emitServerPayload({ kind: "sub", seq: 1 });
-    emitServerPayload({ kind: "sub", seq: 2 });
     worker.script.completeInit("worker-client-2");
-    await initPromise;
-    emitServerPayload({ kind: "sub", seq: 3 });
-    await Promise.resolve();
+    await initPromiseA;
 
-    expect(worker.script.receivedSyncPayloads).toEqual([
-      enc({ kind: "sub", seq: 1 }),
-      enc({ kind: "sub", seq: 2 }),
-      enc({ kind: "sub", seq: 3 }),
-    ]);
+    expect(bridge.getWorkerClientId()).toBe("worker-client-2");
   });
 
   it("WB-U03 does not miss synchronous init-ok responses", async () => {
@@ -488,24 +468,20 @@ describe("WorkerBridge race harness", () => {
     await expect(initPromiseB).resolves.toBe("worker-client-5");
   });
 
-  it("WB-U06 init failure transitions state and preserves queued sync", async () => {
+  it("WB-U06 init failure transitions bridge to failed state", async () => {
+    // When init fails, the bridge moves to "failed". Outbound sync queuing is
+    // owned by the Rust WorkerClient drainer and WorkerHost; the TS bridge does
+    // not buffer payloads.
     const worker = new FakeWorker();
-    const { runtime, emitServerPayload } = createRuntimeHarness();
+    const { runtime } = createRuntimeHarness();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtime);
 
     const initPromise = bridge.init(makeBridgeOptions());
-    emitServerPayload({ kind: "sub", seq: 1 });
-    emitServerPayload({ kind: "sub", seq: 2 });
 
     worker.script.failInit("boom");
     await expect(initPromise).rejects.toThrow("boom");
 
     expect((bridge as any).state.phase).toBe("failed");
-    expect((bridge as any).state.pendingSyncPayloadsForWorker).toEqual([
-      enc({ kind: "sub", seq: 1 }),
-      enc({ kind: "sub", seq: 2 }),
-    ]);
-    expect(worker.script.receivedSyncPayloads).toEqual([]);
   });
 
   it("WB-U09 init times out after the bridge timeout window", async () => {
