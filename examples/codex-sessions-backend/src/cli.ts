@@ -230,6 +230,7 @@ interface JAgentRunSummaryRow {
 const SESSION_SERVICE_PRIME_BUDGET_MS = 2_000;
 const SESSION_SERVICE_STARTUP_WAIT_MS = 2_000;
 const SESSION_SERVICE_STALE_LOCK_GRACE_MS = 30_000;
+const SESSION_SERVICE_REQUEST_TIMEOUT_MS = 2_500;
 const ACTIVE_SESSION_RECENT_SYNC_LIMIT = 32;
 const ACTIVE_SESSION_RECENT_SYNC_BUDGET_MS = 400;
 
@@ -326,12 +327,6 @@ async function resolvePersistentDataPath(dataPath: string): Promise<string> {
   });
 
   if (currentStat?.isDirectory()) {
-    const directoryEntries = (await readdir(normalizedPath)).filter(
-      (entry) =>
-        entry !== ".DS_Store" &&
-        entry !== ".gitkeep" &&
-        entry !== ".keep",
-    );
     const fallbackPath = legacyDirectoryFallbackPath(normalizedPath);
     const fallbackStat = await stat(fallbackPath).catch((error: unknown) => {
       const code =
@@ -348,22 +343,11 @@ async function resolvePersistentDataPath(dataPath: string): Promise<string> {
         `Jazz data path ${normalizedPath} is a directory, and fallback path ${fallbackPath} is also a directory`,
       );
     }
-
-    if (fallbackStat?.isFile() && directoryEntries.length === 0) {
-      await mkdir(dirname(fallbackPath), { recursive: true });
-      console.error(
-        `warning: Jazz2 data path ${normalizedPath} is an empty directory; using legacy fallback ${fallbackPath} instead`,
-      );
-      return fallbackPath;
-    }
-
-    if (fallbackStat?.isFile()) {
-      console.error(
-        `warning: legacy Jazz2 data file ${fallbackPath} exists, but using populated store directory ${normalizedPath}`,
-      );
-    }
-
-    return normalizedPath;
+    await mkdir(dirname(fallbackPath), { recursive: true });
+    console.error(
+      `warning: Jazz2 data path ${normalizedPath} is a directory; using ${fallbackPath} instead`,
+    );
+    return fallbackPath;
   }
 
   await mkdir(dirname(normalizedPath), { recursive: true });
@@ -1482,6 +1466,53 @@ function writeSessionServiceResponse(socket: Socket, response: SessionServiceRes
   socket.write(`${JSON.stringify(response)}\n`);
 }
 
+function summarizeSessionServiceRequest(request: SessionServiceRequest): string {
+  const details = [
+    request.sessionId ? `sessionId=${request.sessionId}` : null,
+    request.projectRoot ? `projectRoot=${request.projectRoot}` : null,
+    request.prefix ? `prefix=${request.prefix}` : null,
+    request.runId ? `runId=${request.runId}` : null,
+  ].filter((value): value is string => !!value);
+
+  return details.length > 0
+    ? `${request.method} (${details.join(", ")})`
+    : request.method;
+}
+
+async function dispatchSessionServiceRequestWithTimeout(
+  store: ReturnType<typeof createCodexSessionStore>,
+  request: SessionServiceRequest,
+  dataPath: string,
+  codexHome: string,
+  sessionSyncScheduler: SessionSyncScheduler,
+  catalogPrimer: CatalogPrimer,
+  recentRolloutSyncScheduler: RecentRolloutSyncScheduler,
+  runtimeInfo: SessionServiceRuntimeInfo,
+): Promise<unknown> {
+  const timeoutSentinel = Symbol("session-service-timeout");
+  const result = await Promise.race([
+    dispatchSessionServiceRequest(
+      store,
+      request,
+      dataPath,
+      codexHome,
+      sessionSyncScheduler,
+      catalogPrimer,
+      recentRolloutSyncScheduler,
+      runtimeInfo,
+    ),
+    delay(SESSION_SERVICE_REQUEST_TIMEOUT_MS).then(() => timeoutSentinel),
+  ]);
+
+  if (result === timeoutSentinel) {
+    throw new Error(
+      `Jazz2 session service request timed out after ${SESSION_SERVICE_REQUEST_TIMEOUT_MS}ms: ${summarizeSessionServiceRequest(request)}`,
+    );
+  }
+
+  return result;
+}
+
 function handleSessionServiceConnection(
   socket: Socket,
   store: ReturnType<typeof createCodexSessionStore>,
@@ -1537,7 +1568,7 @@ function handleSessionServiceConnection(
         }
 
         try {
-          const result = await dispatchSessionServiceRequest(
+          const result = await dispatchSessionServiceRequestWithTimeout(
             store,
             request,
             dataPath,
