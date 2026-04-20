@@ -53,6 +53,7 @@ pub mod post_message_stream;
 pub mod query;
 pub mod runtime;
 pub mod types;
+pub mod worker_client;
 pub mod worker_host;
 #[cfg(target_arch = "wasm32")]
 pub mod ws_stream;
@@ -61,6 +62,8 @@ pub mod ws_stream;
 pub use driver_bridge::JsStorageDriver;
 pub use query::WasmQueryBuilder;
 pub use runtime::WasmRuntime;
+#[cfg(target_arch = "wasm32")]
+pub use worker_client::WorkerClient;
 
 use wasm_bindgen::prelude::*;
 

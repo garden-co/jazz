@@ -24,6 +24,7 @@ pub enum AuthFailureReason {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct InitPayload {
     pub schema_json: String,
     pub app_id: String,
