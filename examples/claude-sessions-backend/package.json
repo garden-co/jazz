@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "build:schema": "tsx scripts/generate-app.mjs",
     "serve": "tsx src/cli.ts serve",
     "test": "vitest run tests"
   },

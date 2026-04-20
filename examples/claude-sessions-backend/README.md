@@ -22,6 +22,7 @@ way Codex sessions are treated.
 ## Run
 
 ```bash
+pnpm --dir examples/claude-sessions-backend build:schema
 pnpm --dir examples/claude-sessions-backend build
 node examples/claude-sessions-backend/dist/src/cli.js serve
 ```
@@ -38,10 +39,20 @@ pnpm --dir examples/claude-sessions-backend serve
 pnpm --dir examples/claude-sessions-backend test
 ```
 
+## Schema Codegen
+
+```bash
+pnpm --dir examples/claude-sessions-backend build:schema
+```
+
+This regenerates `schema/app.ts` from `schema/current.ts` using the branch's
+checked-in `jazz-tools` codegen path.
+
 ## Next phases
 
 - Phase 2: Jazz2 CoValue schema + projector so Claude sessions sync through
-  the Jazz2 network the same way Codex sessions do.
+  the Jazz2 network the same way Codex sessions do. The schema codegen path is
+  now live again; the remaining work is the actual projector/storage swap.
 - Phase 3: Lin consumer `JazzClaudeSessionCompletionService` mirroring
   `JazzCodexSessionCompletionService`.
 - Phase 4: unify into a single `agent-sessions-backend` once both providers

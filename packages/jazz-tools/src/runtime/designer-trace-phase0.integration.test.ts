@@ -10,7 +10,7 @@ import {
   DESIGNER_TRACE_RUNTIME_LAYOUT,
   DESIGNER_TRACE_SYNC_TARGET,
 } from "./designer-trace-phase0.schema.js";
-import { JazzClient } from "./client.js";
+import { JazzClient, type DurabilityTier } from "./client.js";
 import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import {
   createDbFromClient,
@@ -412,7 +412,7 @@ async function waitForQueryRows<T>(
   query: QueryBuilder<T>,
   predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
-  options?: { tier?: "worker" | "edge" | "global" },
+  options?: { tier?: DurabilityTier },
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -443,7 +443,7 @@ async function waitForSubscriptionRows<T extends { id: string }>(
   query: QueryBuilder<T>,
   predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
-  options?: { tier?: "worker" | "edge" | "global" },
+  options?: { tier?: DurabilityTier },
 ): Promise<T[]> {
   return await new Promise<T[]>((resolve, reject) => {
     let unsubscribe: () => void = () => {};

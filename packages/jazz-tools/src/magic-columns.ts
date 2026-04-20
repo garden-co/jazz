@@ -3,6 +3,9 @@ import type { ColumnType } from "./drivers/types.js";
 export const RESERVED_MAGIC_COLUMN_PREFIX = "$";
 
 export const PERMISSION_INTROSPECTION_COLUMNS = ["$canRead", "$canEdit", "$canDelete"] as const;
+// Kept for compatibility with the checked-in dist/codegen generator on this branch.
+// The codegen source is not present in src/, so older dist artifacts still import this.
+export const PERMISSION_INTROSPECTION_TS_TYPE = "boolean";
 export const PROVENANCE_MAGIC_COLUMNS = [
   "$createdBy",
   "$createdAt",

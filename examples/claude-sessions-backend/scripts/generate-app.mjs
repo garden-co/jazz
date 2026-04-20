@@ -13,7 +13,7 @@ const outFile = resolve(here, "../schema/app.ts");
 // Importing schema/current.ts registers the tables via the dsl.
 await import(schemaFile);
 
-const { getCollectedSchema } = await import("jazz-tools");
+const { getCollectedSchema, schemaToWasm } = await import("jazz-tools");
 const codegenPath = resolve(
   here,
   "../../../packages/jazz-tools/dist/codegen/index.js",
@@ -22,15 +22,16 @@ const { analyzeRelations, generateClient, generateWhereInputTypes, generateQuery
   await import(codegenPath);
 
 const schema = getCollectedSchema();
-const relations = analyzeRelations(schema);
+const wasmSchema = schemaToWasm(schema);
+const relations = analyzeRelations(wasmSchema);
 
 const parts = [
   "// AUTO-GENERATED FILE - DO NOT EDIT",
   "// Regenerate via: node scripts/generate-app.mjs",
   generateClient(schema),
-  generateWhereInputTypes(schema),
-  generateQueryBuilderClasses(schema, relations),
-  generateAppExport(schema),
+  generateWhereInputTypes(wasmSchema),
+  generateQueryBuilderClasses(wasmSchema, relations),
+  generateAppExport(wasmSchema),
 ];
 writeFileSync(outFile, parts.join("\n\n") + "\n", "utf-8");
 console.log(`wrote ${outFile}`);
