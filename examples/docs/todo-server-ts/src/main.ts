@@ -150,11 +150,15 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      const { value: todo } = db.insert(schemaApp.todos, {
-        title: body.title,
-        done: false,
-        owner_id: body.owner_id ?? "anonymous",
-      });
+      const todo = await db.insertDurable(
+        schemaApp.todos,
+        {
+          title: body.title,
+          done: false,
+          owner_id: body.owner_id ?? "anonymous",
+        },
+        { tier: "edge" },
+      );
 
       res.status(201).json(todo);
 
