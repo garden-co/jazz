@@ -81,12 +81,12 @@ if (import.meta.url === new URL(process.argv[1], "file://").href) {
   console.log("Server running at", result.serverHandle.url);
   console.log("Press Ctrl-C to stop");
   console.log(
-    "Open dev inspector at http://localhost:5173/#url=" +
+    "Open dev inspector at http://localhost:5173/#serverUrl=" +
       result.serverHandle.url +
-      "&adminSecret=" +
-      result.serverHandle.adminSecret +
       "&appId=" +
-      result.serverHandle.appId,
+      result.serverHandle.appId +
+      "&adminSecret=" +
+      result.serverHandle.adminSecret,
   );
   setInterval(() => {}, 10_000_000);
 }

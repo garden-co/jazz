@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
@@ -35,6 +35,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const plugin = jazzPlugin({
       server: { port, adminSecret: "vite-test-admin" },
@@ -70,6 +71,13 @@ describe("jazzPlugin", () => {
     expect(fakeViteServer.config.env.JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.JAZZ_APP_ID).toBe(fakeViteServer.config.env.JAZZ_APP_ID);
     expect(process.env.JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+          `http://127.0.0.1:${port}`,
+        )}&appId=${encodeURIComponent(fakeViteServer.config.env.JAZZ_APP_ID!)}&adminSecret=vite-test-admin`,
+      ),
+    );
 
     for (const handler of closeHandlers) {
       await handler();

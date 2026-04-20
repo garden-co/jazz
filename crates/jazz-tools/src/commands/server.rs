@@ -62,7 +62,7 @@ fn build_inspector_link(port: u16, app_id: &str, admin_secret: Option<&str>) -> 
     let server_url = format!("http://localhost:{port}");
     let admin_secret_value = admin_secret.unwrap_or("");
     format!(
-        "{STANDALONE_INSPECTOR_URL}#url={}&appId={}&adminSecret={}",
+        "{STANDALONE_INSPECTOR_URL}#serverUrl={}&appId={}&adminSecret={}",
         percent_encode_fragment_value(&server_url),
         percent_encode_fragment_value(app_id),
         percent_encode_fragment_value(admin_secret_value),
@@ -94,7 +94,7 @@ mod tests {
 
         assert_eq!(
             link,
-            "https://jazz2-inspector.vercel.app/#url=http%3A%2F%2Flocalhost%3A4200&appId=app%3Aone%2Ftwo&adminSecret=secret%20with%20spaces"
+            "https://jazz2-inspector.vercel.app/#serverUrl=http%3A%2F%2Flocalhost%3A4200&appId=app%3Aone%2Ftwo&adminSecret=secret%20with%20spaces"
         );
     }
 }
