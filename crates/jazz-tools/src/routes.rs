@@ -28,6 +28,8 @@ use crate::sync_manager::ClientId;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
+    // TODO: Accept app-name aliases in app-scoped route matching
+    // Nesting all non-health routes under a fixed "/apps/{state.app_id}" path makes the server only match the canonical UUID string, but JavaScript callers frequently propagate human-readable app IDs (e.g. "test-app") that are valid elsewhere via AppId::from_name(...). In that non-UUID case, the client now builds /apps/test-app/... URLs while the server only serves /apps/<derived-uuid>/..., so websocket and admin/schema requests return 404 for otherwise valid app IDs.
     let app_route_prefix = format!("/apps/{}", state.app_id);
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
