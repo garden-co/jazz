@@ -1309,17 +1309,28 @@ export class Db {
 
     const locationHref = typeof location !== "undefined" ? location.href : undefined;
 
-    // If the host app didn't pass `runtimeSources.wasmUrl`, default to the file
-    // `withJazz` copies into the app's public/ dir. Computed against the
-    // main-thread origin so the worker receives an absolute URL and doesn't
-    // need to resolve against its own (Turbopack-unreliable) self.location.
+    // Opt-in default: when a bundler plugin (e.g. `withJazz` for Next) copies
+    // the wasm into the host app and advertises the URL via
+    // NEXT_PUBLIC_JAZZ_WASM_URL, pick it up so the worker receives an
+    // absolute URL and skips the (Turbopack-unreliable) bundler default.
+    //
+    // Precedence follows RuntimeSourcesConfig: any of wasmModule / wasmSource /
+    // wasmUrl / baseUrl already supplied by the caller wins — we only fill in
+    // when none of those is set, preserving the documented resolution order
+    // for Vite/webpack/Svelte/etc. callers.
     const configRuntimeSources = this.config.runtimeSources;
+    const envWasmUrl =
+      typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_WASM_URL : undefined;
+    const hasConfiguredSource =
+      !!configRuntimeSources?.wasmUrl ||
+      !!configRuntimeSources?.baseUrl ||
+      !!resolveRuntimeConfigSyncInitInput(configRuntimeSources);
     const runtimeSources =
-      configRuntimeSources?.wasmUrl || typeof location === "undefined"
+      hasConfiguredSource || !envWasmUrl || typeof location === "undefined"
         ? configRuntimeSources
         : {
             ...configRuntimeSources,
-            wasmUrl: `${location.origin}/_jazz/jazz_wasm_bg.wasm`,
+            wasmUrl: new URL(envWasmUrl, location.href).href,
           };
 
     // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
