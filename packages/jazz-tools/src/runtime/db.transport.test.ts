@@ -83,4 +83,37 @@ describe("runtime/Db direct path upstream wiring", () => {
 
     expect((client as any).connectTransport).not.toHaveBeenCalled();
   });
+
+  it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
+    const client = makeClientStub();
+    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      adminSecret: "admin-y",
+      driver: { type: "memory" },
+    });
+    db.exposeGetClient({
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+        policies: {
+          update: {
+            using: {
+              type: "False",
+            },
+          },
+        },
+      },
+    });
+
+    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
+    expect(connectSyncSpy.mock.calls[0]?.[1]).toMatchObject({
+      schema: {
+        todos: {
+          columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+        },
+      },
+    });
+  });
 });

@@ -7,7 +7,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -263,15 +263,11 @@ describe("Svelte Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      auth: { localFirstSecret: "7qSvV33vJ5RRj0PvggMwRHZM_DvrO4aC-FrRPHl9Oc4" },
-      adminSecret: ADMIN_SECRET,
     });
     const el2 = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      auth: { localFirstSecret: "JpMaXfvIgbjIQ7Uo-QMb6HmE144K08GB-c5qbZQp36A" },
-      adminSecret: ADMIN_SECRET,
     });
 
     // Let both app instances finish server/event-stream setup before mutating.

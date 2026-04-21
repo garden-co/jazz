@@ -28,6 +28,9 @@ async function storeStandaloneConfig(page: Page) {
 async function expectTodosTableLoaded(page: Page) {
   await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("link", { name: "Schema" })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole("checkbox", { name: /Toggle done for/ }).first()).toBeVisible({
+    timeout: 15_000,
+  });
 }
 
 async function openTodosTable(page: Page) {
@@ -136,9 +139,9 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"name": "done"')).toBeVisible();
     await expect(page.getByText('"type": "Boolean"')).toBeVisible();
     await expect(page.getByRole("heading", { name: "todos permissions" })).toBeVisible();
-    await expect(
-      page.getByText("No published sync-server permissions found for this app."),
-    ).toBeVisible();
+    await expect(page.getByText('"insert"')).toBeVisible();
+    await expect(page.getByText('"update"')).toBeVisible();
+    await expect(page.getByText('"delete"')).toBeVisible();
   });
 
   test("discards queued inline text edits without persisting them", async ({ page }) => {
@@ -219,6 +222,9 @@ test.describe("data explorer page", () => {
 
   test("filters rows to done=true and shows only checked boolean cells", async ({ page }) => {
     const visibleCheckboxesBeforeFilter = page.getByRole("checkbox", { name: /Toggle done for/ });
+    await expect
+      .poll(async () => await visibleCheckboxesBeforeFilter.count(), { timeout: 15_000 })
+      .toBeGreaterThan(0);
     const visibleCheckboxCountBeforeFilter = await visibleCheckboxesBeforeFilter.count();
     expect(visibleCheckboxCountBeforeFilter).toBeGreaterThan(0);
 
@@ -245,6 +251,7 @@ test.describe("data explorer page", () => {
     await expect(filterButton).toBeVisible();
 
     const checkboxes = page.getByRole("checkbox", { name: /Toggle done for/ });
+    await expect.poll(async () => await checkboxes.count(), { timeout: 15_000 }).toBeGreaterThan(0);
     const checkboxCount = await checkboxes.count();
     expect(checkboxCount).toBeGreaterThan(0);
 

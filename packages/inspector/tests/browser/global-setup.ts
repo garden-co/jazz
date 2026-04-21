@@ -5,6 +5,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const { serverHandle } = await runServer();
 
   const { hashes } = await fetchSchemaHashes(serverHandle.url, {
+    appId: serverHandle.appId,
     adminSecret: serverHandle.adminSecret,
   });
 

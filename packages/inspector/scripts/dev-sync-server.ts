@@ -8,7 +8,7 @@ import {
   TEST_ENV,
   TEST_PORT,
 } from "../tests/browser/test-constants.js";
-import { app } from "../tests/browser/schema.ts";
+import { app, permissions } from "../tests/browser/schema.ts";
 import { createJazzContext } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
@@ -33,7 +33,7 @@ export default async function runServer() {
   const context = createJazzContext({
     appId: serverHandle.appId,
     app: app,
-    permissions: {},
+    permissions,
     driver: { type: "memory" },
     serverUrl: serverHandle.url,
     backendSecret: serverHandle.backendSecret,
