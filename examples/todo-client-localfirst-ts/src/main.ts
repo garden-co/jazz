@@ -66,9 +66,8 @@ export async function startApp(
 
   // #region context-setup-ts-client
   const db = await createDb(resolvedConfig);
-  const session = db.getAuthState().session;
   // #endregion context-setup-ts-client
-  const sessionUserId = session?.user_id ?? null;
+  let sessionUserId = db.getAuthState().session?.user_id ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -85,7 +84,11 @@ export async function startApp(
   const btn = document.createElement("button");
   btn.type = "submit";
   btn.textContent = "Add";
-  btn.disabled = !sessionUserId;
+  const syncAuthState = (userId: string | null) => {
+    sessionUserId = userId;
+    btn.disabled = !sessionUserId;
+  };
+  syncAuthState(sessionUserId);
   const parentSelect = document.createElement("select");
   parentSelect.id = "parent-select";
   const noParentOption = document.createElement("option");
@@ -143,6 +146,9 @@ export async function startApp(
       )
       .join("");
   });
+  const stopAuthSync = db.onAuthChanged(({ session }) => {
+    syncAuthState(session?.user_id ?? null);
+  });
 
   // Add todo form
   form.addEventListener("submit", (e) => {
@@ -189,6 +195,7 @@ export async function startApp(
     db,
     destroy: async () => {
       unsubscribe();
+      stopAuthSync();
       await db.shutdown();
       container.innerHTML = "";
     },

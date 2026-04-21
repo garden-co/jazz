@@ -26,4 +26,16 @@ describe("createDb — anonymous mode", () => {
     expect(first).toBeTruthy();
     await db.shutdown();
   });
+
+  it("does not mint an anonymous identity when adminSecret is provided", async () => {
+    const { createDb } = await import("./db.js");
+    const db = await createDb({
+      appId: "test-app",
+      driver: { type: "memory" },
+      serverUrl: "ws://example.invalid",
+      adminSecret: "admin-secret",
+    });
+    expect(db.getAuthState().session).toBeNull();
+    await db.shutdown();
+  });
 });

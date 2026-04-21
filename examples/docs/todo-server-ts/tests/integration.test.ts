@@ -194,11 +194,12 @@ describe("Todo Server Integration", () => {
 
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
-      const restartUpstream = await TestingServer.start();
+      // Use an isolated upstream so CRUD test data doesn't leak into the count assertion.
+      const coldStartUpstream = await TestingServer.start();
       await pushSchemaCatalogue({
-        serverUrl: restartUpstream.url,
-        appId: restartUpstream.appId,
-        adminSecret: restartUpstream.adminSecret,
+        serverUrl: coldStartUpstream.url,
+        appId: coldStartUpstream.appId,
+        adminSecret: coldStartUpstream.adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, ".."),
       });
 
@@ -211,10 +212,10 @@ describe("Todo Server Integration", () => {
         const server1 = await startServer(
           await createServer({
             dataPath: dbPath,
-            appId: restartUpstream.appId,
-            serverUrl: restartUpstream.url,
-            backendSecret: restartUpstream.backendSecret,
-            adminSecret: restartUpstream.adminSecret,
+            appId: coldStartUpstream.appId,
+            serverUrl: coldStartUpstream.url,
+            backendSecret: coldStartUpstream.backendSecret,
+            adminSecret: coldStartUpstream.adminSecret,
           }),
           0,
         );
@@ -248,10 +249,10 @@ describe("Todo Server Integration", () => {
         const server2 = await startServer(
           await createServer({
             dataPath: dbPath,
-            appId: restartUpstream.appId,
-            serverUrl: restartUpstream.url,
-            backendSecret: restartUpstream.backendSecret,
-            adminSecret: restartUpstream.adminSecret,
+            appId: coldStartUpstream.appId,
+            serverUrl: coldStartUpstream.url,
+            backendSecret: coldStartUpstream.backendSecret,
+            adminSecret: coldStartUpstream.adminSecret,
           }),
           0,
         );
@@ -276,7 +277,7 @@ describe("Todo Server Integration", () => {
           await stopServer(server2);
         }
       } finally {
-        await restartUpstream.stop();
+        await coldStartUpstream.stop();
       }
     });
   });

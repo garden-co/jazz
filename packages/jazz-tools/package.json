@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.35",
+  "version": "2.0.0-alpha.36",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -21,6 +21,10 @@
     "./backend": {
       "types": "./dist/backend/index.d.ts",
       "default": "./dist/backend/index.js"
+    },
+    "./better-auth-adapter": {
+      "types": "./dist/better-auth-adapter/index.d.ts",
+      "default": "./dist/better-auth-adapter/index.js"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
@@ -124,6 +128,7 @@
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
+    "@better-auth/test-utils": "^1.5.5",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
@@ -133,6 +138,7 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "better-auth": "^1.5.5",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
@@ -145,6 +151,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "better-auth": "^1.5.5",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
@@ -154,6 +161,9 @@
     "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
+    "better-auth": {
+      "optional": true
+    },
     "expo": {
       "optional": true
     },

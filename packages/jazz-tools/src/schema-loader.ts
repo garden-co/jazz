@@ -205,6 +205,22 @@ async function loadPermissionsModule(filePath: string): Promise<Record<string, T
   return candidate;
 }
 
+async function tryLoadPermissionsFromSchemaModule(
+  filePath: string,
+): Promise<Record<string, TablePolicies> | undefined> {
+  const module = await loadTsModule(filePath);
+  const candidate = module.permissions ?? null;
+  if (!candidate) {
+    return undefined;
+  }
+  if (!isPermissionsMap(candidate)) {
+    throw new Error(
+      `Invalid permissions export in ${basename(filePath)}. Expected definePermissions(...).`,
+    );
+  }
+  return candidate;
+}
+
 function findInlinePolicyTables(schema: Schema): string[] {
   return schema.tables.filter((table) => table.policies).map((table) => table.name);
 }
@@ -278,18 +294,30 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
 
   const permissionsFile = join(resolved.rootDir, "permissions.ts");
   let permissions: CompiledPermissionsMap | undefined;
+  let resolvedPermissionsFile: string | undefined;
   if (await pathExists(permissionsFile)) {
+    resolvedPermissionsFile = permissionsFile;
     permissions = await loadPermissionsModule(permissionsFile);
     validatePermissionsAgainstSchema(
       schema.tables.map((table) => table.name),
       permissions,
     );
+  } else {
+    const schemaModulePermissions = await tryLoadPermissionsFromSchemaModule(resolved.schemaFile);
+    if (schemaModulePermissions) {
+      resolvedPermissionsFile = resolved.schemaFile;
+      permissions = schemaModulePermissions;
+      validatePermissionsAgainstSchema(
+        schema.tables.map((table) => table.name),
+        permissions,
+      );
+    }
   }
 
   return {
     rootDir: resolved.rootDir,
     schemaFile: resolved.schemaFile,
-    permissionsFile: (await pathExists(permissionsFile)) ? permissionsFile : undefined,
+    permissionsFile: resolvedPermissionsFile,
     permissions,
     schema,
     wasmSchema: schemaToWasm(schema),

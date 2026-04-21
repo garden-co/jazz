@@ -376,6 +376,71 @@ fn tier_label_for_node_tier(tier: Option<&str>) -> &'static str {
         _ => "client",
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_OPFS_CACHE_SIZE: usize = 32 * 1024 * 1024;
+
+/// Build a `SchemaManager` from raw inputs. Shared by `open_persistent` and `open_ephemeral`.
+#[cfg(target_arch = "wasm32")]
+fn build_schema_manager(
+    schema_json: &str,
+    app_id: AppId,
+    env: &str,
+    user_branch: &str,
+    tier: Option<&str>,
+) -> Result<SchemaManager, JsError> {
+    let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+        .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+    let node_tiers = parse_node_durability_tiers(tier)?;
+    let mut sync_manager = SyncManager::new();
+    if !node_tiers.is_empty() {
+        sync_manager = sync_manager.with_durability_tiers(node_tiers);
+    }
+    SchemaManager::new_with_policy_mode(
+        sync_manager,
+        runtime_schema.schema,
+        app_id,
+        env,
+        user_branch,
+        if runtime_schema.loaded_policy_bundle {
+            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
+        } else {
+            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
+        },
+    )
+    .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))
+}
+
+/// Wire up scheduler, sync sender, and `RuntimeCore` into a `WasmRuntime`.
+/// Shared by `open_persistent` and `open_ephemeral`.
+#[cfg(target_arch = "wasm32")]
+fn assemble_wasm_runtime(
+    schema_manager: SchemaManager,
+    storage: Box<dyn Storage>,
+    tier_label: &'static str,
+    use_binary_encoding: bool,
+) -> WasmRuntime {
+    let scheduler = WasmScheduler::new();
+    let sync_sender = JsSyncSender::new(use_binary_encoding);
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
+    core.set_tier_label(tier_label);
+    core.set_sync_sender(Box::new(sync_sender.clone()));
+    let core_rc = Rc::new(RefCell::new(core));
+    {
+        let mut core_guard = core_rc.borrow_mut();
+        core_guard
+            .scheduler_mut()
+            .set_core_ref(Rc::downgrade(&core_rc));
+    }
+    core_rc.borrow_mut().persist_schema();
+    WasmRuntime {
+        core: core_rc,
+        sync_sender,
+        upstream_server_id: RefCell::new(None),
+        tier_label,
+    }
+}
+
 // ============================================================================
 // Type alias
 // ============================================================================
@@ -1780,7 +1845,7 @@ impl WasmRuntime {
         db_name: &str,
         tier: Option<String>,
         use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsError> {
+    ) -> Result<WasmRuntime, JsValue> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
         init_tracing();
@@ -1797,42 +1862,25 @@ impl WasmRuntime {
         .entered();
         info!("opening persistent OPFS runtime");
 
-        // Parse schema
-        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
-        let schema = runtime_schema.schema;
-        // Parse optional node durability tiers
-        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
-
-        // Create sync manager
-        let mut sync_manager = SyncManager::new();
-        if !node_tiers.is_empty() {
-            sync_manager = sync_manager.with_durability_tiers(node_tiers);
-        }
-
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let mut schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
+                .map_err(JsValue::from)?;
 
-        // Create schema manager
-        let mut schema_manager = SchemaManager::new_with_policy_mode(
-            sync_manager,
-            schema,
-            app_id,
-            env,
-            user_branch,
-            if runtime_schema.loaded_policy_bundle {
-                jazz_tools::query_manager::types::RowPolicyMode::Enforcing
-            } else {
-                jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
-            },
-        )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
-
-        const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
         let storage: Box<dyn Storage> = Box::new(
-            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
+            OpfsBTreeStorage::open_opfs(db_name, DEFAULT_OPFS_CACHE_SIZE)
                 .await
-                .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
+                .map_err(|e| {
+                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
+                        let err = js_sys::Error::new(msg);
+                        err.set_name("SecurityError");
+                        JsValue::from(err)
+                    } else {
+                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
+                    }
+                })?,
         );
+
         if let Err(error) =
             rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)
         {
@@ -1843,36 +1891,57 @@ impl WasmRuntime {
             );
         }
 
-        let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding);
-
-        // Create RuntimeCore
-        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
-        core.set_tier_label(tier_label);
-        // Install the JS-callback sender so `batched_tick` drains outbox
-        // entries to the worker bridge (no transport handle here).
-        core.set_sync_sender(Box::new(sync_sender.clone()));
-
-        // Wrap in Rc<RefCell>
-        let core_rc = Rc::new(RefCell::new(core));
-
-        // Set the core_ref on the Scheduler
-        {
-            let mut core_guard = core_rc.borrow_mut();
-            core_guard
-                .scheduler_mut()
-                .set_core_ref(Rc::downgrade(&core_rc));
-        }
-
-        // Persist schema to catalogue for server sync
-        core_rc.borrow_mut().persist_schema();
-
-        Ok(WasmRuntime {
-            core: core_rc,
-            sync_sender,
-            upstream_server_id: RefCell::new(None),
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
             tier_label,
-        })
+            use_binary_encoding,
+        ))
+    }
+
+    /// Create an ephemeral WasmRuntime backed by in-memory storage.
+    ///
+    /// Data is not persisted across page loads. Used as a fallback when OPFS
+    /// is unavailable (e.g. Firefox private browsing mode).
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openEphemeral)]
+    pub fn open_ephemeral(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+        use_binary_encoding: bool,
+    ) -> Result<WasmRuntime, JsError> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = tier_label_for_node_tier(tier.as_deref());
+        let _span = info_span!(
+            "WasmRuntime::openEphemeral",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening ephemeral in-memory runtime (OPFS unavailable)");
+
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let schema_manager =
+            build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
+
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
+
+        Ok(assemble_wasm_runtime(
+            schema_manager,
+            storage,
+            tier_label,
+            use_binary_encoding,
+        ))
     }
 }
 

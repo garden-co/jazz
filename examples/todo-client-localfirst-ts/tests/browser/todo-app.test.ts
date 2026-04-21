@@ -7,9 +7,8 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-import { app } from "../../schema.js";
-import { createDb, DbConfig } from "jazz-tools";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,6 +63,14 @@ describe("Vanilla TS Todo App E2E", () => {
 
     // Wait for the app to render
     await waitFor(() => el.querySelector("#todo-list") !== null, 5000, "App should render");
+    await waitFor(
+      () => {
+        const submitButton = el.querySelector<HTMLButtonElement>('#add-form button[type="submit"]');
+        return submitButton !== null && !submitButton.disabled;
+      },
+      5000,
+      "Todo form should be ready",
+    );
 
     return el;
   }
@@ -268,15 +275,11 @@ describe("Vanilla TS Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      auth: { localFirstSecret: "IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68" },
-      adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      auth: { localFirstSecret: "C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE" },
-      adminSecret: ADMIN_SECRET,
     });
 
     // Let both app instances finish server/event-stream setup before mutating.

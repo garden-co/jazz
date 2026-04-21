@@ -125,6 +125,22 @@ function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
 }
 
+function shouldBypassLocalPolicies(config: DbConfig): boolean {
+  return !!config.adminSecret;
+}
+
+function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
+  return Object.fromEntries(
+    Object.entries(schema).map(([tableName, tableSchema]) => [
+      tableName,
+      {
+        ...tableSchema,
+        policies: undefined,
+      },
+    ]),
+  ) as WasmSchema;
+}
+
 function trimOptionalString(value?: string | null): string | null {
   if (typeof value !== "string") {
     return null;
@@ -1156,8 +1172,12 @@ export class Db {
       throw new Error("Db runtime module is not initialized for this Db implementation");
     }
 
+    const runtimeSchema = shouldBypassLocalPolicies(this.config)
+      ? stripSchemaPolicies(schema)
+      : schema;
+
     // Use stringified schema as cache key
-    const key = serializeRuntimeSchema(schema);
+    const key = serializeRuntimeSchema(runtimeSchema);
 
     if (!this.clients.has(key)) {
       setGlobalWasmLogLevel(this.config.logLevel);
@@ -1167,7 +1187,7 @@ export class Db {
         this.wasmModule,
         {
           appId: this.config.appId,
-          schema,
+          schema: runtimeSchema,
           driver: this.config.driver,
           // In worker mode, don't connect to server directly — worker handles it
           serverUrl: this.worker ? undefined : this.config.serverUrl,
@@ -3136,8 +3156,10 @@ export async function createDb(config: DbConfig): Promise<Db> {
       nowSeconds,
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
-  } else if (!config.jwtToken && !config.cookieSession) {
+  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
+    // Admin-secret clients intentionally stay sessionless so local policy
+    // evaluation does not preempt backend-authorized transport writes.
     const wasmModule = await loadWasmModule(config.runtimeSources);
     const ephemeralSeed = generateEphemeralSeedBase64Url();
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
