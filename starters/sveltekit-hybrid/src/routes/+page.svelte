@@ -21,10 +21,10 @@
     <img src="/jazz.svg" alt="Jazz" class="wordmark" />
     <div class="auth-nav">
       {#if $session.data?.session}
-        <span class="user-email">{$session.data.user.email}</span>
+        <p>Hello, {$session.data.user.name}</p>
         <button type="button" class="btn-secondary" onclick={handleSignOut}>Sign out</button>
       {:else}
-        <p><a href="/signup" class="btn-secondary">Sign up</a> or <a href="/signin" class="link">Sign in</a></p>
+        <p><a href="/signup" class="link">Sign up</a> or <a href="/signin" class="link">Sign in</a></p>
       {/if}
     </div>
   </header>

@@ -1,3 +1,4 @@
+import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 
@@ -44,9 +45,12 @@ export interface ViteDevServer {
 }
 
 export function jazzPlugin(options: JazzPluginOptions = {}) {
+  // Vite only surfaces VITE_*-prefixed vars to the client bundle, so the
+  // scaffolder writes the two client-facing keys under the VITE_ prefix.
+  // Use the same names here so process.env lookups match what's in `.env`.
   const runtime = new ManagedDevRuntime({
-    appId: "JAZZ_APP_ID",
-    serverUrl: "JAZZ_SERVER_URL",
+    appId: "VITE_JAZZ_APP_ID",
+    serverUrl: "VITE_JAZZ_SERVER_URL",
   });
 
   return {
@@ -58,6 +62,11 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       if (options.server === false) {
         return;
       }
+
+      // Vite does not populate process.env from .env for unprefixed
+      // keys, so the managed runtime's env-driven cloud-mode check would
+      // otherwise never fire. Backfill before reading.
+      loadEnvFileIntoProcessEnv(viteServer.config.root);
 
       const schemaDir = options.schemaDir ?? viteServer.config.root;
 
@@ -76,9 +85,12 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         return;
       }
 
+      // Vite only exposes VITE_*-prefixed keys to the client bundle via
+      // import.meta.env. process.env gets the same values via the managed
+      // runtime's own write below.
       viteServer.config.env ??= {};
-      viteServer.config.env.JAZZ_APP_ID = managed.appId;
-      viteServer.config.env.JAZZ_SERVER_URL = managed.serverUrl;
+      viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
+      viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
       console.log(
         `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
           managed.serverUrl,

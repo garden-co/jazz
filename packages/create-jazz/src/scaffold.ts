@@ -44,16 +44,15 @@ export interface ScaffoldOptions {
   starter?: string;
   git?: boolean;
   onStep?: (label: string) => void;
+  /**
+   * Runs after git init and before `pnpm install`. Use for anything that must
+   * land in the scaffolded project before the install runs — e.g. cloud
+   * provisioning that writes `.env`.
+   */
+  preInstall?: (targetDir: string) => Promise<void>;
 }
 
-const SCAFFOLD_COPY_SKIP = new Set([
-  "node_modules",
-  ".next",
-  ".jazz",
-  ".turbo",
-  ".env.local",
-  ".git",
-]);
+const SCAFFOLD_COPY_SKIP = new Set(["node_modules", ".next", ".jazz", ".turbo", ".env", ".git"]);
 
 async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
   const localPath = process.env.JAZZ_STARTER_PATH;
@@ -87,9 +86,8 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
     );
   }
 
-  // 1. Loudly refuse to touch a pre-existing directory. This is what makes
-  //    the cleanup below safe: we only ever rmSync a directory we just
-  //    created in this call.
+  // Refuse to touch a pre-existing directory — the transactional cleanup
+  // below is only safe for a directory we just created ourselves.
   if (fs.existsSync(options.targetDir)) {
     throw new Error(
       `Target directory "${options.targetDir}" already exists. Choose a different name or remove it first.`,
@@ -97,13 +95,12 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
   }
   fs.mkdirSync(options.targetDir, { recursive: true });
 
-  // Steps 2–4 are transactional: on failure, remove the dir we just created.
+  // Fetch → resolve deps → git init are transactional: on failure, remove the
+  // directory we just created.
   try {
-    // 2. Fetch starter
     options.onStep?.("Fetching starter");
     await fetchStarter(starter, options.targetDir);
 
-    // 3. Resolve deps
     options.onStep?.("Resolving dependencies");
     const pkgJsonPath = path.join(options.targetDir, "package.json");
     const rawManifest = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8")) as PackageManifest;
@@ -111,8 +108,7 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
     const finalManifest = { ...resolved, name: options.appName };
     fs.writeFileSync(pkgJsonPath, JSON.stringify(finalManifest, null, 2) + "\n", "utf-8");
 
-    // 4. Git init + initial commit (inherits the user's git identity from
-    //    `~/.gitconfig`, GIT_AUTHOR_*, etc.), unless the caller opted out.
+    // Inherits the user's git identity from `~/.gitconfig`, GIT_AUTHOR_*, etc.
     if (options.git !== false) {
       options.onStep?.("Initialising git");
       runGitInit(options.targetDir);
@@ -122,9 +118,15 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
     throw err;
   }
 
-  // 5. Install — NOT transactional; failure leaves the project in place so
-  //    the user can retry `npm install` manually. `execFileSync` with an
-  //    argv array means no shell interpretation of `pm`.
+  // Pre-install hook runs after the transactional steps; failures from here
+  // on leave the project intact so the user can inspect / retry manually.
+  if (options.preInstall) {
+    await options.preInstall(options.targetDir);
+  }
+
+  // Install is not transactional for the same reason — failure leaves the
+  // project intact so the user can retry `npm install` by hand. `execFileSync`
+  // with an argv array means no shell interpretation of `pm`.
   if (options.pm) {
     options.onStep?.("Installing dependencies");
     try {

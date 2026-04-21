@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdir, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
@@ -25,9 +25,25 @@ function makeViteServer(
   };
 }
 
+// Managed-runtime writes PUBLIC_JAZZ_APP_ID / PUBLIC_JAZZ_SERVER_URL to
+// process.env on successful init; that state leaks across vitest workers in the
+// same thread pool and flips later tests onto the env-driven cloud branch.
+// Scrub before each test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.PUBLIC_JAZZ_APP_ID;
+  delete process.env.PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+  delete process.env.BACKEND_SECRET;
+});
+
 afterEach(async () => {
   await __resetJazzSvelteKitPluginForTests();
   await tempRoots.cleanup();
+  // Shared /tmp roots accumulate .env files from managed-runtime's app-id
+  // persistence; wipe them so the plugin's env-file backfill starts clean.
+  for (const shared of ["/tmp/jazz-sveltekit-test", "/tmp/jazz-sk-noserver"]) {
+    await rm(join(shared, ".env"), { force: true }).catch(() => undefined);
+  }
   vi.restoreAllMocks();
 
   if (originalJazzAppId === undefined) {
