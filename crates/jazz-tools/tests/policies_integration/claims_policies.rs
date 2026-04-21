@@ -417,6 +417,153 @@ async fn admin_role_claims_reject_member_mutations() {
     server.shutdown().await;
 }
 
+/// Verifies that update policies can match the row being mutated by its own
+/// primary key via `id IN @session.claims.editable_doc_ids`.
+///
+/// Alice can read both rows, but her claims only include `allowed_doc`. The
+/// policy is used for both UPDATE USING and WITH CHECK, so only that row may be
+/// changed.
+///
+/// ```text
+/// admin ──create allowed + blocked──────► server
+/// alice claims: [allowed_doc_id] ──────► update allowed row succeeds
+/// alice claims: [allowed_doc_id] ──────► update blocked row is rejected
+/// observer ────────────────────────────► sees only the allowed update persist
+/// ```
+#[tokio::test]
+async fn claim_array_id_policy_gates_updates_by_primary_key() {
+    let table_name = "documents";
+    let id_claim_policy = PolicyExpr::In {
+        column: "id".into(),
+        session_path: vec!["claims".into(), "editable_doc_ids".into()],
+    };
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            table_name,
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(PolicyExpr::True)
+                .with_update(Some(id_claim_policy.clone()), id_claim_policy),
+        ))
+        .build();
+
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let admin = connect_ready_user(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
+
+    let allowed_doc = create_title_document(&admin, table_name, "allowed").await;
+    let blocked_doc = create_title_document(&admin, table_name, "blocked").await;
+
+    let alice = connect_ready_claims(
+        &server,
+        &schema,
+        "alice",
+        json!({ "editable_doc_ids": [allowed_doc] }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
+    let query = QueryBuilder::new(table_name).build();
+
+    wait_for_query(
+        &observer,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "observer sees seeded documents before updates",
+        |rows| {
+            (rows.len() == 2
+                && rows.iter().any(|(id, values)| {
+                    *id == allowed_doc && *values == title_document_values("allowed")
+                })
+                && rows.iter().any(|(id, values)| {
+                    *id == blocked_doc && *values == title_document_values("blocked")
+                }))
+            .then_some(())
+        },
+    )
+    .await;
+
+    let mut observer_stream = observer
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe observer");
+    let mut observer_log = Vec::new();
+
+    alice
+        .update(
+            allowed_doc,
+            vec![("title".to_string(), "allowed updated".into())],
+        )
+        .await
+        .expect("optimistic local allowed update");
+
+    wait_for_query(
+        &observer,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "observer sees allowed row update persist",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == allowed_doc && *values == title_document_values("allowed updated")
+                })
+                .then_some(())
+        },
+    )
+    .await;
+
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees allowed row update broadcast",
+        |log| has_updated(log, allowed_doc),
+    )
+    .await;
+
+    alice
+        .update(
+            blocked_doc,
+            vec![("title".to_string(), "blocked updated".into())],
+        )
+        .await
+        .expect("optimistic local blocked update");
+
+    let rows_after_rejected_update = observer
+        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .await
+        .expect("EdgeServer query after rejected blocked-row update");
+    assert!(
+        rows_after_rejected_update.iter().any(|(id, values)| {
+            *id == allowed_doc && *values == title_document_values("allowed updated")
+        }),
+        "allowed row update should persist: rows={rows_after_rejected_update:?}"
+    );
+    assert!(
+        rows_after_rejected_update.iter().any(|(id, values)| {
+            *id == blocked_doc && *values == title_document_values("blocked")
+        }),
+        "blocked row update should be rejected: rows={rows_after_rejected_update:?}"
+    );
+
+    collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_updated(&observer_log, blocked_doc),
+        "blocked row update must not be broadcast: log={observer_log:?}"
+    );
+
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
 /// Verifies that `claims.role IS NOT NULL` gates row visibility by the
 /// presence of a non-null claim rather than a specific role value.
 ///

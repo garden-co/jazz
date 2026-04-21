@@ -68,12 +68,12 @@ describe("LiveQuery", () => {
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
-  it("renders traced subscriptions from the extension bridge", () => {
+  it("renders traced subscriptions from the extension bridge", async () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
         table: "todos",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
@@ -89,23 +89,23 @@ describe("LiveQuery", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("cell", { name: "todos" })).not.toBeNull();
-    expect(screen.getByRole("cell", { name: "full" })).not.toBeNull();
-    expect(screen.getByText('{"table":"todos"}')).not.toBeNull();
-    const summary = screen.getByText(/TodoList\.tsx:34:17/, { selector: "summary" });
+    expect(await screen.findByRole("cell", { name: "todos" })).not.toBeNull();
+    expect(await screen.findByRole("cell", { name: "full" })).not.toBeNull();
+    expect(await screen.findByText('{"table":"todos"}')).not.toBeNull();
+    const summary = await screen.findByText(/TodoList\.tsx:34:17/, { selector: "summary" });
     expect(summary).not.toBeNull();
 
     fireEvent.click(summary);
 
-    expect(screen.getByText(/at useAll/)).not.toBeNull();
-  });
+    expect(await screen.findByText(/at useAll/)).not.toBeNull();
+  }, 15_000);
 
   it("filters extension rows by table and tier", () => {
     mockGetActiveQuerySubscriptions.mockReturnValue([
       {
         id: "sub-1",
         table: "todos",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
@@ -138,7 +138,7 @@ describe("LiveQuery", () => {
     expect(screen.getByRole("cell", { name: "projects" })).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("Filter by tier"), {
-      target: { value: "worker" },
+      target: { value: "local" },
     });
 
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
@@ -169,7 +169,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-3",
         table: "users",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
@@ -236,7 +236,6 @@ describe("LiveQuery", () => {
     expect(mockFetchServerSubscriptions).toHaveBeenCalledWith("http://localhost:1625", {
       adminSecret: "admin-secret",
       appId: "test-app",
-      pathPrefix: undefined,
     });
     expect(screen.getByRole("cell", { name: "2" })).not.toBeNull();
     expect(screen.queryByLabelText("Filter by tier")).toBeNull();

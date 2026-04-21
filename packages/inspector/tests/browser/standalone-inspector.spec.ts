@@ -28,6 +28,9 @@ async function storeStandaloneConfig(page: Page) {
 async function expectTodosTableLoaded(page: Page) {
   await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("link", { name: "Schema" })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole("checkbox", { name: /Toggle done for/ }).first()).toBeVisible({
+    timeout: 15_000,
+  });
 }
 
 async function openTodosTable(page: Page) {
@@ -42,6 +45,7 @@ async function openTodosTable(page: Page) {
   const tableLink = page.getByRole("link", { name: "View todos data" });
   await expect(tableLink).toBeVisible({ timeout: 5_000 });
   await tableLink.click();
+  await page.getByRole("columnheader", { name: "title" }).click();
 
   await expectTodosTableLoaded(page);
 }
@@ -55,7 +59,7 @@ function rowByTitle(page: Page, title: string) {
 test.describe("connection page", () => {
   test("prefills connection form from hash fragment", async ({ page }) => {
     const fragment = new URLSearchParams({
-      url: SERVER_URL,
+      serverUrl: SERVER_URL,
       appId: APP_ID,
       adminSecret: ADMIN_SECRET,
     }).toString();
@@ -93,14 +97,26 @@ test.describe("connection page", () => {
     await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
   });
 
-  test("reset connection returns to onboarding", async ({ page }) => {
+  test("edit connection opens a prefilled form and reset returns to onboarding", async ({
+    page,
+  }) => {
     await page.goto("/");
     await storeStandaloneConfig(page);
     await page.reload();
 
+    await expect(page.getByRole("button", { name: "Edit connection" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Edit connection" }).click();
+
+    await expect(page.getByRole("heading", { name: "Edit connection" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
+    await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
+    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
     await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible();
+
     await page.getByRole("button", { name: "Reset connection" }).click();
     await expect(page.getByRole("heading", { name: "Connect to Jazz server" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue("");
   });
 });
 
@@ -122,6 +138,10 @@ test.describe("data explorer page", () => {
     await expect(page.getByText('"type": "Text"')).toBeVisible();
     await expect(page.getByText('"name": "done"')).toBeVisible();
     await expect(page.getByText('"type": "Boolean"')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "todos permissions" })).toBeVisible();
+    await expect(page.getByText('"insert"')).toBeVisible();
+    await expect(page.getByText('"update"')).toBeVisible();
+    await expect(page.getByText('"delete"')).toBeVisible();
   });
 
   test("discards queued inline text edits without persisting them", async ({ page }) => {
@@ -202,6 +222,9 @@ test.describe("data explorer page", () => {
 
   test("filters rows to done=true and shows only checked boolean cells", async ({ page }) => {
     const visibleCheckboxesBeforeFilter = page.getByRole("checkbox", { name: /Toggle done for/ });
+    await expect
+      .poll(async () => await visibleCheckboxesBeforeFilter.count(), { timeout: 15_000 })
+      .toBeGreaterThan(0);
     const visibleCheckboxCountBeforeFilter = await visibleCheckboxesBeforeFilter.count();
     expect(visibleCheckboxCountBeforeFilter).toBeGreaterThan(0);
 
@@ -228,6 +251,7 @@ test.describe("data explorer page", () => {
     await expect(filterButton).toBeVisible();
 
     const checkboxes = page.getByRole("checkbox", { name: /Toggle done for/ });
+    await expect.poll(async () => await checkboxes.count(), { timeout: 15_000 }).toBeGreaterThan(0);
     const checkboxCount = await checkboxes.count();
     expect(checkboxCount).toBeGreaterThan(0);
 

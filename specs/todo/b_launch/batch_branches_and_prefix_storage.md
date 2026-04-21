@@ -1,14 +1,14 @@
 # Batch Branches and Prefix-Indexed Storage — TODO (Launch)
 
-Replace today's "one branch with many concurrent tips" model with many linear batches under a shared branch prefix.
+Extend the current row-history foundation with many linear batches under a shared branch prefix.
 
-This is a precursor to opt-in globally consistent transactions and also a storage redesign for the case where a single object may accumulate millions of branches over time.
+This is a precursor to opt-in globally consistent transactions and a storage redesign for the case where a single logical row or row family may accumulate millions of batch lineages over time.
 
 Related:
 
-- [Object Manager](../../status-quo/object_manager.md)
+- [Row Histories](../../status-quo/row_histories.md)
 - [Storage](../../status-quo/storage.md)
-- [HTTP/SSE Transport Protocol](../../status-quo/http_transport.md)
+- [HTTP/WebSocket Transport Protocol](../../status-quo/http_transport.md)
 - [Globally Consistent Transactions](./globally_consistent_transactions.md)
 - [Storage Compression Strategy](./storage_compression_strategy.md)
 
@@ -36,7 +36,7 @@ The storage and memory model should then optimize for:
 ## Goals
 
 - Eliminate ambiguous multi-tip semantics inside a branch.
-- Preserve git-like causality for object history.
+- Preserve clear causal ancestry for row history.
 - Make millions of historical batches per object practical.
 - Optimize for IOPS-bound storage, not maximum raw throughput.
 - Support delta-compressed commit/snapshot storage.
@@ -321,7 +321,7 @@ This allows incremental adoption instead of a single all-at-once rewrite.
 
 - Exact text encoding for `BatchId` in public branch names.
 - Whether `BatchOrd` should be stable forever or allow periodic compaction/reassignment.
-- Whether parent batch refs should be stored as `BatchOrd`, `CommitId`, or both.
+- Whether parent batch refs should be stored as `BatchOrd`, `Digest32`, or both.
 - How aggressively to inline tiny head snapshots in `BatchMeta`.
 - Thresholds for sealing segments and for snapshot checkpoints.
 - Whether we need a separate compact summary structure when a prefix frontier becomes unusually wide.

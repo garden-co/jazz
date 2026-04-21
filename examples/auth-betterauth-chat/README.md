@@ -5,11 +5,13 @@ A small Next.js example that shows how to integrate [Better Auth](https://www.be
 What it demonstrates:
 
 - A single Next.js app that serves both the UI and Better Auth routes
+- Better Auth tables stored in Jazz through `jazz-tools/better-auth-adapter`
+- A Jazz backend context using in-memory storage while syncing auth rows to the local sync server
 - Better Auth's built-in `jwt` plugin to issue ES256 JWTs and expose a JWKS endpoint
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
 - Recreating `JazzProvider` on login and logout, while keeping `db.updateAuthToken(...)` only for same-user JWT refresh after auth expiry
-- Falling back to anonymous `localAuth` when no session exists
+- Falling back to local-first auth when no session exists
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
@@ -17,13 +19,32 @@ New sign-ups receive `role = "member"` by default (configured via the `admin` pl
 
 ## Setup
 
-### 1. Start the Next app
+### 1. Create `.env`
+
+```bash
+cp .env.example .env
+```
+
+The example reads these values from `.env`:
+
+- `NEXT_PUBLIC_JAZZ_APP_ID` — Jazz app id shared by the Next app and sync server
+- `NEXT_PUBLIC_JAZZ_SERVER_URL` — Jazz sync server URL
+- `NEXT_PUBLIC_APP_ORIGIN` — Next app origin used by Better Auth and Playwright
+- `ADMIN_SECRET` — admin secret for the local sync server
+- `BACKEND_SECRET` — backend secret used by the Better Auth Jazz context
+- `NEXT_PUBLIC_CHAT_ID` — general chat room id
+- `NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID` — announcements chat room id
+
+`pnpm dev` and `pnpm test:e2e` both read the same `.env`.
+
+### 2. Start the Next app
 
 ```bash
 pnpm dev
 ```
 
-Starts Next.js on port 3000. Better Auth is mounted under `/api/auth/*` via a Next route handler.
+Starts Next.js at `NEXT_PUBLIC_APP_ORIGIN`. Better Auth is mounted under `/api/auth/*` via a Next
+route handler.
 
 Key routes exposed by Better Auth:
 
@@ -32,28 +53,24 @@ Key routes exposed by Better Auth:
 - `GET  /api/auth/token` — exchange active session cookie for a JWT (bearer plugin)
 - `GET  /api/auth/jwks` — public key set used by the Jazz sync server
 
-### 2. Start the Jazz sync server
-
-```bash
-pnpm sync-server
-```
-
-Builds the `jazz-tools` binary if needed, waits for the Better Auth JWKS endpoint from the Next
-app, starts a local sync server on port 1625, and pushes the schema catalogue in one step.
-
-Open `http://127.0.0.1:3000`.
+Open `NEXT_PUBLIC_APP_ORIGIN`.
 
 ## How the Better Auth integration works
 
-### Server — `server/auth.ts` and `app/api/auth/[...all]/route.ts`
+### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-context.ts`, and `schema-better-auth/schema.ts`
 
-`createBetterAuth` wires up the Better Auth instance with four plugins:
+`auth.ts` wires up the Better Auth instance with four plugins and points the adapter at the
+root Better Auth schema module:
 
 ```ts
-import { nextCookies } from "better-auth/next-js";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { app as authSchema } from "../../schema-better-auth/schema";
 
 betterAuth({
-  database: memoryAdapter(authMemoryDb),
+  database: jazzAdapter({
+    db: () => authJazzContext().asBackend(authSchema),
+    schema: authSchema,
+  }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
   plugins: [
     nextCookies(),
@@ -75,6 +92,14 @@ betterAuth({
 });
 ```
 
+`schema-better-auth/schema.ts` is the Better Auth schema source file that the Jazz adapter now
+generates for the new root-schema workflow. `authJazzContext()` is a lazy accessor that returns
+a server-side Jazz context configured with `driver: { type: "memory" }`, the same `serverUrl`,
+and the same backend secret as the local sync server. It caches the context on `globalThis` so
+route modules don't instantiate it at import time (which would fail during Next's build-time
+page data collection before env vars are available). That keeps Better Auth state out of Better Auth's in-process memory
+adapter while still avoiding local on-disk storage in the Next app.
+
 - **`nextCookies` integration** — lets Better Auth session cookies participate in Next.js route
   handlers and server actions.
 - **`admin` plugin** — tracks a `role` field on each user, defaults new accounts to `"member"`.
@@ -85,7 +110,8 @@ betterAuth({
   which Jazz surfaces as `session.user_id` on the client.
 
 The JWKS endpoint (`/api/auth/jwks`) is automatically provided by the `jwt` plugin and is what
-the Jazz sync server polls to verify every incoming token.
+the Jazz sync server polls to verify every incoming token. The same sync server also accepts the
+backend secret used by the Better Auth Jazz context so auth rows can sync through Jazz too.
 
 ### Client — `src/lib/auth-client.ts`
 
@@ -119,12 +145,12 @@ React.useEffect(() => {
 
 While the JWT is being fetched the app renders a loading state. Once the token arrives,
 `JazzProvider` is mounted in JWT mode. On sign-out Better Auth clears the session cookie and
-the effect resets `initialJwtToken` to `null`, recreating Jazz in anonymous mode.
+the effect resets `initialJwtToken` to `null`, recreating Jazz in local-first mode.
 
 ```tsx
 const config: DbConfig = initialJwtToken
   ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
-  : { appId, ...getActiveSyntheticAuth(appId, { defaultMode: "anonymous" }), ... };
+  : { appId, auth: { localFirstSecret: secret }, serverUrl, ... };
 
 <JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
   <ChatShell />
@@ -143,6 +169,6 @@ Run the full end-to-end setup and flow tests with:
 pnpm test:e2e
 ```
 
-The Playwright `webServer` starts Next on port 4179. Global setup waits for the Next-hosted JWKS
-endpoint, spins up a local Jazz sync server pointed at that JWKS URL, and pushes the schema
-catalogue before the browser test runs.
+The Playwright `webServer` starts Next at `NEXT_PUBLIC_APP_ORIGIN` from `.env`. Global setup waits
+for the Next-hosted JWKS endpoint, spins up a local Jazz sync server pointed at that JWKS URL, and
+pushes the schema catalogue before the browser test runs.

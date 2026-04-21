@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
+import { toast } from "sonner";
 import { app } from "../schema.js";
 
 export function TodoList() {
@@ -66,12 +67,27 @@ export function TodoList() {
             <input
               type="checkbox"
               checked={todo.done}
-              onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
+              onChange={() => {
+                try {
+                  db.update(app.todos, todo.id, { done: !todo.done });
+                } catch {
+                  toast.error("You don't have permission to update this task");
+                }
+              }}
               className="toggle"
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => db.delete(app.todos, todo.id)}>
+            <button
+              className="delete-btn"
+              onClick={() => {
+                try {
+                  db.delete(app.todos, todo.id);
+                } catch {
+                  toast.error("You don't have permission to delete this task");
+                }
+              }}
+            >
               &times;
             </button>
           </li>

@@ -1,22 +1,24 @@
 import { NapiRuntime } from "jazz-napi";
+import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, sessionFromRequest, type RequestLike } from "../runtime/client.js";
+import { JazzClient, type RequestLike } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
+import {
+  resolveSchemaSource,
+  type QuerySchemaSource,
+  type SchemaSourceInput,
+  type WasmSchemaSource,
+} from "../schema-source.js";
+import { resolveRequestSession } from "./request-auth.js";
 
-export interface BackendSchemaSource {
-  wasmSchema: WasmSchema;
-}
-
-export interface BackendQuerySchemaSource {
-  _schema: WasmSchema;
-}
-
-export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuerySchemaSource;
+export type BackendSchemaSource = WasmSchemaSource;
+export type BackendQuerySchemaSource = QuerySchemaSource;
+export type BackendSchemaInput = SchemaSourceInput;
+export type BackendJwtPublicKey = JWK | string;
 
 export type BackendDriver =
   | {
@@ -44,51 +46,29 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
   /** Optional node durability tier identity. */
-  tier?: "worker" | "edge" | "global";
+  tier?: "local" | "edge" | "global";
+  /** JWKS endpoint used to verify external bearer JWTs in `forRequest()`. */
+  jwksUrl?: string;
+  /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
+  jwtPublicKey?: BackendJwtPublicKey;
+  /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
+  allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
+  allowLocalFirstAuth: boolean;
 };
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
-}
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isTableSchema(value: unknown): boolean {
-  return isRecord(value) && Array.isArray(value.columns);
-}
-
-function isWasmSchema(value: unknown): value is WasmSchema {
-  return (
-    isRecord(value) &&
-    !("_schema" in value) &&
-    !("wasmSchema" in value) &&
-    Object.values(value).every((table) => isTableSchema(table))
-  );
-}
-
-function resolveSchema(input: BackendSchemaInput): WasmSchema {
-  if (isWasmSchema(input)) {
-    return input;
+  if (config.jwksUrl !== undefined && config.jwtPublicKey !== undefined) {
+    throw new Error(
+      "Backend auth config cannot set both jwksUrl and jwtPublicKey. Pick one external JWT verification mode.",
+    );
   }
-  if (isRecord(input) && "_schema" in input && isWasmSchema(input._schema)) {
-    return input._schema;
-  }
-  if (isRecord(input) && "wasmSchema" in input && isWasmSchema(input.wasmSchema)) {
-    return input.wasmSchema;
-  }
-
-  throw new Error(
-    "Invalid schema source. Pass a WasmSchema, a generated app object, or a generated query/table object.",
-  );
 }
 
 /**
@@ -108,7 +88,10 @@ export class JazzContext {
 
   constructor(config: BackendContextConfig) {
     assertValidBackendConfig(config);
-    this.config = resolveLocalAuthDefaults(config);
+    this.config = {
+      ...config,
+      allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
+    };
     this.defaultSchemaInput = config.app;
   }
 
@@ -119,14 +102,16 @@ export class JazzContext {
         "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
       );
     }
-    const schema = resolveSchema(selected);
+    const schema = resolveSchemaSource(selected);
     return this.config.permissions
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;
   }
 
   private createClient(schema: WasmSchema): JazzClient {
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
     this.initializedSchemaJson = schemaJson;
     const nodeTier = this.config.tier ?? "edge";
 
@@ -153,12 +138,9 @@ export class JazzContext {
       appId: this.config.appId,
       schema,
       serverUrl: this.config.serverUrl,
-      serverPathPrefix: this.config.serverPathPrefix,
       env: this.config.env,
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
       tier: nodeTier,
@@ -166,6 +148,16 @@ export class JazzContext {
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);
+
+    // Wire Rust-owned WebSocket transport when a server URL is configured.
+    if (this.config.serverUrl) {
+      this.clientInstance.connectTransport(this.config.serverUrl, {
+        backend_secret: this.config.backendSecret,
+        admin_secret: this.config.adminSecret,
+        jwt_token: this.config.jwtToken,
+      });
+    }
+
     return this.clientInstance;
   }
 
@@ -174,18 +166,31 @@ export class JazzContext {
       appId: this.config.appId,
       driver: this.config.driver.type === "memory" ? { type: "memory" } : { type: "persistent" },
       serverUrl: this.config.serverUrl,
-      serverPathPrefix: this.config.serverPathPrefix,
       env: this.config.env,
       userBranch: this.config.userBranch,
       jwtToken: this.config.jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
       adminSecret: this.config.adminSecret,
     };
   }
 
-  private wrapDb(client: JazzClient, session?: Session, attribution?: string): Db {
-    return createDbFromClient(this.buildDbConfig(), client, session, attribution);
+  private wrapDb(
+    client: JazzClient,
+    session?: Session,
+    attribution?: string,
+    backendScoped = false,
+  ): Db {
+    return createDbFromClient(
+      this.buildDbConfig(),
+      client,
+      session,
+      attribution,
+      backendScoped
+        ? {
+            authMode: session?.authMode ?? "external",
+            session: session ?? null,
+          }
+        : undefined,
+    );
   }
 
   /**
@@ -193,7 +198,9 @@ export class JazzContext {
    */
   private getClient(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
-    const schemaJson = serializeRuntimeSchema(schema);
+    const schemaJson = serializeRuntimeSchema(schema, {
+      loadedPolicyBundle: this.config.permissions !== undefined,
+    });
 
     if (!this.clientInstance) {
       return this.createClient(schema);
@@ -219,7 +226,7 @@ export class JazzContext {
    * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
   asBackend(source?: BackendSchemaInput): Db {
-    return this.wrapDb(this.getClient(source).asBackend());
+    return this.wrapDb(this.getClient(source).asBackend(), undefined, undefined, true);
   }
 
   /**
@@ -229,7 +236,7 @@ export class JazzContext {
   withAttribution(principalId: string, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, principalId);
+    return this.wrapDb(client, undefined, principalId, true);
   }
 
   /**
@@ -248,14 +255,23 @@ export class JazzContext {
     client.asBackend();
   }
 
+  private async resolveRequestSession(request: RequestLike): Promise<Session> {
+    return await resolveRequestSession(request, {
+      appId: this.config.appId,
+      jwksUrl: this.config.jwksUrl,
+      jwtPublicKey: this.config.jwtPublicKey,
+      allowLocalFirstAuth: this.config.allowLocalFirstAuth,
+    });
+  }
+
   /**
    * Build a requester-scoped `Db` from an authenticated request.
    */
-  forRequest(request: RequestLike, source?: BackendSchemaInput): Db {
+  async forRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
     const client = this.getClient(source);
-    const session = sessionFromRequest(request);
+    const session = await this.resolveRequestSession(request);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session);
+    return this.wrapDb(client, session, undefined, true);
   }
 
   /**
@@ -265,15 +281,15 @@ export class JazzContext {
   withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, undefined, session.user_id);
+    return this.wrapDb(client, undefined, session.user_id, true);
   }
 
   /**
    * Build a backend-scoped `Db` that stamps write provenance using the
    * authenticated principal from `request` without switching permissions.
    */
-  withAttributionForRequest(request: RequestLike, source?: BackendSchemaInput): Db {
-    return this.withAttributionForSession(sessionFromRequest(request), source);
+  async withAttributionForRequest(request: RequestLike, source?: BackendSchemaInput): Promise<Db> {
+    return this.withAttributionForSession(await this.resolveRequestSession(request), source);
   }
 
   /**
@@ -282,7 +298,7 @@ export class JazzContext {
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const client = this.getClient(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, session);
+    return this.wrapDb(client, session, undefined, true);
   }
 
   /**

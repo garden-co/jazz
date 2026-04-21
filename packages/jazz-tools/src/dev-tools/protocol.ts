@@ -235,13 +235,10 @@ export function sanitizeDbConfigForBridge(dbConfig: DbConfig | null): DbConfig |
   return {
     appId: dbConfig.appId,
     serverUrl: dbConfig.serverUrl,
-    serverPathPrefix: dbConfig.serverPathPrefix,
     env: dbConfig.env,
     userBranch: dbConfig.userBranch,
     devMode: dbConfig.devMode,
     jwtToken: dbConfig.jwtToken,
-    localAuthMode: dbConfig.localAuthMode,
-    localAuthToken: dbConfig.localAuthToken,
     adminSecret: dbConfig.adminSecret,
     driver: dbConfig.driver,
   };

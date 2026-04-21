@@ -170,11 +170,12 @@ fn tuple_as_id_only(tuple: &Tuple) -> Tuple {
             .collect(),
     )
     .with_provenance(tuple.provenance().clone())
+    .with_batch_provenance(tuple.batch_provenance().clone())
 }
 
 /// Check if tuple content or provenance changed (for tuples with same IDs).
 fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
-    if old.provenance() != new.provenance() {
+    if old.provenance() != new.provenance() || old.batch_provenance() != new.batch_provenance() {
         return true;
     }
 
@@ -182,12 +183,12 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
         (
             TupleElement::Row {
                 content: old_content,
-                commit_id: old_commit,
+                batch_id: old_commit,
                 ..
             },
             TupleElement::Row {
                 content: new_content,
-                commit_id: new_commit,
+                batch_id: new_commit,
                 ..
             },
         ) => old_content != new_content || old_commit != new_commit,
@@ -198,7 +199,6 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::{BranchName, ObjectId};
 
     fn id_tuple(ids: &[ObjectId]) -> Tuple {
@@ -208,8 +208,8 @@ mod tests {
     fn row_tuple(id: ObjectId, content: &[u8], commit_byte: u8) -> Tuple {
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: content.to_vec(),
-            commit_id: CommitId([commit_byte; 32]),
+            content: content.to_vec().into(),
+            batch_id: crate::row_histories::BatchId([commit_byte; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }

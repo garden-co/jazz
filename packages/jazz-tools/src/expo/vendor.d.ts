@@ -18,3 +18,13 @@ declare module "expo/fetch" {
 declare module "web-streams-polyfill" {
   export const ReadableStream: typeof globalThis.ReadableStream;
 }
+
+declare module "expo-crypto" {
+  export function getRandomBytes(byteCount: number): Uint8Array;
+}
+
+declare module "expo-secure-store" {
+  export function getItemAsync(key: string): Promise<string | null>;
+  export function setItemAsync(key: string, value: string): Promise<void>;
+  export function deleteItemAsync(key: string): Promise<void>;
+}

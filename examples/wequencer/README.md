@@ -48,4 +48,4 @@ Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` run
 
 ## HTTPS in development
 
-The dev server uses a self-signed TLS certificate (`@vitejs/plugin-basic-ssl`), required because `crypto.subtle` (used by Jazz) is only available in secure contexts. Vite proxies Jazz server requests (`/sync`, `/events`, `/health`, `/auth`) through the same HTTPS origin to avoid mixed content issues. When accessing from another device on the same network, accept the self-signed certificate warning in the browser.
+The dev server uses a self-signed TLS certificate (`@vitejs/plugin-basic-ssl`), required because `crypto.subtle` (used by Jazz) is only available in secure contexts. Vite proxies Jazz server requests (including `/apps/<appId>/ws`, `/apps/<appId>/...`, `/health`, and `/auth`) through the same HTTPS origin to avoid mixed content issues. When accessing from another device on the same network, accept the self-signed certificate warning in the browser.

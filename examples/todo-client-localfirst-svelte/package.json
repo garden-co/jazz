@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
-    "svelte": "^5.0.0"
+    "svelte": "^5.0.0",
+    "svelte-sonner": "^1.0.5"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "catalog:default",

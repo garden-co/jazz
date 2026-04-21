@@ -215,7 +215,6 @@ impl RowNode for OutputNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement};
@@ -232,8 +231,8 @@ mod tests {
         let data = encode_row(&descriptor, &[Value::Integer(n), Value::Text(name.into())]).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: data,
-            commit_id: CommitId([0; 32]),
+            content: data.into(),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -307,7 +306,7 @@ mod tests {
                 &[Value::Integer(1), Value::Text("Alice".into())],
             )
             .unwrap(),
-            CommitId([0; 32]),
+            crate::row_histories::BatchId([0; 16]),
             crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         );
 

@@ -6,7 +6,18 @@ export interface BuiltCondition {
   value: unknown;
 }
 
+export interface BuiltRelation {
+  table?: string;
+  conditions?: BuiltCondition[];
+  hops?: string[];
+  gather?: BuiltGather;
+  union?: {
+    inputs: BuiltRelation[];
+  };
+}
+
 export interface BuiltGather {
+  seed?: BuiltRelation;
   max_depth: number;
   step_table: string;
   step_current_column: string;
@@ -110,6 +121,7 @@ function normalizeGather(value: unknown): BuiltGather | undefined {
   }
 
   return {
+    ...(isPlainObject(value) && value.seed ? { seed: normalizeBuiltRelation(value.seed) } : {}),
     max_depth: maxDepth,
     step_table: value.step_table,
     step_current_column: value.step_current_column,
@@ -118,6 +130,29 @@ function normalizeGather(value: unknown): BuiltGather | undefined {
       ? value.step_hops.filter((hop): hop is string => typeof hop === "string")
       : [],
   };
+}
+
+function normalizeBuiltRelation(value: unknown): BuiltRelation {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  const normalized: BuiltRelation = {
+    ...(typeof value.table === "string" && value.table.length > 0 ? { table: value.table } : {}),
+    conditions: normalizeConditions(value.conditions),
+    hops: Array.isArray(value.hops)
+      ? value.hops.filter((hop): hop is string => typeof hop === "string")
+      : [],
+    gather: normalizeGather(value.gather),
+  };
+
+  if (isPlainObject(value.union) && Array.isArray(value.union.inputs)) {
+    normalized.union = {
+      inputs: value.union.inputs.map((input) => normalizeBuiltRelation(input)),
+    };
+  }
+
+  return normalized;
 }
 
 function createEmptyIncludeEntry(): NormalizedIncludeEntry {

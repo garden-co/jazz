@@ -8,10 +8,16 @@ import { app, type Profile } from "../../schema.js";
 // load would create a duplicate profile.
 const createdForUser = new Set<string>();
 
+/** Reset the module-level guard. Needed in tests that remount with different appIds. */
+export function resetProfileGuard() {
+  createdForUser.clear();
+}
+
 export function useMyProfile(): Profile | null {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
 
   const profiles = useAll(app.profiles.where({ userId: userId ?? "__none__" }));
 
@@ -22,8 +28,18 @@ export function useMyProfile(): Profile | null {
   useEffect(() => {
     if (!userId || !profiles || profiles.length > 0 || createdForUser.has(userId)) return;
     createdForUser.add(userId);
-    db.insert(app.profiles, { userId, name: getRandomUsername() });
-  }, [userId, profiles, db]);
+    const profile = { userId, name: getRandomUsername() };
+    if (sharedWriteOptions) {
+      void db
+        .insert(app.profiles, profile)
+        .wait(sharedWriteOptions)
+        .catch(() => {
+          createdForUser.delete(userId);
+        });
+      return;
+    }
+    db.insert(app.profiles, profile);
+  }, [userId, profiles, db, sharedWriteOptions]);
 
   return canonical;
 }

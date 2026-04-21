@@ -1,5 +1,213 @@
 # jazz-tools
 
+## 2.0.0-alpha.36
+
+### Patch Changes
+
+- Cache runtime schema lookups across query paths and surface unhandled rejected mutations through targeted batch-id queues instead of rescanning every retained local batch record. This also brings the React Native runtime onto the same rejected-batch helper surface as WASM and N-API.
+- 8bb9fbc: Allow caller-supplied row ids to use any valid UUID and rely on explicit row metadata for created-at semantics.
+- 3578b10: Stop persisting and rehydrating a bogus empty schema on dynamic-schema servers.
+
+  `SchemaManager::new_server` leaves the context uninitialized with a sentinel hash. Runtime construction then called `ensure_current_schema_persisted`, writing a placeholder `catalogue_schema` row whose content hashed to the empty-schema digest. On rehydrate that hash surfaced as an "unreachable schema hash" in every connection diagnostics call. The persist path now no-ops while uninitialized, and `process_catalogue_update` ignores empty schemas for forward-compatibility with sqlite files written by the pre-fix server.
+
+- 34e9ca4: Add a browser `window.__jazz.clearStorage()` helper for framework clients, and move the FAQ to a top-level docs page with updated storage-reset guidance.
+- Updated dependencies
+- Updated dependencies [8bb9fbc]
+  - jazz-wasm@2.0.0-alpha.36
+  - jazz-rn@2.0.0-alpha.36
+
+## 2.0.0-alpha.35
+
+### Minor Changes
+
+- 9067b0c: Add static external JWT verification alongside JWKS-based verification in `jazz-tools`.
+
+  The Rust server CLI now accepts `--jwt-public-key` / `JAZZ_JWT_PUBLIC_KEY`, and the TypeScript backend `createJazzContext(...)` path now accepts `jwtPublicKey`. Both server entrypoints reject configs that set both `jwksUrl` and the new static-key option at the same time.
+
+### Patch Changes
+
+- 4d67804: Promote `authMode` to a first-class typed field, add anonymous auth, and overhaul the React provider.
+  - **`Session.authMode`** is now `"external" | "local-first" | "anonymous"`, derived from the JWT `iss` claim instead of an opaque string in `claims`. The permissions DSL exposes `session.authMode` and supports `session.where({ authMode })`.
+  - **Anonymous auth**: when `DbConfig` has neither `secret` nor `jwtToken`, the client mints an ephemeral token. Anonymous sessions can read but are structurally denied writes (checked before policy evaluation); failures surface as `AnonymousWriteDeniedError` on the client.
+  - **`DbConfig` flattened**: `auth: { localFirstSecret }` → `secret`.
+  - **`AuthState` flattened**: `{ authMode, session, error? }` — no more `status` / `transport` union.
+  - **React provider**: `JazzProvider` uses Suspense + `React.use()`; new `onJWTExpired` prop serializes refresh calls and replaces custom sync-wrapper components. New `useAuthState()` and `useLocalFirstAuth()` hooks. Context carries only `{ client }`.
+  - **Identity module**: `mint_local_first_token` / `verify_local_first_identity_proof` → `mint_jazz_self_signed_token` / `verify_jazz_self_signed_proof`, taking an explicit issuer.
+
+- 75756a6: Standardize BatchId JSON values on hex strings across Jazz write-context bindings.
+
+  Batch write contexts now accept the TypeScript wire shape used by current clients, including lowercase `batch_mode` values and string `batch_id` values, and reject the old array-style BatchId JSON representation.
+
+- e5a3189: Add schema-level per-column merge strategies to `jazz-tools`.
+
+  Columns now default to MRCA-relative per-column LWW, and non-nullable integer columns can opt into `merge("counter")` to merge concurrent snapshots by summing their MRCA-relative deltas. Merge strategy is schema metadata, so different schema versions can resolve the same conflicting history differently without rewriting stored rows.
+
+- 772ce14: Require a published permissions head before session-scoped writes can rely on backend authority. Persisted writes against enforcing backends without a current permissions head now reject explicitly with `permissions_head_missing`, and synced-query tests now publish permissions before expecting backend-visible rows or cross-schema authorization results. Session-scoped queries still withhold authoritative remote scope before a permissions head exists, but explicit query/subscription rejection is deferred for now.
+- 947f362: Simplify external JWT identity: `session.user_id` is now the JWT `sub` claim verbatim. The `jazz_principal_id` claim, the `external_identities` server mapping, and the hashed `external:…` fallback are removed. External providers must emit the desired Jazz user id as `sub` directly (e.g. via `getSubject: ({ user }) => user.id`). Also fixes `authMode` resolution in the policy evaluator and preserves `AnonymousWriteDeniedError` through the runtime write path.
+- caad318: Modify write APIs to return a `WriteHandle`, which allows callers to wait for a given durability tier to acknowledge the write or reject it. Also introduces a global `onMutationError` handler to receive errors that aren't explicitly handled with `WriteHandle.wait`.
+- 45be93a: `jazz-tools` now routes its sync, schema, permissions, migration, and introspection requests under app-scoped server paths like `/apps/<appId>/...` instead of relying on a configurable `serverPathPrefix`. Server-backed CLI commands now take `<appId>` when resolving those endpoints.
+- Updated dependencies [4d67804]
+- Updated dependencies [75756a6]
+- Updated dependencies [947f362]
+- Updated dependencies [caad318]
+  - jazz-wasm@2.0.0-alpha.35
+  - jazz-rn@2.0.0-alpha.35
+
+## 2.0.0-alpha.34
+
+### Patch Changes
+
+- 0585935: Fix OPFS B-tree page splitting for large index keys by choosing split points based on encoded page size instead of entry count. This prevents synced inserts with many near-threshold JSON index values from failing with leaf or internal split fit errors.
+- 213288a: Bind qualified `where(...)` filters on hopped permission relations to the relation's actual joined scope so correlated `exists(...)` closures over gathered team grants evaluate correctly at runtime.
+- 66dc47a: Direct write conflicts now resolve with MRCA-based per-column LWW for visible merge previews and merge-on-write rebases, including accepted transactional rows.
+
+  Visible rows also persist compact winner provenance ordinals so tier-aware reads can reuse merged previews without re-walking row history when tiers have already converged.
+  - jazz-wasm@2.0.0-alpha.34
+  - jazz-rn@2.0.0-alpha.34
+
+## 2.0.0-alpha.33
+
+### Patch Changes
+
+- jazz-wasm@2.0.0-alpha.33
+- jazz-rn@2.0.0-alpha.33
+
+## 2.0.0-alpha.32
+
+### Patch Changes
+
+- 2d10b2e: Include the failing index column in synced insert index-update error logs so OPFS-backed index failures are easier to diagnose.
+  - jazz-wasm@2.0.0-alpha.32
+  - jazz-rn@2.0.0-alpha.32
+
+## 2.0.0-alpha.31
+
+### Patch Changes
+
+- ea68566: Isolate browser-local Jazz persistence by default across users and app scopes.
+
+  `createDb()` now derives the default browser persistent namespace from both `appId` and the resolved authenticated principal when no explicit `dbName` is provided, preventing one user from reopening another user's OPFS-backed local cache. `BrowserAuthSecretStore` also now accepts scope hints like `appId`, `userId`, and `sessionId` so browser apps can avoid sharing one global local-first identity secret across unrelated sessions.
+
+- 44b90c0: Fix misleading schema-mismatch recovery guidance during client/server handshakes.
+
+  The transport handshake now sends the client's declared structural schema hash separately from the catalogue-state digest, so server-side connection diagnostics only suggest migrations for real schema hashes that the CLI can resolve.
+
+- 50e46c0: Add HttpOnly cookie auth support to `jazz-tools` with a mirrored browser
+  `cookieSession` for local permission evaluation. Servers can now accept JWT auth
+  from a configured auth cookie, and cookie-backed websocket handshakes are
+  restricted to same-origin requests.
+- fd98d6e: Add coordinated browser logout and storage wipe support so follower tabs can trigger an OPFS reset through the elected leader, stale fallback namespaces are removed, and `db.logout({ wipeData: true })` clears browser state before the next session starts.
+- 09e16b4: Support recursive gather seeds built from composed same-table relations, including hop-based and unioned permission closures.
+- 2e8e918: Cap oversized secondary index keys to a 5 KiB budget so large text values still use the truncate-and-hash encoding without producing OPFS index entries that can overflow B-tree page splits.
+- 05649ae: Add a new `deploy` CLI command to upload the current schema and permissions to the server. Replaces the existing `permissions push` command.
+- 80a0360: Add `updatedAt` overrides to `insert`, `update`, and `upsert` mutation options in `jazz-tools`.
+
+  The same override is available on the durable variants, so callers can stamp `$updatedAt` explicitly on a per-write basis without changing attribution or session scoping.
+
+- 11921e6: Use static `new URL(...)` import for worker when no explicit runtime sources are configured, allowing bundlers (Turbopack, webpack, Vite) to detect and co-bundle the worker script and its WASM dependency automatically.
+
+  Also passes a computed `fallbackWasmUrl` in the worker init message so non-bundled (static HTML) deployments still receive an explicit WASM path as a last resort if `wasmModule.default()` fails.
+
+- Updated dependencies [09e16b4]
+  - jazz-wasm@2.0.0-alpha.31
+  - jazz-rn@2.0.0-alpha.31
+
+## 2.0.0-alpha.30
+
+### Patch Changes
+
+- 848e94d: Replace HTTP `/sync` + SSE `/events` with a single Rust-owned WebSocket `/ws` transport, and wire JWT rotation and server-side auth rejection end-to-end across all bindings.
+
+  **Transport rewrite**
+  - New `TransportManager` in `jazz-tools` owns the WebSocket connection, framing (4-byte big-endian length + JSON), reconnect with exponential backoff, periodic heartbeat, and a `TransportControl` channel that observes `Shutdown` / `UpdateAuth` in every phase (connect, backoff, handshake, connected). Dropped `TransportHandle` triggers an implicit shutdown.
+  - New `install_transport` helper on `RuntimeCore` centralises the boilerplate (create manager → seed catalogue state hash → register handle → spawn) so all four bindings converge on one code path.
+  - `NativeWsStream` (tokio-tungstenite + rustls) and `WasmWsStream` (ws_stream_wasm) implement the shared `StreamAdapter` trait.
+
+  **Auth refresh**
+  - `JazzClient.updateAuthToken(jwt)` now pushes the refreshed credentials into the live transport via `runtime.updateAuth`, which routes through `TransportControl::UpdateAuth` and triggers a reconnect with the new auth. Previously the call only mutated local context.
+  - `ConnectSyncRuntimeOptions.onAuthFailure` is now wired to `runtime.onAuthFailure` and fires whenever the server rejects the WS handshake with `Unauthorized`. NAPI exposes a `ThreadsafeFunction`-based callback; React Native exposes a UniFFI `callback_interface`; WASM keeps its existing `Function` callback.
+  - The worker posts `auth-failed` back to the main thread when `runtime.updateAuth` throws, and supports `update-auth` / `disconnect-upstream` / `reconnect-upstream` messages from the bridge.
+
+  **Bindings**
+  - WASM, NAPI, and React Native all now expose `connect`, `disconnect`, `update_auth`, `on_auth_failure`.
+  - React Native: `JazzRnRuntimeAdapter` forwards `updateAuth` and `onAuthFailure` to the UniFFI binding (previously missing — auth refresh was a silent no-op on RN).
+  - `JazzClient.updateAuthToken` carries `admin_secret` and `backend_secret` forward from context (previously the serialised payload only included `jwt_token`, silently erasing privileged credentials on every refresh).
+
+  **Breaking changes**
+  - `POST /sync` and `GET /events` HTTP routes are deleted; external callers receive 404. Use the WebSocket `/ws` route via `runtime.connect(url, authJson)`.
+  - `RuntimeCore<S, Sch, Sy>` is now `RuntimeCore<S, Sch>` — the `SyncSender` generic parameter has been removed.
+  - `NapiSyncSender` and `RnSyncSender` are removed; bindings use `runtime.connect` instead.
+  - `TokioRuntime::new` no longer takes the trailing `SyncSender` argument.
+  - Cargo features `transport` and `transport-http` are removed; transport types are default-on, and `transport-websocket` enables the WS implementation.
+
+  **Tests**
+  - Inline `TransportManager` tests cover shutdown and `update_auth` in every phase (connect / backoff / handshake / connected).
+  - Re-enabled two previously-`#[ignore]`d sync-reliability tests after fixing a debounce-flag race in `TokioScheduler::schedule_batched_tick`.
+  - Integration tests migrated from `/events` to `/ws`.
+  - New TS coverage: `client.test.ts` (onAuthFailure wiring + secret preservation), `napi.auth-failure.test.ts` (E2E against real NAPI + server), `db.transport.test.ts`, `url.test.ts`, `db.auth-refresh.worker.test.ts` (browser worker round-trip), RN adapter tests for `updateAuth` / `onAuthFailure`.
+
+- e346057: Fix React Native cold-start on offline and unblock initial subscriptions when the transport can't reach the server.
+  - `jazz-rn` now regenerates its UniFFI bindings for the `insert` / `insert_with_session` signatures introduced with the caller-supplied UUIDv7 APIs, so the native library and JS adapter agree at startup and Jazz initializes in the app.
+  - `jazz-rn` now calls `rehydrate_schema_manager_from_catalogue` after opening SQLite, matching the WASM runtime, so offline cold-starts can decode previously-persisted rows against their original schema/permissions history.
+  - `jazz-tools` bounds the "hold remote query frontier while transport connects" wait so a never-completing transport no longer stalls first subscription delivery forever. Pending servers now clear on a new `TransportInbound::ConnectFailed` event (fired from the connect/handshake error paths in both tokio and wasm run loops), with a 2s safety-net timeout for hung connects. The frontier hold also re-evaluates live at settle time so offline or hung first-connect cases release immediately once pending clears.
+
+  No public-API break. RowPolicyMode selection, persisted-row wire format, and transport handshake semantics are unchanged.
+
+- b8581ad: The standalone inspector now shows each table's currently published sync-server permissions alongside its stored schema, making it easier to verify the rules your server is actively enforcing.
+- Updated dependencies [5c80e4d]
+- Updated dependencies [848e94d]
+- Updated dependencies [e346057]
+  - jazz-wasm@2.0.0-alpha.30
+  - jazz-rn@2.0.0-alpha.30
+
+## 2.0.0-alpha.29
+
+### Patch Changes
+
+- 58ace62: Add external UUIDv7 create APIs and id-based upsert APIs across the Rust and TypeScript client surfaces.
+- Updated dependencies [58ace62]
+  - jazz-wasm@2.0.0-alpha.29
+  - jazz-rn@2.0.0-alpha.29
+
+## 2.0.0-alpha.28
+
+### Minor Changes
+
+- f6d18f8: Add BIP39 recovery phrase for local-first identity, exposed at the new `jazz-tools/passphrase` subpath. `RecoveryPhrase.fromSecret` / `RecoveryPhrase.toSecret` encode and decode the 32-byte local-first auth secret as a 24-word English mnemonic, with structured `RecoveryPhraseError` codes and forgiving whitespace/case normalization. Also fixes a latent cache bug in `BrowserAuthSecretStore` and `ExpoAuthSecretStore` where `saveSecret` did not invalidate `cachedPromise`, so a restore after `getOrCreateSecret` would silently keep the pre-restore secret.
+
+### Patch Changes
+
+- 6b2ceff: Reduce migration workflow churn for schema changes that do not require row transforms.
+
+  `jazz-tools migrations create` and `jazz-tools migrations push` now treat default-only and column-order-only schema hash changes as compatible transitions that do not need a reviewed migration file, while still requiring reviewed migrations for incompatible changes like nullability or reference updates. The CLI also now accepts reviewed migration modules that load through CommonJS-style nested `default` exports.
+
+- 6afc27e: Fix row-level policies that reference a row's own `id`, including claim checks like `id IN @session.claims.editable_doc_ids`, so write permissions evaluate against the row `ObjectId` even when the table has no explicit `id` column.
+- 9b45ec5: Adopt the new row-permission strategy across client and server runtimes. Local clients that only have a structural schema stay permissive for offline reads and writes, while runtimes with current permissions and sync servers enforce deny-by-default row access for session-scoped reads, inserts, updates, and deletes.
+- 234b138: Added `jazzSvelteKit()` Vite plugin (`jazz-tools/dev/sveltekit`) for SvelteKit and Vite+Svelte projects. Starts an embedded Jazz dev server, publishes and watches the schema, and injects `PUBLIC_JAZZ_APP_ID`/`PUBLIC_JAZZ_SERVER_URL` into the Vite env. Supports three modes: embedded local server (default), connect to an explicit URL via `server: "https://…"`, or connect to a server already described in `PUBLIC_JAZZ_SERVER_URL`. Defaults `schemaDir` to `src/lib/` to match SvelteKit conventions.
+- e752ae2: Remove demo auth, anonymous auth, and synthetic users. The only valid auth modes are now local-first (Ed25519 JWT) and external (JWKS JWT). Add Expo support for local-first auth secret generation via expo-crypto.
+- 4792880: Verify bearer JWTs inside backend `createJazzContext(...).forRequest()` / `withAttributionForRequest()`, add backend `jwksUrl` and `allowSelfSigned` config, and share JWT-to-session mapping with the runtime session helpers. These request-scoped backend helpers are now async so callers can await self-signed or JWKS-backed verification.
+- Updated dependencies [9b45ec5]
+  - jazz-wasm@2.0.0-alpha.28
+  - jazz-rn@2.0.0-alpha.28
+
+## 2.0.0-alpha.27
+
+### Patch Changes
+
+- d872a4d: `allowedTo` now accepts bare relation names (e.g. `"project"`) in addition to full FK column names (`"projectId"`).
+- cfaed19: Fix enum literals in nested policies
+
+  Nested relation-backed permission filters now serialize enum literals as tagged runtime values instead of raw strings, so publishing permissions and loading them into `createJazzContext(...)` works for cases like `grant_role: "viewer"`.
+
+- 1fb1395: Add `From<T>` impls on `Value` for common types and a `row_input!` macro for ergonomic `HashMap<String, Value>` construction.
+- 463098a: Ship the new unified row-history storage engine across Jazz runtimes.
+
+  Relational rows, query visibility, and sync replay now go through the same storage-backed path instead of mixing durable state with older in-memory cache layers. In practice this makes local persistence and sync behavior more consistent across browser, Node, and native runtimes, especially around cold start, reconnect, and large local datasets.
+
+- Updated dependencies [463098a]
+  - jazz-wasm@2.0.0-alpha.27
+  - jazz-rn@2.0.0-alpha.27
+
 ## 2.0.0-alpha.26
 
 ### Patch Changes
@@ -24,7 +232,7 @@
 
 ### Patch Changes
 
-- 30df2b4: Fix browser worker reconnect after network loss when offline `worker`-tier writes were queued locally.
+- 30df2b4: Fix browser worker reconnect after network loss when offline `local`-tier writes were queued locally.
 
   The worker now aborts its stale upstream events stream before scheduling reconnect after sync POST failures, which lets later writes promote normally once network access returns. This also adds browser regression coverage for the split-context reconnect case where one client stays online while another writes offline and reconnects.
   - jazz-wasm@2.0.0-alpha.25

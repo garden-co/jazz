@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../../schema.js";
 import type { AttachmentData } from "./UploadModal";
+import { DurabilityTier } from "jazz-tools";
 
 interface MessageComposerProps {
   chatId: string;
@@ -17,6 +18,9 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const myProfile = useMyProfile();
   const composerReady = !!userId && !!myProfile;
@@ -31,9 +35,13 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
         text: html.trim(),
         senderId: myProfile.id,
         createdAt: new Date(),
-      });
+      })
+        .wait(sharedWriteOptions)
+        .catch((error) => {
+          console.error("failed to send message", error);
+        });
     },
-    [userId, chatId, db, myProfile],
+    [userId, chatId, db, myProfile, sharedWriteOptions],
   );
 
   const handleSendAttachment = useCallback(
@@ -42,32 +50,33 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
         throw new Error("Profile is still loading. Please try again.");
       }
 
-      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "worker" });
+      const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
 
-      const message = await db.insertDurable(
-        app.messages,
-        {
-          chatId,
-          text: "",
-          senderId: myProfile.id,
-          createdAt: new Date(),
-        },
-        { tier: "worker" },
-      );
+      const messageInsertHandle = db.insert(app.messages, {
+        chatId,
+        text: "",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      });
+      const message = messageInsertHandle.value;
 
-      await db.insertDurable(
-        app.attachments,
-        {
-          messageId: message.id,
-          type: attachment.type,
-          name: attachment.file.name,
-          fileId: storedFile.id,
-          size: attachment.file.size,
-        },
-        { tier: "worker" },
-      );
+      const attachmentInsertHandle = db.insert(app.attachments, {
+        messageId: message.id,
+        type: attachment.type,
+        name: attachment.file.name,
+        fileId: storedFile.id,
+        size: attachment.file.size,
+      });
+
+      if (sharedWriteOptions) {
+        await Promise.all(
+          [messageInsertHandle, attachmentInsertHandle].map((handle) =>
+            handle.wait(sharedWriteOptions),
+          ),
+        );
+      }
     },
-    [userId, chatId, db, myProfile],
+    [userId, chatId, db, myProfile, sharedWriteOptions],
   );
 
   return (

@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type Db } from "jazz-tools/backend";
+import { createJazzContext, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -48,6 +48,17 @@ export interface RunningServer extends TodoServer {
   baseUrl: string;
 }
 
+export interface TodoServerConfig {
+  dataPath?: string;
+  appId?: string;
+  serverUrl?: string;
+  backendSecret?: string;
+  adminSecret?: string;
+  jwksUrl?: string;
+  jwtPublicKey?: BackendJwtPublicKey;
+  allowLocalFirstAuth?: boolean;
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -55,15 +66,19 @@ export interface RunningServer extends TodoServer {
 /**
  * Create a todo server.
  *
- * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
+ * @param config Optional server config. Environment variables are used as fallback.
  * @returns TodoServer with app, db, and shutdown function
  */
-export async function createServer(dataPath?: string): Promise<TodoServer> {
-  const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
-  const serverUrl = process.env.JAZZ_SERVER_URL?.trim();
-  const backendSecret = process.env.JAZZ_BACKEND_SECRET?.trim();
-  const adminSecret = process.env.JAZZ_ADMIN_SECRET?.trim();
+export async function createServer(config: TodoServerConfig = {}): Promise<TodoServer> {
+  const dbPath = config.dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
+  const appId = config.appId ?? process.env.JAZZ_APP_ID ?? "todo-server-ts";
+  const serverUrl = config.serverUrl ?? process.env.JAZZ_SERVER_URL?.trim();
+  const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
+  const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
+  const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
+  const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
+  const allowLocalFirstAuth =
+    config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
 
   if (!serverUrl || !backendSecret) {
     throw new Error(
@@ -80,6 +95,9 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     serverUrl,
     backendSecret,
     adminSecret,
+    jwksUrl,
+    jwtPublicKey,
+    allowLocalFirstAuth,
     env: "dev",
     userBranch: "main",
   });
@@ -132,11 +150,13 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const todo = db.insert(schemaApp.todos, {
-        title: body.title,
-        done: false,
-        owner_id: body.owner_id ?? "anonymous",
-      });
+      const todo = await db
+        .insert(schemaApp.todos, {
+          title: body.title,
+          done: false,
+          owner_id: body.owner_id ?? "anonymous",
+        })
+        .wait({ tier: "local" });
 
       res.status(201).json(todo);
 
@@ -152,6 +172,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const userDb = context.forSession({
         user_id: req.params.userId,
+        authMode: "external",
         claims: {},
       });
       const todos = await userDb.all(schemaApp.todos);
@@ -221,7 +242,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      await db.updateDurable(schemaApp.todos, id, updates);
+      await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
 
       // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
@@ -243,7 +264,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      await db.deleteDurable(schemaApp.todos, id);
+      await db.delete(schemaApp.todos, id).wait({ tier: "local" });
       res.status(204).send();
 
       // Notify SSE connections

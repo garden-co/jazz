@@ -10,7 +10,7 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ElementDescriptor {
     /// Table name or alias for this element.
-    pub table: String,
+    pub table: TableName,
     /// Row descriptor for this element's columns.
     pub descriptor: RowDescriptor,
     /// Starting global column index for this element.
@@ -35,11 +35,11 @@ pub struct TupleDescriptor {
 
 impl TupleDescriptor {
     /// Create a single-element tuple descriptor (ID-only by default).
-    pub fn single(table: &str, descriptor: RowDescriptor) -> Self {
+    pub fn single(table: impl Into<TableName>, descriptor: RowDescriptor) -> Self {
         let total_columns = descriptor.columns.len();
         Self {
             elements: vec![ElementDescriptor {
-                table: table.to_string(),
+                table: table.into(),
                 descriptor,
                 column_offset: 0,
             }],
@@ -50,14 +50,14 @@ impl TupleDescriptor {
 
     /// Create a single-element tuple descriptor with explicit materialization state.
     pub fn single_with_materialization(
-        table: &str,
+        table: impl Into<TableName>,
         descriptor: RowDescriptor,
         materialized: bool,
     ) -> Self {
         let total_columns = descriptor.columns.len();
         Self {
             elements: vec![ElementDescriptor {
-                table: table.to_string(),
+                table: table.into(),
                 descriptor,
                 column_offset: 0,
             }],
@@ -85,13 +85,16 @@ impl TupleDescriptor {
 
     /// Create a tuple descriptor from table names and their descriptors (all ID-only).
     /// Computes column_offset for each element automatically.
-    pub fn from_tables(tables: &[(String, RowDescriptor)]) -> Self {
+    pub fn from_tables<T>(tables: &[(T, RowDescriptor)]) -> Self
+    where
+        T: Clone + Into<TableName>,
+    {
         let mut elements = Vec::with_capacity(tables.len());
         let mut offset = 0;
 
         for (table, descriptor) in tables {
             elements.push(ElementDescriptor {
-                table: table.clone(),
+                table: table.clone().into(),
                 descriptor: descriptor.clone(),
                 column_offset: offset,
             });
@@ -112,7 +115,7 @@ impl TupleDescriptor {
         let left_cols = left.total_columns;
         for elem in &right.elements {
             elements.push(ElementDescriptor {
-                table: elem.table.clone(),
+                table: elem.table,
                 descriptor: elem.descriptor.clone(),
                 column_offset: elem.column_offset + left_cols,
             });

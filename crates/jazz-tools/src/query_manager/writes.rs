@@ -1,20 +1,25 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::sync::Arc;
 
-use crate::commit::CommitId;
-use crate::metadata::{
-    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
+use crate::batch_fate::BatchMode;
+use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
+use crate::object::{BranchName, ObjectId};
+use crate::row_histories::{
+    BatchId, QueryRowBatch, RowHistoryError, RowState, RowVisibilityChange, StoredRowBatch,
+    apply_row_batch,
 };
-use crate::object::{BranchName, Object, ObjectId};
-use crate::schema_manager::{origin_schema_hash_from_metadata, resolve_current_table_name};
-use crate::storage::Storage;
+use crate::schema_manager::{SchemaContext, resolve_current_table_name};
+use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
+use crate::sync_manager::RowBatchKey;
 
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{
     DeleteHandle, InsertResult, QueryError, QueryManager, SchemaWarningAccumulator,
+    WriteTableCacheEntry,
 };
-use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
+use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
-use super::session::{Session, WriteContext};
+use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
     ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName, Value,
 };
@@ -29,9 +34,22 @@ pub struct RowBranchWrite<'a> {
 }
 
 struct PreparedUpdateWrite {
-    table_name: TableName,
-    descriptor: RowDescriptor,
     new_data: Vec<u8>,
+    descriptor: Arc<RowDescriptor>,
+}
+
+struct PreparedUpdateCommit<'a> {
+    table: &'a str,
+    branch: &'a str,
+    id: ObjectId,
+    index_mutations: &'a [crate::storage::IndexMutation<'a>],
+}
+
+struct RowBatchAuthoring<'a> {
+    provenance: &'a RowProvenance,
+    delete_kind: Option<DeleteKind>,
+    row_state: RowState,
+    batch_id: Option<BatchId>,
 }
 
 pub struct RowBranchDelete<'a> {
@@ -42,17 +60,82 @@ pub struct RowBranchDelete<'a> {
     pub old_provenance_for_policy: &'a RowProvenance,
 }
 
-fn resolve_table_name_for_context(
-    schema_context: &crate::schema_manager::SchemaContext,
-    original_table: &str,
-    origin_schema_hash: Option<&crate::query_manager::types::SchemaHash>,
-) -> TableName {
-    resolve_current_table_name(schema_context, original_table, origin_schema_hash)
-        .map(|name| TableName::new(&name))
-        .unwrap_or_else(|| TableName::new(original_table))
-}
-
 impl QueryManager {
+    fn schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        self.branch_schema_map
+            .get(branch)
+            .copied()
+            .or_else(|| self.origin_schema_hash_for_branch(branch))
+    }
+
+    fn write_table_cache_entry_for_schema(
+        &mut self,
+        branch: &str,
+        table_name: TableName,
+        write_schema: &Schema,
+    ) -> Result<Arc<WriteTableCacheEntry>, QueryError> {
+        let schema_hash = self
+            .schema_hash_for_branch(branch)
+            .unwrap_or_else(|| SchemaHash::compute(write_schema));
+        let cache_key = (schema_hash, table_name);
+        if let Some(entry) = self.write_table_cache.get(&cache_key) {
+            return Ok(entry.clone());
+        }
+
+        let table_name = cache_key.1;
+        let table_schema = write_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let entry = Arc::new(WriteTableCacheEntry {
+            descriptor: Arc::new(table_schema.columns.clone()),
+            row_locator: RowLocator {
+                table: table_name.as_str().to_string().into(),
+                origin_schema_hash: Some(schema_hash),
+            },
+            insert_policy: table_schema.policies.insert_policy().cloned().map(Arc::new),
+            update_using_policy: table_schema
+                .policies
+                .update_using_policy()
+                .cloned()
+                .map(Arc::new),
+            update_check_policy: table_schema
+                .policies
+                .update_check_policy()
+                .cloned()
+                .map(Arc::new),
+            delete_using_policy: table_schema
+                .policies
+                .effective_delete_using()
+                .cloned()
+                .map(Arc::new),
+            select_policy: table_schema.policies.select_policy().cloned().map(Arc::new),
+        });
+        self.write_table_cache.insert(cache_key, entry.clone());
+        Ok(entry)
+    }
+
+    fn resolve_insert_object_id<H: Storage>(
+        &self,
+        storage: &H,
+        external_object_id: Option<ObjectId>,
+    ) -> Result<ObjectId, QueryError> {
+        if let Some(object_id) = external_object_id {
+            if storage
+                .load_row_locator(object_id)
+                .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
+                .is_some()
+            {
+                return Err(QueryError::EncodingError(format!(
+                    "object already exists: {object_id}"
+                )));
+            }
+
+            return Ok(object_id);
+        }
+
+        Ok(ObjectId::new())
+    }
+
     fn resolve_write_author(write_context: Option<&WriteContext>) -> String {
         write_context
             .map(|write_context| write_context.author_principal().to_string())
@@ -60,7 +143,13 @@ impl QueryManager {
     }
 
     fn reserve_write_timestamp(&mut self) -> u64 {
-        self.sync_manager.object_manager.reserve_timestamp()
+        self.sync_manager.reserve_timestamp()
+    }
+
+    fn resolve_update_timestamp(&mut self, write_context: Option<&WriteContext>) -> u64 {
+        write_context
+            .and_then(WriteContext::updated_at)
+            .unwrap_or_else(|| self.reserve_write_timestamp())
     }
 
     fn row_provenance_for_insert(
@@ -91,7 +180,213 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    fn resolve_write_row_state(write_context: Option<&WriteContext>) -> RowState {
+        match write_context.map(WriteContext::batch_mode) {
+            Some(BatchMode::Transactional) => RowState::StagingPending,
+            Some(BatchMode::Direct) | None => RowState::VisibleDirect,
+        }
+    }
+
+    fn row_batch_authoring<'a>(
+        &self,
+        provenance: &'a RowProvenance,
+        delete_kind: Option<DeleteKind>,
+        write_context: Option<&WriteContext>,
+    ) -> RowBatchAuthoring<'a> {
+        RowBatchAuthoring {
+            provenance,
+            delete_kind,
+            row_state: Self::resolve_write_row_state(write_context),
+            batch_id: write_context.and_then(WriteContext::batch_id),
+        }
+    }
+
+    fn authored_row_batch(
+        &self,
+        row_id: ObjectId,
+        branch_name: &str,
+        parents: impl IntoIterator<Item = BatchId>,
+        data: Vec<u8>,
+        authoring: RowBatchAuthoring<'_>,
+    ) -> StoredRowBatch {
+        let metadata = Self::row_commit_metadata(authoring.provenance, authoring.delete_kind)
+            .into_iter()
+            .collect();
+
+        if let Some(batch_id) = authoring.batch_id {
+            StoredRowBatch::new_with_batch_id(
+                batch_id,
+                row_id,
+                branch_name,
+                parents,
+                data,
+                authoring.provenance.clone(),
+                metadata,
+                authoring.row_state,
+                self.sync_manager.max_local_durability_tier(),
+            )
+        } else {
+            StoredRowBatch::new(
+                row_id,
+                branch_name,
+                parents,
+                data,
+                authoring.provenance.clone(),
+                metadata,
+                authoring.row_state,
+                self.sync_manager.max_local_durability_tier(),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    fn stored_row_batch_for_tip(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<StoredRowBatch> {
+        let table = self.load_row_table_name(storage, row_id)?;
+        storage
+            .load_visible_region_row(&table, branch_name, row_id)
+            .ok()
+            .flatten()
+    }
+
+    #[cfg(test)]
+    pub(super) fn persist_row_region_tip<H: Storage>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<StoredRowBatch> {
+        let version = self.stored_row_batch_for_tip(storage, row_id, branch_name)?;
+        let visible_entry = storage
+            .load_visible_region_entry(table, branch_name, row_id)
+            .ok()
+            .flatten()?;
+
+        if let Err(error) =
+            storage.append_history_region_rows(table, std::slice::from_ref(&version))
+        {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row_id,
+                %error,
+                "failed to append row-history version"
+            );
+        }
+
+        if let Err(error) =
+            storage.upsert_visible_region_rows(table, std::slice::from_ref(&visible_entry))
+        {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row_id,
+                %error,
+                "failed to upsert visible row entry"
+            );
+        }
+
+        Some(version)
+    }
+
+    fn apply_local_row_batch<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        update: RowVisibilityChange,
+    ) -> Result<StoredRowBatch, QueryError> {
+        let row = update.row.clone();
+        self.handle_row_update_with_origin(storage, update, true, false);
+        Ok(row)
+    }
+
+    fn maybe_track_local_pending_transaction_overlay(
+        &mut self,
+        table: &str,
+        row_batch_key: RowBatchKey,
+        write_context: Option<&WriteContext>,
+        deleted: bool,
+        visibility_change: &Option<RowVisibilityChange>,
+    ) {
+        if visibility_change.is_some()
+            || !matches!(
+                write_context.map(WriteContext::batch_mode),
+                Some(BatchMode::Transactional)
+            )
+        {
+            return;
+        }
+
+        self.pending_local_row_batches
+            .insert(row_batch_key.row_id, row_batch_key);
+        self.mark_subscriptions_dirty_local(table);
+        if deleted {
+            self.mark_local_row_deleted_in_subscriptions(table, row_batch_key.row_id);
+        } else {
+            self.mark_local_row_updated_in_subscriptions(table, row_batch_key.row_id);
+        }
+    }
+
+    fn persist_row_locator<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        row_id: ObjectId,
+        row_locator: &RowLocator,
+    ) {
+        let _ = storage.put_row_locator(row_id, Some(row_locator));
+    }
+
+    fn apply_local_row_history_write<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch_name: &BranchName,
+        row_id: ObjectId,
+        row: StoredRowBatch,
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(BatchId, Option<RowVisibilityChange>), QueryError> {
+        self.ensure_known_schemas_catalogued(storage)
+            .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
+
+        if storage
+            .load_row_locator(row_id)
+            .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
+            .is_none()
+        {
+            let row_locator = self.row_locator_for_branch(table, branch_name.as_str());
+            self.persist_row_locator(storage, row_id, &row_locator);
+        }
+
+        let forwarded_row = row.clone();
+        let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
+            .map_err(|error| match error {
+                RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
+                RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
+                    "missing row-history parent {parent:?} while applying local write for {row_id:?}"
+                )),
+                RowHistoryError::StorageError(error) => {
+                    QueryError::EncodingError(format!("apply row batch: {error}"))
+                }
+            })?;
+
+        self.sync_manager.forward_row_batch_to_servers(
+            row_id,
+            metadata_from_row_locator(&applied.row_locator),
+            forwarded_row,
+        );
+
+        let batch_id = applied.batch_id;
+        Ok((batch_id, applied.visibility_change))
+    }
+
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
+        if let Some(schema_hash) = self.branch_schema_map.get(branch).copied() {
+            return Some(schema_hash);
+        }
         if branch == self.current_branch() {
             return Some(self.schema_context.current_hash);
         }
@@ -114,58 +409,160 @@ impl QueryManager {
         self.find_schema_by_short_hash(&composed.schema_hash)
     }
 
-    fn row_object_metadata_for_branch(&self, table: &str, branch: &str) -> HashMap<String, String> {
-        let mut metadata = HashMap::from([(MetadataKey::Table.to_string(), table.to_string())]);
-        if let Some(origin_schema_hash) = self.origin_schema_hash_for_branch(branch) {
-            metadata.insert(
-                MetadataKey::OriginSchemaHash.to_string(),
-                origin_schema_hash.to_string(),
-            );
+    fn row_locator_for_branch(&self, table: &str, branch: &str) -> RowLocator {
+        RowLocator {
+            table: table.to_string().into(),
+            origin_schema_hash: self.schema_hash_for_branch(branch),
         }
-        metadata
     }
 
-    fn load_row_tip_on_branch(
+    fn load_row_table_name(&self, storage: &dyn Storage, row_id: ObjectId) -> Option<String> {
+        let locator = storage.load_row_locator(row_id).ok().flatten()?;
+        let table = locator.table.as_str();
+        resolve_current_table_name(
+            &self.schema_context,
+            table,
+            locator.origin_schema_hash.as_ref(),
+        )
+        .or(Some(locator.table.to_string()))
+    }
+
+    fn load_visible_row_on_branch(
         &self,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
-    ) -> Option<(&crate::commit::Commit, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-        let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| {
-            (
-                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
-                *id,
-            )
-        });
-        let tip_id = *tips.last()?;
-        let commit = branch.commits.get(&tip_id)?;
-        Some((commit, tip_id))
+    ) -> Option<(String, QueryRowBatch)> {
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        self.load_best_visible_row_batch(
+            storage,
+            row_id,
+            &[branch_name.to_string()],
+            None,
+            &self.schema_context,
+            &branch_schema_map,
+        )
     }
 
     fn load_row_provenance_on_branch(
         &self,
+        storage: &dyn Storage,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<RowProvenance> {
-        let (commit, _) = self.load_row_tip_on_branch(row_id, branch_name)?;
-        commit.row_provenance()
+        let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch_name)?;
+        Some(row.row_provenance())
     }
 
-    fn resolve_current_table_name_from_object(&self, object: &Object) -> Option<String> {
-        let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
-        resolve_current_table_name(
-            &self.schema_context,
-            object.original_table_name(),
-            origin_schema_hash.as_ref(),
-        )
+    fn load_latest_batch_history_row_on_branch(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        batch_id: BatchId,
+    ) -> Option<(String, StoredRowBatch)> {
+        let table = self.load_row_table_name(storage, row_id)?;
+        let row = storage
+            .scan_history_row_batches(&table, row_id)
+            .ok()?
+            .into_iter()
+            .filter(|row| row.batch_id == batch_id && row.branch.as_str() == branch_name)
+            .max_by_key(|row| (row.updated_at, row.batch_id()))?;
+        Some((table, row))
+    }
+
+    pub(crate) fn load_latest_transactional_staged_row_on_branch(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        batch_id: BatchId,
+    ) -> Option<(String, QueryRowBatch)> {
+        let (table, row) =
+            self.load_latest_batch_history_row_on_branch(storage, row_id, branch_name, batch_id)?;
+        Some((table, QueryRowBatch::from(&row)))
+    }
+
+    fn batch_history_row_for_write(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Option<StoredRowBatch> {
+        let batch_id = write_context.and_then(WriteContext::batch_id)?;
+        self.load_latest_batch_history_row_on_branch(storage, row_id, branch_name, batch_id)
+            .map(|(_, row)| row)
+    }
+
+    fn parent_ids_for_write(
+        &self,
+        storage: &dyn Storage,
+        table: &str,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Vec<BatchId> {
+        if let Some(existing_batch_row) =
+            self.batch_history_row_for_write(storage, row_id, branch_name, write_context)
+        {
+            return existing_batch_row.parents.iter().copied().collect();
+        }
+        self.load_branch_tip_ids(storage, table, row_id, branch_name)
+    }
+
+    fn transactional_staged_row_for_write(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch_name: &str,
+        write_context: Option<&WriteContext>,
+    ) -> Option<QueryRowBatch> {
+        let batch_id = write_context
+            .filter(|ctx| ctx.batch_mode() == BatchMode::Transactional)
+            .and_then(WriteContext::batch_id)?;
+        self.load_latest_transactional_staged_row_on_branch(storage, row_id, branch_name, batch_id)
+            .map(|(_, row)| row)
+    }
+
+    fn load_branch_tip_ids(
+        &self,
+        storage: &dyn Storage,
+        table: &str,
+        row_id: ObjectId,
+        branch: &str,
+    ) -> Vec<BatchId> {
+        if let Ok(Some(entry)) = storage.load_visible_region_entry(table, branch, row_id) {
+            return entry.branch_frontier;
+        }
+
+        storage
+            .scan_row_branch_tip_ids(table, branch, row_id)
+            .unwrap_or_default()
     }
 
     fn prepare_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
         write: RowBranchWrite<'_>,
+        write_context: Option<&WriteContext>,
+        new_provenance: &RowProvenance,
+    ) -> Result<PreparedUpdateWrite, QueryError> {
+        let write_schema = self.schema.clone();
+        self.prepare_update_write_for_schema(
+            storage,
+            write,
+            write_schema.as_ref(),
+            write_context,
+            new_provenance,
+        )
+    }
+
+    fn prepare_update_write_for_schema<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        write_schema: &Schema,
         write_context: Option<&WriteContext>,
         new_provenance: &RowProvenance,
     ) -> Result<PreparedUpdateWrite, QueryError> {
@@ -178,17 +575,11 @@ impl QueryManager {
             old_provenance_for_policy,
         } = write;
         let table_name = TableName::new(table);
-        let (descriptor, using_policy, check_policy) = {
-            let table_schema = self
-                .schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.update.using.clone(),
-                table_schema.policies.update.with_check.clone(),
-            )
-        };
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.update_using_policy.as_deref();
+        let check_policy = table_write.update_check_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -197,35 +588,37 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
 
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let new_data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
-                let auth_table_name = resolve_table_name_for_context(
-                    &auth_context,
-                    table,
-                    origin_schema_hash.as_ref(),
-                );
-                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
+                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Update,
                     });
                 };
+                if self.row_policy_mode.denies_missing_explicit_policy()
+                    && !auth_table_schema.policies.has_explicit_update_policy()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
 
-                if let Some(policy) = auth_table_schema.policies.update.using.as_ref()
+                if let Some(policy) = auth_table_schema.policies.update_using_policy()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
                         branch,
-                        auth_table_name,
+                        table_name,
                         policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
@@ -241,12 +634,12 @@ impl QueryManager {
                     });
                 }
 
-                if let Some(policy) = auth_table_schema.policies.update.with_check.as_ref()
+                if let Some(policy) = auth_table_schema.policies.update_check_policy()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
                         branch,
-                        auth_table_name,
+                        table_name,
                         policy,
                         &new_data,
                         new_provenance,
@@ -261,25 +654,37 @@ impl QueryManager {
                         operation: Operation::Update,
                     });
                 }
-            } else if let Some(policy) = &using_policy {
-                let mut visited = HashSet::new();
-                if !self.evaluate_policy_for_content_with_context_for_row(
-                    storage,
-                    policy,
-                    old_data_for_policy,
-                    old_provenance_for_policy,
-                    &descriptor,
-                    session,
-                    table,
-                    branch,
-                    id,
-                    0,
-                    &mut visited,
-                ) {
+            } else {
+                if self.row_policy_mode.denies_missing_explicit_policy()
+                    && using_policy.is_none()
+                    && check_policy.is_none()
+                {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Update,
                     });
+                }
+                if let Some(policy) = &using_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        old_data_for_policy,
+                        old_provenance_for_policy,
+                        descriptor,
+                        session,
+                        table,
+                        branch,
+                        Operation::Update,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
                 }
             }
 
@@ -291,13 +696,14 @@ impl QueryManager {
                 let mut visited = HashSet::new();
                 if !self.evaluate_policy_for_content_with_context_for_row(
                     storage,
-                    &policy,
+                    policy,
                     &new_data,
                     new_provenance,
-                    &descriptor,
+                    descriptor,
                     session,
                     table,
                     branch,
+                    Operation::Update,
                     id,
                     0,
                     &mut visited,
@@ -311,95 +717,116 @@ impl QueryManager {
         }
 
         Ok(PreparedUpdateWrite {
-            table_name,
-            descriptor,
             new_data,
+            descriptor: table_write.descriptor.clone(),
         })
     }
 
     fn commit_prepared_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
-        branch: &str,
-        id: ObjectId,
-        new_data: &[u8],
-        timestamp: u64,
+        commit: PreparedUpdateCommit<'_>,
+        prepared: &PreparedUpdateWrite,
         provenance: &RowProvenance,
-    ) -> Result<CommitId, QueryError> {
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
+        write_context: Option<&WriteContext>,
+    ) -> Result<BatchId, QueryError> {
+        let PreparedUpdateCommit {
+            table,
+            branch,
+            id,
+            index_mutations,
+        } = commit;
+        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
 
-        let commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                branch,
-                parents,
-                new_data.to_vec(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(provenance, None)),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let row = self.authored_row_batch(
+            id,
+            branch,
+            parents,
+            prepared.new_data.clone(),
+            self.row_batch_authoring(provenance, None, write_context),
+        );
+        let branch_name = BranchName::new(branch);
+        let (batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            id,
+            row,
+            index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            RowBatchKey::new(id, branch_name, batch_id),
+            write_context,
+            false,
+            &visibility_change,
+        );
 
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
-        Ok(commit_id)
+        Ok(batch_id)
     }
 
     /// Load a row for schema-aware updates.
     ///
     /// If the row exists on the current schema branch, use that version.
-    /// Otherwise, fall back to the newest visible version across sibling
+    /// Otherwise, fall back to the newest visible row across sibling
     /// schema-version branches for the same logical user branch.
     pub fn load_row_for_schema_update<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
         branches: &[String],
-    ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
-        let schema_context = &self.schema_context;
+    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
+        let schema_context = self.schema_context.clone();
+        self.load_row_for_schema_update_in_context(storage, id, branches, &schema_context)
+    }
+
+    pub fn load_row_for_schema_update_in_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        id: ObjectId,
+        branches: &[String],
+        schema_context: &SchemaContext,
+    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
         let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
-        let obj = self
-            .sync_manager
-            .object_manager
-            .get_or_load(id, storage, branches)?;
-        let original_table = obj.original_table_name();
-        let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
-        let current_table = resolve_table_name_for_context(
+        let (table, row) = self.load_best_visible_row_batch(
+            storage,
+            id,
+            branches,
+            None,
             schema_context,
-            original_table,
-            origin_schema_hash.as_ref(),
-        )
-        .as_str()
-        .to_string();
+            &branch_schema_map,
+        )?;
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
+            table: &table,
             branch_schema_map: &branch_schema_map,
             schema_context,
             schema_warnings: &mut schema_warnings,
         };
-        Self::resolve_latest_row_with_schema_transform(id, obj, branches, &mut transform_context)
-            .and_then(|resolved| {
-                let commit = obj
-                    .branches
-                    .get(&resolved.branch_name)
-                    .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                Some((
-                    current_table,
-                    resolved.branch_name.as_str().to_string(),
-                    resolved.content,
-                    resolved.commit_id,
-                    commit.row_provenance()?,
-                ))
-            })
+        if row.data.is_empty() {
+            return None;
+        }
+
+        Self::transform_row_with_schema(
+            id,
+            row.data.to_vec(),
+            row.batch_id(),
+            BranchName::new(&row.branch),
+            &mut transform_context,
+        )
+        .map(|resolved| {
+            (
+                table,
+                resolved.branch_name.as_str().to_string(),
+                resolved.content,
+                resolved.batch_id,
+                row.row_provenance(),
+            )
+        })
     }
 
     /// Insert a new row into a table.
@@ -427,14 +854,28 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_with_write_context_and_id(storage, table, values, None, write_context)
+    }
+
+    pub fn insert_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let _span = tracing::debug_span!("QM::insert", table).entered();
+        let current_branch = self.current_branch().as_str().to_string();
         let table_name = TableName::new(table);
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        let insert_policy = table_schema.policies.insert.with_check.clone();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -443,43 +884,45 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
+        self.validate_json_for_values(descriptor, values)?;
         Self::validate_write_index_values_on_branch(
             table,
             self.current_branch().as_str(),
             values,
-            &descriptor,
+            descriptor,
         )?;
 
         // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
-        let branch = self.current_branch();
+
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: TableName::new(table),
+                operation: Operation::Insert,
+            });
+        }
 
         // Check INSERT WITH CHECK policy
         if let Some(session) = write_context.and_then(WriteContext::session) {
-            if let Some((auth_schema, auth_context)) = self
-                .local_write_authorization_context(self.current_branch().as_str(), Some(session))
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(&current_branch, Some(session))
             {
-                let origin_schema_hash =
-                    self.origin_schema_hash_for_branch(self.current_branch().as_str());
-                let auth_table_name = resolve_table_name_for_context(
-                    &auth_context,
-                    table,
-                    origin_schema_hash.as_ref(),
-                );
                 let allowed = auth_schema
-                    .get(&auth_table_name)
-                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert_policy())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
-                            self.current_branch().as_str(),
-                            auth_table_name,
+                            &current_branch,
+                            table_name,
                             policy,
                             &data,
                             &provenance,
@@ -489,73 +932,93 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
+                    .unwrap_or_else(|| {
+                        !self.row_policy_mode.denies_missing_explicit_policy()
+                            && auth_schema.contains_key(&table_name)
+                    });
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Insert,
                     });
                 }
-            } else if let Some(policy) = insert_policy
-                && !self.evaluate_policy_for_content_with_context(
-                    storage,
-                    &policy,
-                    &data,
-                    &provenance,
-                    &descriptor,
-                    session,
-                    table,
-                    self.current_branch().as_str(),
-                )
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Insert,
-                });
+            } else {
+                if self.row_policy_mode.denies_missing_explicit_policy() && insert_policy.is_none()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        &data,
+                        &provenance,
+                        descriptor,
+                        session,
+                        table,
+                        &current_branch,
+                        Operation::Insert,
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
+                }
             }
         }
 
-        // Create object with table metadata
-        let metadata = self.row_object_metadata_for_branch(table, &branch);
-
-        let object_id =
-            self.sync_manager
-                .object_manager
-                .create_with_id(storage, object_id, Some(metadata));
+        // Create row locator for the new row object
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                object_id,
-                &branch,
-                vec![],
-                data.clone(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&provenance, None)),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+        let index_mutations = Self::index_mutations_for_insert_on_branch(
+            table,
+            &current_branch,
+            object_id,
+            &data,
+            descriptor,
+        );
+        let row = self.authored_row_batch(
+            object_id,
+            &current_branch,
+            vec![],
+            data.clone(),
+            self.row_batch_authoring(&provenance, None, write_context),
+        );
+        let branch_name = BranchName::new(&current_branch);
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            object_id,
+            row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
+            write_context,
+            false,
+            &visibility_change,
+        );
 
-        // Forward new row to all connected servers
-        tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
-        self.sync_manager
-            .forward_update_to_servers(object_id, branch.into());
+        tracing::trace!(%object_id, ?row_batch_id, "apply local row insert");
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
-        // Update indices immediately and persist
-        self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
-        tracing::trace!(%object_id, table, "index_insert complete");
-
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(table);
-        tracing::trace!(table, "mark_subscriptions_dirty");
-
-        tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
+        tracing::debug!(%object_id, ?row_batch_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
             row_id: object_id,
-            row_commit_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -593,13 +1056,31 @@ impl QueryManager {
         values: &[Value],
         write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_context,
+        )
+    }
+
+    pub fn insert_on_branch_with_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
         let table_name = TableName::new(table);
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        let insert_policy = table_schema.policies.insert.with_check.clone();
+        let write_schema = self.schema.clone();
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -608,13 +1089,13 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
 
         // Encode to binary
-        let data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        let object_id = ObjectId::new();
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
         let timestamp = self.reserve_write_timestamp();
         let provenance = self.row_provenance_for_insert(write_context, timestamp);
 
@@ -623,21 +1104,15 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
-                let auth_table_name = resolve_table_name_for_context(
-                    &auth_context,
-                    table,
-                    origin_schema_hash.as_ref(),
-                );
                 let allowed = auth_schema
-                    .get(&auth_table_name)
-                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert_policy())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
                             branch,
-                            auth_table_name,
+                            table_name,
                             policy,
                             &data,
                             &provenance,
@@ -647,7 +1122,166 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
+                    .unwrap_or_else(|| {
+                        !self.row_policy_mode.denies_missing_explicit_policy()
+                            && auth_schema.contains_key(&table_name)
+                    });
+                if !allowed {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+            } else {
+                if self.row_policy_mode.denies_missing_explicit_policy() && insert_policy.is_none()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+                if let Some(policy) = insert_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        &data,
+                        &provenance,
+                        descriptor,
+                        session,
+                        table,
+                        branch,
+                        Operation::Insert,
+                        object_id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Insert,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Create row locator for the new row object
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
+
+        // Add commit with row data to specified branch
+        let index_mutations =
+            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let row = self.authored_row_batch(
+            object_id,
+            branch,
+            vec![],
+            data.clone(),
+            self.row_batch_authoring(&provenance, None, write_context),
+        );
+        let branch_name = BranchName::new(branch);
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            object_id,
+            row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
+            write_context,
+            false,
+            &visibility_change,
+        );
+
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
+
+        Ok(InsertResult {
+            row_id: object_id,
+            batch_id: row_batch_id,
+            row_values: values.to_vec(),
+        })
+    }
+
+    pub fn insert_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        self.insert_on_branch_with_schema_and_write_context_and_id(
+            storage,
+            table,
+            branch,
+            values,
+            None,
+            write_schema,
+            write_context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_on_branch_with_schema_and_write_context_and_id<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        external_object_id: Option<ObjectId>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let table_name = TableName::new(table);
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let insert_policy = table_write.insert_policy.as_deref();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
+
+        let data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = self.resolve_insert_object_id(storage, external_object_id)?;
+        let timestamp = self.reserve_write_timestamp();
+        let provenance = self.row_provenance_for_insert(write_context, timestamp);
+
+        if let Some(session) = write_context.and_then(WriteContext::session) {
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(branch, Some(session))
+            {
+                let allowed = auth_schema
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .map(|policy| {
+                        self.evaluate_current_authorization_policy_for_content(
+                            storage,
+                            object_id,
+                            branch,
+                            table_name,
+                            policy,
+                            &data,
+                            &provenance,
+                            session,
+                            Operation::Insert,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                    })
+                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -657,13 +1291,14 @@ impl QueryManager {
             } else if let Some(policy) = insert_policy
                 && !self.evaluate_policy_for_content_with_context(
                     storage,
-                    &policy,
+                    policy,
                     &data,
                     &provenance,
-                    &descriptor,
+                    descriptor,
                     session,
                     table,
                     branch,
+                    Operation::Insert,
                 )
             {
                 return Err(QueryError::PolicyDenied {
@@ -673,50 +1308,41 @@ impl QueryManager {
             }
         }
 
-        // Create object with table metadata
-        let metadata = self.row_object_metadata_for_branch(table, branch);
+        self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
-        let object_id =
-            self.sync_manager
-                .object_manager
-                .create_with_id(storage, object_id, Some(metadata));
-
-        // Add commit with row data to specified branch
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                object_id,
-                branch,
-                vec![],
-                data.clone(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&provenance, None)),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
-
-        // Forward new row to all connected servers
-        self.sync_manager
-            .forward_update_to_servers(object_id, branch.into());
-
-        // Update indices on specified branch
-        Self::update_indices_for_insert_on_branch(
+        let index_mutations =
+            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let row = self.authored_row_batch(
+            object_id,
+            branch,
+            vec![],
+            data.clone(),
+            self.row_batch_authoring(&provenance, None, write_context),
+        );
+        let branch_name = BranchName::new(branch);
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
             table,
-            branch,
+            &branch_name,
             object_id,
-            &data,
-            &descriptor,
+            row,
+            &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            RowBatchKey::new(object_id, branch_name, row_batch_id),
+            write_context,
+            false,
+            &visibility_change,
+        );
 
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(table);
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
         Ok(InsertResult {
             row_id: object_id,
-            row_commit_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -869,11 +1495,6 @@ impl QueryManager {
         )
     }
 
-    /// Evaluate a policy expression against encoded row content using full policy context.
-    ///
-    /// This uses the same simple/complex split as server-side permission checks:
-    /// - Evaluate simple predicates directly from row bytes.
-    /// - Materialize and settle policy graphs for complex clauses.
     #[allow(clippy::too_many_arguments)]
     fn evaluate_policy_for_content_with_context<H: Storage>(
         &mut self,
@@ -885,6 +1506,7 @@ impl QueryManager {
         session: &Session,
         table: &str,
         branch: &str,
+        operation: Operation,
     ) -> bool {
         let mut visited = HashSet::new();
         self.evaluate_policy_for_content_with_context_inner(
@@ -896,6 +1518,7 @@ impl QueryManager {
             session,
             table,
             branch,
+            operation,
             None,
             0,
             &mut visited,
@@ -913,6 +1536,7 @@ impl QueryManager {
         session: &Session,
         table: &str,
         branch: &str,
+        operation: Operation,
         row_id: ObjectId,
         depth: usize,
         visited: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -926,6 +1550,7 @@ impl QueryManager {
             session,
             table,
             branch,
+            operation,
             Some(row_id),
             depth,
             visited,
@@ -943,6 +1568,7 @@ impl QueryManager {
         session: &Session,
         table: &str,
         branch: &str,
+        operation: Operation,
         row_id: Option<ObjectId>,
         depth: usize,
         visited: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -950,7 +1576,9 @@ impl QueryManager {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
             return false;
         }
-        let simple_result = evaluate_simple_parts(policy, content, provenance, descriptor, session);
+        let simple_result = evaluate_simple_parts_with_row_id(
+            policy, content, provenance, descriptor, session, row_id,
+        );
         if !simple_result.passed {
             return false;
         }
@@ -995,35 +1623,44 @@ impl QueryManager {
             return true;
         }
 
-        let mut graphs = self.create_policy_graphs_for_complex_clauses(
+        let Some(mut graphs) = self.create_policy_graphs_for_complex_clauses(
             &graph_clauses,
             content,
             descriptor,
             &table_name,
+            operation,
             session,
             branch,
-        );
+        ) else {
+            return false;
+        };
         if graphs.is_empty() {
             return true;
         }
 
-        let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
-        let om = &mut self.sync_manager.object_manager;
-        let branch_name = BranchName::new(branch);
-        let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&branch_name)?;
-            let tip_id = branch_state.tips.iter().next()?;
-            let commit = branch_state.commits.get(tip_id)?;
-            if commit.content.is_empty() {
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let mut row_loader = |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
+            let (_, row) = Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage_ref,
+                id,
+                table_hint.as_ref().map(TableName::as_str),
+                &[branch.to_string()],
+                None,
+                &self.schema_context,
+                &branch_schema_map,
+            )?;
+            if row.is_hard_deleted() {
                 return None;
             }
+            let batch_id = row.batch_id;
+            let provenance = row.row_provenance();
+            let source_branch = BranchName::new(&row.branch);
             Some(LoadedRow::new(
-                commit.content.clone(),
-                *tip_id,
-                commit.row_provenance()?,
-                [(id, branch_name)].into_iter().collect(),
+                row.data,
+                provenance,
+                [(id, source_branch)].into_iter().collect(),
+                batch_id,
             ))
         };
 
@@ -1177,41 +1814,44 @@ impl QueryManager {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
-        let Some(provenance) = self.load_row_provenance_on_branch(row_id, branch) else {
+        let Some(provenance) = self.load_row_provenance_on_branch(storage, row_id, branch) else {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
 
-        let Some(table_schema) = self.schema.get(&table_name).cloned() else {
+        let write_schema = self.schema.clone();
+        let Ok(table_write) =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())
+        else {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
 
         let local_policy = match operation {
-            Operation::Select => table_schema.policies.select.using.clone(),
-            Operation::Insert => table_schema.policies.insert.with_check.clone(),
-            Operation::Update => table_schema.policies.update.using.clone(),
-            Operation::Delete => table_schema.policies.effective_delete_using().cloned(),
+            Operation::Select => table_write.select_policy.as_deref(),
+            Operation::Insert => table_write.insert_policy.as_deref(),
+            Operation::Update => table_write.update_using_policy.as_deref(),
+            Operation::Delete => table_write.delete_using_policy.as_deref(),
         };
 
         let local_allow = local_policy
-            .as_ref()
             .map(|policy| {
                 self.evaluate_policy_for_content_with_context_for_row(
                     storage,
                     policy,
                     &content,
                     &provenance,
-                    &table_schema.columns,
+                    table_write.descriptor.as_ref(),
                     session,
                     table_name.as_str(),
                     branch,
+                    operation,
                     row_id,
                     depth,
                     visited,
                 )
             })
-            .unwrap_or(true);
+            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
 
         visited.remove(&(table_name, row_id, operation));
         local_allow
@@ -1223,18 +1863,22 @@ impl QueryManager {
         row_id: ObjectId,
         branch: &str,
     ) -> Option<Vec<u8>> {
-        let branches = vec![branch.to_string()];
-        let obj = self
-            .sync_manager
-            .object_manager
-            .get_or_load(row_id, storage, &branches)?;
-        let branch_state = obj.branches.get(&BranchName::new(branch))?;
-        let tip_id = branch_state.tips.iter().next()?;
-        let commit = branch_state.commits.get(tip_id)?;
-        if commit.content.is_empty() {
+        let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch)?;
+        if row.is_hard_deleted() {
             return None;
         }
-        Some(commit.content.clone())
+        Some(row.data.to_vec())
+    }
+
+    pub(super) fn visible_row_is_hard_deleted(
+        &self,
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branch: &str,
+    ) -> bool {
+        self.load_visible_row_on_branch(storage, row_id, branch)
+            .map(|(_, row)| row.is_hard_deleted())
+            .unwrap_or(false)
     }
 
     /// Update a row.
@@ -1243,7 +1887,7 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
         values: &[Value],
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         self.update_with_write_context(storage, id, values, None)
     }
 
@@ -1258,33 +1902,38 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
-
-        // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        // Get old data from ObjectManager
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: TableName::new(&table),
+                operation: Operation::Update,
+            });
+        }
+
+        let current_row = self
+            .transactional_staged_row_for_write(
+                storage,
+                id,
+                self.current_branch().as_str(),
+                write_context,
+            )
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                    .map(|(_, row)| row)
+            })
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
-            .ok_or_else(|| {
-                QueryError::EncodingError("missing row provenance on current tip".to_string())
-            })?;
+        let old_data = current_row.data.clone();
+        let old_provenance = current_row.row_provenance();
         let branch = self.current_branch();
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
         let prepared = self.prepare_update_write(
@@ -1300,32 +1949,28 @@ impl QueryManager {
             write_context,
             &new_provenance,
         )?;
-        let commit_id = self.commit_prepared_update_write(
-            storage,
+        let index_mutations = Self::index_mutations_for_update_on_branch(
+            &table,
             branch.as_str(),
-            id,
-            &prepared.new_data,
-            timestamp,
-            &new_provenance,
-        )?;
-
-        // Update indices and persist modified nodes
-        self.update_indices_for_update(
-            storage,
-            &prepared.table_name.0,
             id,
             &old_data,
             &prepared.new_data,
-            &prepared.descriptor,
+            prepared.descriptor.as_ref(),
+        );
+        let batch_id = self.commit_prepared_update_write(
+            storage,
+            PreparedUpdateCommit {
+                table: &table,
+                branch: branch.as_str(),
+                id,
+                index_mutations: &index_mutations,
+            },
+            &prepared,
+            &new_provenance,
+            write_context,
         )?;
-        tracing::trace!(%id, table = %prepared.table_name.0, "index_update complete");
 
-        // Mark subscriptions dirty and notify about content update
-        self.mark_subscriptions_dirty_local(&prepared.table_name.0);
-        self.mark_row_updated_in_subscriptions(&prepared.table_name.0, id);
-        tracing::trace!(table = %prepared.table_name.0, "mark_subscriptions_dirty");
-
-        Ok(commit_id)
+        Ok(batch_id)
     }
 
     pub fn update_with_session<H: Storage>(
@@ -1334,7 +1979,7 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.update_with_write_context(storage, id, values, owned.as_ref())
     }
@@ -1349,7 +1994,23 @@ impl QueryManager {
         storage: &mut H,
         write: RowBranchWrite<'_>,
         write_context: Option<&WriteContext>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
+        let write_schema = self.schema.clone();
+        self.write_existing_row_on_branch_with_schema_and_write_context(
+            storage,
+            write,
+            write_schema.as_ref(),
+            write_context,
+        )
+    }
+
+    pub fn write_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<BatchId, QueryError> {
         let RowBranchWrite {
             table,
             branch,
@@ -1358,57 +2019,75 @@ impl QueryManager {
             old_data_for_policy: _old_data_for_policy,
             old_provenance_for_policy,
         } = write;
-        let timestamp = self.reserve_write_timestamp();
+        let timestamp = self.resolve_update_timestamp(write_context);
         let new_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
-        let prepared = self.prepare_update_write(storage, write, write_context, &new_provenance)?;
-
-        let existing_branch_data = self
-            .load_row_from_object_on_branch(id, branch)
-            .map(|(data, _)| data)
-            .filter(|data| !data.is_empty());
-        let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
-        let commit_id = self.commit_prepared_update_write(
+        let prepared = self.prepare_update_write_for_schema(
             storage,
-            branch,
-            id,
-            &prepared.new_data,
-            timestamp,
+            write,
+            write_schema,
+            write_context,
             &new_provenance,
         )?;
 
-        match existing_branch_data {
-            Some(old_data) => Self::update_indices_for_update_on_branch(
-                storage,
-                table,
-                branch,
-                id,
-                &old_data,
-                &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-            None if was_soft_deleted => Self::update_indices_for_undelete_on_branch(
-                storage,
-                table,
-                branch,
-                id,
-                &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-            None => Self::update_indices_for_insert_on_branch(
-                storage,
+        let staged_branch_row =
+            self.transactional_staged_row_for_write(storage, id, branch, write_context);
+        let existing_branch_data = staged_branch_row
+            .as_ref()
+            .map(|row| row.data.clone())
+            .filter(|data| !data.is_empty())
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, branch)
+                    .map(|(_, row)| row.data)
+                    .filter(|data| !data.is_empty())
+            });
+        let was_soft_deleted = staged_branch_row
+            .as_ref()
+            .map(QueryRowBatch::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id));
+        let index_mutations = if was_soft_deleted {
+            Self::index_mutations_for_undelete_on_branch(
                 table,
                 branch,
                 id,
                 &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-        }
+                prepared.descriptor.as_ref(),
+            )
+        } else if let Some(old_branch_data) = existing_branch_data.as_deref() {
+            Self::index_mutations_for_update_on_branch(
+                table,
+                branch,
+                id,
+                old_branch_data,
+                &prepared.new_data,
+                prepared.descriptor.as_ref(),
+            )
+        } else {
+            Self::index_mutations_for_insert_on_branch(
+                table,
+                branch,
+                id,
+                &prepared.new_data,
+                prepared.descriptor.as_ref(),
+            )
+        };
+        let batch_id = self.commit_prepared_update_write(
+            storage,
+            PreparedUpdateCommit {
+                table,
+                branch,
+                id,
+                index_mutations: &index_mutations,
+            },
+            &prepared,
+            &new_provenance,
+            write_context,
+        )?;
 
-        self.mark_subscriptions_dirty_local(table);
-        self.mark_row_updated_in_subscriptions(table, id);
+        let _ = existing_branch_data;
+        let _ = was_soft_deleted;
 
-        Ok(commit_id)
+        Ok(batch_id)
     }
 
     pub fn write_existing_row_on_branch_with_session<H: Storage>(
@@ -1416,7 +2095,7 @@ impl QueryManager {
         storage: &mut H,
         write: RowBranchWrite<'_>,
         session: Option<&Session>,
-    ) -> Result<CommitId, QueryError> {
+    ) -> Result<BatchId, QueryError> {
         let owned = session.cloned().map(WriteContext::from_session);
         self.write_existing_row_on_branch_with_write_context(storage, write, owned.as_ref())
     }
@@ -1445,78 +2124,86 @@ impl QueryManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
-
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(storage, &table, id) {
+        let current_branch = self.current_branch().to_string();
+        let staged_row =
+            self.transactional_staged_row_for_write(storage, id, &current_branch, write_context);
+        if staged_row
+            .as_ref()
+            .map(QueryRowBatch::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted(storage, &table, id))
+        {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
-        // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        // Get old data from the current visible row (for index removal and content preservation)
+        let current_row = staged_row
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+                    .map(|(_, row)| row)
+            })
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
-            .ok_or_else(|| {
-                QueryError::EncodingError("missing row provenance on current tip".to_string())
-            })?;
+        let old_data = current_row.data.clone();
+        let old_provenance = current_row.row_provenance();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.delete_using_policy.as_deref();
 
-        let (descriptor, using_policy) = {
-            let table_schema = self
-                .schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.effective_delete_using().cloned(),
-            )
-        };
-
-        let current_branch = self.current_branch().to_string();
+        // Deny anonymous writes before any policy evaluation.
+        if let Some(session) = write_context.and_then(WriteContext::session)
+            && session.auth_mode == AuthMode::Anonymous
+        {
+            return Err(QueryError::AnonymousWriteDenied {
+                table: table_name,
+                operation: Operation::Delete,
+            });
+        }
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(&current_branch, Some(session))
             {
-                let origin_schema_hash = self.origin_schema_hash_for_branch(&current_branch);
-                let auth_table_name = resolve_table_name_for_context(
-                    &auth_context,
-                    &table,
-                    origin_schema_hash.as_ref(),
-                );
-                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
+                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
                     });
                 };
+                if self.row_policy_mode.denies_missing_explicit_policy()
+                    && auth_table_schema
+                        .policies
+                        .effective_delete_using()
+                        .is_none()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                }
 
                 if let Some(policy) = auth_table_schema.policies.effective_delete_using()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
                         &current_branch,
-                        auth_table_name,
+                        table_name,
                         policy,
                         &old_data,
                         &old_provenance,
@@ -1531,82 +2218,89 @@ impl QueryManager {
                         operation: Operation::Delete,
                     });
                 }
-            } else if let Some(policy) = using_policy
-                && {
-                    let mut visited = HashSet::new();
-                    !self.evaluate_policy_for_content_with_context_for_row(
-                        storage,
-                        &policy,
-                        &old_data,
-                        &old_provenance,
-                        &descriptor,
-                        session,
-                        &table,
-                        &current_branch,
-                        id,
-                        0,
-                        &mut visited,
-                    )
+            } else {
+                if self.row_policy_mode.denies_missing_explicit_policy() && using_policy.is_none() {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
                 }
-            {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Delete,
-                });
+                if let Some(policy) = using_policy
+                    && {
+                        let mut visited = HashSet::new();
+                        !self.evaluate_policy_for_content_with_context_for_row(
+                            storage,
+                            policy,
+                            &old_data,
+                            &old_provenance,
+                            descriptor,
+                            session,
+                            &table,
+                            &current_branch,
+                            Operation::Delete,
+                            id,
+                            0,
+                            &mut visited,
+                        )
+                    }
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                }
             }
         }
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
-        let timestamp = self.reserve_write_timestamp();
+        let branch = self.current_branch();
+        let parents =
+            self.parent_ids_for_write(storage, &table, id, branch.as_str(), write_context);
+        let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                old_data.clone(),
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Soft),
-                )),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_row = self.authored_row_batch(
+            id,
+            branch.as_str(),
+            parents,
+            old_data.to_vec(),
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
+        );
+        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            &old_data,
+            descriptor,
+        );
+        let branch_name = BranchName::new(branch.as_str());
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            &table,
+            &branch_name,
+            id,
+            delete_row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            RowBatchKey::new(id, branch_name, delete_batch_id),
+            write_context,
+            true,
+            &visibility_change,
+        );
 
-        // Forward delete to all connected servers
-        let branch = self.current_branch();
-        tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
-
-        // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
-        tracing::trace!(%id, table = %table, "index_remove complete (soft delete)");
-
-        // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty_local(&table);
-        self.mark_row_deleted_in_subscriptions(&table, id);
-        tracing::trace!(table = %table, "mark_subscriptions_dirty (delete)");
+        tracing::trace!(%id, ?delete_batch_id, "apply local soft delete");
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -1626,6 +2320,22 @@ impl QueryManager {
         delete: RowBranchDelete<'_>,
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
+        let write_schema = self.schema.clone();
+        self.delete_existing_row_on_branch_with_schema_and_write_context(
+            storage,
+            delete,
+            write_schema.as_ref(),
+            write_context,
+        )
+    }
+
+    pub fn delete_existing_row_on_branch_with_schema_and_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        delete: RowBranchDelete<'_>,
+        write_schema: &Schema,
+        write_context: Option<&WriteContext>,
+    ) -> Result<DeleteHandle, QueryError> {
         let RowBranchDelete {
             table,
             branch,
@@ -1634,50 +2344,54 @@ impl QueryManager {
             old_provenance_for_policy,
         } = delete;
         // Check for hard delete first (checks default branch)
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, branch) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
+        let staged_branch_row =
+            self.transactional_staged_row_for_write(storage, id, branch, write_context);
         let table_name = TableName::new(table);
         // Check if already soft-deleted on this branch
-        if self.row_is_deleted_on_branch(storage, table, branch, id) {
+        if staged_branch_row
+            .as_ref()
+            .map(QueryRowBatch::is_soft_deleted)
+            .unwrap_or_else(|| self.row_is_deleted_on_branch(storage, table, branch, id))
+        {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
-
-        let (descriptor, using_policy) = {
-            let table_schema = self
-                .schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.effective_delete_using().cloned(),
-            )
-        };
+        let table_write =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema)?;
+        let descriptor = table_write.descriptor.as_ref();
+        let using_policy = table_write.delete_using_policy.as_deref();
 
         if let Some(session) = write_context.and_then(WriteContext::session) {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let origin_schema_hash = self.origin_schema_hash_for_branch(branch);
-                let auth_table_name = resolve_table_name_for_context(
-                    &auth_context,
-                    table,
-                    origin_schema_hash.as_ref(),
-                );
-                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
+                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
                     });
                 };
+                if self.row_policy_mode.denies_missing_explicit_policy()
+                    && auth_table_schema
+                        .policies
+                        .effective_delete_using()
+                        .is_none()
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                }
 
                 if let Some(policy) = auth_table_schema.policies.effective_delete_using()
                     && !self.evaluate_current_authorization_policy_for_content(
                         storage,
                         id,
                         branch,
-                        auth_table_name,
+                        table_name,
                         policy,
                         old_data_for_policy,
                         old_provenance_for_policy,
@@ -1692,80 +2406,92 @@ impl QueryManager {
                         operation: Operation::Delete,
                     });
                 }
-            } else if let Some(policy) = using_policy {
-                let mut visited = HashSet::new();
-                if !self.evaluate_policy_for_content_with_context_for_row(
-                    storage,
-                    &policy,
-                    old_data_for_policy,
-                    old_provenance_for_policy,
-                    &descriptor,
-                    session,
-                    table,
-                    branch,
-                    id,
-                    0,
-                    &mut visited,
-                ) {
+            } else {
+                if self.row_policy_mode.denies_missing_explicit_policy() && using_policy.is_none() {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
                     });
                 }
+                if let Some(policy) = using_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        old_data_for_policy,
+                        old_provenance_for_policy,
+                        descriptor,
+                        session,
+                        table,
+                        branch,
+                        Operation::Delete,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Delete,
+                        });
+                    }
+                }
             }
         }
 
-        // Get old data from ObjectManager on this branch
-        let old_branch_data = self
-            .load_row_from_object_on_branch(id, branch)
-            .map(|(data, _)| data)
-            .filter(|data| !data.is_empty());
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
-        let timestamp = self.reserve_write_timestamp();
+        // Get old data from the current visible row on this branch
+        let old_branch_data = staged_branch_row
+            .as_ref()
+            .map(|row| row.data.clone())
+            .filter(|data| !data.is_empty())
+            .or_else(|| {
+                self.load_visible_row_on_branch(storage, id, branch)
+                    .map(|(_, row)| row.data)
+                    .filter(|data| !data.is_empty())
+            });
+        let parents = self.parent_ids_for_write(storage, table, id, branch, write_context);
+        let timestamp = self.resolve_update_timestamp(write_context);
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                branch,
-                parents,
-                old_data_for_policy.to_vec(),
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Soft),
-                )),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
-
-        Self::update_indices_for_soft_delete_on_branch(
-            storage,
+        let delete_row = self.authored_row_batch(
+            id,
+            branch,
+            parents,
+            old_data_for_policy.to_vec(),
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Soft), write_context),
+        );
+        let index_mutations = Self::index_mutations_for_soft_delete_on_branch(
             table,
             branch,
             id,
-            old_branch_data.as_deref().unwrap_or(old_data_for_policy),
-            &descriptor,
+            old_data_for_policy,
+            descriptor,
+        );
+        let branch_name = BranchName::new(branch);
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            table,
+            &branch_name,
+            id,
+            delete_row,
+            &index_mutations,
         )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            table,
+            RowBatchKey::new(id, branch_name, delete_batch_id),
+            write_context,
+            true,
+            &visibility_change,
+        );
 
-        self.mark_subscriptions_dirty_local(table);
-        self.mark_row_deleted_in_subscriptions(table, id);
+        let _ = old_branch_data;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -1790,16 +2516,13 @@ impl QueryManager {
         values: &[Value],
     ) -> Result<InsertResult, QueryError> {
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1809,11 +2532,14 @@ impl QueryManager {
             return Err(QueryError::RowNotDeleted(id));
         }
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -1822,29 +2548,18 @@ impl QueryManager {
             });
         }
 
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            &table,
-            self.current_branch().as_str(),
-            values,
-            &descriptor,
-        )?;
+        self.validate_json_for_values(descriptor, values)?;
+        Self::validate_write_index_values_on_branch(&table, &current_branch, values, descriptor)?;
 
         // Encode new row data
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let new_data =
+            encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
+        let branch = self.current_branch();
+        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
         let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, branch.as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1852,30 +2567,44 @@ impl QueryManager {
         let row_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with row data (no delete metadata = undelete)
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                new_data.clone(),
-                timestamp,
-                row_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&row_provenance, None)),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let row = self.authored_row_batch(
+            id,
+            branch.as_str(),
+            parents,
+            new_data.clone(),
+            self.row_batch_authoring(&row_provenance, None, None),
+        );
+        let index_mutations = Self::index_mutations_for_undelete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            &new_data,
+            descriptor,
+        );
+        let branch_name = BranchName::new(branch.as_str());
+        let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            &table,
+            &branch_name,
+            id,
+            row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            RowBatchKey::new(id, branch_name, row_batch_id),
+            None,
+            false,
+            &visibility_change,
+        );
 
-        // Update indices: remove from _id_deleted, add to _id and column indices
-        self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
-
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(&table);
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
         Ok(InsertResult {
             row_id: id,
-            row_commit_id,
+            batch_id: row_batch_id,
             row_values: values.to_vec(),
         })
     }
@@ -1892,16 +2621,13 @@ impl QueryManager {
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check if already hard-deleted
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1909,26 +2635,23 @@ impl QueryManager {
         // Try to get old data (may be empty if already soft-deleted)
         // Treat empty content as no data (tombstone)
         let old_data = self
-            .load_row_from_object(id)
-            .map(|(data, _)| data)
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+            .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
+        let current_branch = self.current_branch().as_str().to_string();
+        let write_schema = self.schema.clone();
+        let table_write = self.write_table_cache_entry_for_schema(
+            &current_branch,
+            table_name,
+            write_schema.as_ref(),
+        )?;
+        let descriptor = table_write.descriptor.as_ref();
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
+        let branch = self.current_branch();
+        let parents = self.load_branch_tip_ids(storage, &table, id, branch.as_str());
         let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, branch.as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1936,46 +2659,45 @@ impl QueryManager {
         let delete_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with empty content + delete: hard metadata
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                vec![], // Empty content for tombstone
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Hard),
-                )),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        // Update indices: remove from ALL indices including _id_deleted
-        self.update_indices_for_hard_delete(storage, &table, id, old_data.as_deref(), &descriptor)?;
-
-        // Truncate branch: set tails = [delete_commit_id], removing all history
-        // (In ObjectManager, this would be done via set_tails or similar)
-        // For now, we just record the hard delete tombstone
-        let mut tail_ids = std::collections::HashSet::new();
-        tail_ids.insert(delete_commit_id);
-        let _ = self.sync_manager.object_manager.truncate_branch(
-            storage,
+        let delete_row = self.authored_row_batch(
             id,
-            self.current_branch(),
-            tail_ids,
+            branch.as_str(),
+            parents,
+            vec![],
+            self.row_batch_authoring(&delete_provenance, Some(DeleteKind::Hard), None),
+        );
+        let index_mutations = Self::index_mutations_for_hard_delete_on_branch(
+            &table,
+            branch.as_str(),
+            id,
+            old_data.as_deref(),
+            descriptor,
+        );
+        let branch_name = BranchName::new(branch.as_str());
+        let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
+            storage,
+            &table,
+            &branch_name,
+            id,
+            delete_row,
+            &index_mutations,
+        )?;
+        self.maybe_track_local_pending_transaction_overlay(
+            &table,
+            RowBatchKey::new(id, branch_name, delete_batch_id),
+            None,
+            true,
+            &visibility_change,
         );
 
-        // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty_local(&table);
-        self.mark_row_deleted_in_subscriptions(&table, id);
+        let _ = old_data;
+        if let Some(visibility_change) = visibility_change {
+            let _ = self.apply_local_row_batch(storage, visibility_change)?;
+        }
 
         Ok(DeleteHandle {
             row_id: id,
-            delete_commit_id,
+            batch_id: delete_batch_id,
         })
     }
 
@@ -1989,16 +2711,12 @@ impl QueryManager {
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| self.resolve_current_table_name_from_object(obj))
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -2010,19 +2728,17 @@ impl QueryManager {
         self.hard_delete(storage, id)
     }
 
-    /// Get a row by ID if loaded in ObjectManager.
-    ///
-    /// Returns decoded values and the table name if the row exists.
-    pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
-        let object = self.sync_manager.object_manager.get(id)?;
-        let table = object.original_table_name();
-        let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
-        let table =
-            resolve_current_table_name(&self.schema_context, table, origin_schema_hash.as_ref())?;
+    /// Get a row by ID from storage-backed row histories.
+    pub fn get_row(&self, storage: &dyn Storage, id: ObjectId) -> Option<(String, Vec<Value>)> {
+        let table = self.load_row_table_name(storage, id)?;
         let table_name = TableName::new(&table);
 
-        // Get row data from ObjectManager
-        let (data, _) = self.load_row_from_object(id)?;
+        let (data, _) = self
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+            .map(|(_, row)| {
+                let batch_id = row.batch_id();
+                (row.data, batch_id)
+            })?;
 
         let table_schema = self.schema.get(&table_name)?;
         let values = decode_row(&table_schema.columns, &data).ok()?;
@@ -2063,74 +2779,22 @@ impl QueryManager {
         self.row_is_deleted_on_branch(storage, table, &self.current_branch(), row_id)
     }
 
-    /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
-    pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_hard_deleted()
-    }
-
-    /// Check if the current tip has `delete: soft` metadata.
-    pub(super) fn is_soft_delete_commit(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Soft delete: has delete: soft metadata (content is preserved)
-        commit.is_soft_deleted()
-    }
-
-    /// Check if an incoming update has hard delete metadata.
-    pub(super) fn is_incoming_hard_delete(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_hard_deleted()
-    }
-
     /// Check if a commit has been stored to disk.
     ///
     /// With sync storage, commits are stored immediately.
     /// Used by `InsertResult::is_complete()` to check durability.
-    pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
-        if let Some(obj) = self.sync_manager.object_manager.get(object_id) {
-            // Check all branches for the commit
-            for branch in obj.branches.values() {
-                if let Some(commit) = branch.commits.get(commit_id) {
-                    return matches!(commit.stored_state, crate::commit::StoredState::Stored);
-                }
-            }
-        }
-        false
+    pub fn is_version_stored(
+        &self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        batch_id: &BatchId,
+    ) -> bool {
+        let Some(table) = self.load_row_table_name(storage, object_id) else {
+            return false;
+        };
+        storage
+            .row_batch_exists(&table, self.current_branch().as_str(), object_id, *batch_id)
+            .unwrap_or(false)
     }
 }
 

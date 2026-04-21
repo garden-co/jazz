@@ -92,7 +92,6 @@ impl RowNode for ExistsOutputNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement};
 
@@ -106,8 +105,8 @@ mod tests {
     fn make_tuple(id: ObjectId) -> Tuple {
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: vec![],
-            commit_id: CommitId([0; 32]),
+            content: vec![].into(),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }

@@ -255,6 +255,40 @@ mod tests {
     }
 
     #[test]
+    fn auto_lens_column_reorder_is_non_draft_and_keeps_ops_empty() {
+        let old = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("email", ColumnType::Text)
+                    .column("id", ColumnType::Uuid),
+            )
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        assert_ne!(
+            lens.source_hash, lens.target_hash,
+            "column reorder should produce a distinct schema identity"
+        );
+        assert!(
+            lens.forward.ops.is_empty(),
+            "pure reorder should not require explicit migration ops"
+        );
+        assert!(
+            !lens.is_draft(),
+            "pure reorder should be an automatically compatible schema edge"
+        );
+    }
+
+    #[test]
     fn auto_lens_table_rename_is_draft() {
         let old = SchemaBuilder::new()
             .table(

@@ -1,0 +1,44 @@
+---
+title: "Real-time collaborative list"
+description: Multiple users subscribing to the same data and seeing each other's changes in real-time.
+reviewedAt: "f7048c19"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Every client subscribes to the same data and sees changes as they happen. This recipe shows the pattern end-to-end.
+
+## Schema
+
+A shared project with collaboratively-edited tasks.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/collab-list-snippets.tsx#collab-schema
+</include>
+
+## Permissions
+
+Project members can read and write tasks. The creator can manage membership. Tasks inherit access from their project via `allowedTo`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/collab-list-snippets.tsx#collab-permissions
+</include>
+
+## Subscribing to shared data
+
+When multiple clients subscribe to the same query, they all see each other's changes in real-time.
+
+<include cwd lang="tsx" meta='title="ProjectTasks.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/collab-list-snippets.tsx#collab-subscribe
+</include>
+
+When Alice inserts a task it appears in her UI instantly, syncs to the server, and the server pushes it to Bob&hairsp;—&hairsp;whose `useAll` subscription re-renders automatically.
+
+<Accordions type="single">
+<Accordion title="How sync and conflicts work">
+When two users edit the same row concurrently, Jazz uses last-writer-wins (LWW) per column. Each column resolves independently, so if Alice updates `title` while Bob updates `done`, both changes are preserved. If they both update `title`, the last write (by wall-clock time) wins.
+
+For most applications this is the right default. See [How sync works](/docs/concepts/how-sync-works) for more detail.
+
+</Accordion>
+</Accordions>

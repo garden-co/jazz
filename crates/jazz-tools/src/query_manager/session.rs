@@ -2,12 +2,27 @@
 //!
 //! A Session represents the authenticated user's context, containing:
 //! - `user_id`: Required unique identifier for the user
-//! - `claims`: Optional JSON object with additional claims (roles, teams, etc.)
+//! - `claims`: JSON object with user-defined claims (roles, teams, etc.)
+//! - `auth_mode`: First-class auth-mode discriminator derived from the JWT `iss`
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::batch_fate::BatchMode;
 use crate::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::row_histories::BatchId;
+
+/// Auth mode derived from the JWT's `iss` claim.
+///
+/// Mirrors the TS `authMode` union in `packages/jazz-tools/src/runtime/context.ts`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    #[default]
+    External,
+    LocalFirst,
+    Anonymous,
+}
 
 /// Session context for policy evaluation.
 ///
@@ -17,8 +32,12 @@ use crate::metadata::SYSTEM_PRINCIPAL_ID;
 pub struct Session {
     /// Required user identifier.
     pub user_id: String,
-    /// Additional claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
+    /// User-defined claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
     pub claims: JsonValue,
+    /// Auth mode (external / local-first / anonymous). Derived from JWT `iss`.
+    /// Accepts `authMode` (camelCase) on the wire for parity with the TS client.
+    #[serde(default, alias = "authMode")]
+    pub auth_mode: AuthMode,
 }
 
 impl Session {
@@ -26,17 +45,28 @@ impl Session {
         matches!(path, [segment] if segment == "user_id" || segment == "userId")
     }
 
-    /// Create a new session with just a user ID.
+    fn is_auth_mode_path(path: &[String]) -> bool {
+        matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
+    }
+
+    /// Create a new session with just a user ID. Defaults to external auth mode.
     pub fn new(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),
+            auth_mode: AuthMode::External,
         }
     }
 
     /// Create a session with user ID and claims.
     pub fn with_claims(mut self, claims: JsonValue) -> Self {
         self.claims = claims;
+        self
+    }
+
+    /// Set the auth mode.
+    pub fn with_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.auth_mode = auth_mode;
         self
     }
 
@@ -54,6 +84,11 @@ impl Session {
         if Self::is_user_id_path(path) {
             // Special case: user_id is stored as a String, not JsonValue
             // Return None here; use get_user_id() instead
+            return None;
+        }
+
+        if Self::is_auth_mode_path(path) {
+            // auth_mode is enum-typed, not JsonValue — use get_string() instead
             return None;
         }
 
@@ -93,6 +128,9 @@ impl Session {
         if Self::is_user_id_path(path) {
             return true;
         }
+        if Self::is_auth_mode_path(path) {
+            return true;
+        }
         self.get_path(path).is_some()
     }
 
@@ -106,6 +144,13 @@ impl Session {
         }
         if Self::is_user_id_path(path) {
             return Some(&self.user_id);
+        }
+        if Self::is_auth_mode_path(path) {
+            return Some(match self.auth_mode {
+                AuthMode::External => "external",
+                AuthMode::LocalFirst => "local-first",
+                AuthMode::Anonymous => "anonymous",
+            });
         }
         self.get_path(path).and_then(|v| v.as_str())
     }
@@ -122,13 +167,22 @@ impl Session {
 ///
 /// `session` controls permission evaluation. `attribution`, when present,
 /// controls who is recorded as the commit author without changing permission
-/// identity.
+/// identity. `updated_at`, when present, overrides the row provenance
+/// timestamp recorded for update-like writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_mode: Option<BatchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<BatchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch_name: Option<String>,
 }
 
 impl WriteContext {
@@ -136,11 +190,51 @@ impl WriteContext {
         Self {
             session: Some(session),
             attribution: None,
+            updated_at: None,
+            batch_mode: None,
+            batch_id: None,
+            target_branch_name: None,
         }
+    }
+
+    pub fn with_updated_at(mut self, updated_at: u64) -> Self {
+        self.updated_at = Some(updated_at);
+        self
+    }
+
+    pub fn with_batch_mode(mut self, batch_mode: BatchMode) -> Self {
+        self.batch_mode = Some(batch_mode);
+        self
+    }
+
+    pub fn with_batch_id(mut self, batch_id: BatchId) -> Self {
+        self.batch_id = Some(batch_id);
+        self
+    }
+
+    pub fn with_target_branch_name(mut self, target_branch_name: impl Into<String>) -> Self {
+        self.target_branch_name = Some(target_branch_name.into());
+        self
     }
 
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
+    }
+
+    pub fn batch_mode(&self) -> BatchMode {
+        self.batch_mode.unwrap_or(BatchMode::Direct)
+    }
+
+    pub fn batch_id(&self) -> Option<BatchId> {
+        self.batch_id
+    }
+
+    pub fn target_branch_name(&self) -> Option<&str> {
+        self.target_branch_name.as_deref()
+    }
+
+    pub fn updated_at(&self) -> Option<u64> {
+        self.updated_at
     }
 
     pub fn author_principal(&self) -> &str {
@@ -223,17 +317,91 @@ mod tests {
         let context = WriteContext {
             session: Some(Session::new("session-user")),
             attribution: Some("attributed-user".into()),
+            updated_at: None,
+            batch_mode: None,
+            batch_id: None,
+            target_branch_name: None,
         };
 
         assert_eq!(context.author_principal(), "attributed-user");
+        assert_eq!(context.batch_mode(), BatchMode::Direct);
     }
 
     #[test]
     fn test_write_context_author_principal_falls_back_to_session_then_system() {
         let session_context = WriteContext::from_session(Session::new("session-user"));
         assert_eq!(session_context.author_principal(), "session-user");
+        assert_eq!(session_context.batch_mode(), BatchMode::Direct);
 
         let system_context = WriteContext::default();
         assert_eq!(system_context.author_principal(), SYSTEM_PRINCIPAL_ID);
+        assert_eq!(system_context.batch_mode(), BatchMode::Direct);
+    }
+
+    #[test]
+    fn test_write_context_batch_mode_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_batch_mode(BatchMode::Transactional);
+
+        assert_eq!(context.batch_mode(), BatchMode::Transactional);
+    }
+
+    #[test]
+    fn test_write_context_batch_id_override() {
+        let batch_id = BatchId::new();
+        let context =
+            WriteContext::from_session(Session::new("session-user")).with_batch_id(batch_id);
+
+        assert_eq!(context.batch_id(), Some(batch_id));
+    }
+
+    #[test]
+    fn test_write_context_target_branch_name_override() {
+        let context = WriteContext::from_session(Session::new("session-user"))
+            .with_target_branch_name("dev-111111111111-main");
+
+        assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
+    }
+
+    #[test]
+    fn test_write_context_updated_at_override() {
+        let context = WriteContext::from_session(Session::new("session-user")).with_updated_at(42);
+
+        assert_eq!(context.updated_at(), Some(42));
+    }
+
+    #[test]
+    fn session_auth_mode_defaults_to_external() {
+        let session = Session::new("user-1");
+        assert_eq!(session.auth_mode, AuthMode::External);
+    }
+
+    #[test]
+    fn session_auth_mode_roundtrips_through_serde() {
+        for mode in [
+            AuthMode::External,
+            AuthMode::LocalFirst,
+            AuthMode::Anonymous,
+        ] {
+            let session = Session::new("user-1").with_auth_mode(mode);
+            let json = serde_json::to_string(&session).unwrap();
+            let back: Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.auth_mode, mode);
+        }
+    }
+
+    #[test]
+    fn session_auth_mode_accepts_camel_case_alias() {
+        let json = r#"{"user_id":"u","claims":{},"authMode":"anonymous"}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.auth_mode, AuthMode::Anonymous);
+    }
+
+    #[test]
+    fn session_get_string_returns_auth_mode_as_kebab_string() {
+        let s = Session::new("u").with_auth_mode(AuthMode::LocalFirst);
+        assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
+        assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
+        assert!(s.has_path(&["authMode".into()]));
     }
 }

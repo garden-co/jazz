@@ -4,10 +4,10 @@ export interface StandaloneConnectionConfig {
   serverUrl: string;
   appId: string;
   adminSecret: string;
-  serverPathPrefix?: string;
 }
 
 interface StandaloneContextValue {
+  onEdit: () => void;
   onReset: () => void;
   schemaHashes: string[];
   selectedSchemaHash: string | null;
@@ -20,6 +20,7 @@ const StandaloneContext = createContext<StandaloneContextValue | null>(null);
 
 export function StandaloneProvider({
   children,
+  onEdit,
   onReset,
   schemaHashes,
   selectedSchemaHash,
@@ -30,6 +31,7 @@ export function StandaloneProvider({
   return (
     <StandaloneContext.Provider
       value={{
+        onEdit,
         onReset,
         schemaHashes,
         selectedSchemaHash,

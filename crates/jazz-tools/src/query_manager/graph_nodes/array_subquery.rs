@@ -11,8 +11,8 @@ use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::query::ArraySubqueryRequirement;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, Tuple, TupleDelta,
-    TupleDescriptor, TupleElement, TupleProvenance, Value,
+    ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Tuple,
+    TupleBatchProvenance, TupleDelta, TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
 
 use crate::storage::Storage;
@@ -85,6 +85,7 @@ struct ArrayInstanceState {
     correlation_value: Value,
     array_result: Value,
     provenance: TupleProvenance,
+    batch_provenance: TupleBatchProvenance,
 }
 
 impl ArraySubqueryNode {
@@ -124,6 +125,7 @@ impl ArraySubqueryNode {
             nullable: false,
             references: None,
             default: None,
+            merge_strategy: None,
         });
 
         let output_descriptor = RowDescriptor::new(output_columns);
@@ -163,7 +165,7 @@ impl ArraySubqueryNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -179,13 +181,21 @@ impl ArraySubqueryNode {
                     .as_ref()
                     .map(|state| state.provenance.clone())
                     .unwrap_or_default();
+                let old_batch_provenance = state
+                    .as_ref()
+                    .map(|state| state.batch_provenance.clone())
+                    .unwrap_or_default();
                 let old_correlation = state
                     .as_ref()
                     .map(|state| state.correlation_value.clone())
                     .unwrap_or(Value::Null);
-                if let Some(old_output) =
-                    self.build_output_tuple(&tuple, &old_correlation, &old_array, &old_provenance)
-                {
+                if let Some(old_output) = self.build_output_tuple(
+                    &tuple,
+                    &old_correlation,
+                    &old_array,
+                    &old_provenance,
+                    &old_batch_provenance,
+                ) {
                     self.current_tuples.remove(&old_output);
                     result.removed.push(old_output);
                 }
@@ -198,7 +208,7 @@ impl ArraySubqueryNode {
                 // Get correlation value from outer tuple
                 if let Some(correlation_value) = self.extract_correlation_value(&tuple) {
                     // Evaluate subgraph for this correlation value
-                    let (array_result, provenance) =
+                    let (array_result, provenance, batch_provenance) =
                         self.evaluate_subgraph(&correlation_value, io, &mut row_loader);
 
                     // Store instance state
@@ -209,6 +219,7 @@ impl ArraySubqueryNode {
                             correlation_value: correlation_value.clone(),
                             array_result: array_result.clone(),
                             provenance: provenance.clone(),
+                            batch_provenance: batch_provenance.clone(),
                         },
                     );
 
@@ -218,6 +229,7 @@ impl ArraySubqueryNode {
                         &correlation_value,
                         &array_result,
                         &provenance,
+                        &batch_provenance,
                     ) {
                         self.current_tuples.insert(output_tuple.clone());
                         result.added.push(output_tuple);
@@ -240,6 +252,10 @@ impl ArraySubqueryNode {
                 .as_ref()
                 .map(|state| state.provenance.clone())
                 .unwrap_or_default();
+            let old_batch_provenance = old_state
+                .as_ref()
+                .map(|state| state.batch_provenance.clone())
+                .unwrap_or_default();
 
             let old_correlation = old_state
                 .as_ref()
@@ -247,22 +263,31 @@ impl ArraySubqueryNode {
                 .or_else(|| self.extract_correlation_value(&old_tuple));
             let new_correlation = self.extract_correlation_value(&new_tuple);
 
-            let (new_array, new_provenance) = if old_correlation == new_correlation {
-                (
-                    old_state
-                        .as_ref()
-                        .map(|state| state.array_result.clone())
-                        .unwrap_or_else(|| Value::Array(vec![])),
-                    old_state
-                        .as_ref()
-                        .map(|state| state.provenance.clone())
-                        .unwrap_or_default(),
-                )
-            } else if let Some(ref new_corr) = new_correlation {
-                self.evaluate_subgraph(new_corr, io, &mut row_loader)
-            } else {
-                (Value::Array(vec![]), TupleProvenance::default())
-            };
+            let (new_array, new_provenance, new_batch_provenance) =
+                if old_correlation == new_correlation {
+                    (
+                        old_state
+                            .as_ref()
+                            .map(|state| state.array_result.clone())
+                            .unwrap_or_else(|| Value::Array(vec![])),
+                        old_state
+                            .as_ref()
+                            .map(|state| state.provenance.clone())
+                            .unwrap_or_default(),
+                        old_state
+                            .as_ref()
+                            .map(|state| state.batch_provenance.clone())
+                            .unwrap_or_default(),
+                    )
+                } else if let Some(ref new_corr) = new_correlation {
+                    self.evaluate_subgraph(new_corr, io, &mut row_loader)
+                } else {
+                    (
+                        Value::Array(vec![]),
+                        TupleProvenance::default(),
+                        TupleBatchProvenance::default(),
+                    )
+                };
 
             if let (Some(outer_id), Some(correlation_value)) =
                 (new_outer_id, new_correlation.clone())
@@ -274,15 +299,28 @@ impl ArraySubqueryNode {
                         correlation_value,
                         array_result: new_array.clone(),
                         provenance: new_provenance.clone(),
+                        batch_provenance: new_batch_provenance.clone(),
                     },
                 );
             }
 
             let old_output = old_correlation.as_ref().and_then(|correlation| {
-                self.build_output_tuple(&old_tuple, correlation, &old_array, &old_provenance)
+                self.build_output_tuple(
+                    &old_tuple,
+                    correlation,
+                    &old_array,
+                    &old_provenance,
+                    &old_batch_provenance,
+                )
             });
             let new_output = new_correlation.as_ref().and_then(|correlation| {
-                self.build_output_tuple(&new_tuple, correlation, &new_array, &new_provenance)
+                self.build_output_tuple(
+                    &new_tuple,
+                    correlation,
+                    &new_array,
+                    &new_provenance,
+                    &new_batch_provenance,
+                )
             });
 
             match (old_output, new_output) {
@@ -327,23 +365,29 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
-    ) -> (Value, TupleProvenance) {
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> (Value, TupleProvenance, TupleBatchProvenance) {
         // UUID[] FK forward includes correlate an array of ids to scalar inner ids.
         // Evaluate each element independently so output preserves source order/duplicates.
         if let Value::Array(elements) = correlation_value {
             let mut materialized = Vec::new();
             let mut provenance = TupleProvenance::default();
+            let mut batch_provenance = TupleBatchProvenance::default();
             for element in elements {
-                let (nested_value, nested_provenance) =
+                let (nested_value, nested_provenance, nested_batch_provenance) =
                     self.evaluate_subgraph_for_single(element, io, row_loader);
                 let Value::Array(mut nested) = nested_value else {
                     continue;
                 };
                 materialized.append(&mut nested);
-                provenance.extend(nested_provenance);
+                for scoped_object in nested_provenance {
+                    provenance.insert(scoped_object);
+                }
+                for batch_id in nested_batch_provenance {
+                    batch_provenance.insert(batch_id);
+                }
             }
-            return (Value::Array(materialized), provenance);
+            return (Value::Array(materialized), provenance, batch_provenance);
         }
 
         self.evaluate_subgraph_for_single(correlation_value, io, row_loader)
@@ -353,33 +397,57 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
-    ) -> (Value, TupleProvenance) {
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> (Value, TupleProvenance, TupleBatchProvenance) {
         let instance = self
             .subgraph_template
             .instantiate(correlation_value.clone(), &self.schema);
         let mut instance = match instance {
             Some(i) => i,
-            None => return (Value::Array(vec![]), TupleProvenance::default()),
+            None => {
+                return (
+                    Value::Array(vec![]),
+                    TupleProvenance::default(),
+                    TupleBatchProvenance::default(),
+                );
+            }
         };
 
-        let _row_delta = instance.graph.settle(io, row_loader);
+        let _row_delta = instance
+            .graph
+            .settle(io, &mut |id, hint| row_loader(id, hint));
         let mut provenance = TupleProvenance::default();
+        let mut batch_provenance = TupleBatchProvenance::default();
         let array_elements: Vec<Value> = instance
             .graph
-            .current_output_rows_with_provenance()
-            .iter()
-            .filter_map(|(row, row_provenance)| {
+            .current_output_tuples()
+            .into_iter()
+            .filter_map(|tuple| {
+                let row = if tuple.len() == 1 {
+                    tuple.to_single_row()
+                } else {
+                    tuple
+                        .flatten_with_descriptors(
+                            &instance.graph.table_descriptors,
+                            &instance.graph.combined_descriptor,
+                        )
+                        .and_then(|flattened| flattened.to_single_row())
+                }?;
                 let output_desc = self.subgraph_template.output_descriptor();
                 let values = decode_row(output_desc, &row.data).ok()?;
-                provenance.extend(row_provenance.iter().copied());
+                for scoped_object in tuple.provenance().iter().copied() {
+                    provenance.insert(scoped_object);
+                }
+                for batch_id in tuple.batch_provenance().iter().copied() {
+                    batch_provenance.insert(batch_id);
+                }
                 Some(Value::Row {
                     id: Some(row.id),
                     values,
                 })
             })
             .collect();
-        (Value::Array(array_elements), provenance)
+        (Value::Array(array_elements), provenance, batch_provenance)
     }
 
     /// Build output tuple from outer tuple + array result.
@@ -389,6 +457,7 @@ impl ArraySubqueryNode {
         correlation_value: &Value,
         array_result: &Value,
         inner_provenance: &TupleProvenance,
+        inner_batch_provenance: &TupleBatchProvenance,
     ) -> Option<Tuple> {
         if !self.requirement_satisfied(correlation_value, array_result) {
             return None;
@@ -397,7 +466,7 @@ impl ArraySubqueryNode {
         let element = outer_tuple.get(0)?;
         let outer_id = element.id();
         let outer_content = element.content()?;
-        let commit_id = element.commit_id()?;
+        let batch_id = element.batch_id()?;
         let row_provenance = element.row_provenance()?.clone();
 
         // Decode outer values
@@ -411,16 +480,23 @@ impl ArraySubqueryNode {
         let output_content = encode_row(&self.output_descriptor, &values).ok()?;
 
         let mut provenance = outer_tuple.provenance().clone();
-        provenance.extend(inner_provenance.iter().copied());
+        for scoped_object in inner_provenance.iter().copied() {
+            provenance.insert(scoped_object);
+        }
+        let mut batch_provenance = outer_tuple.batch_provenance().clone();
+        for batch_id in inner_batch_provenance.iter().copied() {
+            batch_provenance.insert(batch_id);
+        }
 
-        Some(Tuple::new_with_provenance(
+        Some(Tuple::new_with_shadow_state(
             vec![TupleElement::Row {
                 id: outer_id,
-                content: output_content,
-                commit_id,
+                content: output_content.into(),
+                batch_id,
                 row_provenance,
             }],
             provenance,
+            batch_provenance,
         ))
     }
 
@@ -444,7 +520,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::new();
 
@@ -460,21 +536,26 @@ impl ArraySubqueryNode {
 
         for (outer_id, old_state) in instances_snapshot {
             // Re-evaluate subgraph
-            let (new_array, new_provenance) =
+            let (new_array, new_provenance, new_batch_provenance) =
                 self.evaluate_subgraph(&old_state.correlation_value, io, row_loader);
 
-            if old_state.array_result != new_array || old_state.provenance != new_provenance {
+            if old_state.array_result != new_array
+                || old_state.provenance != new_provenance
+                || old_state.batch_provenance != new_batch_provenance
+            {
                 let old_tuple = self.build_output_tuple(
                     &old_state.outer_tuple,
                     &old_state.correlation_value,
                     &old_state.array_result,
                     &old_state.provenance,
+                    &old_state.batch_provenance,
                 );
                 let new_tuple = self.build_output_tuple(
                     &old_state.outer_tuple,
                     &old_state.correlation_value,
                     &new_array,
                     &new_provenance,
+                    &new_batch_provenance,
                 );
 
                 match (old_tuple, new_tuple) {
@@ -501,6 +582,7 @@ impl ArraySubqueryNode {
                         correlation_value: old_state.correlation_value.clone(),
                         array_result: new_array,
                         provenance: new_provenance,
+                        batch_provenance: new_batch_provenance,
                     },
                 );
             }
@@ -538,6 +620,7 @@ impl RowNode for ArraySubqueryNode {
                 &correlation_value,
                 &Value::Array(vec![]),
                 &TupleProvenance::default(),
+                &TupleBatchProvenance::default(),
             ) {
                 self.current_tuples.remove(&output);
                 result.removed.push(output);
@@ -556,6 +639,7 @@ impl RowNode for ArraySubqueryNode {
                         correlation_value,
                         array_result: Value::Array(vec![]),
                         provenance: TupleProvenance::default(),
+                        batch_provenance: TupleBatchProvenance::default(),
                     },
                 );
             }
@@ -567,6 +651,7 @@ impl RowNode for ArraySubqueryNode {
                 &correlation_value,
                 &Value::Array(vec![]),
                 &TupleProvenance::default(),
+                &TupleBatchProvenance::default(),
             ) {
                 self.current_tuples.insert(output.clone());
                 result.added.push(output);
@@ -593,7 +678,6 @@ impl RowNode for ArraySubqueryNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::query_manager::graph_nodes::subgraph::SubgraphBuilder;
     use crate::query_manager::types::TableName;
 
@@ -689,8 +773,8 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),
-            content: user_data,
-            commit_id: CommitId([0; 32]),
+            content: user_data.into(),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
@@ -732,8 +816,8 @@ mod tests {
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: row_id,
-            content: user_data,
-            commit_id: CommitId([0; 32]),
+            content: user_data.into(),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 

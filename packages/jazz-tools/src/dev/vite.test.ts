@@ -1,0 +1,215 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { jazzPlugin } from "./vite.js";
+import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
+
+const tempRoots = createTempRootTracker();
+const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
+const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
+const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
+
+// Managed-runtime writes VITE_JAZZ_APP_ID / VITE_JAZZ_SERVER_URL to process.env
+// on successful init; that state leaks across vitest workers in the same thread
+// pool and flips later tests onto the env-driven cloud branch. Scrub before each
+// test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.VITE_JAZZ_APP_ID;
+  delete process.env.VITE_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+});
+
+afterEach(async () => {
+  await tempRoots.cleanup();
+
+  if (originalJazzServerUrl === undefined) {
+    delete process.env.VITE_JAZZ_SERVER_URL;
+  } else {
+    process.env.VITE_JAZZ_SERVER_URL = originalJazzServerUrl;
+  }
+
+  if (originalJazzAppId === undefined) {
+    delete process.env.VITE_JAZZ_APP_ID;
+  } else {
+    process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
+  }
+
+  if (originalAdminSecret === undefined) {
+    delete process.env.JAZZ_ADMIN_SECRET;
+  } else {
+    process.env.JAZZ_ADMIN_SECRET = originalAdminSecret;
+  }
+});
+
+describe("jazzPlugin", () => {
+  it("returns a Vite plugin with the correct name", () => {
+    const plugin = jazzPlugin();
+    expect(plugin.name).toBe("jazz");
+  });
+
+  it("starts a server and pushes schema via configureServer hook", async () => {
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-vite-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const plugin = jazzPlugin({
+      server: { port, adminSecret: "vite-test-admin" },
+      schemaDir,
+    });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const fakeViteServer = {
+      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(
+      healthResponse.ok,
+      `health ${healthResponse.status}: ${await healthResponse.text()}`,
+    ).toBe(true);
+
+    const schemasResponse = await fetch(
+      `http://127.0.0.1:${port}/apps/${fakeViteServer.config.env.VITE_JAZZ_APP_ID}/schemas`,
+      {
+        headers: { "X-Jazz-Admin-Secret": "vite-test-admin" },
+      },
+    );
+    const schemasRaw = await schemasResponse.text();
+    expect(schemasResponse.ok, `schemas ${schemasResponse.status}: ${schemasRaw}`).toBe(true);
+    const body = JSON.parse(schemasRaw) as { hashes?: string[] };
+    expect(body.hashes?.length).toBeGreaterThan(0);
+    expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeTruthy();
+    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
+    expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+          `http://127.0.0.1:${port}`,
+        )}&appId=${encodeURIComponent(fakeViteServer.config.env.VITE_JAZZ_APP_ID!)}&adminSecret=vite-test-admin`,
+      ),
+    );
+
+    for (const handler of closeHandlers) {
+      await handler();
+    }
+
+    await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
+  }, 30_000);
+
+  it("does not inject a dev server url during build", async () => {
+    const plugin = jazzPlugin();
+    const fakeViteServer = {
+      config: {
+        root: "/tmp/jazz-build",
+        command: "build" as const,
+        env: {} as Record<string, string>,
+      },
+      httpServer: null,
+      ws: { send() {} },
+    };
+
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeUndefined();
+    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBeUndefined();
+    expect(process.env.VITE_JAZZ_APP_ID).toBe(originalJazzAppId);
+    expect(process.env.VITE_JAZZ_SERVER_URL).toBe(originalJazzServerUrl);
+  });
+
+  it("persists the generated appId to .env in the project root", async () => {
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-vite-env-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const plugin = jazzPlugin({
+      server: { port, adminSecret: "vite-env-test-admin" },
+      schemaDir,
+    });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const fakeViteServer = {
+      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    const generatedAppId = fakeViteServer.config.env.VITE_JAZZ_APP_ID;
+    expect(generatedAppId).toBeTruthy();
+
+    const envContent = await readFile(join(schemaDir, ".env"), "utf8");
+    expect(envContent).toContain(`VITE_JAZZ_APP_ID=${generatedAppId}`);
+
+    for (const handler of closeHandlers) {
+      await handler();
+    }
+  }, 30_000);
+
+  it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-vite-existing-env-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const existingAppId = "00000000-0000-0000-0000-000000000001";
+    await writeFile(join(schemaDir, ".env"), `VITE_JAZZ_APP_ID=${existingAppId}\n`);
+
+    const plugin = jazzPlugin({
+      server: { port, adminSecret: "vite-existing-env-test-admin" },
+      schemaDir,
+    });
+
+    const closeHandlers: (() => Promise<void> | void)[] = [];
+    const fakeViteServer = {
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: { VITE_JAZZ_APP_ID: existingAppId } as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, cb: () => void) {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send() {} },
+    };
+
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBe(existingAppId);
+
+    const envContent = await readFile(join(schemaDir, ".env"), "utf8");
+    expect(envContent).toContain(`VITE_JAZZ_APP_ID=${existingAppId}`);
+    expect(envContent.match(/JAZZ_APP_ID=/g)?.length).toBe(1);
+
+    for (const handler of closeHandlers) {
+      await handler();
+    }
+  }, 30_000);
+});

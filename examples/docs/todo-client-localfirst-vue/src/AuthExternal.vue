@@ -1,17 +1,11 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { createJazzClient, JazzProvider, useLinkExternalIdentity } from "jazz-tools/vue";
+import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
 const appId = "my-app";
 const serverUrl = "http://127.0.0.1:4200";
 const providerJwt = "<provider-jwt>";
 const hasJwt = ref(false);
-
-const linkExternalIdentity = useLinkExternalIdentity({
-  appId,
-  serverUrl,
-  defaultMode: "anonymous",
-});
 
 const localClient = createJazzClient({
   appId,
@@ -24,8 +18,7 @@ const jwtClient = createJazzClient({
   jwtToken: providerJwt,
 });
 
-async function onSignedIn() {
-  await linkExternalIdentity({ jwtToken: providerJwt });
+function onSignedIn() {
   hasJwt.value = true;
 }
 </script>

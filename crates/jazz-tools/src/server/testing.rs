@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
@@ -7,7 +7,6 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::AppContext;
@@ -15,7 +14,8 @@ use crate::middleware::AuthConfig;
 use crate::query_manager::types::Schema;
 use crate::schema_manager::AppId;
 
-use super::{ServerBuilder, ServerState};
+use super::ServerBuilder;
+use super::hosted::HostedServer;
 use crate::sync_manager::ClientId;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
@@ -35,6 +35,7 @@ pub struct TestingServerBuilder {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+    auth_clock: Option<crate::middleware::auth::AuthClock>,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
@@ -113,6 +114,11 @@ impl TestingServerBuilder {
         self
     }
 
+    pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
+        self.auth_clock = Some(clock.into());
+        self
+    }
+
     pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
@@ -160,19 +166,15 @@ impl Drop for TestingJwksServer {
 }
 
 pub struct TestingServer {
-    state: Arc<ServerState>,
-    task: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    port: u16,
-    client: reqwest::Client,
+    hosted: HostedServer,
     app_id: AppId,
-    data_dir: PathBuf,
     admin_secret: String,
     backend_secret: String,
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
     embedded_jwks_server: Option<TestingJwksServer>,
+    auth_clock: crate::middleware::auth::AuthClock,
 }
 
 impl TestingServer {
@@ -204,6 +206,7 @@ impl TestingServer {
             admin_secret,
             backend_secret,
             jwks_url,
+            auth_clock,
             sync_tracer,
         } = builder;
 
@@ -224,13 +227,15 @@ impl TestingServer {
 
         let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
         let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
+        let auth_clock = auth_clock.unwrap_or_default();
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_url),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
+            clock: auth_clock.clone(),
+            ..Default::default()
         };
 
         let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
@@ -251,37 +256,27 @@ impl TestingServer {
         }
         let built = server_builder.build().await.expect("build test server");
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
-            .await
-            .expect("bind test server listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, built.app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("serve jazz server");
-        });
-
-        let server = Self {
-            state: built.state.clone(),
-            task: Some(task),
-            shutdown_tx: Some(shutdown_tx),
+        let hosted = HostedServer::start(
+            built,
             port,
-            client: reqwest::Client::new(),
             app_id,
             data_dir,
+            Some(admin_secret.clone()),
+            Some(backend_secret.clone()),
+        )
+        .await;
+
+        Self {
+            hosted,
+            app_id,
             admin_secret,
             backend_secret,
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
             embedded_jwks_server,
-        };
-        server.wait_ready().await;
-        server
+            auth_clock,
+        }
     }
 
     pub fn default_app_id() -> AppId {
@@ -293,10 +288,14 @@ impl TestingServer {
     }
 
     pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
+        Self::jwt_for_user_with_claims_at(sub, claims, SystemTime::now())
+    }
+
+    fn jwt_for_user_with_claims_at(sub: &str, claims: JsonValue, now: SystemTime) -> String {
         let claims = JwtClaims {
             sub: sub.to_string(),
             claims,
-            exp: SystemTime::now()
+            exp: now
                 .duration_since(UNIX_EPOCH)
                 .expect("clock drift")
                 .as_secs()
@@ -319,11 +318,11 @@ impl TestingServer {
     }
 
     pub fn port(&self) -> u16 {
-        self.port
+        self.hosted.port
     }
 
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        self.hosted.base_url()
     }
 
     pub fn admin_secret(&self) -> &str {
@@ -334,19 +333,25 @@ impl TestingServer {
         &self.backend_secret
     }
 
+    /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
+    /// that need to call internal server methods (e.g. `process_ws_client_frame`).
+    pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
+        self.hosted.state.clone()
+    }
+
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
     pub async fn set_client_ttl(&self, ttl: Duration) {
-        self.state.set_client_ttl(ttl).await;
+        self.hosted.state.set_client_ttl(ttl).await;
     }
 
     /// Run one sweep iteration to reap expired disconnect candidates.
     pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        self.state.run_sweep_once().await
+        self.hosted.state.run_sweep_once().await
     }
 
     /// Number of clients currently in the disconnect candidates list.
     pub async fn disconnect_candidate_count(&self) -> usize {
-        self.state.disconnect_candidates.read().await.len()
+        self.hosted.state.disconnect_candidates.read().await.len()
     }
 
     pub fn built_in_jwt_helpers_available(&self) -> bool {
@@ -391,6 +396,7 @@ impl TestingServer {
             .expect("lock test client data dirs")
             .push(client_data_dir);
 
+        let jwt_token = self.jwt_for_user_for_server_clock(user_id.as_ref());
         AppContext {
             app_id: self.app_id,
             client_id: None,
@@ -398,72 +404,25 @@ impl TestingServer {
             server_url: self.base_url(),
             data_dir,
             storage: crate::ClientStorage::Memory,
-            jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
+            jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret.clone()),
-            admin_secret: Some(self.admin_secret.clone()),
+            admin_secret: None,
             sync_tracer: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
-    }
-
-    async fn wait_ready(&self) {
-        let health_url = format!("{}/health", self.base_url());
-        for _ in 0..80 {
-            if let Ok(response) = self.client.get(&health_url).send().await
-                && response.status().is_success()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("jazz-tools server did not become ready in time");
+        &self.hosted.data_dir
     }
 
     pub async fn shutdown(mut self) {
-        self.state
-            .runtime
-            .flush()
-            .await
-            .expect("flush server runtime");
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(mut task) = self.task.take()
-            && tokio::time::timeout(Duration::from_millis(500), &mut task)
-                .await
-                .is_err()
-        {
-            task.abort();
-            let _ = task.await;
-        }
-        self.state
-            .runtime
-            .with_storage(|storage| {
-                storage.flush();
-                storage.flush_wal();
-                let _ = storage.close();
-            })
-            .expect("flush and close server storage");
-        self.state
-            .external_identity_store
-            .close()
-            .await
-            .expect("close external identity store");
+        self.hosted.shutdown().await;
     }
-}
 
-impl Drop for TestingServer {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+    fn jwt_for_user_for_server_clock(&self, sub: &str) -> String {
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        Self::jwt_for_user_with_claims_at(sub, json!({"role": "user"}), now)
     }
 }
 
@@ -557,6 +516,7 @@ mod tests {
         assert!(server.built_in_jwt_helpers_available());
         assert!(!server.uses_external_jwks());
         assert!(context.jwt_token.is_some());
+        assert!(context.admin_secret.is_none());
 
         server.shutdown().await;
     }

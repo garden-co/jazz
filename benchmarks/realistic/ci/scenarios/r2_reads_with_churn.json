@@ -1,0 +1,13 @@
+{
+  "id": "R2B",
+  "name": "sustained_read_throughput_with_background_write_churn",
+  "seed": 20260222,
+  "operation_count": 256,
+  "background_write_ratio": 0.05,
+  "mix": [
+    { "operation": "query_board", "weight": 40 },
+    { "operation": "query_my_work", "weight": 30 },
+    { "operation": "query_task_detail", "weight": 20 },
+    { "operation": "query_activity_feed", "weight": 10 }
+  ]
+}

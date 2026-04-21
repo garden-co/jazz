@@ -3,6 +3,7 @@ import { useDb, useSession } from "jazz-tools/react";
 import { navigate } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 interface InviteHandlerProps {
   chatId: string;
@@ -14,6 +15,9 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const session = useSession();
   const handled = useRef(false);
   const [chatLoaded, setChatLoaded] = useState(false);
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
@@ -26,7 +30,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
         if (delta.all.length > 0) setChatLoaded(true);
       },
       undefined,
-      { user_id: userId, claims: { join_code: code } },
+      { user_id: userId, claims: { join_code: code }, authMode: "external" },
     );
     return unsubscribe;
   }, [db, userId, chatId, code]);
@@ -35,14 +39,21 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     if (!chatLoaded || handled.current || !userId || !myProfile) return;
     handled.current = true;
 
-    db.insert(app.chatMembers, {
-      chatId,
-      userId,
-      joinCode: code,
-    });
-
-    navigate(`/#/chat/${chatId}`);
-  }, [chatLoaded, db, userId, myProfile, chatId, code]);
+    void db
+      .insert(app.chatMembers, {
+        chatId,
+        userId,
+        joinCode: code,
+      })
+      .wait(sharedWriteOptions)
+      .then(() => {
+        navigate(`/#/chat/${chatId}`);
+      })
+      .catch((error) => {
+        console.error("failed to accept invite", error);
+        handled.current = false;
+      });
+  }, [chatLoaded, db, userId, myProfile, chatId, code, sharedWriteOptions]);
 
   return (
     <div id="joining-chat" className="p-8 text-center text-muted-foreground italic">

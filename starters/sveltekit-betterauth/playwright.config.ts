@@ -1,0 +1,29 @@
+import { defineConfig, devices } from "@playwright/test";
+
+const BASE_URL = "http://localhost:5173";
+
+export default defineConfig({
+  testDir: "./e2e",
+  testMatch: "**/*.spec.ts",
+  timeout: 90_000,
+  fullyParallel: false,
+  workers: 1,
+  retries: process.env.CI ? 2 : 0,
+  use: {
+    baseURL: BASE_URL,
+    trace: "on-first-retry",
+  },
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
+  ],
+  webServer: {
+    command: "pnpm dev",
+    env: { BETTER_AUTH_SECRET: "test-secret-do-not-use-in-production" },
+    url: BASE_URL,
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+  },
+});

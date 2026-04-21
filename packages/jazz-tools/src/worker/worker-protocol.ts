@@ -21,12 +21,11 @@ export interface InitMessage {
   dbName: string;
   clientId: string;
   serverUrl?: string;
-  serverPathPrefix?: string;
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
+  /** Computed WASM URL fallback for non-bundled contexts — used after wasmModule.default() fails. */
+  fallbackWasmUrl?: string;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
@@ -80,8 +79,16 @@ export interface PeerCloseMessage {
 export interface UpdateAuthMessage {
   type: "update-auth";
   jwtToken?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
+}
+
+/** Disconnect the worker's upstream WebSocket transport. */
+export interface DisconnectUpstreamMessage {
+  type: "disconnect-upstream";
+}
+
+/** Reconnect the worker's upstream WebSocket transport (after a disconnect). */
+export interface ReconnectUpstreamMessage {
+  type: "reconnect-upstream";
 }
 
 /** Request graceful shutdown. */
@@ -117,6 +124,8 @@ export type MainToWorkerMessage =
   | PeerSyncToWorkerMessage
   | PeerCloseMessage
   | UpdateAuthMessage
+  | DisconnectUpstreamMessage
+  | ReconnectUpstreamMessage
   | ShutdownMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage

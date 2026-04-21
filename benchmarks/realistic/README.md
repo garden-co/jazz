@@ -98,6 +98,31 @@ The Node-side test server used by the browser harness comes from `jazz-napi`, so
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
 
+### Browser CPU profiling
+
+For focused local CPU profiles of the browser runtime, run:
+
+```bash
+pnpm --dir crates/jazz-napi run build
+pnpm bench:realistic:profile-browser -- --scenario w4,b2
+```
+
+This launches:
+
+- a Vite dev server rooted at `packages/jazz-tools`
+- a headless Chromium with CDP enabled
+- a real `TestingServer` from `jazz-napi`
+
+It captures both main-thread and dedicated-worker CPU profiles to `/tmp/jazz-browser-profiles`
+by default, then prints the hottest self-time frames for each scenario.
+
+Useful options:
+
+```bash
+pnpm bench:realistic:profile-browser -- --scenario b3 --large-multiplier 4
+pnpm bench:realistic:profile-browser -- --out-dir ./tmp/browser-profiles
+```
+
 Current browser scenarios:
 
 - `W1`: interactive local workload mix (worker/OPFS)
@@ -125,6 +150,7 @@ The workflow currently:
 - runs on PRs only when the PR has the `benchmark` label
 - runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
 - keeps a checked-in skip set at `benchmarks/realistic/ci_skip_set.json`
+- only activates configured skips after 3 timed-out observations for the same benchmark id
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
 - records browser outputs per scenario when they complete within budget
 

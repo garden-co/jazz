@@ -7,9 +7,8 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-import { app } from "../../schema.js";
-import { createDb, DbConfig } from "jazz-tools";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -268,17 +267,11 @@ describe("Vanilla TS Todo App E2E", () => {
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-a",
-      adminSecret: ADMIN_SECRET,
     });
     const el2 = await mount({
       appId: APP_ID,
       driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: "ts-sync-user-b",
-      adminSecret: ADMIN_SECRET,
     });
 
     // Let both app instances finish server/event-stream setup before mutating.

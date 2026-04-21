@@ -1,12 +1,53 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn retained_batch_terminal_tier(&self) -> DurabilityTier {
+        let sync_manager = self.schema_manager.query_manager().sync_manager();
+
+        if sync_manager.has_connected_servers() {
+            DurabilityTier::GlobalServer
+        } else {
+            sync_manager
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local)
+        }
+    }
+    fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
+        let Ok(records) = self.storage.scan_local_batch_records() else {
+            return Vec::new();
+        };
+        let terminal_tier = self.retained_batch_terminal_tier();
+
+        records
+            .into_iter()
+            .filter(|record| {
+                record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
+            })
+            .filter(|record| match record.latest_settlement.as_ref() {
+                None => true,
+                Some(crate::batch_fate::BatchSettlement::Missing { .. }) => true,
+                Some(crate::batch_fate::BatchSettlement::Rejected { .. }) => false,
+                Some(crate::batch_fate::BatchSettlement::DurableDirect {
+                    confirmed_tier, ..
+                })
+                | Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                    confirmed_tier,
+                    ..
+                }) => confirmed_tier < &terminal_tier,
+            })
+            .map(|record| record.batch_id)
+            .collect()
+    }
+
     // =========================================================================
     // Sync Operations
     // =========================================================================
 
     /// Push a sync message to the inbox (from network).
     pub fn push_sync_inbox(&mut self, entry: InboxEntry) {
+        if entry.payload.writes_storage() {
+            self.mark_storage_write_pending_flush();
+        }
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
@@ -31,7 +72,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
         self.schema_manager
             .query_manager_mut()
-            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
+            .add_server_with_storage(&self.storage, server_id, skip_catalogue_sync);
+        let pending_batch_ids = self.pending_batch_ids_needing_reconciliation();
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .request_batch_settlements_from_server(server_id, pending_batch_ids);
         self.immediate_tick();
     }
 
@@ -50,7 +96,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn add_client(&mut self, client_id: ClientId, session: Option<Session>) {
         info!(%client_id, has_session = session.is_some(), "adding client");
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
-        sm.add_client(client_id);
+        sm.add_client_with_storage(&self.storage, client_id);
         if let Some(s) = session {
             sm.set_client_session(client_id, s);
         }
@@ -70,7 +116,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_session(client_id, session);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_session(client_id, session);
             self.immediate_tick();
         }
@@ -117,7 +163,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_role(client_id, ClientRole::Admin);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_role(client_id, ClientRole::Admin);
             self.immediate_tick();
         }
@@ -139,7 +185,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_role(client_id, ClientRole::Backend);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_role(client_id, ClientRole::Backend);
             self.immediate_tick();
         }

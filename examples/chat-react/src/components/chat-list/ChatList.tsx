@@ -5,65 +5,81 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { navigate } from "@/hooks/useRouter";
 import { app } from "../../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 export const ChatList = () => {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const myProfile = useMyProfile();
 
   const memberships =
     useAll(app.chatMembers.where({ userId: userId ?? "__none__" }).include({ chat: true })) ?? [];
 
-  const createPublicChat = () => {
+  const createPublicChat = async () => {
     if (!userId || !myProfile) return;
 
-    const chat = db.insert(app.chats, {
-      isPublic: true,
-      createdBy: userId,
-    });
-    db.insert(app.chatMembers, { chatId: chat.id, userId });
-    db.insert(app.messages, {
-      chatId: chat.id,
-      text: "Hello world",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
+    const chat = await db
+      .insert(app.chats, {
+        isPublic: true,
+        createdBy: userId,
+      })
+      .wait(sharedWriteOptions);
+    await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
+    await db
+      .insert(app.messages, {
+        chatId: chat.id,
+        text: "Hello world",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      })
+      .wait(sharedWriteOptions);
+
     navigate(`/#/chat/${chat.id}`);
   };
 
-  const createPrivateChat = () => {
+  const createPrivateChat = async () => {
     if (!userId || !myProfile) return;
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const chat = db.insert(app.chats, {
-      isPublic: false,
-      createdBy: userId,
-      joinCode: shareCode,
-    });
-    db.insert(app.chatMembers, {
-      chatId: chat.id,
-      userId,
-      joinCode: shareCode,
-    });
-    db.insert(app.messages, {
-      chatId: chat.id,
-      text: "This is a private chat.",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
+    const chat = await db
+      .insert(app.chats, {
+        isPublic: false,
+        createdBy: userId,
+        joinCode: shareCode,
+      })
+      .wait(sharedWriteOptions);
+    await db
+      .insert(app.chatMembers, {
+        chatId: chat.id,
+        userId,
+        joinCode: shareCode,
+      })
+      .wait(sharedWriteOptions);
+    await db
+      .insert(app.messages, {
+        chatId: chat.id,
+        text: "This is a private chat.",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      })
+      .wait(sharedWriteOptions);
+
     navigate(`/#/chat/${chat.id}`);
   };
 
   return (
     <div className="p-2 flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2">
-        <Button onClick={createPublicChat}>
+        <Button onClick={() => void createPublicChat()}>
           <MessageSquarePlusIcon /> New Chat
         </Button>
-        <Button variant="outline" onClick={createPrivateChat}>
+        <Button variant="outline" onClick={() => void createPrivateChat()}>
           <LockIcon /> New Private Chat
         </Button>
       </div>

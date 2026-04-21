@@ -8,7 +8,7 @@ Expose groove's core functionality to Go programs:
 
 - C FFI layer over groove (Rust → `extern "C"` → Go `cgo`)
 - Go-idiomatic wrapper: `db.Query()`, `db.Exec()`, iterators
-- Embedded mode (in-process Fjall storage) and client mode (sync to server)
+- Embedded mode (in-process durable storage) and client mode (sync to server)
 - Schema definition in Go structs with codegen or reflection
 
 ## Open Questions

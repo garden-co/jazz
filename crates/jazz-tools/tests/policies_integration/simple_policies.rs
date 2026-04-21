@@ -23,7 +23,7 @@ fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSche
         .column("owner_id", ColumnType::Text)
         .column("title", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
@@ -100,7 +100,7 @@ fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchem
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .column("priority", ColumnType::Integer)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn priority_values(title: &str, priority: i32) -> Vec<Value> {
@@ -111,7 +111,7 @@ fn make_review_schema(table_name: &str, policies: TablePolicies) -> TableSchemaB
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
         .nullable_column("reviewer_id", ColumnType::Text)
-        .policies(policies)
+        .policies(super::explicit_allow_all_policies(policies))
 }
 
 fn review_values(title: &str, reviewer_id: Option<&str>) -> Vec<Value> {
@@ -1668,5 +1668,73 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 
     alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that adding `admin_secret` to an otherwise user-scoped WS client
+/// bypasses row-level SELECT policies by authenticating the transport as a
+/// backend connection.
+#[tokio::test]
+async fn admin_secret_ws_client_bypasses_row_select_policies() {
+    let table_name = "documents_admin_secret_backend";
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            table_name,
+            TablePolicies::new()
+                .with_insert(PolicyExpr::True)
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ))
+        .build();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
+
+    let mut privileged_ctx = server.make_client_context_for_user(schema.clone(), "observer");
+    privileged_ctx.backend_secret = None;
+    privileged_ctx.admin_secret = Some(server.admin_secret().to_string());
+    let privileged = JazzClient::connect(privileged_ctx)
+        .await
+        .expect("connect privileged observer");
+
+    let row_id = seed_document(&alice, table_name, "alice", "private doc", false).await;
+    let expected_values = boolean_policy_document_values("alice", "private doc", false);
+
+    let observer_rows = wait_for_query(
+        &observer,
+        QueryBuilder::new(table_name).build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "ordinary observer stays filtered by select policy",
+        Some,
+    )
+    .await;
+    assert!(
+        observer_rows.is_empty(),
+        "ordinary observer should not see alice's row"
+    );
+
+    let privileged_rows = wait_for_rows(
+        &privileged,
+        QueryBuilder::new(table_name).build(),
+        "admin_secret observer bypasses select policy",
+        |rows| has_row(&rows, row_id, &expected_values).then_some(rows),
+    )
+    .await;
+    assert!(
+        has_row(&privileged_rows, row_id, &expected_values),
+        "admin_secret observer should see alice's row via backend WS auth"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    observer.shutdown().await.expect("shutdown observer");
+    privileged
+        .shutdown()
+        .await
+        .expect("shutdown privileged observer");
     server.shutdown().await;
 }

@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, SchemaHash, TableName,
-    TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, RowDescriptor, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V4 as u8;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V5 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -34,6 +34,8 @@ enum SchemaEncodingVersion {
     V3 = 3,
     // v4 schemas include column defaults.
     V4 = 4,
+    // v5 schemas include column merge strategies.
+    V5 = 5,
 }
 
 impl SchemaEncodingVersion {
@@ -43,6 +45,7 @@ impl SchemaEncodingVersion {
             2 => Some(Self::V2),
             3 => Some(Self::V3),
             4 => Some(Self::V4),
+            5 => Some(Self::V5),
             _ => None,
         }
     }
@@ -56,7 +59,11 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4)
+        matches!(self, Self::V4 | Self::V5)
+    }
+
+    fn has_column_merge_strategies(self) -> bool {
+        matches!(self, Self::V5)
     }
 }
 
@@ -110,10 +117,11 @@ impl std::error::Error for CatalogueEncodingError {}
 /// [version: u8][table_count: u32][table_1]...[table_n]
 /// ```
 ///
-/// Tables are sorted by name for deterministic encoding.
+/// Tables are sorted by name for deterministic encoding. Column order within a
+/// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V4;
+    let version = SchemaEncodingVersion::V5;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -205,12 +213,8 @@ fn encode_row_descriptor_with_version(
     desc: &RowDescriptor,
     version: SchemaEncodingVersion,
 ) {
-    // Sort columns by name for deterministic encoding
-    let mut columns: Vec<_> = desc.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    write_u32(buf, columns.len() as u32);
-    for col in columns {
+    write_u32(buf, desc.columns.len() as u32);
+    for col in &desc.columns {
         encode_column_descriptor_with_version(buf, col, version);
     }
 }
@@ -264,6 +268,15 @@ fn encode_column_descriptor_with_version(
             None => buf.push(0),
         }
     }
+    if version.has_column_merge_strategies() {
+        match col.merge_strategy {
+            Some(ColumnMergeStrategy::Counter) => {
+                buf.push(1);
+                buf.push(1);
+            }
+            None => buf.push(0),
+        }
+    }
 }
 
 fn decode_column_descriptor_with_version(
@@ -293,6 +306,24 @@ fn decode_column_descriptor_with_version(
     } else {
         None
     };
+    let merge_strategy = if version.has_column_merge_strategies() {
+        let has_merge_strategy = read_u8(data, offset)? != 0;
+        if has_merge_strategy {
+            match read_u8(data, offset)? {
+                1 => Some(ColumnMergeStrategy::Counter),
+                tag => {
+                    return Err(CatalogueEncodingError::InvalidTypeTag {
+                        tag,
+                        context: "column_merge_strategy",
+                    });
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
@@ -300,6 +331,7 @@ fn decode_column_descriptor_with_version(
         nullable,
         references,
         default,
+        merge_strategy,
     })
 }
 
@@ -316,6 +348,7 @@ const TYPE_ENUM: u8 = 9;
 const TYPE_DOUBLE: u8 = 10;
 const TYPE_BYTEA: u8 = 11;
 const TYPE_JSON: u8 = 12;
+const TYPE_BATCH_ID: u8 = 13;
 
 fn encode_column_type_with_version(
     buf: &mut Vec<u8>,
@@ -330,6 +363,7 @@ fn encode_column_type_with_version(
         ColumnType::Text => buf.push(TYPE_TEXT),
         ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
         ColumnType::Uuid => buf.push(TYPE_UUID),
+        ColumnType::BatchId => buf.push(TYPE_BATCH_ID),
         ColumnType::Bytea => buf.push(TYPE_BYTEA),
         ColumnType::Json { schema } => {
             buf.push(TYPE_JSON);
@@ -378,6 +412,7 @@ fn decode_column_type_with_version(
         TYPE_TEXT => Ok(ColumnType::Text),
         TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
         TYPE_UUID => Ok(ColumnType::Uuid),
+        TYPE_BATCH_ID => Ok(ColumnType::BatchId),
         TYPE_BYTEA => Ok(ColumnType::Bytea),
         TYPE_JSON => {
             let has_schema = read_u8(data, offset)? != 0;
@@ -432,6 +467,26 @@ fn decode_row_descriptor(
     offset: &mut usize,
 ) -> Result<RowDescriptor, CatalogueEncodingError> {
     decode_row_descriptor_with_version(data, offset, SchemaEncodingVersion::V3)
+}
+
+pub fn encode_row_descriptor_bytes(desc: &RowDescriptor) -> Vec<u8> {
+    let mut buf = Vec::new();
+    encode_row_descriptor(&mut buf, desc);
+    buf
+}
+
+pub fn decode_row_descriptor_bytes(data: &[u8]) -> Result<RowDescriptor, CatalogueEncodingError> {
+    let mut offset = 0;
+    let descriptor = decode_row_descriptor(data, &mut offset)?;
+    if offset != data.len() {
+        return Err(CatalogueEncodingError::DecodeError {
+            message: format!(
+                "row descriptor bytes had trailing data: decoded {offset} of {} bytes",
+                data.len()
+            ),
+        });
+    }
+    Ok(descriptor)
 }
 
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
@@ -1501,6 +1556,7 @@ const VALUE_ROW: u8 = 8;
 // (enum values are stored as Text). Keeping Double at 10 aligns with TYPE_DOUBLE.
 const VALUE_DOUBLE: u8 = 10;
 const VALUE_BYTEA: u8 = 11;
+const VALUE_BATCH_ID: u8 = 12;
 
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
@@ -1532,6 +1588,10 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
         Value::Uuid(id) => {
             buf.push(VALUE_UUID);
             buf.extend_from_slice(id.uuid().as_bytes());
+        }
+        Value::BatchId(bytes) => {
+            buf.push(VALUE_BATCH_ID);
+            buf.extend_from_slice(bytes);
         }
         Value::Bytea(bytes) => {
             buf.push(VALUE_BYTEA);
@@ -1594,6 +1654,10 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
                     message: format!("invalid uuid: {e}"),
                 })?;
             Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
+        }
+        VALUE_BATCH_ID => {
+            let bytes = read_bytes(data, offset, 16)?;
+            Ok(Value::BatchId(bytes.try_into().expect("16-byte batch id")))
         }
         VALUE_BYTEA => {
             let len = read_u32(data, offset)? as usize;
@@ -1715,6 +1779,30 @@ mod tests {
     }
 
     #[test]
+    fn schema_roundtrip_preserves_declared_column_order() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let users = decoded.get(&TableName::new("users")).unwrap();
+        let column_names = users
+            .columns
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["name", "id", "email"]);
+    }
+
+    #[test]
     fn schema_roundtrip_complex() {
         let schema = SchemaBuilder::new()
             .table(
@@ -1828,6 +1916,27 @@ mod tests {
             docs.columns.column("raw_payload").unwrap().column_type,
             ColumnType::Json { schema: None }
         );
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_column_merge_strategy() {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("counters"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("value", ColumnType::Integer)
+                    .merge_strategy(ColumnMergeStrategy::Counter),
+            ])),
+        );
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).unwrap();
+        let table = decoded
+            .get(&TableName::new("counters"))
+            .expect("decoded counters table");
+        let column = table.columns.column("value").expect("counter column");
+
+        assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
     }
 
     #[test]

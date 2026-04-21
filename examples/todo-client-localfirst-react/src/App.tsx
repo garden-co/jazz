@@ -1,32 +1,22 @@
 import * as React from "react";
-import {
-  JazzProvider,
-  getActiveSyntheticAuth,
-  attachDevTools,
-  useJazzClient,
-} from "jazz-tools/react";
+import { JazzProvider, attachDevTools, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { app } from "../schema.js";
 
 const devToolsAttachedClients = new WeakSet<object>();
 
-function readEnvAppId(): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-    ?.JAZZ_APP_ID;
-}
+const appId = import.meta.env.JAZZ_APP_ID;
+const serverUrl = import.meta.env.JAZZ_SERVER_URL;
 
 // #region context-setup-react
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-23f3-7227-818f-51eb1d178b6b";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
+function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId,
     env: "dev",
     userBranch: "main",
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
+    serverUrl,
+    secret,
     ...overrides,
   };
 }
@@ -61,7 +51,13 @@ function DevToolsRegistration() {
 
 // #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
-  const resolvedConfig = defaultConfig(config);
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) {
+    return <>{fallback ?? <p>Loading...</p>}</>;
+  }
+
+  const resolvedConfig = defaultConfig(secret, config);
 
   return (
     <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>

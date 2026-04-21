@@ -9,7 +9,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,6 +35,19 @@ function typeIntoEditor(editorEl: HTMLElement, text: string) {
   handle.insertText(text);
 }
 
+function findSendButton(container: ParentNode): HTMLButtonElement | undefined {
+  return (container.querySelector<HTMLButtonElement>('[data-slot="button"]:has(.lucide-send)') ??
+    [...container.querySelectorAll("button")].find((b) => b.querySelector(".lucide-send"))) as
+    | HTMLButtonElement
+    | undefined;
+}
+
+function hasRenderedMessage(container: ParentNode, text: string): boolean {
+  return [...container.querySelectorAll("article")].some((article) =>
+    article.textContent?.includes(text),
+  );
+}
+
 /** Simulate a real click (pointerdown → pointerup → click). Radix UI
  *  components open on pointerdown, so a bare `.click()` won't work. */
 function simulateClick(el: HTMLElement) {
@@ -54,8 +68,7 @@ describe("Chat App E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      secret?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -93,6 +106,7 @@ describe("Chat App E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
@@ -140,9 +154,7 @@ describe("Chat App E2E", () => {
     );
 
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton =
-      el.querySelector<HTMLButtonElement>('[data-slot="button"]:has(.lucide-send)') ??
-      [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-send"));
+    const sendButton = findSendButton(el);
 
     await act(async () => {
       typeIntoEditor(editor, "Hello Public 2");
@@ -393,8 +405,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-a-${Date.now()}`,
+      secret: await testSecret(`chat-access-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -443,6 +454,12 @@ describe("Chat App E2E", () => {
     await act(async () => simulateClick(privateChatButton));
 
     await waitFor(
+      () => hasRenderedMessage(aliceContainer, "This is a private chat."),
+      10000,
+      "Private chat seed message should render for user A",
+    );
+
+    await waitFor(
       () => aliceContainer.querySelector("#messageEditor") !== null,
       10000,
       "Private chat editor should appear for user A",
@@ -450,9 +467,16 @@ describe("Chat App E2E", () => {
 
     // Send the secret message
     const aliceEditor = aliceContainer.querySelector<HTMLElement>("#messageEditor")!;
-    const aliceSendButton = [...aliceContainer.querySelectorAll("button")].find((b) =>
-      b.querySelector(".lucide-send"),
+    await waitFor(
+      () => {
+        const button = findSendButton(aliceContainer);
+        return !!button && !button.disabled;
+      },
+      10000,
+      "Private chat send button should be enabled for user A",
     );
+
+    const aliceSendButton = findSendButton(aliceContainer);
 
     await act(async () => typeIntoEditor(aliceEditor, "Secret Data"));
     if (aliceSendButton) {
@@ -460,9 +484,9 @@ describe("Chat App E2E", () => {
     }
 
     await waitFor(
-      () => aliceContainer.textContent?.includes("Secret Data") ?? false,
-      5000,
-      "Secret message should appear for user A",
+      () => hasRenderedMessage(aliceContainer, "Secret Data"),
+      10000,
+      "Secret message should render for user A",
     );
 
     // Capture the private chat URL
@@ -481,8 +505,7 @@ describe("Chat App E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("access-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `chat-access-user-b-${Date.now()}`,
+      secret: await testSecret(`chat-access-user-b-${Date.now()}`),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers
@@ -512,18 +535,12 @@ describe("Chat App E2E", () => {
     );
 
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = [...el.querySelectorAll("button")].find((b) =>
-      b.querySelector(".lucide-send"),
-    );
+    const sendButton = findSendButton(el);
 
     for (const text of ["msg1", "msg2"]) {
       await act(async () => typeIntoEditor(editor, text));
       if (sendButton) await act(async () => simulateClick(sendButton));
-      await waitFor(
-        () => el.textContent?.includes(text) ?? false,
-        5000,
-        `Message "${text}" should appear`,
-      );
+      await waitFor(() => hasRenderedMessage(el, text), 5000, `Message "${text}" should appear`);
       // Ensure the next message gets a strictly greater createdAt second.
       await new Promise((r) => setTimeout(r, 1100));
     }
@@ -556,17 +573,11 @@ describe("Chat App E2E", () => {
 
     // Send a plain-text message first
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = [...el.querySelectorAll("button")].find((b) =>
-      b.querySelector(".lucide-send"),
-    );
+    const sendButton = findSendButton(el);
     await act(async () => typeIntoEditor(editor, "msg1"));
     if (sendButton) await act(async () => simulateClick(sendButton));
 
-    await waitFor(
-      () => el.textContent?.includes("msg1") ?? false,
-      5000,
-      "msg1 should appear before canvas",
-    );
+    await waitFor(() => hasRenderedMessage(el, "msg1"), 5000, "msg1 should appear before canvas");
 
     // Insert a canvas
     const plusButton =

@@ -1,0 +1,141 @@
+---
+title: Client Setup
+description: Set up Jazz in your app — works out of the box with most frameworks, with manual configuration available when needed.
+reviewedAt: "cd2e1bc21"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+import { Callout } from "fumadocs-ui/components/callout";
+import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
+
+## Zero-config client setup
+
+Every client needs an `appId`. Add a `serverUrl` to enable sync. For login and authentication options, see [Authentication](/docs/auth/authentication).
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/App.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+    </include>
+  </Tab>
+</Tabs>
+
+Without auth configuration, Jazz creates a local-first identity automatically. To use Jazz completely offline, don't set a `serverUrl`.
+
+<Accordions type="single">
+<Accordion title="Zero config not working?">
+
+Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Runtime source overrides](#runtime-source-overrides) below.
+
+</Accordion>
+</Accordions>
+
+## Client config options
+
+<CreateJazzClientReference />
+
+For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
+
+### Storage driver
+
+Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+## Runtime source overrides
+
+Use `runtimeSources` when Jazz can't automatically find its internal assets. This usually only happens with non-standard bundler configurations or on edge runtimes like Cloudflare Workers.
+
+| Field                       | Use it when                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `runtimeSources.baseUrl`    | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
+| `runtimeSources.wasmUrl`    | The Wasm file has an explicit public URL                                    |
+| `runtimeSources.workerUrl`  | The worker script has an explicit public URL                                |
+| `runtimeSources.wasmSource` | Your runtime gives you Wasm bytes directly                                  |
+| `runtimeSources.wasmModule` | Your runtime gives you a precompiled `WebAssembly.Module`                   |
+
+Jazz resolves these in this order:
+
+1. `runtimeSources.wasmModule`
+2. `runtimeSources.wasmSource`
+3. `runtimeSources.wasmUrl` / `runtimeSources.workerUrl`
+4. `runtimeSources.baseUrl`
+5. built-in zero-config fallback
+
+### Browser asset overrides
+
+The config is the same across frameworks. Plain TypeScript uses `createDb(...)` directly.
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-runtime-sources
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/RuntimeConfigExample.vue#context-setup-vue-runtime-sources
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/RuntimeConfigExample.svelte#context-setup-svelte-runtime-sources
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/runtime-config-snippets.ts#context-setup-ts-runtime-sources
+    </include>
+  </Tab>
+</Tabs>
+
+Use `baseUrl` when both assets live together under one public directory. Use explicit `wasmUrl` / `workerUrl` when your app serves them from different places.
+
+### Edge-style Wasm setup
+
+Some runtimes (like Cloudflare Workers) don't load Jazz the same way a browser does. In those cases, provide the Wasm module or bytes directly.
+
+<include cwd lang="ts" meta='title="worker.ts"'>
+  ../examples/cloudflare-worker-runtime-ts/src/docs-snippets.ts#edge-wasm-module
+</include>
+
+If your platform hands you raw bytes instead of a compiled module, use `runtimeSources.wasmSource`:
+
+```ts title="worker.ts"
+const db = await createDb({
+  appId: "my-app",
+  runtimeSources: {
+    wasmSource: wasmBytes,
+  },
+});
+```
+
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz2/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.

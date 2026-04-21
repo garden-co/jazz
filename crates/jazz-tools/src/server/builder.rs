@@ -8,14 +8,14 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
+use crate::middleware::auth::{
+    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
+};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
-use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::server::{
-    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ExternalIdentityStore, ServerState,
-};
+use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
+use crate::server::{CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -70,7 +70,10 @@ impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig::default(),
+            auth_config: AuthConfig {
+                allow_local_first_auth: true,
+                ..Default::default()
+            },
             catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_mode: ServerStorageMode::Persistent {
@@ -87,6 +90,11 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
+        self
+    }
+
+    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
+        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 
@@ -140,23 +148,13 @@ impl ServerBuilder {
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
         validate_catalogue_authority(&auth_config, &self.catalogue_authority)?;
-        let jwks_cache = build_jwks_cache(&auth_config).await?;
+        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
-        let external_identity_store = Arc::new(self.build_external_identity_store()?);
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
-        let external_identity_rows = external_identity_store
-            .list_external_identities(self.app_id)
-            .await
-            .map_err(|e| format!("failed to load external identities: {e}"))?;
-
-        let mut external_identities = HashMap::with_capacity(external_identity_rows.len());
-        for row in external_identity_rows {
-            external_identities.insert((row.issuer, row.subject), row.principal_id);
-        }
 
         let state = Arc::new(ServerState {
             runtime,
@@ -166,10 +164,8 @@ impl ServerBuilder {
             connection_event_hub,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
-            jwks_cache,
+            jwt_verifier,
             http_client,
-            external_identity_store,
-            external_identities: RwLock::new(external_identities),
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
@@ -202,19 +198,18 @@ impl ServerBuilder {
     fn build_runtime(&self) -> Result<(TokioRuntime<DynStorage>, Arc<ConnectionEventHub>), String> {
         let connection_event_hub = Arc::new(ConnectionEventHub::default());
         let dispatch_hub = Arc::clone(&connection_event_hub);
-        let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                // Record outgoing server message to tracer if present
-                if let Some(ref tracer) = tracer_for_outgoing {
-                    tracer.record_outgoing("server", &entry.destination, &entry.payload);
-                }
                 dispatch_hub.dispatch_payload(client_id, entry.payload);
             }
         });
+
+        if let Some(ref tracer) = self.sync_tracer {
+            runtime.set_sync_tracer(tracer.clone(), "server".to_string());
+        }
 
         Ok((runtime, connection_event_hub))
     }
@@ -226,8 +221,13 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => {
                 let mut schema_manager =
                     SchemaManager::new_server(sync_manager, self.app_id, "prod");
-                rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, self.app_id)
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, self.app_id)
                     .map_err(|e| format!("failed to rehydrate schema manager: {e}"))?;
+                // Dynamic servers fail closed until an explicit permissions head
+                // is available for the active app.
+                schema_manager
+                    .query_manager_mut()
+                    .require_authorization_schema();
                 Ok(schema_manager)
             }
             ServerSchemaMode::Fixed(schema) => {
@@ -289,67 +289,6 @@ impl ServerBuilder {
             ServerStorageMode::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
     }
-
-    fn build_external_identity_store(&self) -> Result<ExternalIdentityStore, String> {
-        match &self.storage_mode {
-            ServerStorageMode::Persistent { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-
-                #[cfg(feature = "rocksdb")]
-                {
-                    let db_path = meta_dir.join("jazz.rocksdb");
-                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                        .map_err(|e| {
-                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                        })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
-                }
-                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
-                {
-                    let db_path = meta_dir.join("jazz.sqlite");
-                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                    })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
-                }
-                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
-                {
-                    ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
-                }
-            }
-            #[cfg(feature = "sqlite")]
-            ServerStorageMode::PersistentSqlite { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-                let db_path = meta_dir.join("jazz.sqlite");
-                let storage = SqliteStorage::open(&db_path).map_err(|e| {
-                    format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                })?;
-                ExternalIdentityStore::new_with_storage(Box::new(storage))
-            }
-            #[cfg(feature = "rocksdb")]
-            ServerStorageMode::PersistentRocksDb { data_dir } => {
-                let meta_dir = Path::new(data_dir).join("meta");
-                std::fs::create_dir_all(&meta_dir).map_err(|e| {
-                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
-                })?;
-                let db_path = meta_dir.join("jazz.rocksdb");
-                let storage =
-                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                    })?;
-                ExternalIdentityStore::new_with_storage(Box::new(storage))
-            }
-            ServerStorageMode::InMemory => {
-                ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
-            }
-        }
-    }
 }
 
 fn server_sync_manager() -> SyncManager {
@@ -370,34 +309,65 @@ fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     )
 }
 
-async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
-    let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
-        return Ok(None);
-    };
+async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
+    match (
+        auth_config.jwks_url.as_ref(),
+        auth_config.jwt_public_key.as_ref(),
+    ) {
+        (Some(_), Some(_)) => Err(
+            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
+                .to_string(),
+        ),
+        (None, None) => Ok(None),
+        (None, Some(public_key)) => {
+            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
+            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
+        }
+        (Some(jwks_url), None) => {
+            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(JWKS_CACHE_TTL);
+            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(JWKS_MAX_STALE);
 
-    let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(JWKS_CACHE_TTL);
-    let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(JWKS_MAX_STALE);
+            let http_client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
 
-    let cache = JwksCache::new(
-        jwks_url.clone(),
-        reqwest::Client::new(),
-        jwks_ttl,
-        jwks_max_stale,
-    );
-    cache
-        .load(false)
-        .await
-        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
+                jwks_url.clone(),
+                http_client,
+                jwks_ttl,
+                jwks_max_stale,
+            )));
 
-    Ok(Some(cache))
+            // Warm the cache in the background. The JWKS endpoint may not be
+            // available yet (e.g. Jazz server starts during Next.js config resolution,
+            // before the app is listening). First auth request will block on fetch
+            // if the background warm hasn't completed.
+            {
+                let verifier = Arc::clone(&verifier);
+                tokio::spawn(async move {
+                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
+                        && let Err(e) = cache.load(false).await
+                    {
+                        tracing::warn!(
+                            "Background JWKS warm failed (will retry on first auth request): {e}"
+                        );
+                    }
+                });
+            }
+
+            Ok(Some(verifier))
+        }
+    }
 }
 
 fn validate_catalogue_authority(
@@ -425,56 +395,14 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
             format!("forward({base_url})")
         }
     };
-    if auth_config.is_configured() {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
-            auth_config.allow_anonymous,
-            auth_config.allow_demo,
-            auth_config.jwks_url.is_some(),
-            auth_config.backend_secret.is_some(),
-            auth_config.admin_secret.is_some(),
-            authority_mode
-        );
-    } else {
-        info!(
-            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
-            auth_config.allow_anonymous, auth_config.allow_demo, authority_mode
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn in_memory_builder_creates_working_external_identity_store() {
-        let app_id = AppId::from_name("builder-test-app");
-        let built = ServerBuilder::new(app_id)
-            .with_in_memory_storage()
-            .build()
-            .await
-            .expect("build server");
-
-        built
-            .state
-            .external_identity_store
-            .create_external_identity(
-                app_id,
-                "https://issuer.example",
-                "subject-123",
-                "principal-123",
-            )
-            .await
-            .expect("create external identity");
-
-        let existing = built
-            .state
-            .external_identity_store
-            .get_external_identity(app_id, "https://issuer.example", "subject-123")
-            .await
-            .expect("query external identity");
-
-        assert!(existing.is_some());
-    }
+    info!(
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
+        auth_config.allow_local_first_auth,
+        auth_config.jwks_url.is_some(),
+        auth_config.jwt_public_key.is_some(),
+        auth_config.auth_cookie_name.is_some(),
+        auth_config.backend_secret.is_some(),
+        auth_config.admin_secret.is_some(),
+        authority_mode
+    );
 }

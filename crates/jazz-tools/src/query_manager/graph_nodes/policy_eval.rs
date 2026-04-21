@@ -2,14 +2,14 @@ use std::collections::HashSet;
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
-    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs, evaluate_expr_recursive,
-    normalize_recursive_max_depth,
+    Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs,
+    evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
 };
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName, Value,
+    ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Value,
 };
 use crate::storage::Storage;
 
@@ -19,14 +19,21 @@ pub(crate) struct PolicyContextEvaluator<'a> {
     schema: &'a Schema,
     session: &'a Session,
     branch: &'a str,
+    row_policy_mode: RowPolicyMode,
 }
 
 impl<'a> PolicyContextEvaluator<'a> {
-    pub(crate) fn new(schema: &'a Schema, session: &'a Session, branch: &'a str) -> Self {
+    pub(crate) fn new(
+        schema: &'a Schema,
+        session: &'a Session,
+        branch: &'a str,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
         Self {
             schema,
             session,
             branch,
+            row_policy_mode,
         }
     }
 
@@ -39,7 +46,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         table_name: &str,
         local_policy_override: Option<&PolicyExpr>,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -59,6 +66,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 let mut visited_inherits = HashSet::new();
                 self.evaluate_expr_with_context(
                     policy,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -69,7 +77,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                     visited_referencing,
                 )
             })
-            .unwrap_or(true);
+            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
 
         visited_referencing.remove(&(table, row.id, operation));
         local_allow
@@ -82,9 +90,9 @@ impl<'a> PolicyContextEvaluator<'a> {
     ) -> Option<&PolicyExpr> {
         let table_schema = self.schema.get(&table_name)?;
         match operation {
-            Operation::Select => table_schema.policies.select.using.as_ref(),
-            Operation::Insert => table_schema.policies.insert.with_check.as_ref(),
-            Operation::Update => table_schema.policies.update.using.as_ref(),
+            Operation::Select => table_schema.policies.select_policy(),
+            Operation::Insert => table_schema.policies.insert_policy(),
+            Operation::Update => table_schema.policies.update_using_policy(),
             Operation::Delete => table_schema.policies.effective_delete_using(),
         }
     }
@@ -99,7 +107,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         target_table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -138,7 +146,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for source_row_id in candidate_ids {
-            let Some(source_row) = row_loader(source_row_id) else {
+            let Some(source_row) = row_loader(source_row_id, Some(source_table_name)) else {
                 continue;
             };
 
@@ -154,7 +162,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             let source_row = Row::new(
                 source_row_id,
                 source_row.data,
-                source_row.commit_id,
+                source_row.batch_id,
                 source_row.row_provenance,
             );
             if self.evaluate_row_access(
@@ -179,11 +187,12 @@ impl<'a> PolicyContextEvaluator<'a> {
     fn evaluate_expr_with_context(
         &self,
         expr: &PolicyExpr,
+        operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
         table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -228,14 +237,22 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited_referencing,
             ),
             PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_context(
-                table, condition, row, descriptor, io, row_loader, depth,
+                table, condition, operation, row, descriptor, io, row_loader, depth,
             ),
-            PolicyExpr::ExistsRel { rel } => {
-                self.evaluate_exists_rel_with_context(rel, row, descriptor, io, row_loader, depth)
-            }
+            PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
+                rel,
+                operation == Operation::Select,
+                row,
+                descriptor,
+                table_name,
+                io,
+                row_loader,
+                depth,
+            ),
             PolicyExpr::And(exprs) => exprs.iter().all(|e| {
                 self.evaluate_expr_with_context(
                     e,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -249,6 +266,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             PolicyExpr::Or(exprs) => exprs.iter().any(|e| {
                 self.evaluate_expr_with_context(
                     e,
+                    operation,
                     row,
                     descriptor,
                     table_name,
@@ -261,6 +279,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             }),
             PolicyExpr::Not(inner) => !self.evaluate_expr_with_context(
                 inner,
+                operation,
                 row,
                 descriptor,
                 table_name,
@@ -270,12 +289,13 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => evaluate_expr_recursive(
+            _ => evaluate_expr_recursive_with_row_id(
                 expr,
                 &row.data,
                 &row.provenance,
                 descriptor,
                 self.session,
+                Some(row.id),
                 depth,
             ),
         }
@@ -291,7 +311,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         _table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -328,37 +348,38 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
         visited.insert(parent_id);
 
-        let parent_row = match row_loader(parent_id) {
+        let parent_table_name = *parent_table;
+        let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
             None => return false,
         };
 
-        let parent_table_name = *parent_table;
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
             None => return false,
         };
 
         let parent_policy = match operation {
-            Operation::Select => parent_schema.policies.select.using.as_ref(),
-            Operation::Insert => parent_schema.policies.insert.with_check.as_ref(),
-            Operation::Update => parent_schema.policies.update.using.as_ref(),
+            Operation::Select => parent_schema.policies.select_policy(),
+            Operation::Insert => parent_schema.policies.insert_policy(),
+            Operation::Update => parent_schema.policies.update_using_policy(),
             Operation::Delete => parent_schema.policies.effective_delete_using(),
         };
 
         let parent_policy = match parent_policy {
             Some(p) => p,
-            None => return true,
+            None => return false,
         };
 
         let parent_row = Row::new(
             parent_id,
             parent_row.data,
-            parent_row.commit_id,
+            parent_row.batch_id,
             parent_row.row_provenance,
         );
         self.evaluate_expr_with_context(
             parent_policy,
+            operation,
             &parent_row,
             &parent_schema.columns,
             parent_table_name.as_str(),
@@ -375,10 +396,11 @@ impl<'a> PolicyContextEvaluator<'a> {
         &self,
         table: &str,
         condition: &PolicyExpr,
+        operation: Operation,
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -398,6 +420,8 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.session,
             self.schema,
             self.branch,
+            operation,
+            self.row_policy_mode,
         ) {
             Some(g) => g,
             None => return false,
@@ -416,10 +440,12 @@ impl<'a> PolicyContextEvaluator<'a> {
     fn evaluate_exists_rel_with_context(
         &self,
         rel: &RelExpr,
+        structural_scans: bool,
         row: &Row,
         descriptor: &RowDescriptor,
+        table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -432,7 +458,16 @@ impl<'a> PolicyContextEvaluator<'a> {
                 None => return false,
             };
 
-        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, self.schema, self.branch) {
+        let current_table = TableName::new(table_name);
+        let mut graph = match PolicyGraph::for_exists_rel(
+            &bound_rel,
+            self.schema,
+            self.branch,
+            Some(self.session.clone()),
+            self.row_policy_mode,
+            Some(&current_table),
+            structural_scans,
+        ) {
             Some(g) => g,
             None => return false,
         };
@@ -511,6 +546,11 @@ fn collect_relation_tables(rel: &RelExpr, tables: &mut HashSet<String>) {
     match rel {
         RelExpr::TableScan { table } => {
             tables.insert(table.as_str().to_string());
+        }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                collect_relation_tables(input, tables);
+            }
         }
         RelExpr::Filter { input, .. }
         | RelExpr::Project { input, .. }

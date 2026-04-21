@@ -1,465 +1,353 @@
-//! Storage conformance test suite.
-//!
-//! Shared tests that any `Storage` backend can plug into with one macro invocation.
-//! Each `test_*` function exercises a single contract of the `Storage` trait.
+//! Storage conformance test suite for the row-history/raw-table storage model.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
 use std::ops::Bound;
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{SchemaHash, Value};
-use crate::storage::{CatalogueLensSeen, CatalogueManifestOp, Storage};
+use crate::batch_fate::{
+    BatchMode, BatchSettlement, CapturedFrontierMember, LocalBatchMember, LocalBatchRecord,
+    SealedBatchMember, SealedBatchSubmission, VisibleBatchMember,
+};
+use crate::catalogue::CatalogueEntry;
+use crate::digest::Digest32;
+use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
+use crate::object::ObjectId;
+use crate::query_manager::types::{
+    ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableSchema, Value,
+};
+use crate::row_format::encode_row;
+use crate::row_histories::{
+    BatchId, HistoryScan, RowState, StoredRowBatch, VisibleRowEntry, decode_flat_history_row,
+    decode_flat_visible_row_entry,
+};
+use crate::schema_manager::encoding::encode_schema;
+use crate::storage::{
+    IndexMutation, RawTableHeader, RowLocator, RowRawTableId, RowRawTableKind, Storage,
+    StorageError, scan_row_raw_table_headers_with_storage,
+};
 use crate::sync_manager::DurabilityTier;
+use crate::test_row_history::persist_test_schema;
 
 /// Factory type for persistence tests that reopen storage at a given path.
 pub type PersistentStorageFactory = dyn Fn(&std::path::Path) -> Box<dyn Storage>;
 
-/// Build a commit with the given content, author, and parents.
-pub fn make_commit(content: &[u8], author: ObjectId, parents: &[CommitId]) -> Commit {
-    Commit {
-        parents: parents.iter().copied().collect(),
-        content: content.to_vec(),
-        timestamp: 1_700_000_000_000_000,
-        author: author.to_string(),
-        metadata: None,
-        stored_state: Default::default(),
-        ack_state: Default::default(),
-    }
+fn row_history_user_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![crate::query_manager::types::ColumnDescriptor::new(
+        "value",
+        ColumnType::Text,
+    )])
+}
+
+fn row_history_test_schema(table: &str) -> crate::query_manager::types::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder(table).column("value", ColumnType::Text))
+        .build()
+}
+
+fn seed_row_history_table(storage: &mut dyn Storage, table: &str) -> SchemaHash {
+    let schema = row_history_test_schema(table);
+    let schema_hash = persist_test_schema(storage, &schema);
+    schema_hash
+}
+
+fn seed_row_history_locator(
+    storage: &mut dyn Storage,
+    table: &str,
+    row_id: ObjectId,
+    schema_hash: SchemaHash,
+) {
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&RowLocator {
+                table: table.into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+}
+
+fn make_row_batch(row_id: ObjectId, branch: &str, updated_at: u64, value: &str) -> StoredRowBatch {
+    StoredRowBatch::new(
+        row_id,
+        branch,
+        Vec::new(),
+        encode_row(
+            &row_history_user_descriptor(),
+            &[Value::Text(value.to_string())],
+        )
+        .unwrap(),
+        RowProvenance::for_insert(row_id.to_string(), updated_at),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    )
+}
+
+fn make_visible_entry(
+    current_row: StoredRowBatch,
+    history_rows: &[StoredRowBatch],
+) -> VisibleRowEntry {
+    VisibleRowEntry::rebuild(current_row, history_rows)
 }
 
 // ============================================================================
-// Object storage tests
+// Branch ord tests
 // ============================================================================
 
-pub fn test_object_create_and_load_metadata(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_row_raw_table_header_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let alice = ObjectId::new();
+    let schema = row_history_test_schema("todos");
+    let schema_hash = SchemaHash::compute(&schema);
+    let user_descriptor = schema[&"todos".into()].columns.clone();
+    let row_raw_table_id = RowRawTableId::new(RowRawTableKind::Visible, "todos", schema_hash);
+    let header = RawTableHeader::row_raw_table(
+        RowRawTableKind::Visible,
+        "todos",
+        schema_hash,
+        &user_descriptor,
+    );
 
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    meta.insert("role".to_string(), "admin".to_string());
+    storage
+        .upsert_raw_table_header(&row_raw_table_id.raw_table_name(), &header)
+        .expect("row raw table header should persist");
 
-    storage.create_object(alice, meta.clone()).unwrap();
-
-    let loaded = storage.load_object_metadata(alice).unwrap().unwrap();
-    assert_eq!(loaded, meta);
+    assert_eq!(
+        storage
+            .load_raw_table_header(&row_raw_table_id.raw_table_name())
+            .unwrap(),
+        Some(header.clone())
+    );
+    assert_eq!(
+        scan_row_raw_table_headers_with_storage(&*storage).unwrap(),
+        vec![(row_raw_table_id, header)]
+    );
 }
 
-pub fn test_object_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_branch_ord_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let main = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
+    let draft = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
+
+    let main_ord = storage.resolve_or_alloc_branch_ord(main).unwrap();
+    let draft_ord = storage.resolve_or_alloc_branch_ord(draft).unwrap();
+
+    assert_eq!(storage.resolve_or_alloc_branch_ord(main).unwrap(), main_ord);
+    assert_ne!(main_ord, draft_ord);
+    assert_eq!(storage.load_branch_ord(main).unwrap(), Some(main_ord));
+    assert_eq!(storage.load_branch_ord(draft).unwrap(), Some(draft_ord));
+    assert_eq!(
+        storage.load_branch_name_by_ord(main_ord).unwrap(),
+        Some(main)
+    );
+    assert_eq!(
+        storage.load_branch_name_by_ord(draft_ord).unwrap(),
+        Some(draft)
+    );
+}
+
+// ============================================================================
+// Row locator tests
+// ============================================================================
+
+pub fn test_object_create_and_load_row_locator(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let object_id = ObjectId::new();
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
+    let locator = RowLocator {
+        table: "users".into(),
+        origin_schema_hash: Some(schema_hash),
+    };
+
+    storage.put_row_locator(object_id, Some(&locator)).unwrap();
+
+    assert_eq!(storage.load_row_locator(object_id).unwrap(), Some(locator));
+}
+
+pub fn test_row_locator_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
     let storage = factory();
-    let unknown = ObjectId::new();
-
-    let result = storage.load_object_metadata(unknown).unwrap();
-    assert!(result.is_none());
+    assert!(storage.load_row_locator(ObjectId::new()).unwrap().is_none());
 }
 
-pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_row_locator_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
     let bob = ObjectId::new();
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
 
-    let mut alice_meta = HashMap::new();
-    alice_meta.insert("owner".to_string(), "alice".to_string());
-
-    let mut bob_meta = HashMap::new();
-    bob_meta.insert("owner".to_string(), "bob".to_string());
-
-    storage.create_object(alice, alice_meta.clone()).unwrap();
-    storage.create_object(bob, bob_meta.clone()).unwrap();
-
-    let loaded_alice = storage.load_object_metadata(alice).unwrap().unwrap();
-    let loaded_bob = storage.load_object_metadata(bob).unwrap().unwrap();
-
-    assert_eq!(loaded_alice, alice_meta);
-    assert_eq!(loaded_bob, bob_meta);
-    assert_ne!(loaded_alice, loaded_bob);
-}
-
-// ============================================================================
-// Branch & commit tests
-// ============================================================================
-
-pub fn test_branch_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let storage = factory();
-    let obj = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let result = storage.load_branch(obj, &branch).unwrap();
-    assert!(result.is_none());
-}
-
-pub fn test_commit_append_and_load(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"alice's first edit", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert_eq!(loaded.commits[0].content, b"alice's first edit");
-    assert_eq!(loaded.commits[0].id(), c1_id);
-    // Single root commit => tails should contain that commit
-    assert!(loaded.tails.contains(&c1_id));
-}
-
-pub fn test_commit_append_chain(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  c1 ("draft v1")  -->  c2 ("draft v2")
-    //  (root)                (parent: c1)
-    //
-    //  After appending both, tails should point to c2 (the tip),
-    //  and both commits should be loadable.
-
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"draft v1", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let c2 = make_commit(b"draft v2", alice, &[c1_id]);
-    let c2_id = c2.id();
-    storage.append_commit(alice, &branch, c2).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 2);
-
-    let ids: HashSet<CommitId> = loaded.commits.iter().map(|c| c.id()).collect();
-    assert!(ids.contains(&c1_id));
-    assert!(ids.contains(&c2_id));
-
-    // Tails should reflect the tip (c2)
-    assert!(loaded.tails.contains(&c2_id));
-}
-
-pub fn test_commit_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"first", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    let c2 = make_commit(b"second", alice, &[c1_id]);
-    let c2_id = c2.id();
-    storage.append_commit(alice, &branch, c2).unwrap();
-
-    storage.delete_commit(alice, &branch, c1_id).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert_eq!(loaded.commits[0].id(), c2_id);
-}
-
-pub fn test_branch_tails_set_and_clear(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"root", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    // Set explicit tails
-    let mut explicit_tails = HashSet::new();
-    explicit_tails.insert(c1_id);
     storage
-        .set_branch_tails(alice, &branch, Some(explicit_tails.clone()))
+        .put_row_locator(
+            alice,
+            Some(&RowLocator {
+                table: "users".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .put_row_locator(
+            bob,
+            Some(&RowLocator {
+                table: "posts".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
         .unwrap();
 
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.tails, explicit_tails);
-
-    // Clear tails
-    storage.set_branch_tails(alice, &branch, None).unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert!(loaded.tails.is_empty());
-}
-
-pub fn test_multiple_branches_independent(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  Object: tasks
-    //
-    //  "main" branch (alice):   c_main ("publish v1")
-    //  "draft" branch (bob):    c_draft ("wip notes")
-    //
-    //  Each branch loads independently without cross-contamination.
-
-    let mut storage = factory();
-    let tasks = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
-
-    let mut meta = HashMap::new();
-    meta.insert("type".to_string(), "tasks".to_string());
-    storage.create_object(tasks, meta).unwrap();
-
-    let alice = ObjectId::new();
-    let bob = ObjectId::new();
-
-    let c_main = make_commit(b"publish v1", alice, &[]);
-    let c_main_id = c_main.id();
-    storage.append_commit(tasks, &main_branch, c_main).unwrap();
-
-    let c_draft = make_commit(b"wip notes", bob, &[]);
-    let c_draft_id = c_draft.id();
-    storage
-        .append_commit(tasks, &draft_branch, c_draft)
-        .unwrap();
-
-    let loaded_main = storage.load_branch(tasks, &main_branch).unwrap().unwrap();
-    assert_eq!(loaded_main.commits.len(), 1);
-    assert_eq!(loaded_main.commits[0].id(), c_main_id);
-
-    let loaded_draft = storage.load_branch(tasks, &draft_branch).unwrap().unwrap();
-    assert_eq!(loaded_draft.commits.len(), 1);
-    assert_eq!(loaded_draft.commits[0].id(), c_draft_id);
+    assert_eq!(
+        storage
+            .load_row_locator(alice)
+            .unwrap()
+            .unwrap()
+            .table
+            .as_str(),
+        "users"
+    );
+    assert_eq!(
+        storage
+            .load_row_locator(bob)
+            .unwrap()
+            .unwrap()
+            .table
+            .as_str(),
+        "posts"
+    );
 }
 
 // ============================================================================
-// Index operation tests
+// Ordered raw-table tests
+// ============================================================================
+
+pub fn test_raw_table_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "alice", b"hello").unwrap();
+    assert_eq!(
+        storage.raw_table_get("users", "alice").unwrap(),
+        Some(b"hello".to_vec())
+    );
+
+    storage.raw_table_delete("users", "alice").unwrap();
+    assert_eq!(storage.raw_table_get("users", "alice").unwrap(), None);
+}
+
+pub fn test_raw_table_scan_prefix(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "alice/1", b"a").unwrap();
+    storage.raw_table_put("users", "alice/2", b"b").unwrap();
+    storage.raw_table_put("users", "bob/1", b"c").unwrap();
+
+    let rows = storage.raw_table_scan_prefix("users", "alice/").unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("alice/1".to_string(), b"a".to_vec()),
+            ("alice/2".to_string(), b"b".to_vec()),
+        ]
+    );
+}
+
+pub fn test_raw_table_scan_range(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    storage.raw_table_put("users", "01", b"a").unwrap();
+    storage.raw_table_put("users", "02", b"b").unwrap();
+    storage.raw_table_put("users", "03", b"c").unwrap();
+
+    let rows = storage
+        .raw_table_scan_range("users", Some("02"), Some("04"))
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("02".to_string(), b"b".to_vec()),
+            ("03".to_string(), b"c".to_vec()),
+        ]
+    );
+}
+
+// ============================================================================
+// Index tests
 // ============================================================================
 
 pub fn test_index_insert_and_exact_lookup(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row_alice = ObjectId::new();
+    let row_id = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row_alice,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), row_id)
         .unwrap();
 
-    let results = storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(results, vec![row_alice]);
-
-    let empty = storage.index_lookup("users", "name", "main", &Value::Text("bob".to_string()));
-    assert!(empty.is_empty());
+    assert_eq!(
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![row_id]
+    );
 }
 
 pub fn test_index_duplicate_values(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row1 = ObjectId::new();
-    let row2 = ObjectId::new();
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
 
     storage
-        .index_insert("users", "age", "main", &Value::Integer(30), row1)
+        .index_insert("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
     storage
-        .index_insert("users", "age", "main", &Value::Integer(30), row2)
+        .index_insert("users", "age", "main", &Value::Integer(25), bob)
         .unwrap();
 
-    let mut results = storage.index_lookup("users", "age", "main", &Value::Integer(30));
-    results.sort();
-    let mut expected = vec![row1, row2];
+    let mut rows = storage.index_lookup("users", "age", "main", &Value::Integer(25));
+    rows.sort();
+    let mut expected = vec![alice, bob];
     expected.sort();
-    assert_eq!(results, expected);
+    assert_eq!(rows, expected);
 }
 
 pub fn test_index_remove(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let row1 = ObjectId::new();
-    let row2 = ObjectId::new();
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
 
     storage
-        .index_insert("users", "age", "main", &Value::Integer(25), row1)
+        .index_insert("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
     storage
-        .index_insert("users", "age", "main", &Value::Integer(25), row2)
+        .index_insert("users", "age", "main", &Value::Integer(25), bob)
         .unwrap();
-
     storage
-        .index_remove("users", "age", "main", &Value::Integer(25), row1)
+        .index_remove("users", "age", "main", &Value::Integer(25), alice)
         .unwrap();
 
-    let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
-    assert_eq!(results, vec![row2]);
-}
-
-pub fn test_index_range_inclusive_exclusive(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_28 = ObjectId::new();
-    let row_30 = ObjectId::new();
-    let row_35 = ObjectId::new();
-
-    for (age, row) in [
-        (20, row_20),
-        (25, row_25),
-        (28, row_28),
-        (30, row_30),
-        (35, row_35),
-    ] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // [25, 30) — inclusive start, exclusive end
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Included(&Value::Integer(25)),
-        Bound::Excluded(&Value::Integer(30)),
+    assert_eq!(
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![bob]
     );
-    results.sort();
-    let mut expected = vec![row_25, row_28];
-    expected.sort();
-    assert_eq!(results, expected);
 }
 
-pub fn test_index_range_unbounded_start(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_26 = ObjectId::new();
-    let row_30 = ObjectId::new();
-
-    for (age, row) in [(20, row_20), (25, row_25), (26, row_26), (30, row_30)] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // (Unbounded, Excluded(26))
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Unbounded,
-        Bound::Excluded(&Value::Integer(26)),
-    );
-    results.sort();
-    let mut expected = vec![row_20, row_25];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_range_unbounded_end(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_20 = ObjectId::new();
-    let row_25 = ObjectId::new();
-    let row_30 = ObjectId::new();
-
-    for (age, row) in [(20, row_20), (25, row_25), (30, row_30)] {
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(age), row)
-            .unwrap();
-    }
-
-    // [25, Unbounded)
-    let mut results = storage.index_range(
-        "users",
-        "age",
-        "main",
-        Bound::Included(&Value::Integer(25)),
-        Bound::Unbounded,
-    );
-    results.sort();
-    let mut expected = vec![row_25, row_30];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_scan_all(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_index_range(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let row1 = ObjectId::new();
     let row2 = ObjectId::new();
     let row3 = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row1,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(20), row1)
         .unwrap();
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("bob".to_string()),
-            row2,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), row2)
         .unwrap();
     storage
-        .index_insert(
+        .index_insert("users", "age", "main", &Value::Integer(30), row3)
+        .unwrap();
+
+    assert_eq!(
+        storage.index_range(
             "users",
-            "name",
+            "age",
             "main",
-            &Value::Text("carol".to_string()),
-            row3,
-        )
-        .unwrap();
-
-    let mut results = storage.index_scan_all("users", "name", "main");
-    results.sort();
-    let mut expected = vec![row1, row2, row3];
-    expected.sort();
-    assert_eq!(results, expected);
-}
-
-pub fn test_index_cross_table_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let user_row = ObjectId::new();
-    let post_row = ObjectId::new();
-
-    storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            user_row,
-        )
-        .unwrap();
-    storage
-        .index_insert(
-            "posts",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            post_row,
-        )
-        .unwrap();
-
-    let user_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(user_results, vec![user_row]);
-
-    let post_results =
-        storage.index_lookup("posts", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(post_results, vec![post_row]);
+            Bound::Included(&Value::Integer(25)),
+            Bound::Unbounded,
+        ),
+        vec![row2, row3]
+    );
 }
 
 pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
@@ -468,178 +356,789 @@ pub fn test_index_cross_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>)
     let draft_row = ObjectId::new();
 
     storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            main_row,
-        )
+        .index_insert("users", "age", "main", &Value::Integer(25), main_row)
         .unwrap();
     storage
-        .index_insert(
-            "users",
-            "name",
-            "draft",
-            &Value::Text("alice".to_string()),
-            draft_row,
-        )
+        .index_insert("users", "age", "draft", &Value::Integer(25), draft_row)
         .unwrap();
 
-    let main_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(main_results, vec![main_row]);
-
-    let draft_results =
-        storage.index_lookup("users", "name", "draft", &Value::Text("alice".to_string()));
-    assert_eq!(draft_results, vec![draft_row]);
-}
-
-pub fn test_index_value_types(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let row_int = ObjectId::new();
-    let row_text = ObjectId::new();
-    let row_uuid = ObjectId::new();
-    let uuid_val = ObjectId::new();
-
-    storage
-        .index_insert("users", "age", "main", &Value::Integer(42), row_int)
-        .unwrap();
-    storage
-        .index_insert(
-            "users",
-            "name",
-            "main",
-            &Value::Text("alice".to_string()),
-            row_text,
-        )
-        .unwrap();
-    storage
-        .index_insert("users", "ref_id", "main", &Value::Uuid(uuid_val), row_uuid)
-        .unwrap();
-
-    let int_results = storage.index_lookup("users", "age", "main", &Value::Integer(42));
-    assert_eq!(int_results, vec![row_int]);
-
-    let text_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(text_results, vec![row_text]);
-
-    let uuid_results = storage.index_lookup("users", "ref_id", "main", &Value::Uuid(uuid_val));
-    assert_eq!(uuid_results, vec![row_uuid]);
-}
-
-// ============================================================================
-// Ack tier test
-// ============================================================================
-
-pub fn test_store_and_load_ack_tier(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
-
-    let mut meta = HashMap::new();
-    meta.insert("owner".to_string(), "alice".to_string());
-    storage.create_object(alice, meta).unwrap();
-
-    let c1 = make_commit(b"synced edit", alice, &[]);
-    let c1_id = c1.id();
-    storage.append_commit(alice, &branch, c1).unwrap();
-
-    storage
-        .store_ack_tier(c1_id, DurabilityTier::Worker)
-        .unwrap();
-
-    let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-    assert_eq!(loaded.commits.len(), 1);
-    assert!(
-        loaded.commits[0]
-            .ack_state
-            .confirmed_tiers
-            .contains(&DurabilityTier::Worker)
-    );
-}
-
-// ============================================================================
-// Catalogue manifest tests
-// ============================================================================
-
-pub fn test_catalogue_manifest_schema_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::SchemaSeen {
-                object_id: obj_id,
-                schema_hash,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
-}
-
-pub fn test_catalogue_manifest_lens_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let source = SchemaHash::from_bytes([0x22; 32]);
-    let target = SchemaHash::from_bytes([0x33; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::LensSeen {
-                object_id: obj_id,
-                source_hash: source,
-                target_hash: target,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    let lens = manifest.lens_seen.get(&obj_id).unwrap();
     assert_eq!(
-        *lens,
-        CatalogueLensSeen {
-            source_hash: source,
-            target_hash: target,
-        }
+        storage.index_lookup("users", "age", "main", &Value::Integer(25)),
+        vec![main_row]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "age", "draft", &Value::Integer(25)),
+        vec![draft_row]
     );
 }
 
-pub fn test_catalogue_manifest_idempotent(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x44; 32]);
+// ============================================================================
+// Row-region tests
+// ============================================================================
 
-    let op = CatalogueManifestOp::SchemaSeen {
-        object_id: obj_id,
-        schema_hash,
+pub fn test_row_region_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_batch(row_id, "main", 10, "alice");
+    let batch_id = version.batch_id();
+
+    storage
+        .append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![version.clone()]
+    );
+    assert_eq!(
+        storage
+            .scan_history_region("users", "main", HistoryScan::Row { row_id })
+            .unwrap(),
+        vec![version]
+    );
+    assert_eq!(
+        storage
+            .load_visible_region_frontier("users", "main", row_id)
+            .unwrap(),
+        Some(vec![batch_id])
+    );
+}
+
+pub fn test_row_region_keeps_same_batch_id_distinct_across_branches(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+
+    let shared_batch_id = BatchId([0x5a; 16]);
+    let mut main = make_row_batch(row_id, "dev/main", 10, "alice");
+    main.batch_id = shared_batch_id;
+    let mut draft = make_row_batch(row_id, "dev/draft", 20, "alice draft");
+    draft.batch_id = shared_batch_id;
+
+    storage
+        .append_history_region_rows("users", &[main.clone(), draft.clone()])
+        .unwrap();
+
+    let history_by_row = storage.scan_history_row_batches("users", row_id).unwrap();
+    let main_history = storage
+        .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
+        .unwrap();
+    let draft_history = storage
+        .scan_history_region("users", "dev/draft", HistoryScan::Row { row_id })
+        .unwrap();
+    let main_loaded = storage
+        .load_history_row_batch("users", "dev/main", row_id, shared_batch_id)
+        .unwrap();
+    let draft_loaded = storage
+        .load_history_row_batch("users", "dev/draft", row_id, shared_batch_id)
+        .unwrap();
+    let ambiguous_lookup =
+        storage.load_history_row_batch_any_branch("users", row_id, shared_batch_id);
+
+    assert_eq!(history_by_row, vec![draft.clone(), main.clone()]);
+    assert_eq!(main_history, vec![main]);
+    assert_eq!(draft_history, vec![draft]);
+    assert_eq!(main_loaded, Some(main_history[0].clone()));
+    assert_eq!(draft_loaded, Some(draft_history[0].clone()));
+    assert!(
+        matches!(ambiguous_lookup, Err(StorageError::IoError(ref message)) if message.contains("ambiguous row history version")),
+        "expected ambiguous unscoped lookup, got {ambiguous_lookup:?}"
+    );
+}
+
+pub fn test_row_region_uses_flat_history_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("done", ColumnType::Boolean),
+        )
+        .build();
+    let schema_hash = SchemaHash::compute(&schema);
+    let descriptor = schema[&"tasks".into()].columns.clone();
+    let row_id = ObjectId::new();
+    let row = StoredRowBatch::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(
+            &descriptor,
+            &[Value::Text("Ship flat rows".into()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        None,
+    );
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .append_history_region_rows("tasks", std::slice::from_ref(&row))
+        .unwrap();
+
+    let encoded = storage
+        .load_history_row_batch_bytes("tasks", row.branch.as_str(), row_id, row.batch_id())
+        .unwrap()
+        .expect("history row should persist");
+
+    assert_eq!(
+        decode_flat_history_row(
+            &descriptor,
+            row_id,
+            row.branch.as_str(),
+            row.batch_id(),
+            &encoded,
+        )
+        .unwrap(),
+        row
+    );
+}
+
+pub fn test_visible_region_uses_flat_bytes_when_schema_known(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .nullable_column("done", ColumnType::Boolean),
+        )
+        .build();
+    let schema_hash = SchemaHash::compute(&schema);
+    let descriptor = schema[&"tasks".into()].columns.clone();
+    let row_id = ObjectId::new();
+    let row = StoredRowBatch::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(
+            &descriptor,
+            &[
+                Value::Text("Ship visible rows".into()),
+                Value::Boolean(false),
+            ],
+        )
+        .unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+        .unwrap();
+
+    let encoded = storage
+        .load_visible_region_row_bytes("tasks", "main", row_id)
+        .unwrap()
+        .expect("visible row should persist");
+
+    assert_eq!(
+        decode_flat_visible_row_entry(&descriptor, row_id, "main", &encoded).unwrap(),
+        entry
+    );
+}
+
+pub fn test_visible_region_does_not_write_separate_batch_side_index(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "tasks");
+    let schema = row_history_test_schema("tasks");
+    let descriptor = row_history_user_descriptor();
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "tasks", row_id, schema_hash);
+
+    let row = StoredRowBatch::new(
+        row_id,
+        "main",
+        Vec::new(),
+        encode_row(&descriptor, &[Value::Text("ship".to_string())]).unwrap(),
+        RowProvenance::for_insert("alice".to_string(), 100),
+        HashMap::new(),
+        RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let entry = VisibleRowEntry::rebuild(row.clone(), std::slice::from_ref(&row));
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: encode_schema(&schema),
+        })
+        .unwrap();
+    storage
+        .put_row_locator(
+            row_id,
+            Some(&crate::storage::RowLocator {
+                table: "tasks".into(),
+                origin_schema_hash: Some(schema_hash),
+            }),
+        )
+        .unwrap();
+    storage
+        .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .raw_table_scan_prefix("tasks", "row:tasks:2:")
+            .unwrap(),
+        Vec::new(),
+        "visible rows should not need a separate batch-id side index once current batch identity lives in the flat payload"
+    );
+}
+
+pub fn test_row_region_patch_state_monotonic(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_batch(row_id, "main", 10, "alice");
+
+    storage
+        .append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            std::slice::from_ref(&make_visible_entry(
+                version.clone(),
+                std::slice::from_ref(&version),
+            )),
+        )
+        .unwrap();
+
+    storage
+        .patch_row_region_rows_by_batch(
+            "users",
+            version.batch_id,
+            None,
+            Some(DurabilityTier::EdgeServer),
+        )
+        .unwrap();
+    storage
+        .patch_row_region_rows_by_batch(
+            "users",
+            version.batch_id,
+            None,
+            Some(DurabilityTier::Local),
+        )
+        .unwrap();
+
+    let visible = storage
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap();
+    let history = storage
+        .scan_history_region("users", "main", HistoryScan::Row { row_id })
+        .unwrap();
+
+    assert_eq!(
+        visible.and_then(|row| row.confirmed_tier),
+        Some(DurabilityTier::EdgeServer)
+    );
+    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+}
+
+pub fn test_row_region_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let main_row_id = ObjectId::new();
+    let draft_row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
+    let main_row = make_row_batch(main_row_id, "main", 10, "main");
+    let draft_row = make_row_batch(draft_row_id, "draft", 20, "draft");
+
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![main_row]
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "draft").unwrap(),
+        vec![draft_row]
+    );
+}
+
+pub fn test_row_region_cross_branch_visible_heads(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let main_row = make_row_batch(row_id, "main", 10, "main");
+    let draft_row = make_row_batch(row_id, "draft", 20, "draft");
+
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .scan_visible_region_row_batches("users", row_id)
+            .unwrap(),
+        vec![draft_row, main_row]
+    );
+}
+
+pub fn test_apply_row_mutation_combines_row_and_index_effects(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+    let version = make_row_batch(row_id, "main", 10, "alice");
+    let visible_entry = make_visible_entry(version.clone(), std::slice::from_ref(&version));
+    let index_mutations = [IndexMutation::Insert {
+        table: "users",
+        column: "name",
+        branch: "main",
+        value: Value::Text("alice".to_string()),
+        row_id,
+    }];
+
+    storage
+        .apply_row_mutation(
+            "users",
+            std::slice::from_ref(&version),
+            std::slice::from_ref(&visible_entry),
+            &index_mutations,
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .load_visible_region_row("users", "main", row_id)
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage
+            .load_history_row_batch("users", "main", row_id, version.batch_id())
+            .unwrap(),
+        Some(version.clone())
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+        vec![row_id]
+    );
+}
+
+// ============================================================================
+// Catalogue tests
+// ============================================================================
+
+pub fn test_catalogue_entry_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let object_id = ObjectId::new();
+    let entry = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            ),
+            ("schema_hash".to_string(), "abc123".to_string()),
+        ]),
+        content: br#"{"tables":["users"]}"#.to_vec(),
+    };
+
+    storage.upsert_catalogue_entry(&entry).unwrap();
+    assert_eq!(
+        storage.load_catalogue_entry(object_id).unwrap(),
+        Some(entry)
+    );
+}
+
+pub fn test_catalogue_entry_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let low_id = ObjectId::from_uuid(uuid::Uuid::nil());
+    let high_id = ObjectId::new();
+
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: high_id,
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueLens.to_string(),
+            )]),
+            content: b"lens".to_vec(),
+        })
+        .unwrap();
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: low_id,
+            metadata: HashMap::from([(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"schema".to_vec(),
+        })
+        .unwrap();
+
+    let scanned = storage.scan_catalogue_entries().unwrap();
+    assert_eq!(scanned.len(), 2);
+    assert_eq!(scanned[0].object_id, low_id);
+    assert_eq!(scanned[1].object_id, high_id);
+}
+
+pub fn test_catalogue_entry_upsert_replaces_existing(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let object_id = ObjectId::new();
+    let first = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([(
+            MetadataKey::Type.to_string(),
+            ObjectType::CataloguePermissionsHead.to_string(),
+        )]),
+        content: b"v1".to_vec(),
+    };
+    let second = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CataloguePermissionsHead.to_string(),
+            ),
+            ("note".to_string(), "updated".to_string()),
+        ]),
+        content: b"v2".to_vec(),
+    };
+
+    storage.upsert_catalogue_entry(&first).unwrap();
+    storage.upsert_catalogue_entry(&second).unwrap();
+
+    assert_eq!(
+        storage.load_catalogue_entry(object_id).unwrap(),
+        Some(second)
+    );
+}
+
+pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let storage = factory();
+    assert!(
+        storage
+            .load_catalogue_entry(ObjectId::new())
+            .unwrap()
+            .is_none()
+    );
+}
+
+pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let mut record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        true,
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![VisibleBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(91)),
+                branch_name: crate::object::BranchName::new("main"),
+                batch_id,
+            }],
+        }),
+    );
+    record.upsert_member(LocalBatchMember {
+        object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(94)),
+        table_name: "users".to_string(),
+        branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        schema_hash: SchemaHash::from_bytes([0xaa; 32]),
+        row_digest: Digest32([11; 32]),
+    });
+    record.upsert_member(LocalBatchMember {
+        object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(95)),
+        table_name: "users".to_string(),
+        branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        schema_hash: SchemaHash::from_bytes([0xaa; 32]),
+        row_digest: Digest32([12; 32]),
+    });
+    record.sealed_submission = Some(SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
+            row_digest: Digest32([9; 32]),
+        }],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(93)),
+            branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
+            batch_id: BatchId([10; 16]),
+        }],
+    ));
+
+    storage.upsert_local_batch_record(&record).unwrap();
+
+    assert_eq!(
+        storage.load_local_batch_record(batch_id).unwrap(),
+        Some(record)
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let low = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(1));
+    let high = crate::row_histories::BatchId::from_uuid(uuid::Uuid::from_u128(2));
+
+    storage
+        .upsert_local_batch_record(&LocalBatchRecord::new(high, BatchMode::Direct, true, None))
+        .unwrap();
+    storage
+        .upsert_local_batch_record(&LocalBatchRecord::new(
+            low,
+            BatchMode::Transactional,
+            false,
+            Some(BatchSettlement::Missing { batch_id: low }),
+        ))
+        .unwrap();
+
+    let records = storage.scan_local_batch_records().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].batch_id, low);
+    assert_eq!(records[1].batch_id, high);
+}
+
+pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Transactional,
+        false,
+        Some(BatchSettlement::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        }),
+    );
+
+    storage.upsert_local_batch_record(&record).unwrap();
+    assert_eq!(
+        storage.load_local_batch_record(batch_id).unwrap(),
+        Some(record)
+    );
+
+    storage.delete_local_batch_record(batch_id).unwrap();
+    assert_eq!(storage.load_local_batch_record(batch_id).unwrap(), None);
+}
+
+pub fn test_authoritative_batch_settlement_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "writer lacks publish rights".to_string(),
     };
 
     storage
-        .append_catalogue_manifest_op(app_id, op.clone())
+        .upsert_authoritative_batch_settlement(&settlement)
         .unwrap();
-    storage.append_catalogue_manifest_op(app_id, op).unwrap();
 
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.len(), 1);
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
+    assert_eq!(
+        storage
+            .load_authoritative_batch_settlement(batch_id)
+            .unwrap(),
+        Some(settlement)
+    );
 }
 
-pub fn test_catalogue_manifest_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let storage = factory();
-    let unknown_app = ObjectId::new();
+pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let alice = ObjectId::from_uuid(uuid::Uuid::from_u128(301));
+    let bob = ObjectId::from_uuid(uuid::Uuid::from_u128(302));
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![
+            SealedBatchMember {
+                object_id: alice,
+                row_digest: Digest32([1; 32]),
+            },
+            SealedBatchMember {
+                object_id: bob,
+                row_digest: Digest32([2; 32]),
+            },
+            SealedBatchMember {
+                object_id: alice,
+                row_digest: Digest32([1; 32]),
+            },
+        ],
+        vec![CapturedFrontierMember {
+            object_id: bob,
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            batch_id: BatchId([3; 16]),
+        }],
+    );
 
-    let result = storage.load_catalogue_manifest(unknown_app).unwrap();
-    assert!(result.is_none());
+    storage.upsert_sealed_batch_submission(&submission).unwrap();
+
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        Some(SealedBatchSubmission::new(
+            batch_id,
+            crate::object::BranchName::new("main"),
+            vec![
+                SealedBatchMember {
+                    object_id: alice,
+                    row_digest: Digest32([1; 32]),
+                },
+                SealedBatchMember {
+                    object_id: bob,
+                    row_digest: Digest32([2; 32]),
+                },
+            ],
+            vec![CapturedFrontierMember {
+                object_id: bob,
+                branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+                batch_id: BatchId([3; 16]),
+            }],
+        ))
+    );
+
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        storage
+            .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let batch_id = crate::row_histories::BatchId::new();
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
+            row_digest: Digest32([4; 32]),
+        }],
+        Vec::new(),
+    );
+
+    storage.upsert_sealed_batch_submission(&submission).unwrap();
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        Some(submission)
+    );
+
+    storage.delete_sealed_batch_submission(batch_id).unwrap();
+    assert_eq!(
+        storage.load_sealed_batch_submission(batch_id).unwrap(),
+        None
+    );
 }
 
 // ============================================================================
@@ -650,21 +1149,27 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
 
-    let alice = ObjectId::new();
-    let branch = BranchName::new("main");
     let row_id = ObjectId::new();
+    let schema_hash = SchemaHash::compute(&row_history_test_schema("users"));
+    let version = make_row_batch(row_id, "main", 10, "alice");
 
-    // Write phase
     {
         let mut storage = factory(path);
-
-        let mut meta = HashMap::new();
-        meta.insert("owner".to_string(), "alice".to_string());
-        storage.create_object(alice, meta).unwrap();
-
-        let c1 = make_commit(b"persistent edit", alice, &[]);
-        storage.append_commit(alice, &branch, c1).unwrap();
-
+        seed_row_history_table(storage.as_mut(), "users");
+        seed_row_history_locator(storage.as_mut(), "users", row_id, schema_hash);
+        storage.raw_table_put("users", "alice", b"hello").unwrap();
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&version))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&make_visible_entry(
+                    version.clone(),
+                    std::slice::from_ref(&version),
+                )),
+            )
+            .unwrap();
         storage
             .index_insert(
                 "users",
@@ -674,25 +1179,26 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
                 row_id,
             )
             .unwrap();
-
         storage.flush();
         storage.close().unwrap();
     }
 
-    // Reopen and verify
     {
         let storage = factory(path);
-
-        let meta = storage.load_object_metadata(alice).unwrap().unwrap();
-        assert_eq!(meta.get("owner").unwrap(), "alice");
-
-        let loaded = storage.load_branch(alice, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert_eq!(loaded.commits[0].content, b"persistent edit");
-
-        let results =
-            storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-        assert_eq!(results, vec![row_id]);
+        assert_eq!(
+            storage.raw_table_get("users", "alice").unwrap(),
+            Some(b"hello".to_vec())
+        );
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap(),
+            Some(version.clone())
+        );
+        assert_eq!(
+            storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+            vec![row_id]
+        );
     }
 }
 
@@ -700,15 +1206,184 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
 
+    factory(path).close().unwrap();
+    factory(path).close().unwrap();
+}
+
+pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let mut record = LocalBatchRecord::new(
+        batch_id,
+        BatchMode::Direct,
+        true,
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![VisibleBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(111)),
+                branch_name: crate::object::BranchName::new("main"),
+                batch_id,
+            }],
+        }),
+    );
+    record.sealed_submission = Some(SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+        vec![SealedBatchMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
+            row_digest: Digest32([11; 32]),
+        }],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(113)),
+            branch_name: crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"),
+            batch_id: BatchId([12; 16]),
+        }],
+    ));
+
     {
-        let storage = factory(path);
+        let mut storage = factory(path);
+        storage.upsert_local_batch_record(&record).unwrap();
+        storage.flush();
         storage.close().unwrap();
     }
 
-    // Reopening at the same path should succeed
     {
         let storage = factory(path);
+        assert_eq!(
+            storage.load_local_batch_record(batch_id).unwrap(),
+            Some(record)
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-bbbbbbbbbbbb-main"))
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+pub fn test_authoritative_batch_settlement_survives_close_reopen(
+    factory: &PersistentStorageFactory,
+) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "session_required".to_string(),
+        reason: "transaction needs an authenticated session".to_string(),
+    };
+
+    {
+        let mut storage = factory(path);
+        storage
+            .upsert_authoritative_batch_settlement(&settlement)
+            .unwrap();
+        storage.flush();
         storage.close().unwrap();
+    }
+
+    {
+        let storage = factory(path);
+        assert_eq!(
+            storage
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap(),
+            Some(settlement)
+        );
+    }
+}
+
+pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let batch_id = crate::row_histories::BatchId::new();
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        crate::object::BranchName::new("main"),
+        vec![
+            SealedBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(501)),
+                row_digest: Digest32([5; 32]),
+            },
+            SealedBatchMember {
+                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(502)),
+                row_digest: Digest32([6; 32]),
+            },
+        ],
+        vec![CapturedFrontierMember {
+            object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(503)),
+            branch_name: crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
+            batch_id: BatchId([7; 16]),
+        }],
+    );
+
+    {
+        let mut storage = factory(path);
+        storage.upsert_sealed_batch_submission(&submission).unwrap();
+        storage.flush();
+        storage.close().unwrap();
+    }
+
+    {
+        let storage = factory(path);
+        assert_eq!(
+            storage.load_sealed_batch_submission(batch_id).unwrap(),
+            Some(submission)
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("main"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .load_branch_ord(crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"))
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+pub fn test_branch_ord_survives_close_reopen(factory: &PersistentStorageFactory) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path();
+    let main = crate::object::BranchName::new("dev-aaaaaaaaaaaa-main");
+    let draft = crate::object::BranchName::new("dev-bbbbbbbbbbbb-main");
+
+    let (main_ord, draft_ord) = {
+        let mut storage = factory(path);
+        let main_ord = storage.resolve_or_alloc_branch_ord(main).unwrap();
+        let draft_ord = storage.resolve_or_alloc_branch_ord(draft).unwrap();
+        storage.flush();
+        storage.close().unwrap();
+        (main_ord, draft_ord)
+    };
+
+    {
+        let mut storage = factory(path);
+        assert_eq!(storage.load_branch_ord(main).unwrap(), Some(main_ord));
+        assert_eq!(storage.load_branch_ord(draft).unwrap(), Some(draft_ord));
+        assert_eq!(
+            storage.load_branch_name_by_ord(main_ord).unwrap(),
+            Some(main)
+        );
+        assert_eq!(
+            storage.load_branch_name_by_ord(draft_ord).unwrap(),
+            Some(draft)
+        );
+        let feature = crate::object::BranchName::new("dev-cccccccccccc-main");
+        let feature_ord = storage.resolve_or_alloc_branch_ord(feature).unwrap();
+        assert!(feature_ord > draft_ord);
     }
 }
 
@@ -716,95 +1391,69 @@ pub fn test_close_releases_resources_for_reopen(factory: &PersistentStorageFacto
 // Multi-actor test
 // ============================================================================
 
-pub fn test_alice_bob_concurrent_branches(factory: &dyn Fn() -> Box<dyn Storage>) {
-    //  Object: tasks
-    //
-    //  alice -> "main" branch:  commit "alice publishes"
-    //           index: users/name/main = "alice" -> row_alice
-    //
-    //  bob   -> "draft" branch: commit "bob drafts"
-    //           index: users/name/draft = "bob" -> row_bob
-    //
-    //  Verify: branches and indices are fully isolated.
-
+pub fn test_alice_bob_branch_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
-    let tasks = ObjectId::new();
+    let schema_hash = seed_row_history_table(storage.as_mut(), "users");
+    let main_row_id = ObjectId::new();
+    let draft_row_id = ObjectId::new();
+    seed_row_history_locator(storage.as_mut(), "users", main_row_id, schema_hash);
+    seed_row_history_locator(storage.as_mut(), "users", draft_row_id, schema_hash);
+    let main_row = make_row_batch(main_row_id, "main", 10, "alice");
+    let draft_row = make_row_batch(draft_row_id, "draft", 20, "bob");
 
-    let mut meta = HashMap::new();
-    meta.insert("type".to_string(), "tasks".to_string());
-    storage.create_object(tasks, meta).unwrap();
-
-    let alice = ObjectId::new();
-    let bob = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
-
-    // Alice writes to main
-    let c_alice = make_commit(b"alice publishes", alice, &[]);
-    let c_alice_id = c_alice.id();
-    storage.append_commit(tasks, &main_branch, c_alice).unwrap();
-
-    let row_alice = ObjectId::new();
+    storage
+        .append_history_region_rows("users", &[main_row.clone(), draft_row.clone()])
+        .unwrap();
+    storage
+        .upsert_visible_region_rows(
+            "users",
+            &[
+                make_visible_entry(main_row.clone(), std::slice::from_ref(&main_row)),
+                make_visible_entry(draft_row.clone(), std::slice::from_ref(&draft_row)),
+            ],
+        )
+        .unwrap();
     storage
         .index_insert(
             "users",
             "name",
             "main",
             &Value::Text("alice".to_string()),
-            row_alice,
+            main_row.row_id,
         )
         .unwrap();
-
-    // Bob writes to draft
-    let c_bob = make_commit(b"bob drafts", bob, &[]);
-    let c_bob_id = c_bob.id();
-    storage.append_commit(tasks, &draft_branch, c_bob).unwrap();
-
-    let row_bob = ObjectId::new();
     storage
         .index_insert(
             "users",
             "name",
             "draft",
             &Value::Text("bob".to_string()),
-            row_bob,
+            draft_row.row_id,
         )
         .unwrap();
 
-    // Verify branch isolation
-    let loaded_main = storage.load_branch(tasks, &main_branch).unwrap().unwrap();
-    assert_eq!(loaded_main.commits.len(), 1);
-    assert_eq!(loaded_main.commits[0].id(), c_alice_id);
-
-    let loaded_draft = storage.load_branch(tasks, &draft_branch).unwrap().unwrap();
-    assert_eq!(loaded_draft.commits.len(), 1);
-    assert_eq!(loaded_draft.commits[0].id(), c_bob_id);
-
-    // Verify index isolation
-    let main_results =
-        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string()));
-    assert_eq!(main_results, vec![row_alice]);
-    let main_bob = storage.index_lookup("users", "name", "main", &Value::Text("bob".to_string()));
-    assert!(main_bob.is_empty());
-
-    let draft_results =
-        storage.index_lookup("users", "name", "draft", &Value::Text("bob".to_string()));
-    assert_eq!(draft_results, vec![row_bob]);
-    let draft_alice =
-        storage.index_lookup("users", "name", "draft", &Value::Text("alice".to_string()));
-    assert!(draft_alice.is_empty());
+    assert_eq!(
+        storage.scan_visible_region("users", "main").unwrap(),
+        vec![main_row.clone()]
+    );
+    assert_eq!(
+        storage.scan_visible_region("users", "draft").unwrap(),
+        vec![draft_row.clone()]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "main", &Value::Text("alice".to_string())),
+        vec![main_row.row_id]
+    );
+    assert_eq!(
+        storage.index_lookup("users", "name", "draft", &Value::Text("bob".to_string())),
+        vec![draft_row.row_id]
+    );
 }
 
 // ============================================================================
 // Macros
 // ============================================================================
 
-/// Generate `#[test]` functions for all non-persistence conformance tests.
-///
-/// Usage:
-/// ```ignore
-/// storage_conformance_tests!(memory, || Box::new(MemoryStorage::default()));
-/// ```
 #[macro_export]
 macro_rules! storage_conformance_tests {
     ($prefix:ident, $factory:expr) => {
@@ -813,48 +1462,33 @@ macro_rules! storage_conformance_tests {
             use $crate::storage::conformance;
 
             #[test]
-            fn object_create_and_load_metadata() {
-                conformance::test_object_create_and_load_metadata(&$factory);
+            fn object_create_and_load_row_locator() {
+                conformance::test_object_create_and_load_row_locator(&$factory);
             }
 
             #[test]
-            fn object_load_nonexistent_returns_none() {
-                conformance::test_object_load_nonexistent_returns_none(&$factory);
+            fn row_locator_load_nonexistent_returns_none() {
+                conformance::test_row_locator_load_nonexistent_returns_none(&$factory);
             }
 
             #[test]
-            fn object_metadata_isolation() {
-                conformance::test_object_metadata_isolation(&$factory);
+            fn row_locator_isolation() {
+                conformance::test_row_locator_isolation(&$factory);
             }
 
             #[test]
-            fn branch_load_nonexistent_returns_none() {
-                conformance::test_branch_load_nonexistent_returns_none(&$factory);
+            fn raw_table_round_trip() {
+                conformance::test_raw_table_round_trip(&$factory);
             }
 
             #[test]
-            fn commit_append_and_load() {
-                conformance::test_commit_append_and_load(&$factory);
+            fn raw_table_scan_prefix() {
+                conformance::test_raw_table_scan_prefix(&$factory);
             }
 
             #[test]
-            fn commit_append_chain() {
-                conformance::test_commit_append_chain(&$factory);
-            }
-
-            #[test]
-            fn commit_delete() {
-                conformance::test_commit_delete(&$factory);
-            }
-
-            #[test]
-            fn branch_tails_set_and_clear() {
-                conformance::test_branch_tails_set_and_clear(&$factory);
-            }
-
-            #[test]
-            fn multiple_branches_independent() {
-                conformance::test_multiple_branches_independent(&$factory);
+            fn raw_table_scan_range() {
+                conformance::test_raw_table_scan_range(&$factory);
             }
 
             #[test]
@@ -873,28 +1507,8 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn index_range_inclusive_exclusive() {
-                conformance::test_index_range_inclusive_exclusive(&$factory);
-            }
-
-            #[test]
-            fn index_range_unbounded_start() {
-                conformance::test_index_range_unbounded_start(&$factory);
-            }
-
-            #[test]
-            fn index_range_unbounded_end() {
-                conformance::test_index_range_unbounded_end(&$factory);
-            }
-
-            #[test]
-            fn index_scan_all() {
-                conformance::test_index_scan_all(&$factory);
-            }
-
-            #[test]
-            fn index_cross_table_isolation() {
-                conformance::test_index_cross_table_isolation(&$factory);
+            fn index_range() {
+                conformance::test_index_range(&$factory);
             }
 
             #[test]
@@ -903,53 +1517,122 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn index_value_types() {
-                conformance::test_index_value_types(&$factory);
+            fn row_region_round_trip() {
+                conformance::test_row_region_round_trip(&$factory);
             }
 
             #[test]
-            fn store_and_load_ack_tier() {
-                conformance::test_store_and_load_ack_tier(&$factory);
+            fn row_region_keeps_same_batch_id_distinct_across_branches() {
+                conformance::test_row_region_keeps_same_batch_id_distinct_across_branches(
+                    &$factory,
+                );
             }
 
             #[test]
-            fn catalogue_manifest_schema_seen() {
-                conformance::test_catalogue_manifest_schema_seen(&$factory);
+            fn row_region_uses_flat_history_bytes_when_schema_known() {
+                conformance::test_row_region_uses_flat_history_bytes_when_schema_known(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_lens_seen() {
-                conformance::test_catalogue_manifest_lens_seen(&$factory);
+            fn visible_region_uses_flat_bytes_when_schema_known() {
+                conformance::test_visible_region_uses_flat_bytes_when_schema_known(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_idempotent() {
-                conformance::test_catalogue_manifest_idempotent(&$factory);
+            fn visible_region_does_not_write_separate_batch_side_index() {
+                conformance::test_visible_region_does_not_write_separate_batch_side_index(
+                    &$factory,
+                );
             }
 
             #[test]
-            fn catalogue_manifest_nonexistent_returns_none() {
-                conformance::test_catalogue_manifest_nonexistent_returns_none(&$factory);
+            fn row_region_patch_state_monotonic() {
+                conformance::test_row_region_patch_state_monotonic(&$factory);
             }
 
             #[test]
-            fn alice_bob_concurrent_branches() {
-                conformance::test_alice_bob_concurrent_branches(&$factory);
+            fn row_region_branch_isolation() {
+                conformance::test_row_region_branch_isolation(&$factory);
+            }
+
+            #[test]
+            fn row_region_cross_branch_visible_heads() {
+                conformance::test_row_region_cross_branch_visible_heads(&$factory);
+            }
+
+            #[test]
+            fn apply_row_mutation_combines_row_and_index_effects() {
+                conformance::test_apply_row_mutation_combines_row_and_index_effects(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_round_trip() {
+                conformance::test_catalogue_entry_round_trip(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_scan_returns_sorted_entries() {
+                conformance::test_catalogue_entry_scan_returns_sorted_entries(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_upsert_replaces_existing() {
+                conformance::test_catalogue_entry_upsert_replaces_existing(&$factory);
+            }
+
+            #[test]
+            fn catalogue_entry_nonexistent_returns_none() {
+                conformance::test_catalogue_entry_nonexistent_returns_none(&$factory);
+            }
+
+            #[test]
+            fn row_raw_table_header_round_trip() {
+                conformance::test_row_raw_table_header_round_trip(&$factory);
+            }
+
+            #[test]
+            fn branch_ord_round_trip() {
+                conformance::test_branch_ord_round_trip(&$factory);
+            }
+
+            #[test]
+            fn local_batch_record_round_trip() {
+                conformance::test_local_batch_record_round_trip(&$factory);
+            }
+
+            #[test]
+            fn local_batch_record_scan_returns_sorted_entries() {
+                conformance::test_local_batch_record_scan_returns_sorted_entries(&$factory);
+            }
+
+            #[test]
+            fn local_batch_record_delete_removes_record() {
+                conformance::test_local_batch_record_delete_removes_record(&$factory);
+            }
+
+            #[test]
+            fn authoritative_batch_settlement_round_trip() {
+                conformance::test_authoritative_batch_settlement_round_trip(&$factory);
+            }
+
+            #[test]
+            fn sealed_batch_submission_round_trip() {
+                conformance::test_sealed_batch_submission_round_trip(&$factory);
+            }
+
+            #[test]
+            fn sealed_batch_submission_delete_removes_record() {
+                conformance::test_sealed_batch_submission_delete_removes_record(&$factory);
+            }
+
+            #[test]
+            fn alice_bob_branch_isolation() {
+                conformance::test_alice_bob_branch_isolation(&$factory);
             }
         }
     };
 }
 
-/// Generate all conformance tests including persistence tests.
-///
-/// Usage:
-/// ```ignore
-/// storage_conformance_tests_persistent!(
-///     my_backend,
-///     || Box::new(MyStorage::open_temp().unwrap()),
-///     |path| Box::new(MyStorage::open(path).unwrap())
-/// );
-/// ```
 #[macro_export]
 macro_rules! storage_conformance_tests_persistent {
     ($prefix:ident, $factory:expr, $reopen_factory:expr) => {
@@ -960,6 +1643,11 @@ macro_rules! storage_conformance_tests_persistent {
             use $crate::storage::conformance;
 
             #[test]
+            fn branch_ord_survives_close_reopen() {
+                conformance::test_branch_ord_survives_close_reopen(&$reopen_factory);
+            }
+
+            #[test]
             fn persistence_survives_close_reopen() {
                 conformance::test_persistence_survives_close_reopen(&$reopen_factory);
             }
@@ -967,6 +1655,23 @@ macro_rules! storage_conformance_tests_persistent {
             #[test]
             fn close_releases_resources_for_reopen() {
                 conformance::test_close_releases_resources_for_reopen(&$reopen_factory);
+            }
+
+            #[test]
+            fn local_batch_record_survives_close_reopen() {
+                conformance::test_local_batch_record_survives_close_reopen(&$reopen_factory);
+            }
+
+            #[test]
+            fn authoritative_batch_settlement_survives_close_reopen() {
+                conformance::test_authoritative_batch_settlement_survives_close_reopen(
+                    &$reopen_factory,
+                );
+            }
+
+            #[test]
+            fn sealed_batch_submission_survives_close_reopen() {
+                conformance::test_sealed_batch_submission_survives_close_reopen(&$reopen_factory);
             }
         }
     };

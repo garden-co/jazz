@@ -137,7 +137,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
 ## Define your schema
 
-Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
@@ -189,7 +189,7 @@ Create the basic structure for your app with Jazz and a to-do list.
 <Accordions type="single">
   <Accordion title="Client Config">
     `appId` identifies your app for storage and sync. For all client config options and runtime
-    source overrides, see [Client Setup](/docs/context-setup/client-setup#client-config-options).
+    source overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
   </Accordion>
 </Accordions>
 
@@ -343,7 +343,8 @@ The server rejects all reads and writes unless you define [permissions](/docs/au
 Then publish the permissions bundle:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha permissions push \
+npx jazz-tools@alpha deploy \
+  <your-app-id> \
   --server-url http://127.0.0.1:1625 \
   --admin-secret secret
 ```
@@ -362,13 +363,14 @@ Update your client config to use the same app ID, and add `serverUrl`:
 
 Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
 
-Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha permissions push`.
+Permissions can be updated without adding a new schema by using
+`npx jazz-tools@alpha deploy <your-app-id>`.
 
-For production deployment and hosting options, see [Server Setup](/docs/context-setup/server-setup).
+For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;anonymous, demo, and external JWT auth
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed

@@ -229,8 +229,8 @@ pub fn document_plaintext_size(title: &str, content: &str, author_id: &str) -> u
 /// Detailed memory breakdown for profiling.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBreakdown {
-    /// ObjectManager breakdown
-    pub object_manager: ObjectManagerMemory,
+    /// SyncManager breakdown
+    pub sync_manager: SyncManagerMemory,
     /// QueryManager breakdown
     pub query_manager: QueryManagerMemory,
     /// Total calculated
@@ -240,19 +240,19 @@ pub struct MemoryBreakdown {
 impl MemoryBreakdown {
     /// Print a formatted breakdown.
     pub fn print(&self) {
-        let om = &self.object_manager;
+        let sm = &self.sync_manager;
         let qm = &self.query_manager;
 
         println!("\nMemory breakdown:");
         println!(
-            "  ObjectManager: {} ({:.1}%)",
-            format_bytes(om.total),
-            100.0 * om.total as f64 / self.total.max(1) as f64
+            "  SyncManager: {} ({:.1}%)",
+            format_bytes(sm.total),
+            100.0 * sm.total as f64 / self.total.max(1) as f64
         );
-        println!("    - row objects: {}", format_bytes(om.row_objects));
-        println!("    - index objects: {}", format_bytes(om.index_objects));
-        println!("    - subscriptions: {}", format_bytes(om.subscriptions));
-        println!("    - outbox/inbox: {}", format_bytes(om.outbox_inbox));
+        println!("    - catalogue: {}", format_bytes(sm.catalogue));
+        println!("    - connections: {}", format_bytes(sm.connections));
+        println!("    - subscriptions: {}", format_bytes(sm.subscriptions));
+        println!("    - queues: {}", format_bytes(sm.queues));
 
         println!(
             "  QueryManager: {} ({:.1}%)",
@@ -267,17 +267,17 @@ impl MemoryBreakdown {
     }
 }
 
-/// Memory breakdown for ObjectManager.
+/// Memory breakdown for SyncManager.
 #[derive(Debug, Clone, Default)]
-pub struct ObjectManagerMemory {
-    /// Size of row object storage (data objects).
-    pub row_objects: usize,
-    /// Size of index object storage (legacy, now unused).
-    pub index_objects: usize,
-    /// Size of subscription tracking.
+pub struct SyncManagerMemory {
+    /// Size of catalogue state.
+    pub catalogue: usize,
+    /// Size of server/client connection state.
+    pub connections: usize,
+    /// Size of subscription and routing state.
     pub subscriptions: usize,
-    /// Size of outbox/inbox buffers.
-    pub outbox_inbox: usize,
+    /// Size of inbox/outbox and pending queues.
+    pub queues: usize,
     /// Total
     pub total: usize,
 }

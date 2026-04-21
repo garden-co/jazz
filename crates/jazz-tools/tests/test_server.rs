@@ -4,6 +4,7 @@
 //!
 //! Spawns the jazz-tools binary as a subprocess and waits for it to become ready.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use tempfile::TempDir;
 
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const JWT_KID: &str = "test-jwks-kid";
+// Use a deterministic UUID app ID for testing
+const TEST_APP_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[derive(Clone)]
 struct JwksState {
@@ -86,6 +89,7 @@ impl Drop for JwksServer {
 pub struct TestServer {
     process: Child,
     pub port: u16,
+    bound_port_file: PathBuf,
     #[allow(dead_code)]
     data_dir: TempDir,
     #[allow(dead_code)]
@@ -95,16 +99,28 @@ pub struct TestServer {
 impl TestServer {
     /// Start a test server on a free port.
     pub async fn start() -> Self {
-        let port = get_free_port();
-        Self::start_on_port(port).await
+        Self::start_on_port(0).await
     }
 
     /// Start a test server without JWT validation configured.
     pub async fn start_without_jwks() -> Self {
-        let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
-        Self::start_inner(port, data_dir, jwks_server, false, vec![]).await
+        Self::start_inner(0, data_dir, jwks_server, false, vec![]).await
+    }
+
+    /// Start a test server with a single static JWT verification key instead of JWKS.
+    pub async fn start_with_jwt_public_key(public_key: Value) -> Self {
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
+        Self::start_inner(
+            0,
+            data_dir,
+            jwks_server,
+            false,
+            vec![("JAZZ_JWT_PUBLIC_KEY", public_key.to_string())],
+        )
+        .await
     }
 
     /// Start a test server with programmable JWKS responses.
@@ -112,10 +128,9 @@ impl TestServer {
     /// The JWKS server returns `responses[N]` for the Nth request,
     /// falling back to the last response for subsequent requests.
     pub async fn start_with_jwks_responses(responses: Vec<Value>) -> Self {
-        let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start_with_responses(responses).await;
-        Self::start_inner(port, data_dir, jwks_server, true, vec![]).await
+        Self::start_inner(0, data_dir, jwks_server, true, vec![]).await
     }
 
     /// Start a test server with programmable JWKS responses and custom cache timing.
@@ -129,11 +144,10 @@ impl TestServer {
         ttl_secs: u64,
         max_stale_secs: u64,
     ) -> Self {
-        let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start_with_responses(responses).await;
         Self::start_inner(
-            port,
+            0,
             data_dir,
             jwks_server,
             true,
@@ -164,16 +178,14 @@ impl TestServer {
         enable_jwks: bool,
         extra_env: Vec<(&str, String)>,
     ) -> Self {
-        // Use a deterministic UUID app ID for testing
-        let app_id = "00000000-0000-0000-0000-000000000001";
-
         let jazz_binary = Self::find_jazz_binary();
+        let bound_port_file = data_dir.path().join("bound-port");
 
         let mut command = Command::new(&jazz_binary);
         command
             .args([
                 "server",
-                app_id,
+                TEST_APP_ID,
                 "--port",
                 &port.to_string(),
                 "--data-dir",
@@ -184,6 +196,7 @@ impl TestServer {
                 "backend-secret-for-integration-tests",
             )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
+            .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
             .envs(extra_env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -196,9 +209,10 @@ impl TestServer {
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to spawn jazz server at {:?}: {}", jazz_binary, e));
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
+            bound_port_file,
             data_dir,
             jwks_server,
         };
@@ -235,23 +249,71 @@ impl TestServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Wait for the server to become ready by polling /health.
-    async fn wait_ready(&self) {
-        let client = reqwest::Client::new();
-        let url = format!("{}/health", self.base_url());
+    pub fn app_id(&self) -> &'static str {
+        TEST_APP_ID
+    }
 
-        for i in 0..50 {
-            match client.get(&url).send().await {
-                Ok(_) => return,
-                Err(e) => {
-                    if i == 49 {
-                        eprintln!("Last error: {:?}", e);
+    /// Wait for the server to become ready by polling /health.
+    async fn wait_ready(&mut self) {
+        let client = reqwest::Client::new();
+
+        for i in 0..200 {
+            self.maybe_update_bound_port();
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!(
+                    "jazz-tools server exited before becoming ready: {status}{}",
+                    self.process_output_summary()
+                );
+            }
+            if self.port != 0 {
+                let url = format!("{}/health", self.base_url());
+                match client.get(&url).send().await {
+                    Ok(_) => return,
+                    Err(e) => {
+                        if i == 199 {
+                            eprintln!("Last error: {:?}", e);
+                        }
                     }
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("Server failed to become ready within 5 seconds");
+        panic!(
+            "Server failed to become ready within 20 seconds{}",
+            self.process_output_summary()
+        );
+    }
+
+    fn maybe_update_bound_port(&mut self) {
+        let Ok(contents) = std::fs::read_to_string(&self.bound_port_file) else {
+            return;
+        };
+        let Ok(port) = contents.trim().parse::<u16>() else {
+            return;
+        };
+        self.port = port;
+    }
+
+    fn process_output_summary(&mut self) -> String {
+        let stdout = take_pipe_text(&mut self.process.stdout);
+        let stderr = take_pipe_text(&mut self.process.stderr);
+        if stdout.is_empty() && stderr.is_empty() {
+            return String::new();
+        }
+
+        format!(
+            "\nstdout:\n{}\nstderr:\n{}",
+            if stdout.is_empty() {
+                "<empty>"
+            } else {
+                stdout.trim()
+            },
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                stderr.trim()
+            }
+        )
     }
 }
 
@@ -262,10 +324,14 @@ impl Drop for TestServer {
     }
 }
 
-/// Find an available port by binding to port 0.
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
-    listener.local_addr().unwrap().port()
+fn take_pipe_text<T: Read>(pipe: &mut Option<T>) -> String {
+    let Some(mut pipe) = pipe.take() else {
+        return String::new();
+    };
+
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {

@@ -483,25 +483,12 @@ impl<F: SyncFile> OpfsBTree<F> {
                     ));
                 }
 
-                let split_at = entries.len() / 2;
-                let right_entries = entries.split_off(split_at);
-                let split_key = right_entries
-                    .first()
-                    .map(|(k, _)| k.clone())
-                    .ok_or_else(|| BTreeError::Corrupt("right leaf split empty".to_string()))?;
-
+                let (split_key, mut left_page, right_page) =
+                    choose_leaf_split(entries, next, self.options.page_size)?;
                 let right_page_id = self.alloc_page_near(page_id);
-                let left_page = Page::Leaf {
-                    entries,
-                    next: Some(right_page_id),
-                };
-                let right_page = Page::Leaf {
-                    entries: right_entries,
-                    next,
-                };
-
-                ensure_page_fits(&left_page, self.options.page_size, "left leaf split")?;
-                ensure_page_fits(&right_page, self.options.page_size, "right leaf split")?;
+                if let Page::Leaf { next, .. } = &mut left_page {
+                    *next = Some(right_page_id);
+                }
 
                 self.set_dirty_page(page_id, left_page)?;
                 self.set_dirty_page(right_page_id, right_page)?;
@@ -556,21 +543,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                     ));
                 }
 
-                let mid = keys.len() / 2;
-                let promoted = keys[mid].clone();
-
-                let right_keys = keys.split_off(mid + 1);
-                let _ = keys.pop();
-                let right_children = children.split_off(mid + 1);
-
-                let left_page = Page::Internal { keys, children };
-                let right_page = Page::Internal {
-                    keys: right_keys,
-                    children: right_children,
-                };
-
-                ensure_page_fits(&left_page, self.options.page_size, "left internal split")?;
-                ensure_page_fits(&right_page, self.options.page_size, "right internal split")?;
+                let (promoted, left_page, right_page) =
+                    choose_internal_split(keys, children, self.options.page_size)?;
 
                 let right_page_id = self.alloc_page_near(page_id);
                 self.set_dirty_page(page_id, left_page)?;
@@ -1585,6 +1559,92 @@ fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), 
             context
         )))
     }
+}
+
+fn centered_split_candidates(preferred: usize, min: usize, max: usize) -> Vec<usize> {
+    debug_assert!(min <= max);
+
+    let preferred = preferred.clamp(min, max);
+    let mut out = Vec::with_capacity(max - min + 1);
+    out.push(preferred);
+
+    for offset in 1..=max - min {
+        if let Some(left) = preferred.checked_sub(offset)
+            && left >= min
+        {
+            out.push(left);
+        }
+
+        let right = preferred + offset;
+        if right <= max {
+            out.push(right);
+        }
+    }
+
+    out
+}
+
+fn choose_leaf_split(
+    entries: Vec<(Vec<u8>, ValueCell)>,
+    next: Option<PageId>,
+    page_size: usize,
+) -> Result<(Vec<u8>, Page, Page), BTreeError> {
+    debug_assert!(entries.len() >= 2);
+
+    for split_at in centered_split_candidates(entries.len() / 2, 1, entries.len() - 1) {
+        let left_page = Page::Leaf {
+            entries: entries[..split_at].to_vec(),
+            next: Some(1),
+        };
+        let right_page = Page::Leaf {
+            entries: entries[split_at..].to_vec(),
+            next,
+        };
+
+        if page_fits(&left_page, page_size)? && page_fits(&right_page, page_size)? {
+            let split_key = match &right_page {
+                Page::Leaf { entries, .. } => entries
+                    .first()
+                    .map(|(key, _)| key.clone())
+                    .ok_or_else(|| BTreeError::Corrupt("right leaf split empty".to_string()))?,
+                _ => unreachable!("constructed leaf page must remain a leaf"),
+            };
+            return Ok((split_key, left_page, right_page));
+        }
+    }
+
+    Err(BTreeError::InvalidOptions(
+        "no valid leaf split fits in page".to_string(),
+    ))
+}
+
+fn choose_internal_split(
+    keys: Vec<Vec<u8>>,
+    children: Vec<PageId>,
+    page_size: usize,
+) -> Result<(Vec<u8>, Page, Page), BTreeError> {
+    debug_assert!(keys.len() >= 2);
+    debug_assert_eq!(children.len(), keys.len() + 1);
+
+    for mid in centered_split_candidates(keys.len() / 2, 1, keys.len() - 1) {
+        let promoted = keys[mid].clone();
+        let left_page = Page::Internal {
+            keys: keys[..mid].to_vec(),
+            children: children[..mid + 1].to_vec(),
+        };
+        let right_page = Page::Internal {
+            keys: keys[mid + 1..].to_vec(),
+            children: children[mid + 1..].to_vec(),
+        };
+
+        if page_fits(&left_page, page_size)? && page_fits(&right_page, page_size)? {
+            return Ok((promoted, left_page, right_page));
+        }
+    }
+
+    Err(BTreeError::InvalidOptions(
+        "no valid internal split fits in page".to_string(),
+    ))
 }
 
 fn choose_active(

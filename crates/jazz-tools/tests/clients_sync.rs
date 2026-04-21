@@ -11,6 +11,7 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use support::wait_for_query;
+use uuid::Uuid;
 
 fn test_schema() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -54,8 +55,8 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
 async fn fresh_client_resolves_object_with_deep_update_history() {
     const DEEP_HISTORY_UPDATES: usize = 100;
 
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
     let writer =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
             .await
@@ -139,11 +140,12 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
 
 #[tokio::test]
 async fn jazz_tools_cli_two_clients_sync_values() {
-    let server = TestingServer::start().await;
-    let client_a = JazzClient::connect(server.make_client_context(test_schema()))
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let client_a = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect client a");
-    let client_b = JazzClient::connect(server.make_client_context(test_schema()))
+    let client_b = JazzClient::connect(server.make_client_context(schema))
         .await
         .expect("connect client b");
 
@@ -214,14 +216,201 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 }
 
 #[tokio::test]
-async fn jazz_tools_cli_two_different_users_sync_values() {
+async fn caller_supplied_uuid_is_used_for_created_row() {
     let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
+
+    let (todo_id, expected_values) = client
+        .create_with_id(
+            "todos",
+            external_id,
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("external-id-created".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("create row with external id");
+
+    assert_eq!(todo_id.uuid(), &external_id);
+
+    let rows = wait_for_query(
+        &client,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "query returns row created with external id",
+        |rows| {
+            (rows.len() == 1 && rows[0].0 == todo_id && rows[0].1 == expected_values)
+                .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(rows[0].0.uuid(), &external_id);
+
+    client.shutdown().await.expect("shutdown writer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").expect("parse external uuid");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([
+                ("title".to_string(), Value::Text("first-title".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("insert row through upsert");
+
+    let provenance_query = QueryBuilder::new("todos")
+        .select(&["$createdAt", "$updatedAt"])
+        .build();
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("updated-title".to_string()),
+            )]),
+        )
+        .await
+        .expect("upsert row with external id");
+
+    let updated_rows = wait_for_query(
+        &client,
+        provenance_query,
+        Some(DurabilityTier::Local),
+        Duration::from_secs(25),
+        "updated provenance query returns row",
+        |rows| (rows.len() == 1 && rows[0].0.uuid() == &external_id).then_some(rows),
+    )
+    .await;
+
+    let Value::Timestamp(updated_created_at) = updated_rows[0].1[0] else {
+        panic!("updated $createdAt should decode as timestamp")
+    };
+    let Value::Timestamp(updated_updated_at) = updated_rows[0].1[1] else {
+        panic!("updated $updatedAt should decode as timestamp")
+    };
+
+    assert_eq!(updated_rows[0].0.uuid(), &external_id);
+    assert!(
+        updated_created_at < updated_updated_at,
+        "created_at should remain the original timestamp after an update"
+    );
+
+    client.shutdown().await.expect("shutdown writer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").expect("parse external uuid");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([
+                ("title".to_string(), Value::Text("first-title".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("insert row through upsert");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("updated-title".to_string()),
+            )]),
+        )
+        .await
+        .expect("update existing row through upsert");
+
+    let rows = wait_for_query(
+        &client,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "query returns updated row from upsert",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0.uuid() == &external_id
+                && rows[0].1
+                    == vec![
+                        Value::Text("updated-title".to_string()),
+                        Value::Boolean(false),
+                    ])
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(rows[0].0.uuid(), &external_id);
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Text("updated-title".to_string()),
+            Value::Boolean(false)
+        ]
+    );
+
+    client.shutdown().await.expect("shutdown writer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn jazz_tools_cli_two_different_users_sync_values() {
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
     let client_alice =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "alice-sync-user"))
+        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-sync-user"))
             .await
             .expect("connect alice client");
     let client_bob =
-        JazzClient::connect(server.make_client_context_for_user(test_schema(), "bob-sync-user"))
+        JazzClient::connect(server.make_client_context_for_user(schema, "bob-sync-user"))
             .await
             .expect("connect bob client");
 

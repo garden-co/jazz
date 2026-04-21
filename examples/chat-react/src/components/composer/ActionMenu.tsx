@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 interface ActionMenuProps {
   chatId: string;
@@ -22,6 +23,9 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploadMode, setUploadMode] = useState<"image" | "file" | null>(null);
 
@@ -29,15 +33,23 @@ export function ActionMenu({ chatId, onAttachment, disabled = false }: ActionMen
 
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
-    const canvas = db.insert(app.canvases, {
-      chatId,
-      createdAt: new Date(),
-    });
-    db.insert(app.messages, {
-      chatId,
-      text: `[Canvas: ${canvas.id}]`,
-      senderId: myProfile.id,
-      createdAt: new Date(),
+    void (async () => {
+      const canvas = await db
+        .insert(app.canvases, {
+          chatId,
+          createdAt: new Date(),
+        })
+        .wait(sharedWriteOptions);
+      await db
+        .insert(app.messages, {
+          chatId,
+          text: `[Canvas: ${canvas.id}]`,
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        })
+        .wait(sharedWriteOptions);
+    })().catch((error) => {
+      console.error("failed to create canvas", error);
     });
   };
 

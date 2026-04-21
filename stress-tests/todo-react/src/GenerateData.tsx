@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema";
 
 const TOTAL_PROJECTS = 10_000;
 const TOTAL_TODOS = 50_000;
@@ -258,7 +258,7 @@ export function GenerateData() {
           db.insert(app.todos, {
             title: randomTodoTitle(),
             done: j % 5 === 0,
-            ownerId: sessionUserId,
+            owner_id: sessionUserId,
             projectId: projectIds[j % projectIds.length],
           });
         }
