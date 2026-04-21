@@ -7,7 +7,6 @@
     "dev": "next dev",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
     "start": "next start",
-    "sync-server": "tsx --env-file .env scripts/sync-server.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

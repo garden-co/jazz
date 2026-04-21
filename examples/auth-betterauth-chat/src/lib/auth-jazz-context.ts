@@ -26,9 +26,10 @@ function createAuthJazzContext() {
   });
 }
 
-export const authJazzContext =
-  globalThis.__authBetterAuthChatJazzContext ?? createAuthJazzContext();
-
-if (process.env.NODE_ENV !== "production") {
-  globalThis.__authBetterAuthChatJazzContext = authJazzContext;
+export function authJazzContext(): JazzContext {
+  const existing = globalThis.__authBetterAuthChatJazzContext;
+  if (existing) return existing;
+  const ctx = createAuthJazzContext();
+  globalThis.__authBetterAuthChatJazzContext = ctx;
+  return ctx;
 }
