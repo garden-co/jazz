@@ -3,7 +3,7 @@ import {
   DBAdapterDebugLogOption,
   type CleanedWhere,
 } from "better-auth/adapters";
-import type { Db } from "jazz-tools";
+import type { Db } from "../runtime/db.js";
 import type { BackendSchemaInput } from "../backend/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSchemaSourceFile } from "./schema.js";
