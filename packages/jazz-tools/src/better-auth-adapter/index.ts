@@ -179,7 +179,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
-      const db: Db = config.db();
+      const db = config.db() as any;
 
       return {
         async create({ model, data }): Promise<any> {
