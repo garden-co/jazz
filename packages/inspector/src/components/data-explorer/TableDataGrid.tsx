@@ -709,7 +709,7 @@ export function TableDataGrid() {
 
     try {
       setIsSidebarMutationPending(true);
-      await db.updateDurable(tableProxy, selectedRowId, updates, {
+      await db.update(tableProxy, selectedRowId, updates).wait({
         tier: mutationDurabilityTier,
       });
       setQueuedEdits((currentQueuedEdits) => {
@@ -756,12 +756,12 @@ export function TableDataGrid() {
 
       await Promise.all([
         ...rowUpdates.map(({ rowId, updates }) =>
-          db.updateDurable(tableProxy, rowId, updates, {
+          db.update(tableProxy, rowId, updates).wait({
             tier: mutationDurabilityTier,
           }),
         ),
         ...[...queuedDeletes].map((rowId) =>
-          db.deleteDurable(tableProxy, rowId, {
+          db.delete(tableProxy, rowId).wait({
             tier: mutationDurabilityTier,
           }),
         ),
@@ -874,7 +874,7 @@ export function TableDataGrid() {
                 if (!selectedRowId) {
                   return;
                 }
-                await db.deleteDurable(tableProxy, selectedRowId, {
+                await db.delete(tableProxy, selectedRowId).wait({
                   tier: mutationDurabilityTier,
                 });
                 setSelectedRowId(null);
@@ -1004,7 +1004,7 @@ export function TableDataGrid() {
               onSave={async (updates) => {
                 try {
                   setIsSidebarMutationPending(true);
-                  await db.insertDurable(tableProxy, updates, {
+                  await db.insert(tableProxy, updates).wait({
                     tier: mutationDurabilityTier,
                   });
                   setMutationState(null);

@@ -34,15 +34,13 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
     const res = await fetch(seed.file);
     const blob = await res.blob();
     const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
-    await db.insertDurable(
-      app.instruments,
-      {
+    await db
+      .insert(app.instruments, {
         name: seed.name,
         soundFileId: file.id,
         display_order: seed.display_order,
-      },
-      { tier: "edge" },
-    );
+      })
+      .wait({ tier: "edge" });
   }
 
   localStorage.setItem(SEEDED_STORAGE_KEY, "1");

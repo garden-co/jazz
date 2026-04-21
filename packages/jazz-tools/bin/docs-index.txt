@@ -5009,15 +5009,14 @@ policies.
 
   const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5091,15 +5090,14 @@ Returns the file row; store its id on your own table.
     mimeType: "application/octet-stream",
   });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
-    },
-    { tier: "edge" },
-  );
+    }
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5301,11 +5299,10 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 
 ## Local-first writes
 
-All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
+All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
-For TypeScript callers that need a replayable handle instead of awaiting immediately, Jazz also exposes persisted-write helpers and explicit batch builders:
+Jazz also exposes explicit batch builders:
 
-- `insertPersisted`, `updatePersisted`, `deletePersisted` return `DbPersistedWrite`
 - `beginTransaction(...)` returns `DbTransaction`
 - `beginDirectBatch(...)` returns `DbDirectBatch`
 
@@ -5386,7 +5383,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 
 ### Partial updates and nullable fields
 
-`update(...)` and `updateDurable(...)` only modify the keys you pass.
+`update(...)` only modify the keys you pass.
 Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
@@ -5415,17 +5412,17 @@ pub async fn clear_nullable_fields(
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
 
-| Tier     | Resolves when                       | Default for    |
-| -------- | ----------------------------------- | -------------- |
-| `local`  | Persisted to local OPFS             | Browser/client |
-| `edge`   | Acknowledged by nearest sync server | Backend/server |
-| `global` | Propagated to global core           | —              |
+| Tier     | Resolves when                       | 
+| -------- | ----------------------------------- | 
+| `local`  | Persisted to local OPFS             | 
+| `edge`   | Acknowledged by nearest sync server | 
+| `global` | Propagated to global core           | 
 
     ```ts
 
-  const { id } = await db.insertDurable(
+  const { id } = await db.insert(
     app.todos,
     {
       title: "Write docs with durability tier",
@@ -5433,11 +5430,10 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteDurable(app.todos, id, { tier: "global" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
 }
 ```
 
@@ -5462,31 +5458,29 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
 
-## Persisted write handles
+## Write handles
 
-Use the persisted variants when you want to keep a stable handle to a write after issuing it locally.
+Write handles let you wait for a write to persisted up to a specific durability tier, and also access the value (in the case of inserts).
 
 ```ts
-const pending = db.insertPersisted(app.todos, {
+const pending = db.insert(app.todos, {
   title: "Ship review fixes",
   done: false,
 });
 
-console.log(pending.batchId());
-console.log(pending.localBatchRecord());
+console.log(pending.batchId);
 
 try {
-  const row = await pending.wait();
+  const row = await pending.wait({ tier: "global" });
   console.log(row.id);
 } catch (error) {
   if (error instanceof PersistedWriteRejectedError) {
     console.error(error.code, error.reason);
-    pending.acknowledgeRejectedBatch();
   }
 }
 ```
 
-`wait()` resolves when the batch reaches the requested durability tier. If the batch is replayably rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
 ## Explicit batches
 
@@ -5515,4 +5509,3 @@ console.log(batch.batchId());
 ```
 
 `DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
-Both builders can issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.
