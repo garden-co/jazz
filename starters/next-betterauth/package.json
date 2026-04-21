@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/ensure-env.js",
     "build": "next build",
     "start": "next start",
     "test:e2e": "playwright test"
