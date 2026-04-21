@@ -1,9 +1,15 @@
-import { BrowserAuthSecretStore } from "jazz-tools";
+import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
+import { RecoveryPhrase } from "jazz-tools/passphrase";
 import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
 
 function TodoApp() {
   return null;
 }
+
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  appHostname: "myapp.com",
+});
 
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
@@ -41,35 +47,57 @@ export function JwtAuthApp() {
 // #endregion auth-jwt-react
 
 // #region auth-localfirst-react-backup
-export async function getRecoveryPhraseForBackup(): Promise<string | null> {
-  const secret = await BrowserAuthSecretStore.loadSecret({ appId: "my-app" });
-  if (!secret) return null;
-  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-  return RecoveryPhrase.fromSecret(secret);
+export function useRecoveryPhraseBackup(): {
+  isLoading: boolean;
+  recoveryPhrase: string | null;
+} {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  return {
+    isLoading,
+    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
+  };
 }
 // #endregion auth-localfirst-react-backup
 
 // #region auth-localfirst-react-restore
-export async function restoreFromRecoveryPhrase(userInput: string): Promise<void> {
-  const { RecoveryPhrase } = await import("jazz-tools/passphrase");
-  const secret = RecoveryPhrase.toSecret(userInput);
-  await BrowserAuthSecretStore.saveSecret(secret, { appId: "my-app" });
+export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void> {
+  const { login } = useLocalFirstAuth();
+
+  return async (userInput: string) => {
+    const restoredSecret = RecoveryPhrase.toSecret(userInput);
+    await login(restoredSecret);
+  };
 }
 // #endregion auth-localfirst-react-restore
 
 // #region auth-localfirst-react-passkey-backup
-export async function backupWithPasskey(secret: string): Promise<void> {
-  const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
-  const pb = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
-  await pb.backup(secret);
+export function usePasskeyBackup(): {
+  isLoading: boolean;
+  backupWithPasskey: (displayName: string) => Promise<void>;
+} {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  return {
+    isLoading,
+    backupWithPasskey: async (displayName: string) => {
+      if (!secret) {
+        throw new Error("Local-first secret is not ready yet");
+      }
+
+      await passkeyBackup.backup(secret, displayName);
+    },
+  };
 }
 // #endregion auth-localfirst-react-passkey-backup
 
 // #region auth-localfirst-react-passkey-restore
-export async function restoreWithPasskey(): Promise<void> {
-  const { BrowserPasskeyBackup } = await import("jazz-tools/passkey-backup");
-  const pb = new BrowserPasskeyBackup({ appName: "My App", appHostname: "myapp.com" });
-  const secret = await pb.restore();
-  await BrowserAuthSecretStore.saveSecret(secret, { appId: "my-app" });
+export function usePasskeyRestore(): () => Promise<void> {
+  const { login } = useLocalFirstAuth();
+
+  return async () => {
+    const restoredSecret = await passkeyBackup.restore();
+    await login(restoredSecret);
+  };
 }
 // #endregion auth-localfirst-react-passkey-restore

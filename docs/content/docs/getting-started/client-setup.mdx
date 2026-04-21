@@ -10,7 +10,7 @@ import CreateJazzClientReference from "../../partials/create-jazz-client-referen
 
 ## Zero-config client setup
 
-Every client needs an `appId`. Add a `serverUrl` to enable sync. For login and authentication options, see [Authentication](/docs/auth/authentication).
+Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
 <Tabs
   groupId="jazz-framework"
@@ -20,32 +20,94 @@ Every client needs an `appId`. Add a `serverUrl` to enable sync. For login and a
 >
   <Tab value="React">
     <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
+
+    `useLocalFirstAuth()` from `jazz-tools/react` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+
   </Tab>
   <Tab value="Vue">
-    <include cwd lang="vue" meta='title="App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/App.vue
-    </include>
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+    import { BrowserAuthSecretStore } from "jazz-tools";
+    import TodoList from "./TodoList.vue";
+
+    const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+
+    const client = createJazzClient({
+      appId: "<your-app-id>",
+      secret,
+    });
+    </script>
+
+    <template>
+      <JazzProvider :client="client">
+        <h1>Todos</h1>
+        <TodoList />
+      </JazzProvider>
+    </template>
+    ```
+
   </Tab>
   <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
-    </include>
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import {
+        createJazzClient,
+        JazzSvelteProvider,
+        BrowserAuthSecretStore,
+      } from 'jazz-tools/svelte';
+      import TodoList from './TodoList.svelte';
+
+      let client = $state<ReturnType<typeof createJazzClient> | null>(null);
+
+      BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
+        client = createJazzClient({ appId: '<your-app-id>', secret });
+      });
+    </script>
+
+    {#if client}
+      <JazzSvelteProvider {client}>
+        {#snippet children()}
+          <h1>Todos</h1>
+          <TodoList />
+        {/snippet}
+        {#snippet fallback()}
+          <p>Loading...</p>
+        {/snippet}
+      </JazzSvelteProvider>
+    {/if}
+    ```
+
   </Tab>
   <Tab value="Expo">
     <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
+      ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo
     </include>
+
+    `ExpoAuthSecretStore` persists the secret in the device's secure storage. Or use `useLocalFirstAuth()` from `jazz-tools/expo` for a hook-based API.
+
   </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
   </Tab>
 </Tabs>
 
-Without auth configuration, Jazz creates a local-first identity automatically. To use Jazz completely offline, don't set a `serverUrl`.
+The secret is generated on first load, persisted locally (`localStorage` in the browser, secure storage on Expo), and reused on every subsequent run — the same device keeps the same Jazz identity.
+
+<Callout type="info">
+  Using Jazz completely offline? Leave out `serverUrl` and everything above still works — writes
+  stay on the device until a server is reachable.
+</Callout>
+
+<Callout type="warn">
+  The local-first secret **is** the user's identity. If it's lost (e.g. cleared `localStorage`), the
+  identity is gone and any data owned by that user becomes inaccessible. Plan for recovery with
+  [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret).
+</Callout>
 
 <Accordions type="single">
 <Accordion title="Zero config not working?">
@@ -64,6 +126,136 @@ For React Native and Expo clients, make sure `serverUrl` points to a host your r
 ### Storage driver
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+## Dev plugins
+
+Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars so `createJazzClient({ appId, serverUrl })` picks them up without any manual wiring.
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React (Vite)">
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import react from "@vitejs/plugin-react";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
+
+    export default defineConfig({
+      plugins: [react(), jazzPlugin()],
+    });
+    ```
+
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
+
+  </Tab>
+  <Tab value="Vue (Vite)">
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import vue from "@vitejs/plugin-vue";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
+
+    export default defineConfig({
+      plugins: [vue(), jazzPlugin()],
+    });
+    ```
+
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
+
+  </Tab>
+  <Tab value="Svelte (Vite)">
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import { svelte } from "@sveltejs/vite-plugin-svelte";
+    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
+
+    export default defineConfig({
+      plugins: [svelte(), jazzSvelteKit()],
+    });
+    ```
+
+    Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`. Use `jazzSvelteKit` for both Vite+Svelte and SvelteKit projects.
+
+  </Tab>
+  <Tab value="SvelteKit">
+    ```ts title="vite.config.ts"
+    import { sveltekit } from "@sveltejs/kit/vite";
+    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
+    import { defineConfig } from "vite";
+
+    export default defineConfig({
+      // jazzSvelteKit must come before sveltekit so it populates
+      // process.env before SvelteKit captures $env/dynamic/public.
+      plugins: [jazzSvelteKit(), sveltekit()],
+    });
+    ```
+
+    Defaults `schemaDir` to `src/lib/`. Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`.
+
+  </Tab>
+  <Tab value="Next.js">
+    ```ts title="next.config.ts"
+    import { withJazz } from "jazz-tools/dev/next";
+
+    export default withJazz({});
+    ```
+
+    Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
+
+  </Tab>
+  <Tab value="Expo">
+    ```js title="metro.config.js"
+    import { getDefaultConfig } from "expo/metro-config";
+    import { withJazz } from "jazz-tools/dev/expo";
+
+    const config = getDefaultConfig(__dirname);
+
+    await withJazz(config, { schemaDir: __dirname });
+
+    export default config;
+    ```
+
+    Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
+
+  </Tab>
+</Tabs>
+
+On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
+
+### Plugin options
+
+All plugins accept the same base options:
+
+| Option        | Description                                                                                                                                                                       |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`      | `true` (default) starts an embedded local server. `false` disables the plugin. A URL string connects to an existing server. An object configures the embedded server (see below). |
+| `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                 |
+| `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
+| `adminSecret` | Required when `server` is a URL. Ignored for the embedded server (a random secret is generated).                                                                                  |
+
+When `server` is an object, the embedded server accepts: `port` (default: random), `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, `jwksUrl`, and the catalogue authority forwarding fields. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
+
+### Connecting to an existing server
+
+Pass a URL to point the plugin at a server you already run — hosted cloud, staging, or a shared self-hosted instance. You must also provide `adminSecret` (or set `JAZZ_ADMIN_SECRET`) so the plugin can push schema and permissions.
+
+```ts title="vite.config.ts"
+jazzPlugin({
+  server: "https://my-jazz-server.example.com",
+  adminSecret: process.env.JAZZ_ADMIN_SECRET,
+  appId: process.env.VITE_JAZZ_APP_ID,
+});
+```
+
+### What auto-pushes
+
+On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the server's admin secret (generated for the embedded server, supplied by you for a remote server).
+
+<Callout type="warn">
+  Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).
+</Callout>
 
 ## Runtime source overrides
 
