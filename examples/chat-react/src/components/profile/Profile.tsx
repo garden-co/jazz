@@ -91,7 +91,11 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
           <p className="text-xs text-muted-foreground">Upload a profile picture.</p>
           <div className="flex items-center gap-3">
             <label className="cursor-pointer transition-opacity hover:opacity-80">
-              <Avatar profileId={myProfile?.id ?? ""} avatarData={myProfile?.avatar} size={64} />
+              <Avatar
+                profileId={myProfile?.id ?? ""}
+                avatarData={myProfile?.avatar ?? undefined}
+                size={64}
+              />
               <input
                 type="file"
                 className="hidden"
