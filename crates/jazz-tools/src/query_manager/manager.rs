@@ -1158,6 +1158,15 @@ impl QueryManager {
             };
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
+            if subscription.sync_backed
+                && !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
+                tracing::trace!("sync-backed query frontier incomplete, deferring settle");
+                self.subscriptions.insert(sub_id, subscription);
+                continue;
+            }
             let branches = subscription.branches.clone();
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
@@ -1173,7 +1182,15 @@ impl QueryManager {
                             && !self
                                 .sync_manager
                                 .has_remote_query_scope_snapshot(QueryId(sub_id.0));
-                        let durability_tier = if lacks_authoritative_remote_scope
+                        let has_authoritative_remote_scope = subscription.sync_backed
+                            && subscription.query_frontier_complete
+                            && self
+                                .sync_manager
+                                .has_remote_query_scope_snapshot(QueryId(sub_id.0))
+                            && (subscription.propagation == QueryPropagation::Full
+                                || !self.sync_manager.has_durability_identity());
+                        let durability_tier = if has_authoritative_remote_scope
+                            || lacks_authoritative_remote_scope
                             || (subscription.local_updates == LocalUpdates::Immediate
                                 && subscription.pending_local_row_ids.contains(&id))
                         {
