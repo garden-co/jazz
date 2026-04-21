@@ -160,16 +160,16 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     return explicitDbName;
   }
 
-  const sessionUserId = resolveClientSessionSync({
+  const session = resolveClientSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
-  })?.user_id;
+  });
 
-  if (!sessionUserId) {
+  if (!session?.user_id || session.authMode === "anonymous") {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(sessionUserId)}`;
+  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
 }
 
 /**
@@ -3179,6 +3179,8 @@ export async function createDb(config: DbConfig): Promise<Db> {
     throw new Error("driver.type='memory' requires serverUrl.");
   }
 
+  logAuthModeInDev(resolvedConfig);
+
   let db: Db;
   if (isBrowser() && driver.type === "persistent") {
     db = await Db.createWithWorker(resolvedConfig);
@@ -3191,6 +3193,23 @@ export async function createDb(config: DbConfig): Promise<Db> {
   }
 
   return db;
+}
+
+function logAuthModeInDev(config: DbConfig): void {
+  if (config.env === "prod") return;
+  const session = resolveClientSessionSync({
+    appId: config.appId,
+    jwtToken: config.jwtToken,
+    cookieSession: config.cookieSession,
+  });
+  const authMode = session?.authMode ?? "anonymous";
+  const description =
+    authMode === "anonymous"
+      ? "anonymous — ephemeral identity, no write permissions on synced data"
+      : authMode === "local-first"
+        ? "local-first — identity persisted locally via secret"
+        : "external — identity issued by an auth provider";
+  console.info(`[jazz] auth mode: ${authMode} (${description})`);
 }
 
 export function createDbFromClient(
