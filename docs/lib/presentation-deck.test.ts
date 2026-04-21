@@ -4,7 +4,7 @@ import {
   estimatePresentationSpeakingDurationSeconds,
   parsePresentationSlidesFromMdx,
   resolvePresentationSlideIdentity,
-} from "./presentation-deck.ts";
+} from "./presentation-deck.js";
 
 test("parses slide order from the MDX file in source order", () => {
   const slides = parsePresentationSlidesFromMdx(
