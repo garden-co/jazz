@@ -126,7 +126,7 @@ function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
 }
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
-  return resolveStorageDriver(config.driver).type === "memory" && !!config.adminSecret;
+  return !!config.adminSecret;
 }
 
 function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
