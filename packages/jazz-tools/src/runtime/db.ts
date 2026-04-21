@@ -1319,8 +1319,14 @@ export class Db {
     // when none of those is set, preserving the documented resolution order
     // for Vite/webpack/Svelte/etc. callers.
     const configRuntimeSources = this.config.runtimeSources;
+    // Use the literal `process.env.NEXT_PUBLIC_JAZZ_WASM_URL` form: Next's
+    // build-time replacement only rewrites that exact property access. Optional
+    // chaining on `process.env` can bypass the replacement in Turbopack and
+    // leave this as `undefined` in client bundles, defeating the fallback.
     const envWasmUrl =
-      typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_WASM_URL : undefined;
+      typeof process !== "undefined" && process.env
+        ? process.env.NEXT_PUBLIC_JAZZ_WASM_URL
+        : undefined;
     // Any explicit override means the caller is taking control of wasm/worker
     // resolution — don't second-guess them by injecting a Next-plugin URL.
     // `workerUrl` counts too: the spawn path at `Db.spawnWorker` already
