@@ -56,6 +56,15 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
+    config(config: { optimizeDeps?: { exclude?: string[] } }) {
+      const existing = config.optimizeDeps?.exclude ?? [];
+      return {
+        build: { target: "es2020" },
+        worker: { format: "es" as const },
+        optimizeDeps: { exclude: Array.from(new Set([...existing, "jazz-wasm"])) },
+      };
+    },
+
     async configureServer(viteServer: ViteDevServer) {
       if (viteServer.config.command !== "serve") return;
 
