@@ -47,27 +47,23 @@ describe("TS Insert API", () => {
   });
 
   it("can wait for row to be persisted up to a specific durability tier", async () => {
-    const projectHandle = db.insert(app.projects, { name: "Test Project" });
-
-    await expect(projectHandle.wait({ tier: "local" })).resolves.toBeUndefined();
-    const { value: project } = projectHandle;
+    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "local" });
     expect(project).toEqual({
       id: expect.any(String),
       name: "Test Project",
     });
     const owner = insertUser(db);
 
-    const todoHandle = db.insert(app.todos, {
-      title: "Test Todo",
-      done: true,
-      tags: ["tag1", "tag2"],
-      projectId: project.id,
-      ownerId: owner.id,
-      assigneesIds: [],
-    });
-
-    await expect(todoHandle.wait({ tier: "local" })).resolves.toBeUndefined();
-    const { value: todo } = todoHandle;
+    const todo = await db
+      .insert(app.todos, {
+        title: "Test Todo",
+        done: true,
+        tags: ["tag1", "tag2"],
+        projectId: project.id,
+        ownerId: owner.id,
+        assigneesIds: [],
+      })
+      .wait({ tier: "local" });
     expect(todo).toEqual({
       id: expect.any(String),
       title: "Test Todo",

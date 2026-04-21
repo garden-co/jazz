@@ -184,21 +184,6 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.deleteWithSession("row-1", writeContextJson);
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
-
-    await expect(
-      adapter.insertDurableWithSession("todos", {}, writeContextJson, "local"),
-    ).resolves.toEqual({
-      id: "row-1",
-      values: [],
-      batchId: "batch-2",
-    });
-    await expect(
-      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
-    ).resolves.toBeUndefined();
-    await expect(
-      adapter.deleteDurableWithSession("row-1", writeContextJson, "local"),
-    ).resolves.toBeUndefined();
-    expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
   it("bridges subscription callbacks with handle conversion", () => {
@@ -298,24 +283,6 @@ describe("JazzRnRuntimeAdapter", () => {
       ],
       pending: false,
     });
-  });
-
-  it("supports local-tier persisted mutations and rejects global tiers", async () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
-      id: "row-1",
-      values: [],
-      batchId: "batch-1",
-    });
-    expect(binding.flush).toHaveBeenCalledTimes(1);
-
-    await expect(adapter.updateDurable("row-1", {}, "local")).resolves.toBeUndefined();
-    await expect(adapter.deleteDurable("row-1", "local")).resolves.toBeUndefined();
-    expect(binding.flush).toHaveBeenCalledTimes(3);
-
-    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
   });
 
   it("wraps Jazz RN errors with error name and cause", async () => {

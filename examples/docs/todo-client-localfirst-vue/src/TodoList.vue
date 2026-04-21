@@ -28,13 +28,11 @@ function removeTodo(id: string) {
 
 // #region writing-durability-vue
 async function addImportantTodo(todoTitle: string) {
-  const { id } = await db.insertDurable(
-    app.todos,
-    { title: todoTitle, done: false },
-    { tier: "edge" },
-  );
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
-  await db.deleteDurable(app.todos, id, { tier: "global" });
+  const { id } = await db
+    .insert(app.todos, { title: todoTitle, done: false })
+    .wait({ tier: "edge" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "edge" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
 }
 // #endregion writing-durability-vue
 
