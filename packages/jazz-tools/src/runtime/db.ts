@@ -460,16 +460,10 @@ export class DbTransaction {
 
   /**
    * Commit the transaction. Data will be globally visible once it's accepted by the authority.
-   *
-   * @returns the batch id of the committed transaction.
    */
-  commit(): string {
-    if (this.committed) {
-      return this.batchId();
-    }
-    const batchId = this.runtimeTransaction.commit();
+  commit(): WriteHandle {
     this.committed = true;
-    return batchId;
+    return this.runtimeTransaction.commit();
   }
 
   /**
