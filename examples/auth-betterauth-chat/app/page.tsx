@@ -124,7 +124,7 @@ function useBetterAuthJWT() {
   }
 
   return {
-    isLoading: isPending || isLoadingJWT,
+    isLoading: isPending || isLoadingJWT || (!!sessionId && !jwt),
     jwt,
     getRefreshedJWT,
   };
