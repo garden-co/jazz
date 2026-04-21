@@ -1,24 +1,21 @@
 import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
-import { APP_ORIGIN } from "../../constants";
-
-const authMemoryDb: MemoryDB = {
-  account: [],
-  jwks: [],
-  session: [],
-  user: [],
-  verification: [],
-};
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { authJazzContext } from "./auth-jazz-context";
+import { app } from "../../schema";
 
 const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
+const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
 
 async function createBetterAuth(issuer: string = APP_ORIGIN) {
   const auth = betterAuth({
     baseURL: issuer,
-    database: memoryAdapter(authMemoryDb),
+    database: jazzAdapter({
+      db: () => authJazzContext().asBackend(app),
+      schema: app.wasmSchema,
+    }),
     secret: BETTER_AUTH_SECRET,
     trustedOrigins: [APP_ORIGIN],
     hooks: {

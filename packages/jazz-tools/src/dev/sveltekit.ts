@@ -64,7 +64,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       // Extract backendSecret from the server config object (SvelteKit-only option).
       const serverConfig: JazzServerOptions =
         typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
-      const backendSecret = serverConfig.backendSecret;
+      const backendSecret = serverConfig.backendSecret ?? process.env.BACKEND_SECRET;
 
       // Pre-resolve jwksUrl from Vite's configured host/port when starting a
       // local server. Precedence: explicit option → APP_ORIGIN env → Vite config
