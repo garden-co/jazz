@@ -4,7 +4,7 @@ import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 const db = await createDb({
-  appId: "my-todo-app",
+  appId: "<your-app-id>",
 });
 // use db.shutdown() to clean up when finished
 // #endregion setup-ts

@@ -1,12 +1,12 @@
+// #region context-setup-react-minimal
 import { JazzProvider } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
 
-// #region context-setup-react-minimal
 export default function App() {
   return (
     <JazzProvider
       config={{
-        appId: "my-todo-app",
+        appId: "<your-app-id>",
       }}
     >
       <h1>Todos</h1>

@@ -1,6 +1,7 @@
 ---
 title: Better Auth Adapter
 description: Use Better Auth with Jazz as the database adapter.
+reviewedAt: "22485728"
 ---
 
 The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For general Better Auth setup (route handlers, client, plugins), see the [Better Auth documentation](https://www.better-auth.com/docs).
@@ -57,7 +58,7 @@ npx @better-auth/cli@latest generate \
   --output ./schema-better-auth/schema.ts
 
 # Validate the generated schema source
-npx jazz-tools@alpha validate --schema-dir ./schema-better-auth
+pnpm dlx jazz-tools@alpha validate --schema-dir ./schema-better-auth
 ```
 
 The generated `schema.ts` includes a `permissions` export that denies all operations on the better-auth tables by default. This prevents any regular Jazz client session from reading or writing better-auth data. The adapter uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely, so better-auth itself is unaffected.
@@ -72,7 +73,7 @@ schema publication flow you already use for your app schema. Once that schema is
 server, publish the deny-all permissions:
 
 ```bash
-npx jazz-tools@alpha permissions push \
+pnpm dlx jazz-tools@alpha permissions push \
   --schema-dir ./schema-better-auth \
   --server-url $JAZZ_SERVER_URL \
   --admin-secret $JAZZ_ADMIN_SECRET
@@ -81,7 +82,7 @@ npx jazz-tools@alpha permissions push \
 You can check the currently deployed permissions head at any time:
 
 ```bash
-npx jazz-tools@alpha permissions status \
+pnpm dlx jazz-tools@alpha permissions status \
   --schema-dir ./schema-better-auth \
   --server-url $JAZZ_SERVER_URL \
   --admin-secret $JAZZ_ADMIN_SECRET
@@ -90,9 +91,9 @@ npx jazz-tools@alpha permissions status \
 After the initial push, schema changes require a migration edge:
 
 ```bash
-npx jazz-tools@alpha migrations create --fromHash <fromHash>
-npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
-npx jazz-tools@alpha migrations push <fromHash> <toHash>
+pnpm dlx jazz-tools@alpha migrations create --fromHash <fromHash>
+pnpm dlx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
+pnpm dlx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```
 
 <Callout title="No push needed for local-only setups">
