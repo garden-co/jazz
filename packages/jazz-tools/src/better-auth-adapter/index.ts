@@ -185,8 +185,9 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
           await assertUniqueConstraints(model, data as Record<string, unknown>);
 
+          const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
-          return config.db().insertDurable(qb, data, { tier: "global" });
+          return config.db().insertDurable(qb, fields, { tier: "global", ...(id ? { id } : {}) });
         },
 
         async findOne({ model, where, select, join }): Promise<any> {
@@ -231,16 +232,14 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return null;
           }
 
-          await assertUniqueConstraints(
-            model,
-            update as Record<string, unknown>,
-            new Set([match.id]),
-          );
+          const { id: _id, ...fields } = update as Record<string, unknown>;
+
+          await assertUniqueConstraints(model, fields, new Set([match.id]));
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
-          await config.db().updateDurable(qb, match.id, update as any, { tier: "global" });
+          await config.db().updateDurable(qb, match.id, fields, { tier: "global" });
 
           return findByJazzRowId(model, match.id);
         },
@@ -251,17 +250,15 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return 0;
           }
 
-          await assertUniqueConstraints(
-            model,
-            update as Record<string, unknown>,
-            new Set(matches.map((match) => match.id)),
-          );
+          const { id: _id, ...fields } = update as Record<string, unknown>;
+
+          await assertUniqueConstraints(model, fields, new Set(matches.map((match) => match.id)));
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
           for (const match of matches) {
-            await config.db().updateDurable(qb, match.id, update, { tier: "global" });
+            await config.db().updateDurable(qb, match.id, fields, { tier: "global" });
           }
 
           return matches.length;

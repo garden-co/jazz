@@ -360,6 +360,40 @@ describe("jazzAdapter", () => {
       expect(second.email).toBe("bob@example.com");
     });
 
+    it("accepts an explicit id in create/update payloads without surfacing it as a column", async () => {
+      const presetId = "0195d5cb-7c00-7000-8000-000000000abc";
+
+      const created = await adapter.create<any>({
+        model: "user",
+        data: {
+          id: presetId,
+          name: "Preset",
+          email: "preset@example.com",
+          emailVerified: false,
+          image: null,
+        },
+        forceAllowId: true,
+      });
+
+      expect(created.id).toBe(presetId);
+
+      const updated = await adapter.update<any>({
+        model: "user",
+        where: [{ field: "id", operator: "eq", value: presetId, connector: "AND" }],
+        update: { id: presetId, name: "Preset Renamed" },
+      });
+
+      expect(updated).toMatchObject({ id: presetId, name: "Preset Renamed" });
+
+      const changed = await adapter.updateMany({
+        model: "user",
+        where: [{ field: "id", operator: "eq", value: presetId, connector: "AND" }],
+        update: { id: presetId, name: "Preset Renamed Again" },
+      });
+
+      expect(changed).toBe(1);
+    });
+
     it("accepts app-like schema sources from root schema.ts modules", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
