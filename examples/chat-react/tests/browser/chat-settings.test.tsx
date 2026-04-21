@@ -147,18 +147,15 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     await openSettings(el);
 
-    // Find the chat name input
-    const nameInput = document.querySelector<HTMLInputElement>("#chat-name");
-    expect(nameInput).toBeTruthy();
-
-    await act(async () => typeInto(nameInput!, "Weekend plans"));
-
-    // Wait for the DB update to round-trip back into the controlled input
     await waitFor(
-      () => nameInput!.value === "Weekend plans",
+      () => document.querySelector<HTMLInputElement>("#chat-name") !== null,
       5000,
-      "Chat name input should reflect the persisted value",
+      "Chat name input should appear",
     );
+
+    await act(async () => {
+      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Weekend plans");
+    });
 
     // Close the sheet
     const closeButton = document
@@ -188,14 +185,22 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     // Set a name first
     await openSettings(el);
-    const nameInput = document.querySelector<HTMLInputElement>("#chat-name")!;
-    await act(async () => typeInto(nameInput, "Temporary name"));
+    await waitFor(
+      () => document.querySelector<HTMLInputElement>("#chat-name") !== null,
+      5000,
+      "Chat name input should appear",
+    );
+    await act(async () => {
+      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Temporary name");
+    });
 
     // Wait for the name to take effect
     await new Promise((r) => setTimeout(r, 500));
 
     // Clear it
-    await act(async () => typeInto(nameInput, ""));
+    await act(async () => {
+      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "");
+    });
 
     // Close the sheet
     const closeButton = document

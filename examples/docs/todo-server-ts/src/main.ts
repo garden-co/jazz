@@ -79,6 +79,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
   const allowLocalFirstAuth =
     config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
+  const writeTier = serverUrl ? "edge" : "local";
 
   if (!serverUrl || !backendSecret) {
     throw new Error(
@@ -156,7 +157,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
           done: false,
           owner_id: body.owner_id ?? "anonymous",
         })
-        .wait({ tier: "local" });
+        .wait({ tier: writeTier });
 
       res.status(201).json(todo);
 
@@ -242,7 +243,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
+      await db.update(schemaApp.todos, id, updates).wait({ tier: writeTier });
 
       // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
@@ -264,7 +265,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.delete(schemaApp.todos, id).wait({ tier: "local" });
+      await db.delete(schemaApp.todos, id).wait({ tier: writeTier });
       res.status(204).send();
 
       // Notify SSE connections

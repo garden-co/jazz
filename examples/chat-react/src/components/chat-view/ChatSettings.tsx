@@ -1,4 +1,4 @@
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { LogOutIcon, Share2Icon } from "lucide-react";
 import { Avatar } from "@/components/Avatar";
@@ -64,6 +64,11 @@ function ChatSettingsContent({
 
   const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
   const chat = chatRows[0];
+  const [draftName, setDraftName] = useState("");
+
+  useEffect(() => {
+    setDraftName(chat?.name ?? "");
+  }, [chatId, chat?.name]);
 
   const members = useAll(app.chatMembers.where({ chatId })) ?? [];
   const allProfiles = useAll(app.profiles) ?? [];
@@ -74,7 +79,7 @@ function ChatSettingsContent({
   const myMembership = members.find((m) => m.userId === userId);
 
   const handleNameChange = (newName: string) => {
-    if (!chat) return;
+    setDraftName(newName);
     db.update(app.chats, chatId, {
       name: newName || (null as unknown as string),
     });
@@ -86,6 +91,22 @@ function ChatSettingsContent({
     onOpenChange(false);
     navigate("/#/chats");
   };
+
+  if (!chat) {
+    return (
+      <>
+        <SheetHeader>
+          <SheetTitle>Chat settings</SheetTitle>
+        </SheetHeader>
+
+        <SheetDescription className="sr-only">
+          Manage chat name, view members, and leave the chat.
+        </SheetDescription>
+
+        <div className="px-4 py-6 text-sm text-muted-foreground italic">Loading chat...</div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -105,7 +126,7 @@ function ChatSettingsContent({
           </p>
           <Input
             id="chat-name"
-            value={chat?.name ?? ""}
+            value={draftName}
             onChange={(evt) => handleNameChange(evt.currentTarget.value)}
           />
         </div>
