@@ -18,11 +18,22 @@ function resolveBrowserAssetBase(locationHref: string): string {
 }
 
 function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
-  if (locationHref) {
-    return new URL(url, locationHref).href;
+  // If `url` is already absolute, ignore the base. Workers under some bundlers
+  // (Turbopack) expose a non-URL `self.location.href`, and `new URL(absolute,
+  // badBase)` still throws because the base is validated.
+  try {
+    return new URL(url).href;
+  } catch {
+    // url is relative — fall through.
   }
-
-  return new URL(url).href;
+  if (locationHref) {
+    try {
+      return new URL(url, locationHref).href;
+    } catch {
+      // base unparseable — fall through.
+    }
+  }
+  return url;
 }
 
 function resolveConfiguredBaseUrl(
