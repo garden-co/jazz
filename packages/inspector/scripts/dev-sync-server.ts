@@ -48,14 +48,12 @@ export default async function runServer() {
     await Promise.all(
       batch.map((title, indexWithinBatch) => {
         const seedIndex = offset + indexWithinBatch;
-        return sessionedClient.insertDurable(
-          app.todos,
-          {
+        return sessionedClient
+          .insert(app.todos, {
             title: title,
             done: seedIndex % 2 === 1,
-          },
-          { tier: "global" },
-        );
+          })
+          .wait({ tier: "global" });
       }),
     );
   }

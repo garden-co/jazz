@@ -2,9 +2,9 @@
 
 Integrate `ON DELETE CASCADE` with the built-in file storage tables. When this lands, app developers no longer need to manually delete files and file_parts — deletion cascades automatically from parent rows.
 
-Depends on: [on_delete_cascade.md](../a_mvp/on_delete_cascade.md). Can be deferred to `c_later/` if cascade isn't ready at launch.
+Depends on the future row-level cascade semantics work. Can be deferred to `c_later/` if cascade isn't ready at launch.
 
-See also: [Phase 1: static files](../a_mvp/built_in_file_storage.md), [Phase 3: mutable files](../c_later/mutable_files_and_smart_chunking.md).
+See also: [Mutable files and smart chunking](../c_later/mutable_files_and_smart_chunking.md).
 
 ## What Changes
 
@@ -39,7 +39,7 @@ Content-addressed parts can be shared across multiple files (same bytes = same U
 - Only soft-delete a part when ALL live references to it are soft-deleted.
 - Only hard-delete a part when ALL references (including soft-deleted ones) are hard-deleted.
 
-See `on_delete_cascade.md` for distributed refcounting semantics (eager soft delete, authoritative hard delete).
+This likely needs distributed refcounting semantics (eager soft delete, authoritative hard delete) rather than a naive FK-only implementation.
 
 ## Migration from Phase 1
 

@@ -5,8 +5,8 @@ import {
   MAX_FILE_PART_BYTES,
   type FileStorageDb,
 } from "./file-storage.js";
-import { QueryBuilder, QueryOptions, TableProxy, InsertHandle } from "./db.js";
-import { JazzClient } from "./client.js";
+import { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
+import { InsertHandle, JazzClient } from "./client.js";
 
 interface StoredFile {
   id: string;
@@ -67,6 +67,7 @@ function makeTable<Row, Init>(table: string): QueryableTable<Row, Init> {
 
 class FakeDb implements FileStorageDb {
   private nextSyntheticId = 1;
+  private nextBatchId = 1;
   readonly inserts: Array<{
     table: string;
     data: Record<string, unknown>;
@@ -77,17 +78,28 @@ class FakeDb implements FileStorageDb {
   readonly queryOptions: Array<QueryOptions | undefined> = [];
   readonly files = new Map<string, StoredFile>();
   readonly fileParts = new Map<string, StoredFilePart>();
+  readonly #insertsByBatchId = new Map<string, number>();
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
-    return new InsertHandle(this.store(table, data, false) as T, "batch-id", {} as JazzClient);
-  }
+    const batchId = `batch-${this.nextBatchId++}`;
+    const row = this.store(table, data, false);
+    this.#insertsByBatchId.set(batchId, this.inserts.length - 1);
+    const client = {
+      waitForPersistedBatch: async (persistedBatchId: string, tier: string) => {
+        const insertIndex = this.#insertsByBatchId.get(persistedBatchId);
+        if (insertIndex === undefined) {
+          throw new Error(`unknown batch ${persistedBatchId}`);
+        }
+        const insert = this.inserts[insertIndex];
+        if (!insert) {
+          throw new Error(`missing insert for batch ${persistedBatchId}`);
+        }
+        insert.durable = true;
+        insert.tier = tier;
+      },
+    } as JazzClient;
 
-  async insertDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options: { tier: "local" | "edge" | "global" },
-  ): Promise<T> {
-    return this.store(table, data, true, options.tier) as T;
+    return new InsertHandle(row as T, batchId, client);
   }
 
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {

@@ -461,16 +461,14 @@ describe("NAPI integration", () => {
       });
 
       const createdTodo = await withTimeout(
-        aliceDb.insertDurable(
-          policyTodosTable,
-          {
+        aliceDb
+          .insert(policyTodosTable, {
             title: "session-created-item",
             done: false,
             description: "created via forSession",
             owner_id: "alice",
-          },
-          { tier: "edge" },
-        ),
+          })
+          .wait({ tier: "edge" }),
         10_000,
         "session insert timed out",
       );
@@ -495,21 +493,17 @@ describe("NAPI integration", () => {
         { timeout: 20_000 },
       );
 
-      await expect(
-        aliceDb.insertDurable(
-          policyTodosTable,
-          {
-            title: "session-policy-denied",
-            done: false,
-            description: "",
-            owner_id: "bob",
-          },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow();
+      expect(() =>
+        aliceDb.insert(policyTodosTable, {
+          title: "session-policy-denied",
+          done: false,
+          description: "",
+          owner_id: "bob",
+        }),
+      ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
 
       await withTimeout(
-        aliceDb.updateDurable(policyTodosTable, createdTodo.id, { done: true }, { tier: "edge" }),
+        aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "edge" }),
         10_000,
         "session update timed out",
       );
@@ -533,7 +527,7 @@ describe("NAPI integration", () => {
       );
 
       await withTimeout(
-        aliceDb.deleteDurable(policyTodosTable, createdTodo.id, { tier: "edge" }),
+        aliceDb.delete(policyTodosTable, createdTodo.id).wait({ tier: "edge" }),
         10_000,
         "session delete timed out",
       );
@@ -619,14 +613,9 @@ describe("NAPI integration", () => {
 
       await waitForQueryRows(reader, allTodosQuery, (rows) => rows.length === 0);
 
-      const createdRow = await writer.insertDurable(
-        simpleTodosTable,
-        {
-          title: "napi-shared-item",
-          done: false,
-        },
-        { tier: "edge" },
-      );
+      const createdRow = await writer
+        .insert(simpleTodosTable, { title: "napi-shared-item", done: false })
+        .wait({ tier: "edge" });
       const rowId = createdRow.id;
 
       const rowsAfterCreate = await waitForQueryRows(reader, allTodosQuery, (rows) =>
@@ -639,7 +628,7 @@ describe("NAPI integration", () => {
         done: false,
       });
 
-      await writer.updateDurable(simpleTodosTable, rowId, { done: true }, { tier: "edge" });
+      await writer.update(simpleTodosTable, rowId, { done: true }).wait({ tier: "edge" });
 
       const rowsAfterUpdate = await waitForQueryRows(reader, allTodosQuery, (rows) => {
         const row = rows.find((entry) => entry.id === rowId);
@@ -648,7 +637,7 @@ describe("NAPI integration", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.done).toBe(true);
 
-      await writer.deleteDurable(simpleTodosTable, rowId, { tier: "edge" });
+      await writer.delete(simpleTodosTable, rowId).wait({ tier: "edge" });
       await settleAsyncSyncWork();
       await waitForQueryRows(
         writer,
@@ -712,14 +701,9 @@ describe("NAPI integration", () => {
       });
 
       const writer = writerContext.db();
-      const createdRow = await writer.insertDurable(
-        simpleTodosTable,
-        {
-          title: "persisted-local-item",
-          done: false,
-        },
-        { tier: "local" },
-      );
+      const createdRow = await writer
+        .insert(simpleTodosTable, { title: "persisted-local-item", done: false })
+        .wait({ tier: "local" });
       const rowId = createdRow.id;
 
       await waitForQueryRows(
@@ -787,15 +771,14 @@ describe("NAPI integration", () => {
       });
 
       await expect(
-        context.db().insertDurable(
-          timestampProjectsTable,
-          {
+        context
+          .db()
+          .insert(timestampProjectsTable, {
             name: "timestamp-probe",
             created_at: new Date(timestamp),
             updated_at: new Date(timestamp),
-          },
-          { tier: "local" },
-        ),
+          })
+          .wait({ tier: "local" }),
       ).resolves.toEqual({
         id: expect.any(String),
         name: "timestamp-probe",

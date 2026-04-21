@@ -41,9 +41,14 @@ describe("missingSeeds", () => {
 const fakeBlob = new Blob([new Uint8Array(8)]);
 
 function makeDb(instruments: { name: string }[] = []) {
+  const insertWait = vi.fn().mockResolvedValue(undefined);
+  const insert = vi.fn().mockImplementation(() => ({
+    wait: insertWait,
+  }));
   return {
     all: vi.fn().mockResolvedValue(instruments),
-    insertDurable: vi.fn().mockResolvedValue({ id: "inst-id" }),
+    insert,
+    insertWait,
     createFileFromBlob: vi.fn().mockResolvedValue({ id: "file-id" }),
   };
 }
@@ -75,16 +80,16 @@ describe("ensureInstrumentsSeeded", () => {
     db.all.mockRejectedValue(new Error("offline"));
     await expect(ensureInstrumentsSeeded(db as any)).resolves.toBeUndefined();
     expect(db.all).not.toHaveBeenCalled();
-    expect(db.insertDurable).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   test("first visit offline: propagates the error from db.all", async () => {
     const db = {
       all: vi.fn().mockRejectedValue(new Error("Edge server unreachable")),
-      insertDurable: vi.fn().mockResolvedValue({ id: "inst-id" }),
+      insert: vi.fn(),
     };
     await expect(ensureInstrumentsSeeded(db as any)).rejects.toThrow("Edge server unreachable");
-    expect(db.insertDurable).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
     // Flag must NOT be set — the next attempt should retry, not skip
     expect(localStorage.getItem(SEEDED_STORAGE_KEY)).toBeNull();
   });
@@ -96,7 +101,7 @@ describe("ensureInstrumentsSeeded", () => {
     const db = makeDb();
     await ensureInstrumentsSeeded(db as any);
     expect(db.all).not.toHaveBeenCalled();
-    expect(db.insertDurable).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   test("sets the localStorage flag after a successful seed", async () => {
@@ -117,13 +122,14 @@ describe("ensureInstrumentsSeeded", () => {
   test("inserts all 7 seeds when the db is empty", async () => {
     const db = makeDb([]);
     await ensureInstrumentsSeeded(db as any);
-    expect(db.insertDurable).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
+    expect(db.insert).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
+    expect(db.insertWait).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
   });
 
   test("inserts nothing when all seeds are already present", async () => {
     const db = makeDb(allSeedRows());
     await ensureInstrumentsSeeded(db as any);
-    expect(db.insertDurable).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   test("inserts only the missing seeds when the db is partially populated", async () => {
@@ -133,8 +139,8 @@ describe("ensureInstrumentsSeeded", () => {
     ];
     const db = makeDb(partial);
     await ensureInstrumentsSeeded(db as any);
-    expect(db.insertDurable).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length - 2);
-    const insertedNames = db.insertDurable.mock.calls.map((c: any[]) => c[1].name);
+    expect(db.insert).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length - 2);
+    const insertedNames = db.insert.mock.calls.map((c: any[]) => c[1].name);
     expect(insertedNames).not.toContain("Kick");
     expect(insertedNames).not.toContain("Snare");
   });
@@ -143,7 +149,7 @@ describe("ensureInstrumentsSeeded", () => {
     const db = makeDb([]);
     await ensureInstrumentsSeeded(db as any);
     expect(db.createFileFromBlob).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
-    for (const call of db.insertDurable.mock.calls as any[]) {
+    for (const call of db.insert.mock.calls as any[]) {
       const data = call[1];
       expect(data).toHaveProperty("name");
       expect(data).toHaveProperty("soundFileId");

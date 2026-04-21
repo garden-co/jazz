@@ -49,7 +49,7 @@ See [Queries](/docs/reading/queries) for subscriptions, one-shot queries, and du
 <Accordions type="single">
 <Accordion title="Durable inserts">
 
-Use `insertDurable` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
+Use `db.insert(...).wait({ tier: "..." })` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
 
 </Accordion>
 <Accordion title="Explicit owners for transferable ownership">

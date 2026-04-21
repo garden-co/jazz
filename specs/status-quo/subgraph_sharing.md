@@ -16,8 +16,10 @@ For each unique outer row:
 4. Settle graph to get results
 5. Store array result
 
-> `crates/groove/src/query_manager/graph_nodes/subgraph.rs:55-153` (instantiate)
-> `crates/groove/src/query_manager/graph_nodes/array_subquery.rs:139-277` (process + evaluate)
+Current implementation lives under:
+
+- `crates/jazz-tools/src/query_manager/graph_nodes/subgraph.rs`
+- `crates/jazz-tools/src/query_manager/graph_nodes/array_subquery.rs`
 
 ## Integration with QueryGraph
 
@@ -28,7 +30,9 @@ Array subquery nodes are chained into the graph pipeline after materialization:
 - On inner table change: `mark_inner_dirty()` → `reevaluate_all()` re-settles all instances
 - On outer delta: `process_with_context()` evaluates subgraph for new/updated outer rows
 
-> `crates/groove/src/query_manager/graph.rs:351-364` (compilation), `988-1052` (dirty marking), `1341-1357` (settlement)
+The relevant compilation and settle plumbing now lives in:
+
+- `crates/jazz-tools/src/query_manager/graph.rs`
 
 ## Features
 
@@ -67,7 +71,7 @@ Nested:
 })
 ```
 
-> `crates/groove/src/query_manager/query.rs:630-779` (builder API)
+Current builder implementation: `crates/jazz-tools/src/query_manager/query.rs`
 
 ## Performance Observations
 

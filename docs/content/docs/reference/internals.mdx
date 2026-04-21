@@ -71,7 +71,7 @@ fall back to surprise table scans.
 
 ### Deletion
 
-The user-facing `delete` and `deleteDurable` APIs perform a **soft delete**. The row is preserved in
+The user-facing `delete` API performs a **soft delete**. The row is preserved in
 history, but it disappears from ordinary live queries.
 
 Internally, the current visible state leaves the live `_id` index and can still be addressed

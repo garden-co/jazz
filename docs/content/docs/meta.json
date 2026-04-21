@@ -18,6 +18,7 @@
     "recipes/real-time-collaborative-list",
     "recipes/nested-data",
     "recipes/auth-provider-integration",
+    "faq",
     "---Reference---",
     "reference"
   ]

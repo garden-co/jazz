@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { JazzClient, LocalBatchRecord, Row } from "./client.js";
+import {
+  InsertHandle,
+  WriteHandle,
+  type JazzClient,
+  type LocalBatchRecord,
+  type Row,
+} from "./client.js";
 import type { Session } from "./context.js";
 
 class TestDb extends Db {
@@ -47,16 +53,36 @@ function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
   };
 }
 
-function makePendingWrite<T>(batchId: string, value: T) {
+function makeHandleClient(localBatchRecord: LocalBatchRecord) {
   return {
-    batchId: () => batchId,
-    value: () => value,
-    wait: vi.fn(async () => value),
+    waitForPersistedBatch: vi.fn(async () => undefined),
+    localBatchRecord: vi.fn(() => localBatchRecord),
+    acknowledgeRejectedBatch: vi.fn(() => false),
   };
 }
 
-describe("Db persisted writes", () => {
-  it("transforms persisted insert rows and exposes batch helpers", async () => {
+function makeInsertHandle(
+  value: Row,
+  batchId: string,
+  localBatchRecord = makeLocalBatchRecord(batchId),
+) {
+  const client = makeHandleClient(localBatchRecord);
+  return {
+    handle: new InsertHandle(value, batchId, client as unknown as JazzClient),
+    client,
+  };
+}
+
+function makeWriteHandle(batchId: string, localBatchRecord = makeLocalBatchRecord(batchId)) {
+  const client = makeHandleClient(localBatchRecord);
+  return {
+    handle: new WriteHandle(batchId, client as unknown as JazzClient),
+    client,
+  };
+}
+
+describe("Db write handles", () => {
+  it("transforms inserted rows and waits for durability on the insert handle", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
       id: "todo-1",
@@ -65,109 +91,98 @@ describe("Db persisted writes", () => {
         { type: "Boolean", value: false },
       ],
     };
-    const pendingWrite = makePendingWrite("batch-insert", runtimeRow);
-    const localBatchRecord = makeLocalBatchRecord("batch-insert");
-    const createPersisted = vi.fn(() => pendingWrite);
-    const loadLocalBatchRecord = vi.fn(() => localBatchRecord);
-    const acknowledgeRejectedBatch = vi.fn(() => false);
+    const { handle: insertHandle, client: handleClient } = makeInsertHandle(
+      runtimeRow,
+      "batch-insert",
+    );
+    const create = vi.fn(() => insertHandle);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      createPersisted,
-      localBatchRecord: loadLocalBatchRecord,
-      acknowledgeRejectedBatch,
+      create,
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const pending = db.insertPersisted(
-      table,
-      { title: "Buy milk", done: false },
-      { tier: "global" },
-    );
+    const pending = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(createPersisted).toHaveBeenCalledWith(
+    expect(create).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "Buy milk" },
         done: { type: "Boolean", value: false },
       },
-      { tier: "global" },
+      undefined,
     );
-    expect(pending.batchId()).toBe("batch-insert");
-    expect(pending.value()).toEqual({
+    expect(pending.batchId).toBe("batch-insert");
+    expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
       done: false,
     });
-    await expect(pending.wait()).resolves.toEqual({
+    await expect(pending.wait({ tier: "global" })).resolves.toEqual({
       id: "todo-1",
       title: "Buy milk",
       done: false,
     });
-    expect(pending.localBatchRecord()).toEqual(localBatchRecord);
-    expect(loadLocalBatchRecord).toHaveBeenCalledWith("batch-insert");
-    expect(pending.acknowledgeRejectedBatch()).toBe(false);
-    expect(acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-insert");
+    expect(handleClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-insert", "global");
   });
 
-  it("keeps persisted update and delete handles batch-addressable", async () => {
+  it("keeps update and delete handles waitable by durability tier", async () => {
     const table = todoTable();
-    const updatePending = makePendingWrite("batch-update", undefined);
-    const deletePending = makePendingWrite("batch-delete", undefined);
-    const updatePersisted = vi.fn(() => updatePending);
-    const deletePersisted = vi.fn(() => deletePending);
-    const localBatchRecord = vi.fn((batchId: string) => makeLocalBatchRecord(batchId));
+    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-update");
+    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-delete");
+    const update = vi.fn(() => updateHandle);
+    const remove = vi.fn(() => deleteHandle);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      updatePersisted,
-      deletePersisted,
-      localBatchRecord,
-      acknowledgeRejectedBatch: vi.fn(() => true),
+      update,
+      delete: remove,
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const updated = db.updatePersisted(table, "todo-1", { done: true }, { tier: "edge" });
-    const deleted = db.deletePersisted(table, "todo-1", { tier: "global" });
+    const updated = db.update(table, "todo-1", { done: true });
+    const deleted = db.delete(table, "todo-1");
 
-    expect(updatePersisted).toHaveBeenCalledWith(
+    expect(update).toHaveBeenCalledWith(
       "todo-1",
       {
         done: { type: "Boolean", value: true },
       },
-      { tier: "edge" },
+      undefined,
     );
-    expect(deletePersisted).toHaveBeenCalledWith("todo-1", { tier: "global" });
-    await expect(updated.wait()).resolves.toBeUndefined();
-    await expect(deleted.wait()).resolves.toBeUndefined();
-    expect(updated.localBatchRecord()).toMatchObject({ batchId: "batch-update" });
-    expect(deleted.localBatchRecord()).toMatchObject({ batchId: "batch-delete" });
+    expect(remove).toHaveBeenCalledWith("todo-1");
+    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
+    await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
+    expect(updateClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-update", "edge");
+    expect(deleteClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-delete", "global");
   });
 
-  it("routes persisted writes through the session-aware client-backed db path", () => {
+  it("routes write handles through the session-aware client-backed db path", async () => {
     const table = todoTable();
     const session: Session = {
       user_id: "alice",
       claims: { role: "writer" },
       authMode: "external",
     };
-    const insertPending = makePendingWrite("batch-session-insert", {
-      id: "todo-2",
-      values: [
-        { type: "Text", value: "With session" },
-        { type: "Boolean", value: true },
-      ],
-    } satisfies Row);
-    const updatePending = makePendingWrite("batch-session-update", undefined);
-    const deletePending = makePendingWrite("batch-session-delete", undefined);
-    const createPersistedInternal = vi.fn(() => insertPending);
-    const updatePersistedInternal = vi.fn(() => updatePending);
-    const deletePersistedInternal = vi.fn(() => deletePending);
+    const { handle: insertHandle, client: insertClient } = makeInsertHandle(
+      {
+        id: "todo-2",
+        values: [
+          { type: "Text", value: "With session" },
+          { type: "Boolean", value: true },
+        ],
+      },
+      "batch-session-insert",
+    );
+    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-session-update");
+    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-session-delete");
+    const createHandleInternal = vi.fn(() => insertHandle);
+    const updateHandleInternal = vi.fn(() => updateHandle);
+    const deleteHandleInternal = vi.fn(() => deleteHandle);
     const runtimeClient = {
       getSchema: () => new Map(Object.entries(todoSchema())),
-      createPersistedInternal,
-      updatePersistedInternal,
-      deletePersistedInternal,
-      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
-      acknowledgeRejectedBatch: vi.fn(() => false),
+      createHandleInternal,
+      updateHandleInternal,
+      deleteHandleInternal,
     };
 
     const db = createDbFromClient(
@@ -177,15 +192,11 @@ describe("Db persisted writes", () => {
       "alice@writer",
     );
 
-    const inserted = db.insertPersisted(
-      table,
-      { title: "With session", done: true },
-      { tier: "global" },
-    );
-    const updated = db.updatePersisted(table, "todo-2", { done: false }, { tier: "edge" });
-    const deleted = db.deletePersisted(table, "todo-2", { tier: "local" });
+    const inserted = db.insert(table, { title: "With session", done: true });
+    const updated = db.update(table, "todo-2", { done: false });
+    const deleted = db.delete(table, "todo-2");
 
-    expect(createPersistedInternal).toHaveBeenCalledWith(
+    expect(createHandleInternal).toHaveBeenCalledWith(
       "todos",
       {
         title: { type: "Text", value: "With session" },
@@ -193,32 +204,39 @@ describe("Db persisted writes", () => {
       },
       session,
       "alice@writer",
-      { tier: "global" },
+      undefined,
     );
-    expect(updatePersistedInternal).toHaveBeenCalledWith(
+    expect(updateHandleInternal).toHaveBeenCalledWith(
       "todo-2",
       {
         done: { type: "Boolean", value: false },
       },
       session,
       "alice@writer",
-      { tier: "edge" },
       undefined,
       undefined,
     );
-    expect(deletePersistedInternal).toHaveBeenCalledWith(
-      "todo-2",
-      session,
-      "alice@writer",
-      { tier: "local" },
-      undefined,
-    );
-    expect(inserted.value()).toEqual({
+    expect(deleteHandleInternal).toHaveBeenCalledWith("todo-2", session, "alice@writer");
+    expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",
       done: true,
     });
-    expect(updated.batchId()).toBe("batch-session-update");
-    expect(deleted.batchId()).toBe("batch-session-delete");
+    await expect(inserted.wait({ tier: "global" })).resolves.toEqual({
+      id: "todo-2",
+      title: "With session",
+      done: true,
+    });
+    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
+    await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
+    expect(insertClient.waitForPersistedBatch).toHaveBeenCalledWith(
+      "batch-session-insert",
+      "global",
+    );
+    expect(updateClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-session-update", "edge");
+    expect(deleteClient.waitForPersistedBatch).toHaveBeenCalledWith(
+      "batch-session-delete",
+      "local",
+    );
   });
 });
