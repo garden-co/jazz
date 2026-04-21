@@ -1920,10 +1920,7 @@ impl WasmRuntime {
         let schema_manager =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
 
-        let storage: Box<dyn Storage> = Box::new(
-            OpfsBTreeStorage::memory(DEFAULT_OPFS_CACHE_SIZE)
-                .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
-        );
+        let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
 
         Ok(assemble_wasm_runtime(
             schema_manager,
