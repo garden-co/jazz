@@ -8,4 +8,6 @@ pub enum BTreeError {
     Corrupt(String),
     #[error("io error: {0}")]
     Io(String),
+    #[error("security error: {0}")]
+    SecurityError(String),
 }

@@ -63,6 +63,14 @@ describe("Vanilla TS Todo App E2E", () => {
 
     // Wait for the app to render
     await waitFor(() => el.querySelector("#todo-list") !== null, 5000, "App should render");
+    await waitFor(
+      () => {
+        const submitButton = el.querySelector<HTMLButtonElement>('#add-form button[type="submit"]');
+        return submitButton !== null && !submitButton.disabled;
+      },
+      5000,
+      "Todo form should be ready",
+    );
 
     return el;
   }

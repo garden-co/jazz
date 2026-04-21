@@ -293,16 +293,34 @@ async function handleInit(msg: InitMessage): Promise<void> {
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
 
-    // Open persistent OPFS-backed runtime with local durability tier
-    runtime = await wasmModule.WasmRuntime.openPersistent(
-      schemaJson,
-      msg.appId,
-      msg.env,
-      msg.userBranch,
-      msg.dbName,
-      "local",
-      false,
-    );
+    // Open persistent OPFS-backed runtime, falling back to ephemeral in-memory
+    // storage if OPFS is blocked (e.g. Firefox private browsing raises SecurityError).
+    try {
+      runtime = await wasmModule.WasmRuntime.openPersistent(
+        schemaJson,
+        msg.appId,
+        msg.env,
+        msg.userBranch,
+        msg.dbName,
+        "local",
+        false,
+      );
+    } catch (e: any) {
+      if (e?.name === "SecurityError") {
+        console.warn("[jazz] OPFS unavailable (SecurityError) — falling back to ephemeral storage");
+        runtime = await wasmModule.WasmRuntime.openEphemeral(
+          schemaJson,
+          msg.appId,
+          msg.env,
+          msg.userBranch,
+          msg.dbName,
+          "local",
+          false,
+        );
+      } else {
+        throw e;
+      }
+    }
 
     // Register main thread as a Peer client
     mainClientId = runtime.addClient();

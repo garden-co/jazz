@@ -1,7 +1,7 @@
 ---
 title: Client
 description: Build a local-first to-do app with Jazz, step by step.
-reviewedAt: "4059cdef"
+reviewedAt: "22485728"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -59,22 +59,22 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
   </Tab>
   <Tab value="Vue">
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
   </Tab>
   <Tab value="Svelte">
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
   </Tab>
   <Tab value="Expo">
     ```bash title="Terminal"
-    pnpm add jazz-tools jazz-rn expo
+    pnpm add jazz-tools@alpha jazz-rn expo
     pnpm add -D @babel/plugin-transform-flow-strip-types
     ```
 
@@ -130,10 +130,16 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
   </Tab>
   <Tab value="TypeScript">
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
   </Tab>
 </Tabs>
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Click below to generate one on the Jazz hosted cloud&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later.
+
+<GenerateAppId />
 
 ## Define your schema
 
@@ -188,8 +194,10 @@ Create the basic structure for your app with Jazz and a to-do list.
 
 <Accordions type="single">
   <Accordion title="Client Config">
-    `appId` identifies your app for storage and sync. For all client config options and runtime
-    source overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
+    `appId` identifies your app for storage and sync. Use the UUID you generated
+    above&hairsp;—&hairsp;not a human-readable name&hairsp;—&hairsp;so your local data is already
+    correctly namespaced when you add a server. For all client config options and runtime source
+    overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
   </Accordion>
 </Accordions>
 
@@ -315,22 +323,13 @@ Framework hooks return `undefined` while loading, then an array of matching rows
 
 ## Enable sync
 
-So far, your to-do list only works locally. To sync across devices, you need a server, permissions, and an app ID.
+So far, your to-do list only works locally. To sync across devices, you need permissions published to the server.
 
-### Start a server
-
-Generate an app ID:
-
-```bash title="Terminal"
-npx jazz-tools@alpha create app
-# outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
-```
-
-Start the server with that ID. In development mode, clients auto-publish the schema when they connect, so you don't need an admin secret just to sync schema changes. The default port is 1625.
-
-```bash title="Terminal"
-npx jazz-tools@alpha server <your-app-id> --admin-secret secret
-```
+<Accordions type="single">
+  <Accordion title="Didn't generate your app ID above? Generate it now!">
+    <GenerateAppId />
+  </Accordion>
+</Accordions>
 
 ### Add permissions
 
@@ -340,33 +339,21 @@ The server rejects all reads and writes unless you define [permissions](/docs/au
   ../examples/docs/todo-client-localfirst-ts/permissions.ts#quickstart-permissions-ts
 </include>
 
-Then publish the permissions bundle:
+Then publish the permissions bundle using the app ID and admin secret from above:
 
-```bash title="Terminal"
-npx jazz-tools@alpha deploy \
-  <your-app-id> \
-  --server-url http://127.0.0.1:1625 \
-  --admin-secret secret
-```
+<DeployCommand />
 
 ### Connect the client
 
-Update your client config to use the same app ID, and add `serverUrl`:
+Update your client config to add `serverUrl`. If you generated an app ID above, these values are already filled in:
 
-```ts title="Client config"
-{
-  appId: "<your-app-id>",
-  // Use your machine's LAN IP for mobile devices.
-  serverUrl: "http://127.0.0.1:1625",
-}
-```
+<CloudConfig />
 
 Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
 
-Permissions can be updated without adding a new schema by using
-`npx jazz-tools@alpha deploy <your-app-id>`.
+Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy`.
 
-For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
+For self-hosted deployments, see [Server Setup](/docs/getting-started/server-setup).
 
 ## Next steps
 

@@ -42,6 +42,75 @@ function findSendButton(container: ParentNode): HTMLButtonElement | undefined {
     | undefined;
 }
 
+async function waitForSendButton(
+  container: ParentNode,
+  timeoutMs: number,
+  message: string,
+): Promise<HTMLButtonElement> {
+  await waitFor(
+    () => {
+      const button = findSendButton(container);
+      return !!button && !button.disabled;
+    },
+    timeoutMs,
+    message,
+  );
+
+  return findSendButton(container)!;
+}
+
+async function waitForEditorReady(
+  editorEl: HTMLElement,
+  timeoutMs: number,
+  message: string,
+): Promise<HTMLElement> {
+  await waitFor(
+    () => {
+      const handle = (editorEl as any).__editorHandle;
+      const proseMirror = editorEl.querySelector<HTMLElement>('[contenteditable="true"]');
+      return !!handle && typeof handle.insertText === "function" && proseMirror !== null;
+    },
+    timeoutMs,
+    message,
+  );
+
+  return editorEl.querySelector<HTMLElement>('[contenteditable="true"]')!;
+}
+
+async function sendMessage(
+  container: ParentNode,
+  editorEl: HTMLElement,
+  text: string,
+  timeoutMs: number,
+): Promise<void> {
+  await waitForSendButton(
+    container,
+    timeoutMs,
+    "Send button should be enabled after the composer finishes loading",
+  );
+
+  const proseMirror = await waitForEditorReady(
+    editorEl,
+    timeoutMs,
+    "Editor should be ready for typing before sending",
+  );
+
+  await act(async () => typeIntoEditor(editorEl, text));
+
+  await waitFor(
+    () => proseMirror.textContent?.includes(text) ?? false,
+    timeoutMs,
+    `Editor should contain "${text}" before sending`,
+  );
+
+  const sendButton = await waitForSendButton(
+    container,
+    timeoutMs,
+    `Send button should stay enabled while sending "${text}"`,
+  );
+  await act(async () => simulateClick(sendButton));
+}
+
 function hasRenderedMessage(container: ParentNode, text: string): boolean {
   return [...container.querySelectorAll("article")].some((article) =>
     article.textContent?.includes(text),
@@ -154,15 +223,7 @@ describe("Chat App E2E", () => {
     );
 
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = findSendButton(el);
-
-    await act(async () => {
-      typeIntoEditor(editor, "Hello Public 2");
-    });
-
-    if (sendButton) {
-      await act(async () => simulateClick(sendButton));
-    }
+    await sendMessage(el, editor, "Hello Public 2", 10000);
 
     await waitFor(
       () => el.textContent?.includes("Hello Public 2") ?? false,
@@ -258,14 +319,7 @@ describe("Chat App E2E", () => {
 
     // Send a message to delete
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = [...el.querySelectorAll("button")].find((b) =>
-      b.querySelector(".lucide-send"),
-    );
-
-    await act(async () => typeIntoEditor(editor, "Message to delete"));
-    if (sendButton) {
-      await act(async () => simulateClick(sendButton));
-    }
+    await sendMessage(el, editor, "Message to delete", 10000);
 
     await waitFor(
       () => el.textContent?.includes("Message to delete") ?? false,
@@ -467,21 +521,7 @@ describe("Chat App E2E", () => {
 
     // Send the secret message
     const aliceEditor = aliceContainer.querySelector<HTMLElement>("#messageEditor")!;
-    await waitFor(
-      () => {
-        const button = findSendButton(aliceContainer);
-        return !!button && !button.disabled;
-      },
-      10000,
-      "Private chat send button should be enabled for user A",
-    );
-
-    const aliceSendButton = findSendButton(aliceContainer);
-
-    await act(async () => typeIntoEditor(aliceEditor, "Secret Data"));
-    if (aliceSendButton) {
-      await act(async () => simulateClick(aliceSendButton));
-    }
+    await sendMessage(aliceContainer, aliceEditor, "Secret Data", 10000);
 
     await waitFor(
       () => hasRenderedMessage(aliceContainer, "Secret Data"),
@@ -535,11 +575,9 @@ describe("Chat App E2E", () => {
     );
 
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = findSendButton(el);
 
     for (const text of ["msg1", "msg2"]) {
-      await act(async () => typeIntoEditor(editor, text));
-      if (sendButton) await act(async () => simulateClick(sendButton));
+      await sendMessage(el, editor, text, 10000);
       await waitFor(() => hasRenderedMessage(el, text), 5000, `Message "${text}" should appear`);
       // Ensure the next message gets a strictly greater createdAt second.
       await new Promise((r) => setTimeout(r, 1100));
@@ -573,9 +611,7 @@ describe("Chat App E2E", () => {
 
     // Send a plain-text message first
     const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = findSendButton(el);
-    await act(async () => typeIntoEditor(editor, "msg1"));
-    if (sendButton) await act(async () => simulateClick(sendButton));
+    await sendMessage(el, editor, "msg1", 10000);
 
     await waitFor(() => hasRenderedMessage(el, "msg1"), 5000, "msg1 should appear before canvas");
 
