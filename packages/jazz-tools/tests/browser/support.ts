@@ -105,7 +105,7 @@ export async function waitForQuery<T>(
  * Race a promise against a timeout.
  *
  * Useful for operations that should complete within a deadline (e.g.
- * `insertDurable`) but don't have built-in timeout support.
+ * `db.insert(...).wait({ tier: "edge" })`) but don't have built-in timeout support.
  */
 export async function withTimeout<T>(
   promise: Promise<T>,

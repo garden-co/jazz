@@ -4,11 +4,11 @@ DESCRIPTION:"How and when to use Jazz's auth modes, and how to manage JWT auth o
 
 Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick the mode implicitly by what you pass in `DbConfig`: nothing for anonymous, `secret` for local-first, or `jwtToken` for external.
 
-| Mode          | What it does                                           | When to use it                                   |
-| ------------- | ------------------------------------------------------ | ------------------------------------------------ |
-| `anonymous`   | Ephemeral read-only identity, no secret, no server     | Public/marketing surfaces, try-before-anything   |
-| `local-first` | Stable identity from a device secret, no server needed | Production offline-first apps, try-before-signup |
-| `external`    | Validates a JWT from your auth provider via JWKS       | Production apps with real user accounts          |
+| Mode          | What it does                                                                | When to use it                                   |
+| ------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
+| `anonymous`   | Ephemeral read-only identity, no secret, no server                          | Public/marketing surfaces, try-before-anything   |
+| `local-first` | Stable identity from a device secret, no server needed                      | Production offline-first apps, try-before-signup |
+| `external`    | Validates a JWT from your auth provider via JWKS or a configured static key | Production apps with real user accounts          |
 
 Anonymous sessions can subscribe to queries but are **structurally denied writes** — every insert, update, and delete path checks the session's auth mode before any policy evaluation runs, and surfaces an `AnonymousWriteDeniedError` to the client. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
 
@@ -18,9 +18,9 @@ Local-first auth lets users start using your app without signing up. They can la
 
 ## External auth for production
 
-Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your JWKS endpoint.
+Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your server's configured JWKS endpoint or static key.
 
-  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz retrieves the signing key from the JWKS endpoint you specify.
+  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz either retrieves the signing key from the JWKS endpoint you specify or uses a single configured JWK / public key directly.
 
 For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web-tokens) are a great starting point.
 
@@ -210,7 +210,7 @@ jazz-tools server "$JAZZ_APP_ID" \
 When the server receives a request, it tries each auth method in priority order and uses the first match:
 
 1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
-2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
+2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the configured `--jwks-url` or `--jwt-public-key`.
 3. **Local-first auth**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header with a self-signed local-first token.
 4. **No session**&hairsp;—&hairsp;none of the above matched.
 
@@ -565,7 +565,7 @@ We can define permissions in `permissions.ts`:
 
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha deploy`.
+Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha deploy <appId>`.
 
 Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
 
@@ -1311,6 +1311,56 @@ no local-first reconciliation information is discarded.
 | **Source of truth**    | Single authoritative database              | Every client with the same row-history updates sees the same state |
 | **Conflict handling**  | Server rejects or last-request-wins        | Automatic visible-state reconciliation with retained history       |
 
+===PAGE:faq===
+TITLE:FAQ
+DESCRIPTION:Frequently asked questions about Jazz.
+
+In browser apps using the React, Vue, or Svelte Jazz clients, open the devtools console and run:
+
+```ts
+await window.__jazz.clearStorage();
+```
+
+If the page has more than one live Jazz storage context, inspect the available namespaces and then choose one explicitly:
+
+```ts
+window.__jazz.listLiveStorageNamespaces();
+await window.__jazz.clearStorage("my-app::alice");
+```
+
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API.
+
+- Browser persistent storage only.
+- If exactly one live namespace exists, `clearStorage()` uses it automatically.
+- If multiple live namespaces exist, Jazz throws and lists the available namespaces until you choose one.
+- Can be initiated from either leader or follower tabs; Jazz coordinates the reset across tabs for that namespace.
+- Deletes OPFS storage only. It does not clear `localStorage` local-first auth data.
+- Reopens a clean worker/runtime so the same live client remains usable after the wipe.
+
+This is useful when iterating on your schema during development.
+
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+
+Yes. Omit `serverUrl` from your config — data will be persisted locally only.
+
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
+
+No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+
+Jazz may return the following errors when a client's request is rejected by the server:
+
+- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
+  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
+  that operation on the row.
+- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
+  Make sure the client is using a valid auth mode (local-first or external JWT).
+- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
+  catalogue object without the required admin secret. In production, catalogue writes require
+  `--admin-secret`.
+- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
+  server, typically because the query references a table or schema the server doesn't know about.
+  This can happen if the schema hasn't synced yet or if there's a version mismatch.
+
 ===PAGE:getting-started/client-setup===
 TITLE:Client Setup
 DESCRIPTION:Set up Jazz in your app — works out of the box with most frameworks, with manual configuration available when needed.
@@ -1546,11 +1596,12 @@ npx jazz-tools@alpha server "$JAZZ_APP_ID" \
 | `-d, --data-dir `         | Persistent storage directory                                                                                                             | -                             | `./data`                  |
 | `--in-memory`                       | Use in-memory storage instead of files; data is lost when the process exits                                                              | -                             | off                       |
 | `--jwks-url `             | JWKS endpoint for external JWT validation                                                                                                | `JAZZ_JWKS_URL`               | unset                     |
+| `--jwt-public-key ` | Single JWK JSON object or PEM public key for external JWT validation. Accepts inline contents or a path to a key file.                   | `JAZZ_JWT_PUBLIC_KEY`         | unset                     |
 | `--allow-local-first-auth`          | Allow local-first auth (`Authorization: Bearer <self-signed Jazz JWT>`)                                                                  | `JAZZ_ALLOW_LOCAL_FIRST_AUTH` | see `NODE_ENV` note below |
 | `--backend-secret ` | Enable backend session impersonation                                                                                                     | `JAZZ_BACKEND_SECRET`         | unset                     |
 | `--admin-secret `     | Required for `deploy`, `migrations push`, and schema catalogue reads. In development mode, structural schema auto-sync works without it. | `JAZZ_ADMIN_SECRET`           | unset                     |
 
-Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires `--jwks-url`.
+Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 
 ## Backend context setup
 
@@ -2087,7 +2138,9 @@ const todo = computed(() => todos.value?.[0]);
 
   return (
 
-       db.update(app.todos, id, { done: !todo.done })}
+       {
+          db.update(app.todos, id, { done: !todo.done });
+        }}
       />
       {todo.title}
        db.delete(app.todos, id)}>
@@ -2245,6 +2298,7 @@ Then publish the permissions bundle:
 
 ```bash title="Terminal"
 npx jazz-tools@alpha deploy \
+  <your-app-id> \
   --server-url http://127.0.0.1:1625 \
   --admin-secret secret
 ```
@@ -2263,7 +2317,8 @@ Update your client config to use the same app ID, and add `serverUrl`:
 
 Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
 
-Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha deploy`.
+Permissions can be updated without adding a new schema by using
+`npx jazz-tools@alpha deploy <your-app-id>`.
 
 For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
 
@@ -2375,7 +2430,7 @@ const api = new Hono();
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
-- `jwksUrl` or `jwtPublicKey` verifies external JWTs inside `await context.forRequest(req)`. Without either one, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
+- `jwksUrl` verifies external JWTs inside `await context.forRequest(req)`. Without it, the backend only accepts Jazz self-signed tokens unless you set `allowLocalFirstAuth: false`.
 - `dataPath` controls where local server state persists.
 
 Each route handler awaits `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
@@ -2400,7 +2455,7 @@ api.post("/api/todos", async (c) => {
   const db = await context.forRequest(c.req);
   const { title } = await c.req.json();
 
-  const todo = db.insert(schemaApp.todos, {
+  const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
     owner_id: "system",
@@ -2487,8 +2542,8 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
   `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
   Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
-  want to accept external JWTs from your auth provider, also set `jwksUrl` or `jwtPublicKey` so
-  the backend can verify them.
+  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
+  them via JWKS.
 
 ## Authentication
 
@@ -3399,7 +3454,7 @@ Insert from the top down&hairsp;—&hairsp;create the project first, then tasks 
   const session = useSession();
 
   async function handleCreate() {
-    const project = db.insert(app.projects, {
+    const { value: project } = db.insert(app.projects, {
       name: "Website redesign",
     });
 
@@ -3850,46 +3905,6 @@ For most queries and subscriptions, omitting a tier is the right choice: Jazz de
   clients may arrive through edge tiers before being globally available **even if the durability of
   the write is set to 'global'**.
 
-===PAGE:reference/faq===
-TITLE:FAQ
-DESCRIPTION:Frequently asked questions about Jazz.
-
-Call `db.deleteClientStorage()` to delete the local OPFS database for the current namespace:
-
-```ts
-await db.deleteClientStorage();
-```
-
-- Browser worker-backed `Db` only.
-- Must be called from the leader tab; otherwise it logs an error and returns without deleting. Close other tabs first.
-- Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
-- Does not clear `localStorage` local-first auth data.
-- Reopens a clean worker runtime, so the same `db` instance remains usable.
-
-This is useful when iterating on your schema during development.
-
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
-
-Yes. Omit `serverUrl` from your config — data will be persisted locally only.
-
-Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
-
-No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
-
-Jazz may return the following errors when a client's request is rejected by the server:
-
-- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
-  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
-  that operation on the row.
-- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
-  Make sure the client is using a valid auth mode (local-first or external JWT).
-- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
-  catalogue object without the required admin secret. In production, catalogue writes require
-  `--admin-secret`.
-- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
-  server, typically because the query references a table or schema the server doesn't know about.
-  This can happen if the schema hasn't synced yet or if there's a version mismatch.
-
 ===PAGE:reference/framework-patterns===
 TITLE:Framework Patterns
 DESCRIPTION:Side-by-side reference for React/Expo, Vue, and Svelte Jazz APIs.
@@ -4270,14 +4285,11 @@ correct and simple, but worth remembering when including across very large resul
 
 ### Transport
 
-Jazz uses HTTP with binary framing rather than WebSockets or raw SSE text.
+Jazz uses a single WebSocket sync transport plus a small HTTP surface for health and admin reads.
 
-- **Server -> client**: `GET /events?client_id=<uuid>` — a persistent binary stream of
-  length-prefixed JSON frames (`[4-byte u32 BE length][JSON payload]`). Event types include
-  `Connected`, `SyncUpdate`, and `Heartbeat`.
-- **Client -> server**: `POST /sync` — sends row-version updates, query subscription changes, and
-  related sync payloads.
-- **Admin**: `GET /schemas`, `GET /schema/:hash` — schema catalogue reads (requires admin access).
+- **Sync**: `GET /apps/<appId>/ws` upgrades to a WebSocket carrying the typed sync protocol.
+- **Admin**: `GET /apps/<appId>/schemas`, `GET /apps/<appId>/schema/:hash`, and
+  `POST /apps/<appId>/admin/...` handle schema and permissions publication/read flows.
 - **Health**: `GET /health`.
 
 ### Client identity
@@ -4659,7 +4671,7 @@ Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call r
 
 When you change your schema on a shared app, create and push a migration. See [Migrations](/docs/schemas/migrations) for details.
 
-If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage).
+If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/faq#reset-browser-storage).
 
 ## Exporting the app
 
@@ -4719,13 +4731,13 @@ Traditional migration systems run a linear sequence and require peers to converg
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
-   npx jazz-tools@alpha migrations push <fromHash> <toHash>
+   npx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
    ```
 
    If you also want to publish the current schema, the migration and permissions in one step, you can run:
 
    ```bash
-   npx jazz-tools@alpha deploy
+   npx jazz-tools@alpha deploy <appId>
    ```
 
    `deploy` publishes the current schema if the server does not already know it, checks whether the
@@ -4733,7 +4745,7 @@ Traditional migration systems run a linear sequence and require peers to converg
    if needed, and then publishes the current permissions.
 
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha deploy`. See [Permissions](/docs/auth/permissions) for details.
+`npx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 
@@ -4872,8 +4884,8 @@ The Jazz server will detect when there are rows that are not reachable from the 
 In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
-npx jazz-tools@alpha migrations create --fromHash <fromHash>
-npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
+npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
+npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -4887,12 +4899,15 @@ also saves a snapshot of the schema in the local snapshot directory.
 ```bash
 npx jazz-tools@alpha schema export
 npx jazz-tools@alpha schema export --schema-dir ./packages/app
-npx jazz-tools@alpha schema export --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
+npx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
 ```
 
 Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it
 loads the schema from the local snapshot folder or, if missing, from the server.
 `--schema-dir` and `--schema-hash` are mutually exclusive.
+
+Server-backed commands require the app id so Jazz can resolve app-scoped routes like
+`/apps/<appId>/schema/:hash`.
 
 | Flag                   | Default             | Description                                                     |
 | ---------------------- | ------------------- | --------------------------------------------------------------- |
@@ -4904,7 +4919,8 @@ loads the schema from the local snapshot folder or, if missing, from the server.
 
 ## Migration flags
 
-`migrations create` uses flags rather than positional hashes.
+`migrations create` uses flags rather than positional hashes. When it needs to resolve missing
+schema hashes from a server, pass `<appId>` as the leading positional argument.
 
 | Flag                   | Default             | Description                                      |
 | ---------------------- | ------------------- | ------------------------------------------------ |
@@ -4993,15 +5009,14 @@ policies.
 
   const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5075,15 +5090,14 @@ Returns the file row; store its id on your own table.
     mimeType: "application/octet-stream",
   });
 
-  return db.insertDurable(
+  return db.insert(
     app.uploads,
     {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
-    },
-    { tier: "edge" },
-  );
+    }
+  ).wait({ tier: "edge" });
 }
 ```
 
@@ -5285,11 +5299,10 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 
 ## Local-first writes
 
-All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
+All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
-For TypeScript callers that need a replayable handle instead of awaiting immediately, Jazz also exposes persisted-write helpers and explicit batch builders:
+Jazz also exposes explicit batch builders:
 
-- `insertPersisted`, `updatePersisted`, `deletePersisted` return `DbPersistedWrite`
 - `beginTransaction(...)` returns `DbTransaction`
 - `beginDirectBatch(...)` returns `DbDirectBatch`
 
@@ -5370,7 +5383,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 
 ### Partial updates and nullable fields
 
-`update(...)` and `updateDurable(...)` only modify the keys you pass.
+`update(...)` only modify the keys you pass.
 Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
@@ -5399,17 +5412,17 @@ pub async fn clear_nullable_fields(
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
 
-| Tier     | Resolves when                       | Default for    |
-| -------- | ----------------------------------- | -------------- |
-| `local`  | Persisted to local OPFS             | Browser/client |
-| `edge`   | Acknowledged by nearest sync server | Backend/server |
-| `global` | Propagated to global core           | —              |
+| Tier     | Resolves when                       | 
+| -------- | ----------------------------------- | 
+| `local`  | Persisted to local OPFS             | 
+| `edge`   | Acknowledged by nearest sync server | 
+| `global` | Propagated to global core           | 
 
     ```ts
 
-  const { id } = await db.insertDurable(
+  const { id } = await db.insert(
     app.todos,
     {
       title: "Write docs with durability tier",
@@ -5417,11 +5430,10 @@ When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a 
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
-    { tier: "edge" },
-  );
+  ).wait({ tier: "edge" });
 
-  await db.updateDurable(app.todos, id, { done: true }, { tier: "global" });
-  await db.deleteDurable(app.todos, id, { tier: "global" });
+  await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+  await db.delete(app.todos, id).wait({ tier: "global" });
 }
 ```
 
@@ -5444,33 +5456,31 @@ pub async fn write_todo_with_default_durability(
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
-Need to clear local data during development? See [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)
+Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
 
-## Persisted write handles
+## Write handles
 
-Use the persisted variants when you want to keep a stable handle to a write after issuing it locally.
+Write handles let you wait for a write to persisted up to a specific durability tier, and also access the value (in the case of inserts).
 
 ```ts
-const pending = db.insertPersisted(app.todos, {
+const pending = db.insert(app.todos, {
   title: "Ship review fixes",
   done: false,
 });
 
-console.log(pending.batchId());
-console.log(pending.localBatchRecord());
+console.log(pending.batchId);
 
 try {
-  const row = await pending.wait();
+  const row = await pending.wait({ tier: "global" });
   console.log(row.id);
 } catch (error) {
   if (error instanceof PersistedWriteRejectedError) {
     console.error(error.code, error.reason);
-    pending.acknowledgeRejectedBatch();
   }
 }
 ```
 
-`wait()` resolves when the batch reaches the requested durability tier. If the batch is replayably rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
 ## Explicit batches
 
@@ -5480,6 +5490,7 @@ Use an explicit transaction when several writes should settle together after an 
 const tx = db.beginTransaction(app.todos);
 
 tx.insert(app.todos, { title: "Draft copy", done: false });
+const stagedDrafts = await tx.all(app.todos.where({ done: false }));
 tx.update(app.todos, todoId, { done: true });
 
 const batchId = tx.commit();
@@ -5497,4 +5508,4 @@ batch.update(app.todos, todoId, { done: true });
 console.log(batch.batchId());
 ```
 
-Both builders can also issue persisted writes, expose `localBatchRecord()` / `localBatchRecords()`, and let you acknowledge replayable rejections by batch id.
+`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.

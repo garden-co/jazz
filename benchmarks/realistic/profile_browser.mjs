@@ -535,18 +535,18 @@ function buildInitScript(schemaTables) {
         const allowedFolders = [];
         const deniedFolders = [];
         const ts = nowMicros();
-        const allowedRoot = await db.insertDurable(folderTable, {
+        const allowedRoot = await db.insert(folderTable, {
           parent_id: null,
           owner_id: owners.allowedOwnerId,
           title: "allowed-root",
           updated_at: ts,
-        }, { tier: "local" });
-        const deniedRoot = await db.insertDurable(folderTable, {
+        }).wait({ tier: "local" });
+        const deniedRoot = await db.insert(folderTable, {
           parent_id: null,
           owner_id: owners.deniedOwnerId,
           title: "denied-root",
           updated_at: ts + 1,
-        }, { tier: "local" });
+        }).wait({ tier: "local" });
         allowedFolders.push(allowedRoot.id);
         deniedFolders.push(deniedRoot.id);
         for (let i = 2; i < totalFolders; i += 1) {
@@ -554,12 +554,12 @@ function buildInitScript(schemaTables) {
           const parent = allowedChain
             ? allowedFolders[allowedFolders.length - 1]
             : deniedFolders[deniedFolders.length - 1];
-          const row = await db.insertDurable(folderTable, {
+          const row = await db.insert(folderTable, {
             parent_id: parent,
             owner_id: allowedChain ? owners.allowedOwnerId : owners.deniedOwnerId,
             title: "folder-" + i,
             updated_at: ts + i,
-          }, { tier: "local" });
+          }).wait({ tier: "local" });
           if (allowedChain) allowedFolders.push(row.id);
           else deniedFolders.push(row.id);
         }
@@ -572,13 +572,13 @@ function buildInitScript(schemaTables) {
           const editorId = useAllowed
             ? (allowAllowedUserWrite ? owners.allowedOwnerId : owners.intermediateOwnerId)
             : owners.deniedOwnerId;
-          await db.insertDurable(documentTable, {
+          await db.insert(documentTable, {
             folder_id: folderId,
             editor_id: editorId,
             body: "doc-" + i,
             revision: 0,
             updated_at: ts + 10000 + i,
-          }, { tier: "local" });
+          }).wait({ tier: "local" });
         }
       }
       async function seedDataset(db, config) {

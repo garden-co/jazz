@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
 const mockUseAll = vi.fn();
-const mockUpdateDurable = vi.fn();
-const mockInsertDurable = vi.fn();
-const mockDeleteDurable = vi.fn();
+const mockUpdate = vi.fn();
+const mockInsert = vi.fn();
+const mockDelete = vi.fn();
+const mockUpdateWait = vi.fn();
+const mockInsertWait = vi.fn();
+const mockDeleteWait = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
 
@@ -61,9 +64,9 @@ const mockWasmSchema = {
 vi.mock("jazz-tools/react", () => ({
   useAll: (...args: unknown[]) => mockUseAll(...args),
   useDb: () => ({
-    updateDurable: (...args: unknown[]) => mockUpdateDurable(...args),
-    insertDurable: (...args: unknown[]) => mockInsertDurable(...args),
-    deleteDurable: (...args: unknown[]) => mockDeleteDurable(...args),
+    update: (...args: unknown[]) => mockUpdate(...args),
+    insert: (...args: unknown[]) => mockInsert(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
   }),
 }));
 
@@ -115,12 +118,24 @@ describe("TableDataGrid", () => {
       ],
     };
 
-    mockUpdateDurable.mockReset();
-    mockInsertDurable.mockReset();
-    mockDeleteDurable.mockReset();
-    mockUpdateDurable.mockResolvedValue(undefined);
-    mockInsertDurable.mockResolvedValue({ id: "new-row" });
-    mockDeleteDurable.mockResolvedValue(undefined);
+    mockUpdate.mockReset();
+    mockInsert.mockReset();
+    mockDelete.mockReset();
+    mockUpdateWait.mockReset();
+    mockInsertWait.mockReset();
+    mockDeleteWait.mockReset();
+    mockUpdateWait.mockResolvedValue(undefined);
+    mockInsertWait.mockResolvedValue(undefined);
+    mockDeleteWait.mockResolvedValue(undefined);
+    mockUpdate.mockImplementation(() => ({
+      wait: (...args: unknown[]) => mockUpdateWait(...args),
+    }));
+    mockInsert.mockImplementation(() => ({
+      wait: (...args: unknown[]) => mockInsertWait(...args),
+    }));
+    mockDelete.mockImplementation(() => ({
+      wait: (...args: unknown[]) => mockDeleteWait(...args),
+    }));
     mockUseAll.mockReset();
     mockUseAll.mockImplementation((query) => {
       const builtQuery =
@@ -263,16 +278,18 @@ describe("TableDataGrid", () => {
     fireEvent.change(within(ownerField).getByRole("textbox"), { target: { value: "owner-c" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(mockUpdateDurable).toHaveBeenCalledWith(
-      expect.objectContaining({ _table: "todos" }),
-      "row-2",
-      expect.objectContaining({
-        title: "zeta updated",
-        done: true,
-        owner_id: "owner-c",
-      }),
-      { tier: "local" },
-    );
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({
+          title: "zeta updated",
+          done: true,
+          owner_id: "owner-c",
+        }),
+      );
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
+    });
   });
 
   it("preserves unsaved edits when the current row live-updates", async () => {
@@ -310,7 +327,7 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(mockUpdateDurable).toHaveBeenCalledWith(
+      expect(mockUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
         expect.objectContaining({
@@ -319,8 +336,8 @@ describe("TableDataGrid", () => {
           meta: { done: true },
           owner_id: "owner-a",
         }),
-        { tier: "local" },
       );
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -353,19 +370,19 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("Queued")).not.toBeNull();
     expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
     expect(screen.getByText("zeta queued")).not.toBeNull();
-    expect(mockUpdateDurable).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockUpdateDurable).toHaveBeenCalledWith(
+      expect(mockUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
         expect.objectContaining({
           title: "zeta queued",
         }),
-        { tier: "local" },
       );
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
 
     expect(screen.queryByText(/queued change across/i)).toBeNull();
@@ -381,19 +398,19 @@ describe("TableDataGrid", () => {
 
     expect(screen.getByText("Queued")).not.toBeNull();
     expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
-    expect(mockUpdateDurable).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockUpdateDurable).toHaveBeenCalledWith(
+      expect(mockUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
         expect.objectContaining({
           done: true,
         }),
-        { tier: "local" },
       );
+      expect(mockUpdateWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -534,7 +551,7 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("row-2")).toBeNull();
   });
 
-  it("opens insert sidebar and inserts a new row", () => {
+  it("opens insert sidebar and inserts a new row", async () => {
     renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Insert" }));
@@ -547,15 +564,17 @@ describe("TableDataGrid", () => {
     fireEvent.change(within(doneField).getByRole("combobox"), { target: { value: "true" } });
     fireEvent.click(screen.getAllByRole("button", { name: "Insert" })[1] as Element);
 
-    expect(mockInsertDurable).toHaveBeenCalledWith(
-      expect.objectContaining({ _table: "todos" }),
-      expect.objectContaining({
-        title: "new todo",
-        done: true,
-        meta: null,
-      }),
-      { tier: "local" },
-    );
+    await waitFor(() => {
+      expect(mockInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        expect.objectContaining({
+          title: "new todo",
+          done: true,
+          meta: null,
+        }),
+      );
+      expect(mockInsertWait).toHaveBeenCalledWith({ tier: "local" });
+    });
   });
 
   it("closes sidebar when clicking outside", () => {
@@ -583,11 +602,11 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => {
-      expect(mockDeleteDurable).toHaveBeenCalledWith(
+      expect(mockDelete).toHaveBeenCalledWith(
         expect.objectContaining({ _table: "todos" }),
         "row-2",
-        { tier: "local" },
       );
+      expect(mockDeleteWait).toHaveBeenCalledWith({ tier: "local" });
     });
   });
 
@@ -603,6 +622,6 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     fireEvent.click(screen.getByRole("button", { name: "No" }));
 
-    expect(mockDeleteDurable).not.toHaveBeenCalled();
+    expect(mockDelete).not.toHaveBeenCalled();
   });
 });

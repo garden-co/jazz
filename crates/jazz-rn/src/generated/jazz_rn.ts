@@ -45,6 +45,7 @@ import {
   type UniffiReferenceHolder,
   type UniffiRustCallStatus,
   AbstractFfiConverterByteArray,
+  FfiConverterArray,
   FfiConverterBool,
   FfiConverterCallback,
   FfiConverterInt32,
@@ -682,6 +683,7 @@ const FfiConverterTypeJazzRnError = (() => {
 })();
 
 export interface RnRuntimeInterface {
+  acknowledgeRejectedBatch(batchId: string) /*throws*/ : boolean;
   addClient() /*throws*/ : string;
   addServer() /*throws*/ : void;
   /**
@@ -716,6 +718,7 @@ export interface RnRuntimeInterface {
    * Disconnect from the Jazz server and drop the transport handle.
    */
   disconnect(): void;
+  drainRejectedBatchIds() /*throws*/ : Array<string>;
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -736,6 +739,8 @@ export interface RnRuntimeInterface {
     writeContextJson: string | undefined,
     objectId: string | undefined
   ) /*throws*/ : string;
+  loadLocalBatchRecord(batchId: string) /*throws*/ : string | undefined;
+  loadLocalBatchRecords() /*throws*/ : string;
   /**
    * Register a callback that fires when the transport receives an auth
    * rejection from the server during the WS handshake.
@@ -762,6 +767,7 @@ export interface RnRuntimeInterface {
     tier: string | undefined
   ) /*throws*/ : string;
   removeServer() /*throws*/ : void;
+  sealBatch(batchId: string) /*throws*/ : void;
   setClientRole(clientId: string, role: string) /*throws*/ : void;
   subscribe(
     queryJson: string,
@@ -818,6 +824,24 @@ export class RnRuntime
     this[pointerLiteralSymbol] = pointer;
     this[destructorGuardSymbol] =
       uniffiTypeRnRuntimeObjectFactory.bless(pointer);
+  }
+
+  acknowledgeRejectedBatch(batchId: string): boolean /*throws*/ {
+    return FfiConverterBool.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
   }
 
   addClient(): string /*throws*/ {
@@ -993,6 +1017,23 @@ export class RnRuntime
     );
   }
 
+  drainRejectedBatchIds(): Array<string> /*throws*/ {
+    return FfiConverterArrayString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -1090,6 +1131,41 @@ export class RnRuntime
             FfiConverterString.lower(valuesJson),
             FfiConverterOptionalString.lower(writeContextJson),
             FfiConverterOptionalString.lower(objectId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  loadLocalBatchRecord(batchId: string): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  loadLocalBatchRecords(): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             callStatus
           );
         },
@@ -1211,6 +1287,22 @@ export class RnRuntime
       /*caller:*/ (callStatus) => {
         nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  sealBatch(batchId: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(batchId),
           callStatus
         );
       },
@@ -1434,6 +1526,9 @@ const FfiConverterOptionalTypeBatchedTickCallback = new FfiConverterOptional(
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
+// FfiConverter for Array<string>
+const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
+
 /**
  * This should be called before anything else.
  *
@@ -1477,6 +1572,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_func_mint_local_first_token'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch() !==
+    54914
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch'
     );
   }
   if (
@@ -1552,6 +1655,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids() !==
+    62045
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription() !==
     22451
   ) {
@@ -1589,6 +1700,22 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record() !==
+    21509
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records() !==
+    57451
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records'
     );
   }
   if (
@@ -1637,6 +1764,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_remove_server'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch() !==
+    59278
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_seal_batch'
     );
   }
   if (

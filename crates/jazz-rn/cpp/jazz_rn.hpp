@@ -39,6 +39,9 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_fn_constructor_rnruntime_new(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_add_client(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -66,6 +69,9 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -79,6 +85,15 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
@@ -97,6 +112,9 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -113,6 +131,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
@@ -138,6 +159,10 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_add_client(
@@ -167,6 +192,10 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value
+  cpp_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -180,6 +209,17 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value
+  cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -198,6 +238,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(
@@ -219,6 +262,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_constructor_rnruntime_new(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value

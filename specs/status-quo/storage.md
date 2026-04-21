@@ -233,4 +233,4 @@ That means:
 | `crates/jazz-tools/src/row_format.rs`         | Shared row encoding                                            |
 | `crates/jazz-wasm/src/runtime.rs`             | Browser runtime bridge into storage                            |
 | `crates/jazz-napi/src/lib.rs`                 | SQLite-backed NAPI runtime                                     |
-| `crates/jazz-cloud-server/src/server.rs`      | RocksDB-backed server runtime                                  |
+| `crates/jazz-tools/src/server/hosted.rs`      | Hosted server runtime wiring over the durable storage backends |

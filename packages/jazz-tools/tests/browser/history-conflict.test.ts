@@ -124,7 +124,7 @@ describe("History & Conflict Management", () => {
     // Alice inserts a todo
     const uniqueTitle = `original-${Date.now()}`;
     const { id } = await withTimeout(
-      dbAlice.insertDurable(todos, { title: uniqueTitle, done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: uniqueTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert(worker) did not resolve",
     );
@@ -141,8 +141,8 @@ describe("History & Conflict Management", () => {
     // Both update concurrently — creates diverged tips (true conflict).
     // Promise.all ensures neither awaits the other's round-trip first.
     await Promise.all([
-      dbAlice.updateDurable(todos, id, { title: "alice-edit" }, { tier: "local" }),
-      dbBob.updateDurable(todos, id, { title: "bob-edit" }, { tier: "local" }),
+      dbAlice.update(todos, id, { title: "alice-edit" }).wait({ tier: "local" }),
+      dbBob.update(todos, id, { title: "bob-edit" }).wait({ tier: "local" }),
     ]);
 
     // Both must converge to the same final title.
@@ -172,7 +172,7 @@ describe("History & Conflict Management", () => {
 
     // Alice inserts
     const { id } = await withTimeout(
-      dbAlice.insertDurable(todos, { title: "original", done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: "original", done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert did not resolve",
     );
@@ -187,7 +187,7 @@ describe("History & Conflict Management", () => {
     );
 
     // Alice updates
-    await dbAlice.updateDurable(todos, id, { title: "updated-by-alice" }, { tier: "local" });
+    await dbAlice.update(todos, id, { title: "updated-by-alice" }).wait({ tier: "local" });
 
     // Alice sees her own update locally
     await waitForQuery(
@@ -227,12 +227,12 @@ describe("History & Conflict Management", () => {
 
     // Both create concurrently
     await withTimeout(
-      dbAlice.insertDurable(todos, { title: milkTitle, done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: milkTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert did not resolve",
     );
     await withTimeout(
-      dbBob.insertDurable(todos, { title: eggsTitle, done: false }, { tier: "local" }),
+      dbBob.insert(todos, { title: eggsTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Bob insert did not resolve",
     );
@@ -280,7 +280,7 @@ describe("History & Conflict Management", () => {
     // Alice inserts a todo
     const originalTitle = `sub-test-${Date.now()}`;
     const { id } = await withTimeout(
-      dbAlice.insertDurable(todos, { title: originalTitle, done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: originalTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert did not resolve",
     );
@@ -311,7 +311,7 @@ describe("History & Conflict Management", () => {
 
     // Bob updates (durable so it propagates)
     const bobTitle = `bob-updated-${Date.now()}`;
-    await dbBob.updateDurable(todos, id, { title: bobTitle }, { tier: "local" });
+    await dbBob.update(todos, id, { title: bobTitle }).wait({ tier: "local" });
 
     // Alice's subscription should fire with the update
     await waitForCondition(
@@ -348,7 +348,7 @@ describe("History & Conflict Management", () => {
     // Alice inserts a todo
     const originalTitle = `fresh-test-${Date.now()}`;
     const { id } = await withTimeout(
-      dbAlice.insertDurable(todos, { title: originalTitle, done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: originalTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert did not resolve",
     );
@@ -364,8 +364,8 @@ describe("History & Conflict Management", () => {
 
     // Both update concurrently — creates diverged tips (true conflict).
     await Promise.all([
-      dbAlice.updateDurable(todos, id, { title: "alice-edit" }, { tier: "local" }),
-      dbBob.updateDurable(todos, id, { title: "bob-edit" }, { tier: "local" }),
+      dbAlice.update(todos, id, { title: "alice-edit" }).wait({ tier: "local" }),
+      dbBob.update(todos, id, { title: "bob-edit" }).wait({ tier: "local" }),
     ]);
 
     // Wait for convergence between Alice and Bob
@@ -420,7 +420,7 @@ describe("History & Conflict Management", () => {
     const dbBob = await createReadySyncedDb(ctx, "hc-bob-fields", token, testingServer);
 
     const { id } = await withTimeout(
-      dbAlice.insertDurable(todos, { title: "task", done: false }, { tier: "local" }),
+      dbAlice.insert(todos, { title: "task", done: false }).wait({ tier: "local" }),
       10000,
       "Alice insert did not resolve",
     );
@@ -435,8 +435,8 @@ describe("History & Conflict Management", () => {
 
     // Alice updates title, Bob updates done — concurrently
     await Promise.all([
-      dbAlice.updateDurable(todos, id, { title: "alice-title" }, { tier: "local" }),
-      dbBob.updateDurable(todos, id, { done: true }, { tier: "local" }),
+      dbAlice.update(todos, id, { title: "alice-title" }).wait({ tier: "local" }),
+      dbBob.update(todos, id, { done: true }).wait({ tier: "local" }),
     ]);
 
     // Both must converge to the same state
@@ -468,7 +468,7 @@ async function createReadySyncedDb(
     async () => {
       try {
         await withTimeout(
-          db.insertDurable(todos, { title: warmupTitle, done: false }, { tier: "local" }),
+          db.insert(todos, { title: warmupTitle, done: false }).wait({ tier: "local" }),
           2_000,
           `${label} warmup insert did not resolve`,
         );
@@ -486,11 +486,9 @@ async function createReadySyncedDb(
 
 async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<void> {
   const { id: aliceToBobId } = await withTimeout(
-    dbAlice.insertDurable(
-      todos,
-      { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false },
-      { tier: "local" },
-    ),
+    dbAlice
+      .insert(todos, { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false })
+      .wait({ tier: "local" }),
     10_000,
     `${label} Alice->Bob peer sync insert did not resolve`,
   );
@@ -504,11 +502,9 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
   );
 
   const { id: bobToAliceId } = await withTimeout(
-    dbBob.insertDurable(
-      todos,
-      { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false },
-      { tier: "local" },
-    ),
+    dbBob
+      .insert(todos, { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false })
+      .wait({ tier: "local" }),
     10_000,
     `${label} Bob->Alice peer sync insert did not resolve`,
   );

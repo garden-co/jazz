@@ -53,16 +53,14 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db.insertDurable(
-        app.messages,
-        {
+      await db
+        .insert(app.messages, {
           author_name: authorName,
           chat_id: chatId,
           text: messageText.trim(),
           sent_at: new Date(),
-        },
-        { tier: "edge" },
-      );
+        })
+        .wait({ tier: "edge" });
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
@@ -76,7 +74,7 @@ export function ChatPanel({
     setDeleteError(null);
 
     try {
-      await db.deleteDurable(app.messages, messageId, { tier: "edge" });
+      await db.delete(app.messages, messageId).wait({ tier: "edge" });
     } catch (error) {
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {

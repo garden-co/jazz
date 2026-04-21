@@ -44,6 +44,11 @@ interface NativeModuleInterface {
     dataPath: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+    ptr: bigint,
+    batchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_client(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -88,6 +93,10 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
     ptr: bigint,
     handle: bigint,
@@ -115,6 +124,15 @@ interface NativeModuleInterface {
     valuesJson: Uint8Array,
     writeContextJson: Uint8Array,
     objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+    ptr: bigint,
+    batchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+    ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
@@ -147,6 +165,11 @@ interface NativeModuleInterface {
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
     ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+    ptr: bigint,
+    batchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
@@ -210,6 +233,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms(): number;
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
@@ -219,17 +243,21 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
