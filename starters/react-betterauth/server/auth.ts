@@ -25,7 +25,11 @@ export const auth = betterAuth({
   baseURL: APP_ORIGIN,
   secret: BETTER_AUTH_SECRET,
   database: memoryAdapter(authMemoryDb),
-  trustedOrigins: [APP_ORIGIN, "http://localhost:5173"],
+  trustedOrigins: (request) => {
+    const origin = request?.headers.get("origin");
+    if (origin && new URL(origin).hostname === "localhost") return [origin];
+    return [APP_ORIGIN];
+  },
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,

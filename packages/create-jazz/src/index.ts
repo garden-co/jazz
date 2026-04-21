@@ -194,7 +194,11 @@ async function main() {
           }
           if (hosting === "hosted") {
             const envKeys = envKeysForStarter(starter);
-            if (envKeys) {
+            if (!envKeys) {
+              log.warn(
+                `Skipping hosted provisioning: no env key map registered for starter "${starter}".`,
+              );
+            } else {
               await runHostedInit({
                 dir,
                 cloudSyncUrl: CLOUD_SYNC_URL,
