@@ -1,6 +1,7 @@
 ---
 title: Local-first auth
 description: "Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
+reviewedAt: "22485728"
 ---
 
 Local-first auth lets users start using your app immediately — no sign-up, no server round-trip. Jazz generates a stable identity from a secret stored on the device. Without a recovery mechanism, that identity lives only on the device — if the secret is lost, it's gone. Linking to an external provider at sign-up is one way to make the identity durable and recoverable.
@@ -29,7 +30,7 @@ Use `useLocalFirstAuth()` to manage the user's secret. On first load it generate
 Local-first auth is enabled by default in development. In production, enable it explicitly:
 
 ```bash
-jazz-tools server <APP_ID> --allow-local-first-auth
+pnpm dlx jazz-tools@alpha server <APP_ID> --allow-local-first-auth
 ```
 
 No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.

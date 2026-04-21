@@ -1715,9 +1715,15 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
 }
 
 export async function deploy(options: DeployOptions): Promise<void> {
-  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  const compiled = await loadCompiledSchema(options.schemaDir);
   console.log(`Loaded current schema from ${compiled.schemaFile}.`);
-  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
+
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
+  }
 
   let localSchemaHash = await resolveStoredStructuralSchemaHash(
     options.appId,
@@ -1739,6 +1745,13 @@ export async function deploy(options: DeployOptions): Promise<void> {
       `The current schema is already stored in the server as ${shortSchemaHash(localSchemaHash)}; skipping publish.`,
     );
   }
+
+  if (!compiled.permissions || !compiled.permissionsFile) {
+    console.log("No permissions.ts found; skipping permissions publish.");
+    return;
+  }
+
+  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
 
   const { head: currentHead } = await fetchPermissionsHead(options.serverUrl, {
     appId: options.appId,

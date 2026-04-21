@@ -70,6 +70,7 @@ pub enum StorageError {
         key_bytes: usize,
         max_key_bytes: usize,
     },
+    SecurityError(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -87,6 +88,7 @@ impl std::fmt::Display for StorageError {
                 f,
                 "indexed value too large for {table}.{column} on branch {branch}: index key would be {key_bytes} bytes (max {max_key_bytes})"
             ),
+            StorageError::SecurityError(message) => write!(f, "security error: {message}"),
         }
     }
 }

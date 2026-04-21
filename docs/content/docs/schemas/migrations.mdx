@@ -1,7 +1,7 @@
 ---
 title: Migrations
 description: Structural schema evolution workflow and reviewed migration edges.
-reviewedAt: "f6535a533"
+reviewedAt: "22485728"
 ---
 
 <Callout type="info" title="You can skip this first">
@@ -17,34 +17,34 @@ Traditional migration systems run a linear sequence and require peers to converg
 1. If this is the first migration you are creating, run:
 
    ```bash
-   npx jazz-tools@alpha migrations create
+   pnpm dlx jazz-tools@alpha migrations create
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools@alpha validate` to catch authoring errors
-   before connecting.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to ensure policies
+   are valid before they are deployed. `deploy` does not run these checks.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
-   npx jazz-tools@alpha migrations create --name <your-migration-name>
+   pnpm dlx jazz-tools@alpha migrations create --name <your-migration-name>
    ```
 
    By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
-5. **Review and customise**&hairsp;—&hairsp; the migration, if needed (see below).
+5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
-   npx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
+   pnpm dlx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
    ```
 
    If you also want to publish the current schema, the migration and permissions in one step, you can run:
 
    ```bash
-   npx jazz-tools@alpha deploy <appId>
+   pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
    `deploy` publishes the current schema if the server does not already know it, checks whether the
@@ -52,7 +52,7 @@ Traditional migration systems run a linear sequence and require peers to converg
    if needed, and then publishes the current permissions.
 
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
+`pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 
@@ -110,8 +110,8 @@ The Jazz server will detect when there are rows that are not reachable from the 
 In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
-npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
-npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -119,13 +119,13 @@ server and saves a snapshot in `migrations/snapshots/`.
 
 ## Exporting the compiled schema
 
-`npx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
+`pnpm dlx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
-npx jazz-tools@alpha schema export
-npx jazz-tools@alpha schema export --schema-dir ./packages/app
-npx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
+pnpm dlx jazz-tools@alpha schema export
+pnpm dlx jazz-tools@alpha schema export --schema-dir ./packages/app
+pnpm dlx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
 ```
 
 Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it

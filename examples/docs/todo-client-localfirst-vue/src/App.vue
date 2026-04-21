@@ -3,7 +3,7 @@ import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 import TodoList from "./TodoList.vue";
 
 const client = createJazzClient({
-  appId: "my-todo-app",
+  appId: "<your-app-id>",
 });
 </script>
 

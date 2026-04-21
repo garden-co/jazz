@@ -7,6 +7,7 @@
     "dev": "concurrently --kill-others-on-fail --names server,vite \"pnpm dev:server\" \"pnpm dev:vite\"",
     "dev:vite": "wait-on --timeout 20000 http-get://127.0.0.1:3001/health && vite",
     "dev:server": "tsx watch --env-file=.env server/index.ts",
+    "prebuild": "node scripts/ensure-env.js",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",
     "test:e2e": "playwright test"

@@ -7,7 +7,7 @@ export function App() {
   return (
     <JazzProvider
       config={{
-        appId: "my-todo-app",
+        appId: "<your-app-id>",
       }}
     >
       <SafeAreaView style={{ flex: 1 }}>
