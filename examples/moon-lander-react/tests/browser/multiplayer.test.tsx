@@ -319,7 +319,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       // collectDeposit now uses DELETE+INSERT so the deposit gets a new ID.
       // The game engine's collectedIds tracks the OLD ID, so deposit-count
       // doesn't reflect the collection. Use sync-uncollected (raw edge count)
-      // which correctly drops when deleteDurable fires WHERE EXIT.
+      // which correctly drops when delete fires WHERE EXIT.
       const syncEl = el.querySelector('[data-testid="sync-debug"]')!;
       const countAfterCollect = parseInt(syncEl.getAttribute("data-sync-uncollected") ?? "0", 10);
       const collected = countBefore - countAfterCollect;
