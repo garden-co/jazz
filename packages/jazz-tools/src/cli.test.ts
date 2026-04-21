@@ -2358,6 +2358,56 @@ export default s.defineMigration({
     expect(logs.some((line) => line.includes("Warning: The new permissions schema"))).toBe(true);
     expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
   });
+
+  it("warns about tables with no explicit permission policy", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        return new Response(
+          JSON.stringify({ objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", hash: schemaHash }),
+          { status: 201 },
+        );
+      }
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+      }
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      deploy({
+        appId: APP_ID,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+        migrationsDir: join(root, "migrations"),
+      }),
+    );
+
+    const warnings = logs.filter((line) => line.includes("has no explicit"));
+    expect(warnings.length).toBeGreaterThan(0);
+  });
 });
 
 function runBin(
