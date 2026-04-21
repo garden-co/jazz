@@ -1158,15 +1158,6 @@ impl QueryManager {
             };
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
-            if subscription.sync_backed
-                && !subscription.settled_once
-                && !subscription.query_frontier_complete
-                && self.sync_manager.has_servers_or_pending_servers()
-            {
-                tracing::trace!("sync-backed query frontier incomplete, deferring settle");
-                self.subscriptions.insert(sub_id, subscription);
-                continue;
-            }
             let branches = subscription.branches.clone();
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
@@ -1238,19 +1229,6 @@ impl QueryManager {
                     removed = delta.removed.len(),
                     "settle delta"
                 );
-            }
-
-            if !subscription.settled_once
-                && !subscription.query_frontier_complete
-                && self.sync_manager.has_servers_or_pending_servers()
-            {
-                // Graph state updated by settle(), but don't deliver until the
-                // initial upstream frontier has been replayed — or until every
-                // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
-                // which means nothing upstream is going to replay.
-                tracing::trace!("query frontier incomplete, holding first delivery");
-                self.subscriptions.insert(sub_id, subscription);
-                continue;
             }
 
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
@@ -1621,12 +1599,18 @@ impl QueryManager {
 
         if local_update {
             self.mark_subscriptions_dirty_local(&logical_table);
+            self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
+        } else if let Some((previous_tier, current_tier)) =
+            Self::pure_confirmed_tier_change(&update)
+        {
+            self.mark_subscriptions_dirty_for_confirmed_tier_change(
+                &logical_table,
+                update.object_id,
+                previous_tier,
+                current_tier,
+            );
         } else {
             self.mark_subscriptions_dirty(&logical_table);
-        }
-        if local_update {
-            self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
-        } else {
             self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
         }
     }
@@ -1655,6 +1639,96 @@ impl QueryManager {
             if Self::subscription_involves_table(&server_sub.graph, table) {
                 server_sub.graph.mark_dirty_for_table(table);
             }
+        }
+    }
+
+    fn pure_confirmed_tier_change(
+        update: &RowVisibilityChange,
+    ) -> Option<(Option<DurabilityTier>, Option<DurabilityTier>)> {
+        let previous = update.previous_row.as_ref()?;
+        if previous.confirmed_tier == update.row.confirmed_tier {
+            return None;
+        }
+
+        let mut normalized_previous = previous.clone();
+        normalized_previous.confirmed_tier = update.row.confirmed_tier;
+        (normalized_previous == update.row)
+            .then_some((previous.confirmed_tier, update.row.confirmed_tier))
+    }
+
+    fn confirmed_tier_satisfies(
+        confirmed_tier: Option<DurabilityTier>,
+        required_tier: DurabilityTier,
+    ) -> bool {
+        confirmed_tier.is_some_and(|confirmed| confirmed >= required_tier)
+    }
+
+    fn effective_required_tier_for_subscription_row(
+        subscription: &QuerySubscription,
+        row_id: ObjectId,
+        has_remote_query_scope_snapshot: bool,
+        has_durability_identity: bool,
+    ) -> Option<DurabilityTier> {
+        let lacks_authoritative_remote_scope = subscription.sync_backed
+            && subscription.local_updates == LocalUpdates::Immediate
+            && !has_remote_query_scope_snapshot;
+        let has_authoritative_remote_scope = subscription.sync_backed
+            && subscription.query_frontier_complete
+            && has_remote_query_scope_snapshot
+            && (subscription.propagation == QueryPropagation::Full || !has_durability_identity);
+
+        if has_authoritative_remote_scope
+            || lacks_authoritative_remote_scope
+            || (subscription.local_updates == LocalUpdates::Immediate
+                && subscription.pending_local_row_ids.contains(&row_id))
+        {
+            None
+        } else {
+            subscription.durability_tier
+        }
+    }
+
+    fn mark_subscriptions_dirty_for_confirmed_tier_change(
+        &mut self,
+        table: &str,
+        id: ObjectId,
+        previous_tier: Option<DurabilityTier>,
+        current_tier: Option<DurabilityTier>,
+    ) {
+        let has_durability_identity = self.sync_manager.has_durability_identity();
+        let remote_scope_snapshots: HashSet<_> = self
+            .subscriptions
+            .keys()
+            .copied()
+            .filter(|sub_id| {
+                self.sync_manager
+                    .has_remote_query_scope_snapshot(QueryId(sub_id.0))
+            })
+            .collect();
+
+        for (sub_id, subscription) in &mut self.subscriptions {
+            if !Self::subscription_involves_table(&subscription.graph, table) {
+                continue;
+            }
+
+            let required_tier = Self::effective_required_tier_for_subscription_row(
+                subscription,
+                id,
+                remote_scope_snapshots.contains(sub_id),
+                has_durability_identity,
+            );
+            let Some(required_tier) = required_tier else {
+                continue;
+            };
+
+            let visibility_changed = Self::confirmed_tier_satisfies(previous_tier, required_tier)
+                != Self::confirmed_tier_satisfies(current_tier, required_tier);
+            if !visibility_changed {
+                continue;
+            }
+
+            subscription.graph.mark_dirty_for_table(table);
+            subscription.graph.mark_row_updated(id);
         }
     }
 

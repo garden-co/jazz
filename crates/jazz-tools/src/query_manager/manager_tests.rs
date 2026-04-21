@@ -10825,7 +10825,7 @@ fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
 }
 
 #[test]
-fn sync_backed_subscription_waiting_for_frontier_does_not_repeatedly_reload_visible_rows() {
+fn sync_backed_subscription_keeps_initial_rows_visible_without_reloading_on_tier_confirmations() {
     use crate::sync_manager::{InboxEntry, QueryId, ServerId, Source, SyncPayload};
     use uuid::Uuid;
 
@@ -10855,7 +10855,7 @@ fn sync_backed_subscription_waiting_for_frontier_does_not_repeatedly_reload_visi
         )
         .unwrap();
     qm.process(&mut storage);
-    let _initial_query_row_loads = storage.query_row_loads();
+    let initial_query_row_loads = storage.query_row_loads();
 
     let subscription = qm
         .subscriptions
@@ -10866,12 +10866,19 @@ fn sync_backed_subscription_waiting_for_frontier_does_not_repeatedly_reload_visi
         "subscription should still be waiting on upstream QuerySettled"
     );
     assert!(
-        !subscription.settled_once,
-        "subscription should not mark its first delivery complete before QuerySettled"
+        subscription.settled_once,
+        "subscription should deliver initial local rows before QuerySettled arrives"
     );
     assert!(
-        subscription.graph.has_dirty_nodes(),
-        "frontier-waiting subscriptions should keep their graph dirty until the first upstream frontier completes"
+        !subscription.graph.has_dirty_nodes(),
+        "initial delivery should still settle the graph"
+    );
+
+    let initial_results = qm.get_subscription_results(sub_id);
+    assert_eq!(initial_results.len(), 1);
+    assert_eq!(
+        initial_results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
     );
 
     for confirmed_tier in [
@@ -10891,17 +10898,23 @@ fn sync_backed_subscription_waiting_for_frontier_does_not_repeatedly_reload_visi
         qm.process(&mut storage);
     }
 
+    assert_eq!(
+        storage.query_row_loads(),
+        initial_query_row_loads,
+        "upstream tier confirmations should not keep reloading rows whose visibility is unchanged"
+    );
+
     let subscription = qm
         .subscriptions
         .get(&sub_id)
         .expect("subscription should exist");
     assert!(
-        subscription.graph.has_dirty_nodes(),
-        "upstream tier confirmations should not clear a held subscription's dirty graph before QuerySettled"
+        !subscription.graph.has_dirty_nodes(),
+        "confirmations whose visibility is unchanged should not dirty the graph"
     );
     assert!(
-        !subscription.settled_once,
-        "upstream tier confirmations should not mark a held subscription as delivered"
+        subscription.settled_once,
+        "confirmations should not revoke the already-delivered initial snapshot"
     );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -10920,15 +10933,15 @@ fn sync_backed_subscription_waiting_for_frontier_does_not_repeatedly_reload_visi
         .expect("subscription should exist");
     assert!(
         subscription.query_frontier_complete,
-        "QuerySettled should release the held frontier"
+        "QuerySettled should release the waiting frontier"
     );
     assert!(
         subscription.settled_once,
-        "frontier completion should allow the held subscription to settle"
+        "frontier completion should preserve the initial delivery"
     );
     assert!(
         !subscription.graph.has_dirty_nodes(),
-        "frontier completion should leave the subscription graph settled"
+        "frontier completion should leave the graph settled"
     );
 
     let results = qm.get_subscription_results(sub_id);
