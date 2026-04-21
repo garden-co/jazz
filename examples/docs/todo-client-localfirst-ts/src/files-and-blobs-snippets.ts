@@ -7,15 +7,13 @@ const EXAMPLE_OWNER_ID = "local:example-owner";
 export async function createUploadFromBlob(db: Db, blob: Blob | File) {
   const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
-  return db.insertDurable(
-    app.uploads,
-    {
+  return db
+    .insert(app.uploads, {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
-    },
-    { tier: "edge" },
-  );
+    })
+    .wait({ tier: "edge" });
 }
 // #endregion files-create-from-blob-ts
 
@@ -27,15 +25,13 @@ export async function createUploadFromStream(db: Db, stream: ReadableStream<Uint
     mimeType: "application/octet-stream",
   });
 
-  return db.insertDurable(
-    app.uploads,
-    {
+  return db
+    .insert(app.uploads, {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
-    },
-    { tier: "edge" },
-  );
+    })
+    .wait({ tier: "edge" });
 }
 // #endregion files-create-from-stream-ts
 

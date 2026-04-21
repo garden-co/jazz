@@ -1,25 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type LocalBatchRecord, type Runtime } from "./client.js";
+import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
-  const insertDurableWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined, string]
-  > = [];
   const updateWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
   const deleteWithSessionCalls: Array<[string, string | undefined]> = [];
-  const updateDurableCalls: Array<[string, Record<string, unknown>, string]> = [];
-  const updateDurableWithSessionCalls: Array<
-    [string, Record<string, unknown>, string | undefined, string]
-  > = [];
   const deleteCalls: string[] = [];
-  const deleteDurableCalls: Array<[string, string]> = [];
-  const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
   const runtimeBase: Runtime = {
+    loadLocalBatchRecord: () => null,
+    loadLocalBatchRecords: () => [],
     insert: (table: string, values: Record<string, unknown>) => {
       insertCalls.push([table, values]);
       return {
@@ -40,16 +33,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
         batchId: "insert-with-session-batch-id",
       };
     },
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
-    insertDurableWithSession: async (
-      table: string,
-      values: Record<string, unknown>,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      insertDurableWithSessionCalls.push([table, values, writeContextJson ?? undefined, tier]);
-      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
-    },
     update: (objectId: string, updates: Record<string, unknown>) => {
       updateCalls.push([objectId, updates]);
       return { batchId: "update-batch-id" };
@@ -62,17 +45,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       updateWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined]);
       return { batchId: "update-with-session-batch-id" };
     },
-    updateDurable: async (objectId: string, updates: Record<string, unknown>, tier: string) => {
-      updateDurableCalls.push([objectId, updates, tier]);
-    },
-    updateDurableWithSession: async (
-      objectId: string,
-      updates: Record<string, unknown>,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      updateDurableWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined, tier]);
-    },
     delete: (objectId: string) => {
       deleteCalls.push(objectId);
       return { batchId: "delete-batch-id" };
@@ -80,16 +52,6 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     deleteWithSession: (objectId: string, writeContextJson?: string | null) => {
       deleteWithSessionCalls.push([objectId, writeContextJson ?? undefined]);
       return { batchId: "delete-with-session-batch-id" };
-    },
-    deleteDurable: async (objectId: string, tier: string) => {
-      deleteDurableCalls.push([objectId, tier]);
-    },
-    deleteDurableWithSession: async (
-      objectId: string,
-      writeContextJson?: string | null,
-      tier = "edge",
-    ) => {
-      deleteDurableWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
     },
     query: async () => [],
     subscribe: () => 0,
@@ -125,15 +87,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     client: new JazzClientCtor(runtime, context, "edge"),
     insertCalls,
     insertWithSessionCalls,
-    insertDurableWithSessionCalls,
     updateCalls,
     updateWithSessionCalls,
-    updateDurableCalls,
-    updateDurableWithSessionCalls,
     deleteCalls,
-    deleteDurableCalls,
     deleteWithSessionCalls,
-    deleteDurableWithSessionCalls,
   };
 }
 
@@ -206,52 +163,20 @@ describe("JazzClient mutation durability split", () => {
     expect(deleteCalls).toEqual(["row-1"]);
   });
 
-  it("routes updateDurable/deleteDurable through durability-aware runtime methods", async () => {
-    const { client, updateDurableCalls, deleteDurableCalls } = makeClient();
-    const updates = { done: { type: "Boolean" as const, value: true } };
-
-    const updatePending = client.updateDurable("row-1", updates);
-    const deletePending = client.deleteDurable("row-1", { tier: "global" });
-
-    expect(updatePending).toBeInstanceOf(Promise);
-    expect(deletePending).toBeInstanceOf(Promise);
-
-    await updatePending;
-    await deletePending;
-
-    expect(updateDurableCalls).toEqual([["row-1", updates, "edge"]]);
-    expect(deleteDurableCalls).toEqual([["row-1", "global"]]);
-  });
-
   it("routes attributed writes through session-aware runtime methods", async () => {
-    const {
-      client,
-      insertWithSessionCalls,
-      insertDurableWithSessionCalls,
-      updateWithSessionCalls,
-      updateDurableWithSessionCalls,
-      deleteWithSessionCalls,
-      deleteDurableWithSessionCalls,
-    } = makeClient();
+    const { client, insertWithSessionCalls, updateWithSessionCalls, deleteWithSessionCalls } =
+      makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
     const updates = { done: { type: "Boolean" as const, value: true } };
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
     client.createInternal("todos", insertValues, undefined, "alice");
-    await client.createDurableInternal("todos", insertValues, undefined, "alice");
     client.updateInternal("row-1", updates, undefined, "alice");
-    await client.updateDurableInternal("row-1", updates, undefined, "alice");
     client.deleteInternal("row-1", undefined, "alice");
-    await client.deleteDurableInternal("row-1", undefined, "alice", { tier: "global" });
 
     expect(insertWithSessionCalls).toEqual([["todos", insertValues, attributedContext]]);
-    expect(insertDurableWithSessionCalls).toEqual([
-      ["todos", insertValues, attributedContext, "edge"],
-    ]);
     expect(updateWithSessionCalls).toEqual([["row-1", updates, attributedContext]]);
-    expect(updateDurableWithSessionCalls).toEqual([["row-1", updates, attributedContext, "edge"]]);
     expect(deleteWithSessionCalls).toEqual([["row-1", attributedContext]]);
-    expect(deleteDurableWithSessionCalls).toEqual([["row-1", attributedContext, "global"]]);
   });
 
   it("forwards caller-supplied create ids to runtime insert methods", async () => {
@@ -261,26 +186,13 @@ describe("JazzClient mutation durability split", () => {
         return { id: objectId ?? "generated-id", values: [], batchId: "batch-1" };
       },
     );
-    const insertDurable = vi.fn(
-      async (
-        table: string,
-        values: Record<string, unknown>,
-        tier: string,
-        objectId?: string | null,
-      ) => {
-        return { id: objectId ?? "generated-id", values: [] };
-      },
-    );
-    const { client } = makeClient({ insert, insertDurable });
+    const { client } = makeClient({ insert });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
 
     const created = client.create("todos", insertValues, { id: externalId });
-    const createdDurable = await client.createDurable("todos", insertValues, { id: externalId });
 
     expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
-    expect(insertDurable).toHaveBeenCalledWith("todos", insertValues, "edge", externalId);
-    expect(created.id).toBe(externalId);
-    expect(createdDurable.id).toBe(externalId);
+    expect(created.value.id).toBe(externalId);
   });
 
   it("falls back to update when upsert sees an existing object id", async () => {
@@ -289,30 +201,19 @@ describe("JazzClient mutation durability split", () => {
     const insert = vi.fn(() => {
       throw insertError;
     });
-    const insertDurable = vi.fn(async () => {
-      throw insertError;
-    });
     const update = vi.fn(() => ({ batchId: "fallback-update-batch" }));
-    const updateDurable = vi.fn(async () => {});
     const { client } = makeClient({
       insert,
-      insertDurable,
       update,
-      updateDurable,
     });
     const values = { title: { type: "Text" as const, value: "Updated title" } };
 
     expect(client.upsert("todos", values, { id: externalId })).toEqual({
       batchId: "fallback-update-batch",
     });
-    await expect(
-      client.upsertDurable("todos", values, { id: externalId }),
-    ).resolves.toBeUndefined();
 
     expect(insert).toHaveBeenCalledWith("todos", values, externalId);
-    expect(insertDurable).toHaveBeenCalledWith("todos", values, "edge", externalId);
     expect(update).toHaveBeenCalledWith(externalId, values);
-    expect(updateDurable).toHaveBeenCalledWith(externalId, values, "edge");
   });
 
   it("returns the inserted batch id when upsert creates a new row", () => {
@@ -366,25 +267,10 @@ describe("JazzClient mutation durability split", () => {
         batchId: "generated-batch-id",
       }),
     );
-    const insertDurableWithSession = vi.fn(
-      async (
-        table: string,
-        values: Record<string, unknown>,
-        _writeContextJson?: string | null,
-        _tier = "edge",
-        objectId?: string | null,
-      ) => ({
-        id: objectId ?? "generated-id",
-        values: [],
-      }),
-    );
-    const updateWithSession = vi.fn();
-    const updateDurableWithSession = vi.fn(async () => {});
+    const updateWithSession = vi.fn(() => ({ batchId: "generated-update-batch-id" }));
     const { client } = makeClient({
       insertWithSession,
-      insertDurableWithSession,
       updateWithSession,
-      updateDurableWithSession,
     });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
     const updates = { done: { type: "Boolean" as const, value: true } };
@@ -392,29 +278,10 @@ describe("JazzClient mutation durability split", () => {
     const updatedAtContext = JSON.stringify({ updated_at: updatedAt });
 
     client.create("todos", insertValues, { updatedAt });
-    await client.createDurable("todos", insertValues, {
-      id: "todo-1",
-      tier: "global",
-      updatedAt,
-    });
     client.update("row-1", updates, { updatedAt });
-    await client.updateDurable("row-1", updates, { tier: "global", updatedAt });
 
     expect(insertWithSession).toHaveBeenCalledWith("todos", insertValues, updatedAtContext);
-    expect(insertDurableWithSession).toHaveBeenCalledWith(
-      "todos",
-      insertValues,
-      updatedAtContext,
-      "global",
-      "todo-1",
-    );
     expect(updateWithSession).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
-    expect(updateDurableWithSession).toHaveBeenCalledWith(
-      "row-1",
-      updates,
-      updatedAtContext,
-      "global",
-    );
   });
 
   it("preserves custom updated_at overrides when upsert falls back to update", async () => {
@@ -423,16 +290,10 @@ describe("JazzClient mutation durability split", () => {
     const insertWithSession = vi.fn(() => {
       throw insertError;
     });
-    const insertDurableWithSession = vi.fn(async () => {
-      throw insertError;
-    });
     const updateWithSession = vi.fn(() => ({ batchId: "fallback-update-session-batch" }));
-    const updateDurableWithSession = vi.fn(async () => {});
     const { client } = makeClient({
       insertWithSession,
-      insertDurableWithSession,
       updateWithSession,
-      updateDurableWithSession,
     });
     const values = { title: { type: "Text" as const, value: "Updated title" } };
     const updatedAt = 1_764_000_000_000_000;
@@ -441,24 +302,8 @@ describe("JazzClient mutation durability split", () => {
     expect(client.upsert("todos", values, { id: externalId, updatedAt })).toEqual({
       batchId: "fallback-update-session-batch",
     });
-    await expect(
-      client.upsertDurable("todos", values, { id: externalId, updatedAt }),
-    ).resolves.toBeUndefined();
 
     expect(insertWithSession).toHaveBeenCalledWith("todos", values, updatedAtContext, externalId);
-    expect(insertDurableWithSession).toHaveBeenCalledWith(
-      "todos",
-      values,
-      updatedAtContext,
-      "edge",
-      externalId,
-    );
     expect(updateWithSession).toHaveBeenCalledWith(externalId, values, updatedAtContext);
-    expect(updateDurableWithSession).toHaveBeenCalledWith(
-      externalId,
-      values,
-      updatedAtContext,
-      "edge",
-    );
   });
 });

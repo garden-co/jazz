@@ -11,7 +11,7 @@ Enable the server to serve stored binary data as HTTP responses with correct con
 - CDN-friendly: correct cache headers, ETags based on content hash
 - Access control: respect the same auth rules as row-level queries
 
-Builds on `built_in_file_storage.md` for storage, adds an HTTP serving layer.
+Builds on the current built-in file/blob APIs over the conventional `files` / `file_parts` tables and adds an HTTP serving layer.
 
 ## Open Questions
 

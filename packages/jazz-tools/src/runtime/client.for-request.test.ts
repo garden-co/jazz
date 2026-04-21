@@ -41,6 +41,11 @@ function mockMutation(batchId = "batch-id"): DirectMutationResult {
   return { batchId };
 }
 
+const runtimeBatchRecordStubs = {
+  loadLocalBatchRecord: () => null,
+  loadLocalBatchRecords: () => [],
+};
+
 function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
     [];
@@ -52,6 +57,7 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
+    ...runtimeBatchRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
@@ -98,12 +104,6 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-    }),
-    updateDurable: async () => {},
-    deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
     onSyncMessageToSend: () => {},
     addServer: () => {},
@@ -139,6 +139,7 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
+    ...runtimeBatchRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
@@ -155,12 +156,6 @@ function makeClientWithContext(context: AppContext): JazzClient {
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-    }),
-    updateDurable: async () => {},
-    deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
     onSyncMessageToSend: () => {},
     addServer: () => {},
@@ -466,6 +461,7 @@ describe("JazzClient.forRequest", () => {
     let writeContextJson: string | null | undefined;
 
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
       insertWithSession: (_table, _values, contextJson) => {
         writeContextJson = contextJson;
@@ -493,9 +489,6 @@ describe("JazzClient.forRequest", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -610,6 +603,7 @@ describe("JazzClient schema order", () => {
     const insert = vi.fn(() => mockRow());
     const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert,
       update: () => ({
         batchId: "batch-id",
@@ -622,9 +616,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable,
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -686,6 +677,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
@@ -706,9 +698,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -773,6 +762,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
@@ -805,9 +795,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -884,6 +871,7 @@ describe("JazzClient schema order", () => {
 
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
@@ -919,9 +907,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -1035,6 +1020,7 @@ describe("JazzClient schema order", () => {
 
   it("keeps magic projection values ahead of included rows during schema alignment", async () => {
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
@@ -1070,9 +1056,6 @@ describe("JazzClient schema order", () => {
       createSubscription: () => 0,
       executeSubscription: () => {},
       unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},
@@ -1189,6 +1172,7 @@ describe("JazzClient schema order", () => {
   it("reorders subscription deltas back to the declared schema order", async () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
       update: () => ({
         batchId: "batch-id",
@@ -1203,9 +1187,6 @@ describe("JazzClient schema order", () => {
         onUpdate = callback as (delta: unknown) => void;
       },
       unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
       onSyncMessageReceived: () => {},
       onSyncMessageToSend: () => {},
       addServer: () => {},

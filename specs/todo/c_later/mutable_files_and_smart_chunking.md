@@ -2,7 +2,7 @@
 
 Support editing files in-place with efficient diff-sync via content-defined chunking.
 
-See also: [Phase 1: static files](../a_mvp/built_in_file_storage.md), [Phase 2: cascade integration](../b_launch/file_storage_cascade_integration.md).
+See also: [Cascade integration](../b_launch/file_storage_cascade_integration.md).
 
 ## FastCDC Chunking
 

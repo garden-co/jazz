@@ -184,21 +184,6 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.deleteWithSession("row-1", writeContextJson);
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
-
-    await expect(
-      adapter.insertDurableWithSession("todos", {}, writeContextJson, "local"),
-    ).resolves.toEqual({
-      id: "row-1",
-      values: [],
-      batchId: "batch-2",
-    });
-    await expect(
-      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
-    ).resolves.toBeUndefined();
-    await expect(
-      adapter.deleteDurableWithSession("row-1", writeContextJson, "local"),
-    ).resolves.toBeUndefined();
-    expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
   it("bridges subscription callbacks with handle conversion", () => {
@@ -298,24 +283,6 @@ describe("JazzRnRuntimeAdapter", () => {
       ],
       pending: false,
     });
-  });
-
-  it("supports local-tier persisted mutations and rejects global tiers", async () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
-      id: "row-1",
-      values: [],
-      batchId: "batch-1",
-    });
-    expect(binding.flush).toHaveBeenCalledTimes(1);
-
-    await expect(adapter.updateDurable("row-1", {}, "local")).resolves.toBeUndefined();
-    await expect(adapter.deleteDurable("row-1", "local")).resolves.toBeUndefined();
-    expect(binding.flush).toHaveBeenCalledTimes(3);
-
-    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
   });
 
   it("wraps Jazz RN errors with error name and cause", async () => {
@@ -487,5 +454,64 @@ describe("JazzRnRuntimeAdapter", () => {
 
     captured!.onFailure("token expired");
     expect(listener).toHaveBeenCalledWith("token expired");
+  });
+
+  it("bridges rejected batch helpers", () => {
+    const binding = createBinding({
+      loadLocalBatchRecord: vi.fn(() =>
+        JSON.stringify({
+          batchId: "batch-1",
+          latestSettlement: {
+            kind: "rejected",
+            code: "WriteRejected",
+            reason: "nope",
+          },
+        }),
+      ),
+      loadLocalBatchRecords: vi.fn(() =>
+        JSON.stringify([
+          {
+            batchId: "batch-1",
+            latestSettlement: {
+              kind: "rejected",
+              code: "WriteRejected",
+              reason: "nope",
+            },
+          },
+        ]),
+      ),
+      drainRejectedBatchIds: vi.fn(() => ["batch-1"]),
+      acknowledgeRejectedBatch: vi.fn(() => true),
+      sealBatch: vi.fn(),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    expect(adapter.loadLocalBatchRecord("batch-1")).toEqual({
+      batchId: "batch-1",
+      latestSettlement: {
+        kind: "rejected",
+        code: "WriteRejected",
+        reason: "nope",
+      },
+    });
+    expect(adapter.loadLocalBatchRecords()).toEqual([
+      {
+        batchId: "batch-1",
+        latestSettlement: {
+          kind: "rejected",
+          code: "WriteRejected",
+          reason: "nope",
+        },
+      },
+    ]);
+    expect(adapter.drainRejectedBatchIds()).toEqual(["batch-1"]);
+    expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
+    adapter.sealBatch("batch-1");
+
+    expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
+    expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
+    expect(binding.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
+    expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
   });
 });

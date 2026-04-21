@@ -153,8 +153,8 @@ describe("forRequest auth and policy", () => {
    *
    *   alice ──forRequest──► context
    *             │
-   *             ├─ insertDurable({ owner_id: alice })  ──► OK
-   *             ├─ insertDurable({ owner_id: "other" }) ──► REJECT (policy)
+   *             ├─ insert({ owner_id: alice })  ──► OK
+   *             ├─ insert({ owner_id: "other" }) ──► REJECT (policy)
    *             └─ all(...)                            ──► [alice-todo]
    *
    *   backend ──asBackend──► context
@@ -179,11 +179,14 @@ describe("forRequest auth and policy", () => {
     });
     const backendDb = context.asBackend();
 
-    const row = await aliceDb.insertDurable(
-      todoApp.todos,
-      { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-      { tier: "edge" },
-    );
+    const row = await aliceDb
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.userId,
+      })
+      .wait({ tier: "edge" });
 
     // forRequest session surfaces its own row.
     await vi.waitFor(
@@ -199,13 +202,14 @@ describe("forRequest auth and policy", () => {
     );
 
     // Insert with a foreign owner_id is rejected by the policy.
-    await expect(
-      aliceDb.insertDurable(
-        todoApp.todos,
-        { title: "imposter", done: false, description: scopeTag, owner_id: "someone-else" },
-        { tier: "edge" },
-      ),
-    ).rejects.toThrow();
+    expect(() =>
+      aliceDb.insert(todoApp.todos, {
+        title: "imposter",
+        done: false,
+        description: scopeTag,
+        owner_id: "someone-else",
+      }),
+    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
 
     // Backend can see the row regardless of ownership.
     await vi.waitFor(
@@ -272,7 +276,7 @@ describe("forRequest auth and policy", () => {
 
     await expect(
       context.forRequest({ headers: { authorization: "Bearer not-a-valid-jwt" } }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Invalid JWT payload");
   });
 
   /**
@@ -331,21 +335,30 @@ describe("forRequest auth and policy", () => {
 
     // Seed rows for all three users through the backend writer context.
     await Promise.all([
-      writerBackend.insertDurable(
-        todoApp.todos,
-        { title: "alice-item", done: false, description: scopeTag, owner_id: alice.userId },
-        { tier: "edge" },
-      ),
-      writerBackend.insertDurable(
-        todoApp.todos,
-        { title: "bob-item", done: false, description: scopeTag, owner_id: bob.userId },
-        { tier: "edge" },
-      ),
-      writerBackend.insertDurable(
-        todoApp.todos,
-        { title: "carol-item", done: false, description: scopeTag, owner_id: carol.userId },
-        { tier: "edge" },
-      ),
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "alice-item",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.userId,
+        })
+        .wait({ tier: "edge" }),
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "bob-item",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.userId,
+        })
+        .wait({ tier: "edge" }),
+      writerBackend
+        .insert(todoApp.todos, {
+          title: "carol-item",
+          done: false,
+          description: scopeTag,
+          owner_id: carol.userId,
+        })
+        .wait({ tier: "edge" }),
     ]);
 
     const aliceSessionDb = readerContext.forSession({
@@ -401,10 +414,10 @@ describe("forRequest concurrent session isolation", () => {
    *                       ├──► context ──► server
    *   bob   ──forRequest──┘
    *
-   *   alice: insertDurable({ owner_id: alice })  ──► OK
-   *   bob:   insertDurable({ owner_id: bob })    ──► OK
-   *   alice: insertDurable({ owner_id: bob })    ──► REJECT
-   *   bob:   insertDurable({ owner_id: alice })  ──► REJECT
+   *   alice: insert({ owner_id: alice })  ──► OK
+   *   bob:   insert({ owner_id: bob })    ──► OK
+   *   alice: insert({ owner_id: bob })    ──► REJECT
+   *   bob:   insert({ owner_id: alice })  ──► REJECT
    *   alice: all()  ──► [alice-todo]
    *   bob:   all()  ──► [bob-todo]
    *   aliceAgain (new Db handle, same user): all() ──► [alice-todo]
@@ -414,16 +427,22 @@ describe("forRequest concurrent session isolation", () => {
 
     // Fire writes for both users in parallel.
     await Promise.all([
-      aliceDb.insertDurable(
-        todoApp.todos,
-        { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-        { tier: "edge" },
-      ),
-      bobDb.insertDurable(
-        todoApp.todos,
-        { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
-        { tier: "edge" },
-      ),
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.userId,
+        })
+        .wait({ tier: "edge" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.userId,
+        })
+        .wait({ tier: "edge" }),
     ]);
 
     // Alice's scoped Db should only surface her own row.
@@ -450,22 +469,22 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user write rejection: alice and bob must not be able to insert
     // rows owned by each other, even when their requests are in flight concurrently.
-    await Promise.all([
-      expect(
-        aliceDb.insertDurable(
-          todoApp.todos,
-          { title: "alice-as-bob", done: false, description: scopeTag, owner_id: bob.userId },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow(),
-      expect(
-        bobDb.insertDurable(
-          todoApp.todos,
-          { title: "bob-as-alice", done: false, description: scopeTag, owner_id: alice.userId },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow(),
-    ]);
+    expect(() =>
+      aliceDb.insert(todoApp.todos, {
+        title: "alice-as-bob",
+        done: false,
+        description: scopeTag,
+        owner_id: bob.userId,
+      }),
+    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+    expect(() =>
+      bobDb.insert(todoApp.todos, {
+        title: "bob-as-alice",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.userId,
+      }),
+    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
 
     // A new Db handle for alice (same identity, new forRequest call — simulating
     // a subsequent HTTP request from the same user) must stay isolated from bob's data.
@@ -490,37 +509,38 @@ describe("forRequest concurrent session isolation", () => {
    *   alice: insert alice-todo  ──► aliceRow
    *   bob:   insert bob-todo    ──► bobRow
    *
-   *   alice: updateDurable(aliceRow) ──► OK    alice: all() ──► [alice-updated]
-   *   bob:   updateDurable(bobRow)   ──► OK    bob:   all() ──► [bob-updated]
+   *   alice: update(aliceRow) ──► OK    alice: all() ──► [alice-updated]
+   *   bob:   update(bobRow)   ──► OK    bob:   all() ──► [bob-updated]
    *
-   *   alice: updateDurable(bobRow)   ──► REJECT
-   *   bob:   updateDurable(aliceRow) ──► REJECT
+   *   alice: update(bobRow)   ──► REJECT
+   *   bob:   update(aliceRow) ──► REJECT
    */
-  it("concurrent updateDurable respects per-user ownership — cross-user update is rejected", async () => {
+  it("concurrent update respects per-user ownership — cross-user update is rejected", async () => {
     const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     const [aliceRow, bobRow] = await Promise.all([
-      aliceDb.insertDurable(
-        todoApp.todos,
-        { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-        { tier: "edge" },
-      ),
-      bobDb.insertDurable(
-        todoApp.todos,
-        { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
-        { tier: "edge" },
-      ),
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.userId,
+        })
+        .wait({ tier: "edge" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.userId,
+        })
+        .wait({ tier: "edge" }),
     ]);
 
     // Each user can update their own row concurrently.
     await Promise.all([
-      aliceDb.updateDurable(
-        todoApp.todos,
-        aliceRow.id,
-        { title: "alice-updated" },
-        { tier: "edge" },
-      ),
-      bobDb.updateDurable(todoApp.todos, bobRow.id, { title: "bob-updated" }, { tier: "edge" }),
+      aliceDb.update(todoApp.todos, aliceRow.id, { title: "alice-updated" }).wait({ tier: "edge" }),
+      bobDb.update(todoApp.todos, bobRow.id, { title: "bob-updated" }).wait({ tier: "edge" }),
     ]);
 
     await vi.waitFor(
@@ -536,24 +556,12 @@ describe("forRequest concurrent session isolation", () => {
     );
 
     // Cross-user update must be rejected.
-    await Promise.all([
-      expect(
-        aliceDb.updateDurable(
-          todoApp.todos,
-          bobRow.id,
-          { title: "alice-as-bob" },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow(),
-      expect(
-        bobDb.updateDurable(
-          todoApp.todos,
-          aliceRow.id,
-          { title: "bob-as-alice" },
-          { tier: "edge" },
-        ),
-      ).rejects.toThrow(),
-    ]);
+    expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
+      'Update failed: WriteError("policy denied UPDATE on table todos")',
+    );
+    expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
+      'Update failed: WriteError("policy denied UPDATE on table todos")',
+    );
   }, 30_000);
 
   /**
@@ -564,38 +572,46 @@ describe("forRequest concurrent session isolation", () => {
    *   alice: insert alice-todo  ──► aliceRow
    *   bob:   insert bob-todo    ──► bobRow
    *
-   *   alice: deleteDurable(bobRow)   ──► REJECT
-   *   bob:   deleteDurable(aliceRow) ──► REJECT
+   *   alice: delete(bobRow)   ──► REJECT
+   *   bob:   delete(aliceRow) ──► REJECT
    *
-   *   alice: deleteDurable(aliceRow) ──► OK    alice: all() ──► []
-   *   bob:   deleteDurable(bobRow)   ──► OK    bob:   all() ──► []
+   *   alice: delete(aliceRow) ──► OK    alice: all() ──► []
+   *   bob:   delete(bobRow)   ──► OK    bob:   all() ──► []
    */
-  it("concurrent deleteDurable respects per-user ownership — cross-user delete is rejected", async () => {
+  it("concurrent delete respects per-user ownership — cross-user delete is rejected", async () => {
     const { alice, bob, aliceDb, bobDb, scopeTag } = await createConcurrentTestEnv();
 
     const [aliceRow, bobRow] = await Promise.all([
-      aliceDb.insertDurable(
-        todoApp.todos,
-        { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-        { tier: "edge" },
-      ),
-      bobDb.insertDurable(
-        todoApp.todos,
-        { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
-        { tier: "edge" },
-      ),
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.userId,
+        })
+        .wait({ tier: "edge" }),
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-todo",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.userId,
+        })
+        .wait({ tier: "edge" }),
     ]);
 
     // Cross-user delete must be rejected while rows still exist.
-    await Promise.all([
-      expect(aliceDb.deleteDurable(todoApp.todos, bobRow.id, { tier: "edge" })).rejects.toThrow(),
-      expect(bobDb.deleteDurable(todoApp.todos, aliceRow.id, { tier: "edge" })).rejects.toThrow(),
-    ]);
+    expect(() => aliceDb.delete(todoApp.todos, bobRow.id)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
+    expect(() => bobDb.delete(todoApp.todos, aliceRow.id)).toThrow(
+      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    );
 
     // Each user can delete their own row concurrently.
     await Promise.all([
-      aliceDb.deleteDurable(todoApp.todos, aliceRow.id, { tier: "edge" }),
-      bobDb.deleteDurable(todoApp.todos, bobRow.id, { tier: "edge" }),
+      aliceDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "edge" }),
+      bobDb.delete(todoApp.todos, bobRow.id).wait({ tier: "edge" }),
     ]);
 
     await vi.waitFor(
@@ -638,11 +654,14 @@ describe("forRequest concurrent session isolation", () => {
       context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
     ]);
 
-    await aliceDb1.insertDurable(
-      todoApp.todos,
-      { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-      { tier: "edge" },
-    );
+    await aliceDb1
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.userId,
+      })
+      .wait({ tier: "edge" });
 
     // Both alice handles surface the row; neither should see bob's (not yet inserted).
     await vi.waitFor(
@@ -657,11 +676,14 @@ describe("forRequest concurrent session isolation", () => {
       { timeout: 10_000 },
     );
 
-    await bobDb.insertDurable(
-      todoApp.todos,
-      { title: "bob-todo", done: false, description: scopeTag, owner_id: bob.userId },
-      { tier: "edge" },
-    );
+    await bobDb
+      .insert(todoApp.todos, {
+        title: "bob-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: bob.userId,
+      })
+      .wait({ tier: "edge" });
 
     // After bob's insert lands, neither alice handle should see bob's row.
     await vi.waitFor(
@@ -697,11 +719,14 @@ describe("forRequest concurrent session isolation", () => {
       headers: { authorization: `Bearer ${carol.token}` },
     });
 
-    await aliceDb.insertDurable(
-      todoApp.todos,
-      { title: "alice-todo", done: false, description: scopeTag, owner_id: alice.userId },
-      { tier: "edge" },
-    );
+    await aliceDb
+      .insert(todoApp.todos, {
+        title: "alice-todo",
+        done: false,
+        description: scopeTag,
+        owner_id: alice.userId,
+      })
+      .wait({ tier: "edge" });
 
     // Wait for alice's row to be visible to alice, then verify carol sees nothing.
     await vi.waitFor(

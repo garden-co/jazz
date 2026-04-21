@@ -7,7 +7,6 @@
  * Key design:
  * - createDb() is async (pre-loads WASM module)
  * - insert/update/delete are sync (local-first immediate writes, no durability wait)
- * - insertDurable/updateDurable/deleteDurable are async (durability-aware, return Promises)
  * - all/one are async (need storage I/O for queries)
  */
 
@@ -16,18 +15,20 @@ import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schem
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   DirectBatch as RuntimeDirectBatch,
+  InsertHandle,
   JazzClient,
   type LocalBatchRecord,
   type MutationErrorEvent,
   loadWasmModule,
   PersistedWrite as RuntimePersistedWrite,
   Transaction as RuntimeTransaction,
-  type CreateDurabilityOptions,
+  WriteHandle,
   type CreateOptions,
-  type UpdateDurabilityOptions,
+  type CreateDurabilityOptions,
   type UpdateOptions,
-  type UpsertDurabilityOptions,
+  type UpdateDurabilityOptions,
   type UpsertOptions,
+  type UpsertDurabilityOptions,
   type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -406,68 +407,6 @@ function backendScopedAuthState(session?: Session | null): AuthState {
   };
 }
 
-/**
- * Returned by upsert, update, and delete operations. Allows waiting for the
- * write to be persisted at a given durability tier.
- */
-export class WriteHandle {
-  readonly #client: JazzClient;
-
-  constructor(
-    readonly batchId: string,
-    client: JazzClient,
-  ) {
-    this.#client = client;
-  }
-
-  async wait(options: { tier: DurabilityTier }): Promise<void> {
-    return this.#client.waitForPersistedBatch(this.batchId, options.tier);
-  }
-}
-
-/**
- * Returned by insert operations. Allows getting the inserted value and
- * waiting for the write to be persisted at a given durability tier.
- */
-export class InsertHandle<T> extends WriteHandle {
-  constructor(
-    readonly value: T,
-    batchId: string,
-    client: JazzClient,
-  ) {
-    super(batchId, client);
-  }
-}
-
-export class DbPersistedWrite<T> {
-  constructor(
-    private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
-    private readonly transformValue: (value: Row | void) => T,
-    private readonly loadBatchRecord: () => LocalBatchRecord | null,
-    private readonly acknowledgeRejected: () => boolean,
-  ) {}
-
-  batchId(): string {
-    return this.pendingWrite.batchId();
-  }
-
-  value(): T {
-    return this.transformValue(this.pendingWrite.value());
-  }
-
-  async wait(): Promise<T> {
-    return this.transformValue(await this.pendingWrite.wait());
-  }
-
-  localBatchRecord(): LocalBatchRecord | null {
-    return this.loadBatchRecord();
-  }
-
-  acknowledgeRejectedBatch(): boolean {
-    return this.acknowledgeRejected();
-  }
-}
-
 export class DbTransaction {
   private committed = false;
 
@@ -499,18 +438,6 @@ export class DbTransaction {
     this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
   }
 
-  private wrapPersistedWrite<T>(
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => this.client.localBatchRecord(pendingWrite.batchId()),
-      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   batchId(): string {
     return this.runtimeTransaction.batchId();
   }
@@ -531,29 +458,9 @@ export class DbTransaction {
       this.resolveInputSchema(table),
       table._table,
     );
-    const row = this.runtimeTransaction.create(table._table, values);
-    return new InsertHandle(
-      transformRow(row, table._schema, table._table),
-      row.batchId,
-      this.client,
-    );
-  }
-
-  insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    this.ensureActive();
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeTransaction.createPersisted(table._table, values, options);
-    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
-      transformRow(row as Row, table._schema, table._table),
-    );
+    return this.runtimeTransaction
+      .create(table._table, values)
+      .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
@@ -563,48 +470,13 @@ export class DbTransaction {
       this.resolveInputSchema(table),
       table._table,
     );
-    const result = this.runtimeTransaction.update(id, updates);
-    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
-  }
-
-  updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.ensureActive();
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeTransaction.updatePersisted(id, updates, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return this.runtimeTransaction.update(id, updates);
   }
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
-    const result = this.runtimeTransaction.delete(id);
-    return new WriteHandle(result?.batchId ?? this.runtimeTransaction.batchId(), this.client);
-  }
-
-  deletePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.ensureActive();
-    this.assertOwnsTable(table, "DbTransaction");
-    const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return this.runtimeTransaction.delete(id);
   }
 
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
@@ -661,18 +533,6 @@ export class DbDirectBatch {
     );
   }
 
-  private wrapPersistedWrite<T>(
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => this.client.localBatchRecord(pendingWrite.batchId()),
-      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   batchId(): string {
     return this.runtimeBatch.batchId();
   }
@@ -683,28 +543,9 @@ export class DbDirectBatch {
       this.resolveInputSchema(table),
       table._table,
     );
-    const row = this.runtimeBatch.create(table._table, values);
-    return new InsertHandle(
-      transformRow(row, table._schema, table._table),
-      row.batchId,
-      this.client,
-    );
-  }
-
-  insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeBatch.createPersisted(table._table, values, options);
-    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
-      transformRow(row as Row, table._schema, table._table),
-    );
+    return this.runtimeBatch
+      .create(table._table, values)
+      .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
@@ -713,45 +554,12 @@ export class DbDirectBatch {
       this.resolveInputSchema(table),
       table._table,
     );
-    const result = this.runtimeBatch.update(id, updates);
-    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
-  }
-
-  updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeBatch.updatePersisted(id, updates, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return this.runtimeBatch.update(id, updates);
   }
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.assertOwnsTable(table, "DbDirectBatch");
-    const result = this.runtimeBatch.delete(id);
-    return new WriteHandle(result?.batchId ?? this.runtimeBatch.batchId(), this.client);
-  }
-
-  deletePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.assertOwnsTable(table, "DbDirectBatch");
-    const pendingWrite = this.runtimeBatch.deletePersisted(id, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return this.runtimeBatch.delete(id);
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -2264,10 +2072,8 @@ export class Db {
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
     const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
-    const row = options
-      ? client.create(table._table, values, options)
-      : client.create(table._table, values);
-    return new InsertHandle(transformRow(row, table._schema, table._table), row.batchId, client);
+    const inserted = client.create(table._table, values, options);
+    return inserted.mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
   /**
@@ -2319,7 +2125,7 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    return new WriteHandle(client.upsert(table._table, values, options).batchId, client);
+    return client.upsert(table._table, values, options);
   }
 
   /**
@@ -2351,7 +2157,7 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    return new WriteHandle(client.update(id, updates, options).batchId, client);
+    return client.update(id, updates, options);
   }
 
   /**
@@ -2394,34 +2200,7 @@ export class Db {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
-    return new WriteHandle(client.delete(id).batchId, client);
-  }
-
-  /**
-   * Delete a row and wait for durability at the requested tier.
-   */
-  async deleteDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): Promise<void> {
-    const client = this.getClient(table._schema);
-    await this.ensureBridgeReady();
-    await client.deleteDurable(id, options);
-  }
-
-  deletePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    const client = this.getClient(table._schema);
-    const pendingWrite = client.deletePersisted(id, options);
-    return this.wrapPersistedWrite(
-      client,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return client.delete(id);
   }
 
   beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
@@ -2784,19 +2563,6 @@ export class Db {
     this.notifyActiveQuerySubscriptionTraceListeners();
   }
 
-  protected wrapPersistedWrite<T>(
-    client: JazzClient,
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => client.localBatchRecord(pendingWrite.batchId()),
-      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   private parseRuntimeQueryTracePayload(
     queryJson: string,
     fallbackTable: string,
@@ -2885,18 +2651,9 @@ class ClientBackedDb extends Db {
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const row = this.runtimeClient.createInternal(
-      table._table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-    );
-    return new InsertHandle(
-      transformRow(row, table._schema, table._table),
-      row.batchId,
-      this.runtimeClient,
-    );
+    return this.runtimeClient
+      .createHandleInternal(table._table, values, this.session, this.attribution, options)
+      .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
   override async insertDurable<T, Init>(
@@ -2929,7 +2686,7 @@ class ClientBackedDb extends Db {
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const batchId = this.runtimeClient.upsertInternal(
+    return this.runtimeClient.upsertHandleInternal(
       table._table,
       values,
       options.id,
@@ -2937,7 +2694,6 @@ class ClientBackedDb extends Db {
       this.attribution,
       options.updatedAt,
     );
-    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async upsertDurable<T, Init>(
@@ -2995,7 +2751,7 @@ class ClientBackedDb extends Db {
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const batchId = this.runtimeClient.updateInternal(
+    return this.runtimeClient.updateHandleInternal(
       id,
       updates,
       this.session,
@@ -3003,7 +2759,6 @@ class ClientBackedDb extends Db {
       undefined,
       options?.updatedAt,
     );
-    return new WriteHandle(batchId.batchId, this.runtimeClient);
   }
 
   override async updateDurable<T, Init>(
@@ -3055,35 +2810,7 @@ class ClientBackedDb extends Db {
   }
 
   override delete<T, Init>(_table: TableProxy<T, Init>, id: string): WriteHandle {
-    const batchId = this.runtimeClient.deleteInternal(id, this.session, this.attribution).batchId;
-    return new WriteHandle(batchId, this.runtimeClient);
-  }
-
-  override async deleteDurable<T, Init>(
-    _table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): Promise<void> {
-    await this.runtimeClient.deleteDurableInternal(id, this.session, this.attribution, options);
-  }
-
-  override deletePersisted<T, Init>(
-    _table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    const pendingWrite = this.runtimeClient.deletePersistedInternal(
-      id,
-      this.session,
-      this.attribution,
-      options,
-      undefined,
-    );
-    return this.wrapPersistedWrite(
-      this.runtimeClient,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
+    return this.runtimeClient.deleteHandleInternal(id, this.session, this.attribution);
   }
 
   override beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
@@ -3208,7 +2935,7 @@ function generateEphemeralSeedBase64Url(): string {
  *
  * This is an **async** factory function that pre-loads the WASM module.
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
- * Use the `*Durable` variants when you need a Promise that resolves at a durability tier.
+ * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
  * In browser environments, automatically uses a dedicated worker for
  * OPFS persistence. In Node.js, uses in-memory storage.
