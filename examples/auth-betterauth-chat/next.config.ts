@@ -5,6 +5,10 @@ export const baseNextConfig = {
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
 };
 
-export const jazzOptions = {};
+export const jazzOptions = {
+  server: {
+    backendSecret: "auth-betterauth-chat-dev-backend-secret",
+  },
+};
 
 export default withJazz(baseNextConfig, jazzOptions);

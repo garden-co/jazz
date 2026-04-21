@@ -1,3 +1,6 @@
+import { createRequire } from "node:module";
+import { copyFile, mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
@@ -28,13 +31,24 @@ export interface NextJazzPluginOptions extends JazzPluginOptions {
 }
 
 const DEVELOPMENT_PHASE = "phase-development-server";
+const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const PUBLIC_APP_ID_ENV = "NEXT_PUBLIC_JAZZ_APP_ID";
 const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
+const PUBLIC_WASM_SUBPATH = "_jazz/jazz_wasm_bg.wasm";
 
 const runtime = new ManagedDevRuntime({
   appId: PUBLIC_APP_ID_ENV,
   serverUrl: PUBLIC_SERVER_URL_ENV,
 });
+
+async function copyWasmToPublic(projectRoot: string): Promise<void> {
+  const require = createRequire(import.meta.url);
+  const pkgJsonPath = require.resolve("jazz-wasm/package.json");
+  const wasmSource = join(dirname(pkgJsonPath), "pkg", "jazz_wasm_bg.wasm");
+  const wasmDest = join(projectRoot, "public", PUBLIC_WASM_SUBPATH);
+  await mkdir(dirname(wasmDest), { recursive: true });
+  await copyFile(wasmSource, wasmDest);
+}
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
   return Array.from(new Set([...(existing ?? []), "jazz-tools", "jazz-napi"]));
@@ -65,6 +79,17 @@ export function withJazz(
       serverExternalPackages: mergeServerExternalPackages(resolved.serverExternalPackages),
     };
 
+    // Copy jazz-wasm bytes into the host app's public/ dir so they're served
+    // at a stable origin-root URL. Works around bundlers (Turbopack) that
+    // don't transform wasm-bindgen's `new URL('*.wasm', import.meta.url)`
+    // pattern inside worker chunks. Runs in dev and production-build so the
+    // asset is present in the built output.
+    if (phase === DEVELOPMENT_PHASE || phase === PRODUCTION_BUILD_PHASE) {
+      await copyWasmToPublic(options.schemaDir ?? process.cwd());
+    }
+
+    // Everything below is dev-only: managed server, APP_ID/SERVER_URL
+    // injection. In production the host app supplies those via its own env.
     if (phase !== DEVELOPMENT_PHASE || options.server === false) {
       return merged;
     }

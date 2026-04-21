@@ -1307,12 +1307,25 @@ export class Db {
       throw new Error("Worker bridge is only available for driver.type='persistent'");
     }
 
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+
+    // If the host app didn't pass `runtimeSources.wasmUrl`, default to the file
+    // `withJazz` copies into the app's public/ dir. Computed against the
+    // main-thread origin so the worker receives an absolute URL and doesn't
+    // need to resolve against its own (Turbopack-unreliable) self.location.
+    const configRuntimeSources = this.config.runtimeSources;
+    const runtimeSources =
+      configRuntimeSources?.wasmUrl || typeof location === "undefined"
+        ? configRuntimeSources
+        : {
+            ...configRuntimeSources,
+            wasmUrl: `${location.origin}/_jazz/jazz_wasm_bg.wasm`,
+          };
+
     // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
     // fallback WASM URL for non-bundled contexts where wasmModule.default() may fail.
-    const runtimeSources = this.config.runtimeSources;
     let fallbackWasmUrl: string | undefined;
     if (!runtimeSources?.workerUrl && !runtimeSources?.baseUrl && !runtimeSources?.wasmUrl) {
-      const locationHref = typeof location !== "undefined" ? location.href : undefined;
       if (!resolveRuntimeConfigSyncInitInput(runtimeSources)) {
         fallbackWasmUrl =
           resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources) ?? undefined;
@@ -1328,7 +1341,7 @@ export class Db {
       serverUrl: this.config.serverUrl,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
-      runtimeSources: this.config.runtimeSources,
+      runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
     };
