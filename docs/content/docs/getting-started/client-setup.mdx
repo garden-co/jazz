@@ -224,6 +224,19 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
 On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
 
+### Env var names
+
+Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix its bundler uses to expose env vars to the client bundle. SvelteKit's `PUBLIC_*` prefix also covers Svelte+Vite via `jazzSvelteKit`. Secrets are always unprefixed — they're server-only: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
+
+| Bundler   | App ID                    | Server URL                    |
+| --------- | ------------------------- | ----------------------------- |
+| Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
+| Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
+| SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
+| Expo      | `EXPO_PUBLIC_JAZZ_APP_ID` | `EXPO_PUBLIC_JAZZ_SERVER_URL` |
+
+Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.
+
 ### Plugin options
 
 All plugins accept the same base options:
