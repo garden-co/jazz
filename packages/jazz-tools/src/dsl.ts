@@ -576,12 +576,13 @@ class AddBuilder<Optional extends boolean = false> {
     };
   }
 
-  enum<const Variants extends readonly [string, ...string[]]>(
-    ...args: [...variants: Variants, opts: { default: MaybeOptional<Variants[number], Optional> }]
-  ): AddOp<{ kind: "ENUM"; variants: [...Variants] }, MaybeOptional<Variants[number], Optional>> {
-    const opts = args[args.length - 1] as {
-      default: MaybeOptional<Variants[number], Optional>;
-    };
+  enum<
+    const Variants extends readonly [string, ...string[]],
+    const TDefault extends Variants[number] | null,
+  >(
+    ...args: [...variants: Variants, opts: { default: TDefault }]
+  ): AddOp<{ kind: "ENUM"; variants: [...Variants] }, TDefault> {
+    const opts = args[args.length - 1] as { default: TDefault };
     const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
     return {
       _type: "add",
