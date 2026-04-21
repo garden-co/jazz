@@ -163,7 +163,7 @@ describe("better-auth schema helpers", () => {
       [
         'import { schema as s } from "jazz-tools";',
         "",
-        "const schema = {",
+        "export const schema = {",
         "  accountHolders: s.table({",
         '    "email-address": s.string(),',
         '    role: s.enum("user", "admin"),',

@@ -364,7 +364,7 @@ export function buildJazzSchemaSourceText(args: {
   return [
     'import { schema as s } from "jazz-tools";',
     "",
-    "const schema = {",
+    "export const schema = {",
     ...blocks.flatMap((block, index) => (index === 0 ? [block] : ["", block])),
     "};",
     "",
