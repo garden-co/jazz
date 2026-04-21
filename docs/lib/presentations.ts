@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
@@ -46,22 +43,9 @@ export function getPresentationDeckPage(deck: string) {
 }
 
 const presentationSlideCache = new Map<string, Promise<PresentationSlide[]>>();
-const docsRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function getRawDeckSource(page: PresentationDeckPage) {
-  const relativePath = (
-    page.data as PresentationDeckPage["data"] & {
-      info?: {
-        fullPath?: string;
-      };
-    }
-  ).info?.fullPath;
-
-  if (typeof relativePath !== "string") {
-    throw new Error(`Presentation deck "${getDeckSlug(page)}" is missing raw source access.`);
-  }
-
-  return readFile(path.resolve(docsRoot, relativePath), "utf8");
+  return page.data.getText("raw");
 }
 
 export async function getPresentationSlidesForPage(
