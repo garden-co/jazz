@@ -519,51 +519,51 @@ function isTypedColumnBuilder(value: ArrayElementSource): value is AnyTypedColum
   return typeof value === "object" && value !== null && "_build" in value && "_sqlType" in value;
 }
 
-class AddBuilder<Optional extends boolean = false> {
-  string<const TDefault extends MaybeOptional<string, Optional>>(opts: {
+class AddBuilder {
+  string<const TDefault extends string | null>(opts: {
     default: TDefault;
   }): AddOp<"TEXT", TDefault> {
     return { _type: "add", sqlType: "TEXT", default: opts.default };
   }
 
-  int<const TDefault extends MaybeOptional<number, Optional>>(opts: {
+  int<const TDefault extends number | null>(opts: {
     default: TDefault;
   }): AddOp<"INTEGER", TDefault> {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
-  timestamp<const TDefault extends MaybeOptional<Date | number, Optional>>(opts: {
+  timestamp<const TDefault extends Date | number | null>(opts: {
     default: TDefault;
   }): AddOp<"TIMESTAMP", TDefault> {
     return { _type: "add", sqlType: "TIMESTAMP", default: opts.default };
   }
 
-  boolean<const TDefault extends MaybeOptional<boolean, Optional>>(opts: {
+  boolean<const TDefault extends boolean | null>(opts: {
     default: TDefault;
   }): AddOp<"BOOLEAN", TDefault> {
     return { _type: "add", sqlType: "BOOLEAN", default: opts.default };
   }
 
-  float<const TDefault extends MaybeOptional<number, Optional>>(opts: {
+  float<const TDefault extends number | null>(opts: {
     default: TDefault;
   }): AddOp<"REAL", TDefault> {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
-  bytes<const TDefault extends MaybeOptional<Uint8Array, Optional>>(opts: {
+  bytes<const TDefault extends Uint8Array | null>(opts: {
     default: TDefault;
   }): AddOp<"BYTEA", TDefault> {
     return { _type: "add", sqlType: "BYTEA", default: opts.default };
   }
 
-  ref<const TTargetTable extends string, const TDefault extends MaybeOptional<string, Optional>>(
+  ref<const TTargetTable extends string, const TDefault extends string | null>(
     _targetTable: TTargetTable,
     opts: { default: TDefault },
   ): AddOp<"UUID", TDefault> {
     return { _type: "add", sqlType: "UUID", default: opts.default };
   }
 
-  json<const TDefault extends MaybeOptional<JsonValue, Optional>>(opts: {
+  json<const TDefault extends JsonValue | null>(opts: {
     default: TDefault;
     schema?: JsonSchemaSource;
   }): AddOp<JsonSqlType, TDefault> {
@@ -593,7 +593,7 @@ class AddBuilder<Optional extends boolean = false> {
 
   array<
     TElement extends ArrayElementSource,
-    const TDefault extends MaybeOptional<ArrayElementValue<TElement>[], Optional>,
+    const TDefault extends ArrayElementValue<TElement>[] | null,
   >(opts: {
     of: TElement;
     default: TDefault;
@@ -609,64 +609,57 @@ class AddBuilder<Optional extends boolean = false> {
       default: opts.default,
     };
   }
-
-  optional(): AddBuilder<true> {
-    return this as AddBuilder<true>;
-  }
 }
 
 // ============================================================================
 // Drop Builder (for migration context)
 // ============================================================================
 
-class DropBuilder<Optional extends boolean = false> {
-  string<const TBackwardsDefault extends MaybeOptional<string, Optional>>(opts: {
+class DropBuilder {
+  string<const TBackwardsDefault extends string | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"TEXT", TBackwardsDefault> {
     return { _type: "drop", sqlType: "TEXT", backwardsDefault: opts.backwardsDefault };
   }
 
-  int<const TBackwardsDefault extends MaybeOptional<number, Optional>>(opts: {
+  int<const TBackwardsDefault extends number | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"INTEGER", TBackwardsDefault> {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
-  timestamp<const TBackwardsDefault extends MaybeOptional<Date | number, Optional>>(opts: {
+  timestamp<const TBackwardsDefault extends Date | number | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"TIMESTAMP", TBackwardsDefault> {
     return { _type: "drop", sqlType: "TIMESTAMP", backwardsDefault: opts.backwardsDefault };
   }
 
-  boolean<const TBackwardsDefault extends MaybeOptional<boolean, Optional>>(opts: {
+  boolean<const TBackwardsDefault extends boolean | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"BOOLEAN", TBackwardsDefault> {
     return { _type: "drop", sqlType: "BOOLEAN", backwardsDefault: opts.backwardsDefault };
   }
 
-  float<const TBackwardsDefault extends MaybeOptional<number, Optional>>(opts: {
+  float<const TBackwardsDefault extends number | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"REAL", TBackwardsDefault> {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
   }
 
-  bytes<const TBackwardsDefault extends MaybeOptional<Uint8Array, Optional>>(opts: {
+  bytes<const TBackwardsDefault extends Uint8Array | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"BYTEA", TBackwardsDefault> {
     return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
   }
 
-  ref<
-    const TTargetTable extends string,
-    const TBackwardsDefault extends MaybeOptional<string, Optional>,
-  >(
+  ref<const TTargetTable extends string, const TBackwardsDefault extends string | null>(
     _targetTable: TTargetTable,
     opts: { backwardsDefault: TBackwardsDefault },
   ): DropOp<"UUID", TBackwardsDefault> {
     return { _type: "drop", sqlType: "UUID", backwardsDefault: opts.backwardsDefault };
   }
 
-  json<const TBackwardsDefault extends MaybeOptional<JsonValue, Optional>>(opts: {
+  json<const TBackwardsDefault extends JsonValue | null>(opts: {
     backwardsDefault: TBackwardsDefault;
     schema?: JsonSchemaSource;
   }): DropOp<JsonSqlType, TBackwardsDefault> {
@@ -679,15 +672,13 @@ class DropBuilder<Optional extends boolean = false> {
     };
   }
 
-  enum<const Variants extends readonly [string, ...string[]]>(
-    ...args: [
-      ...variants: Variants,
-      opts: { backwardsDefault: MaybeOptional<Variants[number], Optional> },
-    ]
-  ): DropOp<{ kind: "ENUM"; variants: [...Variants] }, MaybeOptional<Variants[number], Optional>> {
-    const opts = args[args.length - 1] as {
-      backwardsDefault: MaybeOptional<Variants[number], Optional>;
-    };
+  enum<
+    const Variants extends readonly [string, ...string[]],
+    const TBackwardsDefault extends Variants[number] | null,
+  >(
+    ...args: [...variants: Variants, opts: { backwardsDefault: TBackwardsDefault }]
+  ): DropOp<{ kind: "ENUM"; variants: [...Variants] }, TBackwardsDefault> {
+    const opts = args[args.length - 1] as { backwardsDefault: TBackwardsDefault };
     const variants = normalizeEnumVariants(args.slice(0, -1) as string[]);
     return {
       _type: "drop",
@@ -698,7 +689,7 @@ class DropBuilder<Optional extends boolean = false> {
 
   array<
     TElement extends ArrayElementSource,
-    const TBackwardsDefault extends MaybeOptional<ArrayElementValue<TElement>[], Optional>,
+    const TBackwardsDefault extends ArrayElementValue<TElement>[] | null,
   >(opts: {
     of: TElement;
     backwardsDefault: TBackwardsDefault;
@@ -713,10 +704,6 @@ class DropBuilder<Optional extends boolean = false> {
       },
       backwardsDefault: opts.backwardsDefault,
     };
-  }
-
-  optional(): DropBuilder<true> {
-    return this as unknown as DropBuilder<true>;
   }
 }
 
@@ -756,11 +743,11 @@ export const col = {
   /**
    * Add a new column to the table
    */
-  add: new AddBuilder<true>(),
+  add: new AddBuilder(),
   /**
    * Drop a column from the table
    */
-  drop: new DropBuilder<true>(),
+  drop: new DropBuilder(),
   /**
    * Rename a column in the table
    * @deprecated Use {@link col.renameFrom} instead
