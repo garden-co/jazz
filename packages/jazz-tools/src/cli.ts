@@ -1719,6 +1719,13 @@ export async function deploy(options: DeployOptions): Promise<void> {
   console.log(`Loaded current schema from ${compiled.schemaFile}.`);
   console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
 
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
+  }
+
   let localSchemaHash = await resolveStoredStructuralSchemaHash(
     options.appId,
     options.serverUrl,
