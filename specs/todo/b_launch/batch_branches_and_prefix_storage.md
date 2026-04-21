@@ -8,7 +8,7 @@ Related:
 
 - [Row Histories](../../status-quo/row_histories.md)
 - [Storage](../../status-quo/storage.md)
-- [HTTP/SSE Transport Protocol](../../status-quo/http_transport.md)
+- [HTTP/WebSocket Transport Protocol](../../status-quo/http_transport.md)
 - [Globally Consistent Transactions](./globally_consistent_transactions.md)
 - [Storage Compression Strategy](./storage_compression_strategy.md)
 
