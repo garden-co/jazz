@@ -296,27 +296,17 @@ pub fn derive_verifying_key(seed: &[u8; 32]) -> VerifyingKey {
     derive_signing_key(seed, SIGN_DOMAIN).verifying_key()
 }
 
-/// Derive a stable user identity UUID from a 32-byte seed.
+/// Derive a stable UUIDv5 user identity from a 32-byte seed.
 /// Derives the signing key for the sign domain, extracts the public key,
-/// then produces a deterministic UUID whose version nibble is 7 so it
-/// satisfies Jazz's UUIDv7 validation while retaining UUIDv5-style
-/// name-based determinism (see `user_id_from_public_key`).
+/// then produces UUIDv5(KEY_NAMESPACE, public_key_bytes).
 pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
     let verifying_key = derive_verifying_key(seed);
     user_id_from_public_key(verifying_key.as_bytes())
 }
 
-/// Deterministically derive a user-id UUID from Ed25519 public key bytes.
-///
-/// Computes UUIDv5(KEY_NAMESPACE, pub_key_bytes) and rewrites the version
-/// nibble to 7. The variant nibble of UUIDv5 is already in the v7-valid
-/// range (`0b10xx`), so no other bits need to change. The result is
-/// deterministic, collision-resistant like v5, and passes Jazz's
-/// `get_version_num() == 7` check.
+/// Deterministically derive a UUIDv5 user id from Ed25519 public key bytes.
 fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
-    let mut bytes = *Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes).as_bytes();
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    Uuid::from_bytes(bytes)
+    Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes)
 }
 
 #[cfg(test)]
@@ -352,9 +342,9 @@ mod tests {
     }
 
     #[test]
-    fn user_id_is_uuid_v7() {
+    fn user_id_is_uuid_v5() {
         let id = derive_user_id(&alice_seed());
-        assert_eq!(id.get_version_num(), 7);
+        assert_eq!(id.get_version_num(), 5);
     }
 
     #[test]

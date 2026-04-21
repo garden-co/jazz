@@ -360,8 +360,8 @@ describe("jazzAdapter", () => {
       expect(second.email).toBe("bob@example.com");
     });
 
-    it("accepts an explicit id in create/update payloads without surfacing it as a column", async () => {
-      const presetId = "0195d5cb-7c00-7000-8000-000000000abc";
+    it("uses an explicit UUIDv5 as the persisted row id without surfacing it as a column", async () => {
+      const presetId = "550e8400-e29b-51d4-a716-4466554400ab";
 
       const created = await adapter.create<any>({
         model: "user",
@@ -376,6 +376,16 @@ describe("jazzAdapter", () => {
       });
 
       expect(created.id).toBe(presetId);
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: presetId, connector: "AND" }],
+        }),
+      ).resolves.toMatchObject({
+        id: presetId,
+        email: "preset@example.com",
+        name: "Preset",
+      });
 
       const updated = await adapter.update<any>({
         model: "user",
