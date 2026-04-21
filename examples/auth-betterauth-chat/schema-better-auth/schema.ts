@@ -1,6 +1,6 @@
 import { schema as s } from "jazz-tools";
 
-const schema = {
+export const schema = {
   better_auth_user: s.table({
     name: s.string(),
     email: s.string(),
