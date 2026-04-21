@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { startTransition, useEffect, useEffectEvent, useState, type ReactNode } from "react";
 
 type SlideLink = {
+  estimatedDurationSeconds: number;
   href: string;
   title: string;
 };
@@ -23,6 +24,11 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
 
   const currentIndex = slides.findIndex((slide) => slide.href === pathname);
   const activeIndex = currentIndex === -1 ? 0 : currentIndex;
+  const currentSlide = slides[activeIndex] ?? slides[0];
+  const currentDurationSeconds = currentSlide?.estimatedDurationSeconds ?? 0;
+  const cumulativeDurationSeconds = slides
+    .slice(0, activeIndex + 1)
+    .reduce((total, slide) => total + slide.estimatedDurationSeconds, 0);
   const previousSlide = slides[activeIndex - 1];
   const nextSlide = slides[activeIndex + 1];
 
@@ -93,7 +99,12 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
   }, [onKeyDown]);
 
   return (
-    <PresentationNotesProvider hideNotes={() => setShowNotes(false)} showNotes={showNotes}>
+    <PresentationNotesProvider
+      cumulativeDurationSeconds={cumulativeDurationSeconds}
+      currentDurationSeconds={currentDurationSeconds}
+      hideNotes={() => setShowNotes(false)}
+      showNotes={showNotes}
+    >
       <div className="min-h-screen bg-fd-background text-fd-foreground">
         <div className="flex min-h-screen flex-col">
           <header className="flex items-center justify-between gap-6 px-6 py-4 text-[0.72rem] font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground sm:px-8">
