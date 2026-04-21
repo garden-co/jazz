@@ -179,6 +179,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
+      const db: Db = config.db();
+
       return {
         async create({ model, data }): Promise<any> {
           const table = getPrefixedModelName(model);
@@ -187,7 +189,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
-          return config.db().insertDurable(qb, fields, { tier: "global", ...(id ? { id } : {}) });
+          return db.insertDurable(qb, fields, { tier: "global", ...(id ? { id } : {}) });
         },
 
         async findOne({ model, where, select, join }): Promise<any> {
@@ -239,7 +241,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
-          await config.db().updateDurable(qb, match.id, fields, { tier: "global" });
+          await db.updateDurable(qb, match.id, fields, { tier: "global" });
 
           return findByJazzRowId(model, match.id);
         },
@@ -258,7 +260,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const qb = createQueryBuilder(table, wasmSchema);
 
           for (const match of matches) {
-            await config.db().updateDurable(qb, match.id, fields, { tier: "global" });
+            await db.updateDurable(qb, match.id, fields, { tier: "global" });
           }
 
           return matches.length;
@@ -272,7 +274,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          await config.db().deleteDurable(qb, match.id, { tier: "global" });
+          await db.deleteDurable(qb, match.id, { tier: "global" });
         },
 
         async deleteMany({ model, where }) {
@@ -284,7 +286,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
           for (const match of matches) {
-            await config.db().deleteDurable(qb, match.id, { tier: "global" });
+            await db.deleteDurable(qb, match.id, { tier: "global" });
           }
 
           return matches.length;
