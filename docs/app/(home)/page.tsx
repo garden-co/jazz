@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { pricingMeters } from "@/lib/home-pricing";
 
@@ -104,7 +105,32 @@ export default function HomePage() {
   return (
     <div className="w-full">
       <section className="h-[80vh] w-full">
-        <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4">
+        <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
+          <aside className="absolute right-4 top-4 z-30 max-w-sm text-md rounded-2xl border border-fd-border/70 dark:border-white/50 bg-white dark:bg-black p-4 leading-relaxed shadow">
+            <p>Announcing the Jazz v2 alpha!</p>
+            <p>
+              See the{" "}
+              <Link
+                href="/blog/what-is-jazz"
+                className="font-medium underline decoration-fd-muted-foreground/60 underline-offset-4 transition-colors hover:text-fd-foreground"
+              >
+                announcement post
+              </Link>
+              .{" "}
+            </p>
+            <p>
+              <span className="text-fd-muted-foreground">
+                (Looking for{" "}
+                <a
+                  href="https://classic.jazz.tools"
+                  className="underline decoration-fd-muted-foreground/60 underline-offset-4 transition-colors hover:text-fd-foreground"
+                >
+                  classic Jazz
+                </a>
+                ?)
+              </span>
+            </p>
+          </aside>
           <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
             <h1 className="w-full text-[clamp(4rem,11vw,10rem)] font-black leading-[0.84] tracking-[-0.05em]">
               <span className="block">the</span>
@@ -206,6 +232,24 @@ export default function HomePage() {
           <div className="mt-20 border-t pt-12 sm:mt-24 sm:pt-14"></div>
         </div>
       </section>
+      <footer className="w-full pb-24 pt-4 sm:pb-28 lg:pb-32">
+        <div className="mx-auto flex w-full max-w-(--fd-layout-width) flex-col items-center gap-6 px-4">
+          <p className="font-display text-[clamp(2.75rem,5vw,6rem)] font-black leading-[0.9] tracking-[-0.06em]">
+            npm create jazz
+          </p>
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-4">
+            <p className="text-sm text-fd-muted-foreground sm:text-base">Join the </p>
+            <a
+              href="https://discord.gg/RN9UKh52be"
+              className="inline-flex items-center rounded-full border border-fd-border px-4 py-2 text-sm font-medium transition-colors hover:bg-fd-accent hover:text-fd-accent-foreground"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Jazz Discord
+            </a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
