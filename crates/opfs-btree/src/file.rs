@@ -474,6 +474,13 @@ fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn map_js_error(value: wasm_bindgen::JsValue) -> BTreeError {
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: web_sys::DomException = value.unchecked_into();
+        if ex.name() == "SecurityError" {
+            return BTreeError::SecurityError(ex.message().into());
+        }
+        return BTreeError::Io(format!("DOMException({}): {}", ex.name(), ex.message()));
+    }
     if let Some(s) = value.as_string() {
         BTreeError::Io(s)
     } else {

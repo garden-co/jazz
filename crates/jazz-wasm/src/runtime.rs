@@ -1766,7 +1766,7 @@ impl WasmRuntime {
         db_name: &str,
         tier: Option<String>,
         use_binary_encoding: bool,
-    ) -> Result<WasmRuntime, JsError> {
+    ) -> Result<WasmRuntime, JsValue> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
         init_tracing();
@@ -1784,11 +1784,12 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         // Parse schema
-        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
-            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        let runtime_schema =
+            jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+                .map_err(|e| JsValue::from(JsError::new(&format!("Invalid schema JSON: {}", e))))?;
         let schema = runtime_schema.schema;
         // Parse optional node durability tiers
-        let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
+        let node_tiers = parse_node_durability_tiers(tier.as_deref()).map_err(JsValue::from)?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
@@ -1811,13 +1812,28 @@ impl WasmRuntime {
                 jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
             },
         )
-        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        .map_err(|e| {
+            JsValue::from(JsError::new(&format!(
+                "Failed to create SchemaManager: {:?}",
+                e
+            )))
+        })?;
 
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
         let storage: Box<dyn Storage> = Box::new(
             OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
                 .await
-                .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?,
+                .map_err(|e| {
+                    if let jazz_tools::storage::StorageError::SecurityError(ref msg) = e {
+                        web_sys::DomException::new_with_message_and_name(msg, "SecurityError")
+                            .map(JsValue::from)
+                            .unwrap_or_else(|_| {
+                                JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
+                            })
+                    } else {
+                        JsValue::from(JsError::new(&format!("Storage: {:?}", e)))
+                    }
+                })?,
         );
         if let Err(error) =
             rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage.as_ref(), app_id)

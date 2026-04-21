@@ -307,6 +307,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
       );
     } catch (e: any) {
       if (e instanceof DOMException && e.name === "SecurityError") {
+        console.warn("[jazz] OPFS unavailable (SecurityError) — falling back to ephemeral storage");
         runtime = await wasmModule.WasmRuntime.openEphemeral(
           schemaJson,
           msg.appId,
