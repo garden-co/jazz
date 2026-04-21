@@ -73,7 +73,8 @@ _and_ with the people who invent the CSS standard
 1. map out domain model
 2. build the UI
 3. impress everyone with flashy demo around local state
-      <Notes>
+
+<Notes>
 Then I usually built a quick mostly working demo around local
 UI state, because that's easy to iterate on
 
@@ -235,13 +236,16 @@ the main message is: you deserve a better stack.
 And the three metrics I want you to keep in mind when
 you judge a stack are
 
-- lines of code, especially those that don't have anything to
-  do with what makes your app unique
-- layers of infra bullshit, so how many things do you have to
-  deploy and integrate with each other
-- light-milliseconds that user edits have to travel before they
-  become visible
-    </Notes>
+Lines of code, especially the ones that don't have anything to
+do with what makes your app unique.
+
+Layers of infra bullshit, meaning how many things you have to
+deploy and integrate with each other.
+
+Light-milliseconds that user edits have to travel before they
+become visible.
+
+</Notes>
 </Slide>
 
 <Slide>
@@ -255,15 +259,16 @@ of the more modern alternatives
 </Slide>
 
 <Slide>
-# Traditional backend
+# Slimming the stack 0
 
 Lines of code: +++++++++++++++
 
 Layers:
 
 - backend/external
-  - Database, ORM, cache, connection pooler
-  - backend framework, auth logic
+  - Database
+  - ORM, cache, connection pooler
+  - backend framework, CRUD API boilerplate, API layer, auth logic
   - queues, pubsub, workers, durable streams
   - auth provider, blob storage
 - frontend
@@ -271,7 +276,9 @@ Layers:
   - query cache w/ optimistic updates, ui state
   - client/rendering framework
 
-Light milliseconds: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
 
 <Notes>
 This is our starting situation, and this is exactly what makes
@@ -280,6 +287,295 @@ the backend part so unfun:
 _list everything in the diagram_
 
 point out "durable streams" as newest addition to the stack
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 1
+
+Lines of code: ++++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ORM, cache, connection pooler
+  - backend framework, CRUD API boilerplate, API layer, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+starting with the frontend
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 2
+
+Lines of code: +++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, connection pooler
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+continuing with simplifying the database client in the backend
+
+not much LOC saved (ORM -> modern DB client) but fewer thigns to choose
+
+we can have a DB client directly in the frontend!
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 3
+
+Lines of code: +++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+removing scale/perf aiding infra layers
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 4
+
+Lines of code: +++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+subsume queue/stream/pubsub layer into the database
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 5
+
+Lines of code: ++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, ~~blob storage~~
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+subsume blob storage
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 6
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, ~~auth logic~~
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, ~~blob storage~~
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- optimistic preview: 0ms
+
+<Notes>
+make permissions DB concern
+
+auth roundtrip disappears
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 6
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - cache
+  - backend framework
+  - workers
+  - auth provider
+- frontend
+  - DB client
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- optimistic preview: 0ms
+
+<Notes>
+let's pause and see what we're left with
+
+already pretty clean!
+
+everything that happens from now on is going to be more jazz-specific
+
+our ambition: really get as close as possible to useState as your DB
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 7
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~cache~~
+  - backend framework
+  - workers
+  - auth provider
+- regional database edge
+- frontend
+  - DB client
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- via same regional cache: 10ms -> edge -> 10ms
+- optimistic preview: 0ms
+
+<Notes>
+explain built-in regional edges for caching and
+super low latency between collaborators
+
+joke about how other solutions can also do this if you
+happen to live in us-east-1
+
+and unlike normal caches, this is fully auth aware!
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 8
+
+Lines of code: +++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~cache~~
+  - backend framework
+  - workers
+  - auth provider
+- regional database edge
+- frontend
+  - **Local-first database**
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- via same regional cache: 10ms -> edge -> 10ms
+- **durable local state**: 0ms
+
+<Notes>
+this is where it gets really interesting and we
+introduce a local-first database on the client
+that is truly durable!
+
+TODO: argument for why slightly less LOC
 
 </Notes>
 </Slide>
