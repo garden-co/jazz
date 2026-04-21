@@ -53,11 +53,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const onSendRef = useRef(onSend);
   const [toolbarState, setToolbarState] = useState<FloatingToolbarState>({
     visible: false,
     top: 0,
     left: 0,
   });
+
+  useEffect(() => {
+    onSendRef.current = onSend;
+  }, [onSend]);
 
   const handleSend = useCallback(() => {
     const view = viewRef.current;
@@ -65,11 +70,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (isDocEmpty(view.state)) return;
 
     const html = serialiseToHtml(view.state);
-    onSend(html);
+    onSendRef.current(html);
 
     const newState = EditorState.create({ schema, plugins: view.state.plugins });
     view.updateState(newState);
-  }, [onSend]);
+  }, []);
 
   const handleInsertText = useCallback((text: string) => {
     const view = viewRef.current;
@@ -137,7 +142,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       view.destroy();
       viewRef.current = null;
     };
-  }, [disabled, handleSend]);
+  }, [handleSend, placeholder]);
+
+  useEffect(() => {
+    viewRef.current?.setProps({
+      editable: () => !disabled,
+    });
+  }, [disabled]);
 
   return (
     <div ref={containerRef} id="messageEditor" className="relative flex-1">
