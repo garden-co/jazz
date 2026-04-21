@@ -289,7 +289,7 @@ impl JazzClient {
             .await
     }
 
-    /// Create a new row in a table using a caller-supplied UUIDv7.
+    /// Create a new row in a table using a caller-supplied UUID.
     pub async fn create_with_id(
         &self,
         table: &str,
@@ -328,7 +328,7 @@ impl JazzClient {
             .await
     }
 
-    /// Create a new row with a caller-supplied UUIDv7 and wait for durability.
+    /// Create a new row with a caller-supplied UUID and wait for durability.
     pub async fn create_persisted_with_id(
         &self,
         table: &str,
@@ -359,7 +359,7 @@ impl JazzClient {
         Ok((object_id, row_values))
     }
 
-    /// Create or update a row using a caller-supplied UUIDv7.
+    /// Create or update a row using a caller-supplied UUID.
     pub async fn upsert(
         &self,
         table: &str,

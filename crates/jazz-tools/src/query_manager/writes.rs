@@ -120,14 +120,6 @@ impl QueryManager {
         external_object_id: Option<ObjectId>,
     ) -> Result<ObjectId, QueryError> {
         if let Some(object_id) = external_object_id {
-            if object_id.uuid().get_version_num() != 7 {
-                return Err(QueryError::EncodingError(format!(
-                    "external create id must be UUIDv7, got version {} for {}",
-                    object_id.uuid().get_version_num(),
-                    object_id
-                )));
-            }
-
             if storage
                 .load_row_locator(object_id)
                 .map_err(|err| QueryError::EncodingError(format!("load row locator: {err}")))?
