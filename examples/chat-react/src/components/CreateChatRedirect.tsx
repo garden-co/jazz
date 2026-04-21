@@ -3,13 +3,16 @@ import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 export const CreateChatRedirect = () => {
   const db = useDb();
   const session = useSession();
   const { navigate } = useRouter();
   const initialized = useRef(false);
-  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
@@ -19,28 +22,23 @@ export const CreateChatRedirect = () => {
     initialized.current = true;
 
     void (async () => {
-      const chatInsertHandle = db.insert(app.chats, {
-        isPublic: true,
-        createdBy: userId,
-      });
-      const chat = chatInsertHandle.value;
+      const chat = await db
+        .insert(app.chats, {
+          isPublic: true,
+          createdBy: userId,
+        })
+        .wait(sharedWriteOptions);
 
-      const memberInsertHandle = db.insert(app.chatMembers, { chatId: chat.id, userId });
+      await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
 
-      const messageInsertHandle = db.insert(app.messages, {
-        chatId: chat.id,
-        text: "Hello world",
-        senderId: myProfile.id,
-        createdAt: new Date(),
-      });
-
-      if (sharedWriteOptions) {
-        await Promise.all(
-          [chatInsertHandle, memberInsertHandle, messageInsertHandle].map((handle) =>
-            handle.wait(sharedWriteOptions),
-          ),
-        );
-      }
+      await db
+        .insert(app.messages, {
+          chatId: chat.id,
+          text: "Hello world",
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        })
+        .wait(sharedWriteOptions);
 
       navigate(`/#/chat/${chat.id}`);
     })().catch((error) => {

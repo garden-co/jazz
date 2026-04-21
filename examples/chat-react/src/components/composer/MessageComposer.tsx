@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../../schema.js";
 import type { AttachmentData } from "./UploadModal";
+import { DurabilityTier } from "jazz-tools";
 
 interface MessageComposerProps {
   chatId: string;
@@ -17,7 +18,9 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
-  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const myProfile = useMyProfile();
   const composerReady = !!userId && !!myProfile;
@@ -27,17 +30,16 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
       if (!userId || !myProfile) return;
       if (!html.trim()) return;
 
-      const messageInsertHandle = db.insert(app.messages, {
+      db.insert(app.messages, {
         chatId,
         text: html.trim(),
         senderId: myProfile.id,
         createdAt: new Date(),
-      });
-      if (sharedWriteOptions) {
-        messageInsertHandle.wait(sharedWriteOptions).catch((error) => {
+      })
+        .wait(sharedWriteOptions)
+        .catch((error) => {
           console.error("failed to send message", error);
         });
-      }
     },
     [userId, chatId, db, myProfile, sharedWriteOptions],
   );

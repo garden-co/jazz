@@ -5,12 +5,15 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { navigate } from "@/hooks/useRouter";
 import { app } from "../../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 export const ChatList = () => {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
-  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const myProfile = useMyProfile();
 
@@ -20,26 +23,21 @@ export const ChatList = () => {
   const createPublicChat = async () => {
     if (!userId || !myProfile) return;
 
-    const chatInsertHandle = db.insert(app.chats, {
-      isPublic: true,
-      createdBy: userId,
-    });
-    const chat = chatInsertHandle.value;
-    const memberInsertHandle = db.insert(app.chatMembers, { chatId: chat.id, userId });
-    const messageInsertHandle = db.insert(app.messages, {
-      chatId: chat.id,
-      text: "Hello world",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
-
-    if (sharedWriteOptions) {
-      await Promise.all(
-        [chatInsertHandle, memberInsertHandle, messageInsertHandle].map((handle) =>
-          handle.wait(sharedWriteOptions),
-        ),
-      );
-    }
+    const chat = await db
+      .insert(app.chats, {
+        isPublic: true,
+        createdBy: userId,
+      })
+      .wait(sharedWriteOptions);
+    await db.insert(app.chatMembers, { chatId: chat.id, userId }).wait(sharedWriteOptions);
+    await db
+      .insert(app.messages, {
+        chatId: chat.id,
+        text: "Hello world",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      })
+      .wait(sharedWriteOptions);
 
     navigate(`/#/chat/${chat.id}`);
   };
@@ -49,31 +47,28 @@ export const ChatList = () => {
 
     const shareCode = crypto.randomUUID().slice(0, 8);
 
-    const chatInsertHandle = db.insert(app.chats, {
-      isPublic: false,
-      createdBy: userId,
-      joinCode: shareCode,
-    });
-    const chat = chatInsertHandle.value;
-    const memberInsertHandle = db.insert(app.chatMembers, {
-      chatId: chat.id,
-      userId,
-      joinCode: shareCode,
-    });
-    const messageInsertHandle = db.insert(app.messages, {
-      chatId: chat.id,
-      text: "This is a private chat.",
-      senderId: myProfile.id,
-      createdAt: new Date(),
-    });
-
-    if (sharedWriteOptions) {
-      await Promise.all(
-        [chatInsertHandle, memberInsertHandle, messageInsertHandle].map((handle) =>
-          handle.wait(sharedWriteOptions),
-        ),
-      );
-    }
+    const chat = await db
+      .insert(app.chats, {
+        isPublic: false,
+        createdBy: userId,
+        joinCode: shareCode,
+      })
+      .wait(sharedWriteOptions);
+    await db
+      .insert(app.chatMembers, {
+        chatId: chat.id,
+        userId,
+        joinCode: shareCode,
+      })
+      .wait(sharedWriteOptions);
+    await db
+      .insert(app.messages, {
+        chatId: chat.id,
+        text: "This is a private chat.",
+        senderId: myProfile.id,
+        createdAt: new Date(),
+      })
+      .wait(sharedWriteOptions);
 
     navigate(`/#/chat/${chat.id}`);
   };
