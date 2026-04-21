@@ -21,6 +21,11 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
         batchId: "insert-batch-id",
       };
     },
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "insert-batch-id",
+    }),
     insertWithSession: (
       table: string,
       values: Record<string, unknown>,
@@ -37,6 +42,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       updateCalls.push([objectId, updates]);
       return { batchId: "update-batch-id" };
     },
+    updateDurable: async () => {},
     updateWithSession: (
       objectId: string,
       updates: Record<string, unknown>,
@@ -49,6 +55,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       deleteCalls.push(objectId);
       return { batchId: "delete-batch-id" };
     },
+    deleteDurable: async () => {},
     deleteWithSession: (objectId: string, writeContextJson?: string | null) => {
       deleteWithSessionCalls.push([objectId, writeContextJson ?? undefined]);
       return { batchId: "delete-with-session-batch-id" };

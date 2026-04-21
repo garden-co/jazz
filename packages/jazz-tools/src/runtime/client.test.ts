@@ -1,12 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
-import { JazzClient, resolveDefaultDurabilityTier, type MutationErrorEvent } from "./client.js";
+import {
+  JazzClient,
+  resolveDefaultDurabilityTier,
+  type MutationErrorEvent,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
-  return {
-    updateAuth: vi.fn(),
-    onAuthFailure: vi.fn(),
+  const runtime = {
+    updateAuth: vi.fn<(auth_json: string) => void>(),
+    onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(),
     insertDurable: vi.fn(),
@@ -14,20 +19,55 @@ function makeFakeRuntime() {
     updateDurable: vi.fn(),
     delete: vi.fn(),
     deleteDurable: vi.fn(),
-    query: vi.fn(),
-    subscribe: vi.fn(),
-    createSubscription: vi.fn(),
-    executeSubscription: vi.fn(),
-    unsubscribe: vi.fn(),
+    query:
+      vi.fn<
+        (
+          query_json: string,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => Promise<any>
+      >(),
+    subscribe:
+      vi.fn<
+        (
+          query_json: string,
+          on_update: Function,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => number
+      >(),
+    createSubscription:
+      vi.fn<
+        (
+          query_json: string,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => number
+      >(),
+    executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
+    unsubscribe: vi.fn<(handle: number) => void>(),
+    loadLocalBatchRecord: vi.fn<
+      (batch_id: string) => ReturnType<NonNullable<Runtime["loadLocalBatchRecord"]>>
+    >(() => null),
+    loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
+      () => [],
+    ),
+    drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
+    acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
     addClient: vi.fn().mockReturnValue("client-id"),
-    returnsDeclaredSchemaRows: false,
+    returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
-  };
+  } satisfies Runtime;
+
+  return runtime;
 }
 
 function makeContext(): AppContext {
@@ -303,7 +343,7 @@ describe("JazzClient mutation error handling", () => {
   it("checks only runtime-reported rejected batch ids after sync", () => {
     const runtime = makeFakeRuntime();
     runtime.drainRejectedBatchIds = vi
-      .fn(() => [])
+      .fn<() => string[]>(() => [])
       .mockReturnValueOnce([])
       .mockReturnValueOnce(["batch-rejected"]);
     runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
