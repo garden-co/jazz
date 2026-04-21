@@ -5487,8 +5487,9 @@ tx.insert(app.todos, { title: "Draft copy", done: false });
 const stagedDrafts = await tx.all(app.todos.where({ done: false }));
 tx.update(app.todos, todoId, { done: true });
 
-const batchId = tx.commit();
-console.log(batchId);
+const committed = tx.commit();
+await committed.wait({ tier: "edge" });
+console.log(committed.batchId);
 ```
 
 The changes made as part of the transaction are scoped to it, and will only be

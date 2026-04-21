@@ -129,12 +129,13 @@ describe("Db transactions", () => {
     const insertedRuntime = makeInsertHandle(runtimeRow, "batch-tx");
     const updatedRuntime = makeWriteHandle("batch-tx");
     const deletedRuntime = makeWriteHandle("batch-tx");
+    const committedRuntime = makeWriteHandle("batch-tx");
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-tx"),
       create: vi.fn(() => insertedRuntime.handle),
       update: vi.fn(() => updatedRuntime.handle),
       delete: vi.fn(() => deletedRuntime.handle),
-      commit: vi.fn(() => "batch-tx"),
+      commit: vi.fn(() => committedRuntime.handle),
       localBatchRecord: vi.fn((batchId = "batch-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-tx")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -178,7 +179,14 @@ describe("Db transactions", () => {
     expect(insertedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "global");
     expect(updatedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "edge");
     expect(deletedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "local");
-    expect(tx.commit()).toBe("batch-tx");
+    const committed = tx.commit();
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBe("batch-tx");
+    await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
+    expect(committedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
+      "batch-tx",
+      "global",
+    );
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
     expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
@@ -208,7 +216,7 @@ describe("Db transactions", () => {
       create: vi.fn(() => insertedRuntime.handle),
       update: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
       delete: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
-      commit: vi.fn(() => "batch-session-tx"),
+      commit: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
       localBatchRecord: vi.fn((batchId = "batch-session-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-session-tx")]),
       acknowledgeRejectedBatch: vi.fn(() => true),
@@ -230,7 +238,9 @@ describe("Db transactions", () => {
     const inserted = tx.insert(table, { title: "Session transaction", done: true });
 
     expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(session, "alice@writer");
-    expect(tx.commit()).toBe("batch-session-tx");
+    const committed = tx.commit();
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBe("batch-session-tx");
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
     expect(inserted.value).toEqual({
       id: "todo-2",
@@ -263,7 +273,7 @@ describe("Db transactions", () => {
       create: vi.fn(() => insertedRuntime.handle),
       update: vi.fn(),
       delete: vi.fn(),
-      commit: vi.fn(() => "batch-closed"),
+      commit: vi.fn(() => makeWriteHandle("batch-closed").handle),
       localBatchRecord: vi.fn((batchId = "batch-closed") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-closed")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -280,7 +290,9 @@ describe("Db transactions", () => {
     );
 
     const tx = db.beginTransaction(table);
-    expect(tx.commit()).toBe("batch-closed");
+    const committed = tx.commit();
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBe("batch-closed");
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
     expect(runtimeTransaction.create).not.toHaveBeenCalled();
@@ -302,7 +314,7 @@ describe("Db transactions", () => {
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(async () => [runtimeRow]),
-      commit: vi.fn(() => "batch-read"),
+      commit: vi.fn(() => makeWriteHandle("batch-read").handle),
       localBatchRecord: vi.fn((batchId = "batch-read") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -343,7 +355,7 @@ describe("Db transactions", () => {
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(),
-      commit: vi.fn(() => "batch-read-closed"),
+      commit: vi.fn(() => makeWriteHandle("batch-read-closed").handle),
       localBatchRecord: vi.fn((batchId = "batch-read-closed") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read-closed")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -360,7 +372,9 @@ describe("Db transactions", () => {
     );
 
     const tx = db.beginTransaction(table);
-    expect(tx.commit()).toBe("batch-read-closed");
+    const committed = tx.commit();
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBe("batch-read-closed");
 
     await expect(tx.all(query)).rejects.toThrow(/committed/i);
     expect(runtimeTransaction.query).not.toHaveBeenCalled();
@@ -377,7 +391,7 @@ describe("Db transactions", () => {
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
-      commit: vi.fn(() => "batch-cross-client"),
+      commit: vi.fn(() => makeWriteHandle("batch-cross-client").handle),
       localBatchRecord: vi.fn((batchId = "batch-cross-client") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-cross-client")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
