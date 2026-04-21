@@ -21,9 +21,95 @@ Use `useLocalFirstAuth()` to manage the user's secret. On first load it generate
 
 <Callout type="warn">
   The secret is the user's identity. If it's lost (e.g. `localStorage` cleared), the identity is
-  gone and any data owned by that user becomes inaccessible. For durable identity, upgrade to an
-  external provider.
+  gone and any data owned by that user becomes inaccessible unless you restore it from a recovery
+  passphrase, a passkey backup, or an external provider you linked earlier.
 </Callout>
+
+## Backing up and restoring the secret
+
+You can keep local-first auth fully serverless and still make it recoverable. Jazz ships two backup
+helpers for the same 32-byte secret:
+
+| Method                      | Platforms     | Best for                                       | Trade-offs                                           |
+| --------------------------- | ------------- | ---------------------------------------------- | ---------------------------------------------------- |
+| `jazz-tools/passphrase`     | Browser, Expo | Manual backup users can carry anywhere         | User must safely store a 24-word recovery passphrase |
+| `jazz-tools/passkey-backup` | Browser only  | Fast recovery on devices that support passkeys | Requires WebAuthn and a stable relying-party ID      |
+
+### Recovery passphrase
+
+`jazz-tools/passphrase` converts the local-first secret into a 24-word English recovery
+passphrase. Restoring that passphrase produces the exact same secret, so the user keeps the same
+Jazz identity.
+
+<Tabs groupId="local-first-recovery-platform" persist updateAnchor items={["React", "Expo"]}>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-backup
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+      ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo-backup
+    </include>
+  </Tab>
+</Tabs>
+
+To restore, decode the user-provided passphrase back into a secret and hand it back to your
+local-first auth flow:
+
+<Tabs
+  groupId="local-first-recovery-restore-platform"
+  persist
+  updateAnchor
+  items={["React", "Expo"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-restore
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+      ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo-restore
+    </include>
+  </Tab>
+</Tabs>
+
+The parser accepts upper-case input and extra whitespace. Invalid input throws
+`RecoveryPhraseError` with codes like `invalid-length`, `invalid-word`, and
+`invalid-checksum`.
+
+<Callout type="info">
+  In React and Expo, prefer `useLocalFirstAuth()` for backup and restore so the mounted
+  `JazzProvider` updates immediately. The lower-level `BrowserAuthSecretStore` and
+  `ExpoAuthSecretStore` APIs are still useful outside React-based UIs.
+</Callout>
+
+### Passkey backup
+
+For browser apps, `jazz-tools/passkey-backup` stores the same secret in a resident WebAuthn
+credential. That gives users passkey-style recovery without adding a server-side auth provider.
+
+Create the passkey from the current local-first secret:
+
+<include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-backup
+</include>
+
+Restore from the passkey by reading the secret back and passing it to `login(...)` from
+`useLocalFirstAuth()`:
+
+<include cwd lang="tsx" meta='title="auth-snippets.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react-passkey-restore
+</include>
+
+Use a stable `appHostname` everywhere you want passkey recovery to work. It becomes the WebAuthn
+relying-party ID, so changing it creates a different passkey namespace. `backup(secret,
+displayName)` also needs a user-visible name for the platform passkey sheet.
+
+Handle `PasskeyBackupError` in your UI to surface cases like unsupported browsers, no saved
+credential, or missing user verification. Keep a recovery passphrase or external sign-in as a
+fallback if the user might lose access to their passkey provider.
 
 ## Server configuration
 
