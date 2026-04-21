@@ -194,6 +194,15 @@ describe("Todo Server Integration", () => {
 
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
+      // Use an isolated upstream so CRUD test data doesn't leak into the count assertion.
+      const coldStartUpstream = await TestingServer.start();
+      await pushSchemaCatalogue({
+        serverUrl: coldStartUpstream.url,
+        appId: coldStartUpstream.appId,
+        adminSecret: coldStartUpstream.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+      });
+
       // Use a shared data path so both server instances see the same Fjall file
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
       const dbPath = join(dataDir, "jazz.db");
@@ -202,10 +211,10 @@ describe("Todo Server Integration", () => {
       const server1 = await startServer(
         await createServer({
           dataPath: dbPath,
-          appId: upstream!.appId,
-          serverUrl: upstream!.url,
-          backendSecret: upstream!.backendSecret,
-          adminSecret: upstream!.adminSecret,
+          appId: coldStartUpstream.appId,
+          serverUrl: coldStartUpstream.url,
+          backendSecret: coldStartUpstream.backendSecret,
+          adminSecret: coldStartUpstream.adminSecret,
         }),
         0,
       );
@@ -234,10 +243,10 @@ describe("Todo Server Integration", () => {
       const server2 = await startServer(
         await createServer({
           dataPath: dbPath,
-          appId: upstream!.appId,
-          serverUrl: upstream!.url,
-          backendSecret: upstream!.backendSecret,
-          adminSecret: upstream!.adminSecret,
+          appId: coldStartUpstream.appId,
+          serverUrl: coldStartUpstream.url,
+          backendSecret: coldStartUpstream.backendSecret,
+          adminSecret: coldStartUpstream.adminSecret,
         }),
         0,
       );
@@ -259,6 +268,7 @@ describe("Todo Server Integration", () => {
       expect(found2!.title).toBe("Also persist");
 
       await stopServer(server2);
+      await coldStartUpstream.stop();
     });
   });
 
