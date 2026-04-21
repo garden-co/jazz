@@ -154,8 +154,11 @@ async function loadSchemaAst(filePath: string): Promise<Schema> {
   }
 
   throw new Error(
-    `Could not find a schema export in ${basename(filePath)}. ` +
-      "Use side-effect table(...) declarations, or export schema/app/default from schema.ts.",
+    `Could not find a schema in ${filePath}. ` +
+      `Define tables with side-effect table(...) calls at module scope, ` +
+      `or export const schema / app / default. ` +
+      `By convention, schema.ts (and permissions.ts) live at the project root ` +
+      `(or src/lib/ for SvelteKit). See https://jazz.tools/docs/schemas/defining-tables.`,
   );
 }
 
@@ -279,7 +282,12 @@ export async function hasRootSchema(schemaDir: string): Promise<boolean> {
 export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchemaProject> {
   const resolved = resolveRootSchemaFiles(schemaDir);
   if (!resolved) {
-    throw new Error(`Schema file not found. Expected ${describeExpectedSchemaFiles(schemaDir)}.`);
+    throw new Error(
+      `Schema file not found. Jazz looks for schema.ts (and, optionally, permissions.ts alongside it) ` +
+        `at the project root, ./src/, or ./src/lib/ (SvelteKit). ` +
+        `Searched: ${describeExpectedSchemaFiles(schemaDir)}. ` +
+        `Pass --schema-dir <path> to point at a different root.`,
+    );
   }
 
   let schema = await loadSchemaAst(resolved.schemaFile);
