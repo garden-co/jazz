@@ -154,7 +154,7 @@ pub fn setup_data<S: Storage>(
     for i in 0..num_teams {
         let is_owned = i < owned_team_count;
         let owner = if is_owned { user_id } else { "other_user" };
-        let (row_id, _row_values) = core
+        let ((row_id, _row_values), _batch_id) = core
             .insert(
                 "teams",
                 row([
@@ -183,7 +183,7 @@ pub fn setup_data<S: Storage>(
             other_teams[team_idx - owned_team_count]
         };
 
-        let (row_id, _row_values) = core
+        let ((row_id, _row_values), _batch_id) = core
             .insert(
                 "folders",
                 row([
@@ -223,7 +223,7 @@ pub fn setup_data<S: Storage>(
             continue;
         };
 
-        let (row_id, _row_values) = core
+        let ((row_id, _row_values), _batch_id) = core
             .insert(
                 "documents",
                 row([

@@ -458,7 +458,7 @@ impl<S: Storage> R1State<S> {
 
     fn seed_dataset(&mut self, profile: &ProfileConfig) {
         for user_idx in 0..profile.users {
-            let (user_id, _row_values) = self
+            let ((user_id, _row_values), _batch_id) = self
                 .runtime
                 .insert(
                     "users",
@@ -474,7 +474,7 @@ impl<S: Storage> R1State<S> {
 
         for org_idx in 0..profile.organizations {
             let created_at = self.bump_timestamp();
-            let (org_id, _row_values) = self
+            let ((org_id, _row_values), _batch_id) = self
                 .runtime
                 .insert(
                     "organizations",
@@ -512,7 +512,7 @@ impl<S: Storage> R1State<S> {
         for project_idx in 0..profile.projects {
             let org_id = self.organizations[project_idx % self.organizations.len()];
             let updated_at = self.bump_timestamp();
-            let (project_id, _row_values) = self
+            let ((project_id, _row_values), _batch_id) = self
                 .runtime
                 .insert(
                     "projects",
@@ -539,7 +539,7 @@ impl<S: Storage> R1State<S> {
             };
             let priority = ((task_idx % 5) + 1) as i32;
             let updated_at = self.bump_timestamp();
-            let (task_id, _row_values) = self
+            let ((task_id, _row_values), _batch_id) = self
                 .runtime
                 .insert(
                     "tasks",
@@ -742,7 +742,7 @@ impl<S: Storage> R1State<S> {
         };
         let updated_at = self.bump_timestamp();
 
-        let (task_id, _row_values) = self
+        let ((task_id, _row_values), _batch_id) = self
             .runtime
             .insert(
                 "tasks",
@@ -841,7 +841,7 @@ fn seed_project_board_dataset<S: Storage>(
     };
 
     for user_idx in 0..profile.users {
-        let (user_id, _row_values) = runtime
+        let ((user_id, _row_values), _batch_id) = runtime
             .insert(
                 "users",
                 row([
@@ -855,7 +855,7 @@ fn seed_project_board_dataset<S: Storage>(
     }
 
     for org_idx in 0..profile.organizations {
-        let (org_id, _row_values) = runtime
+        let ((org_id, _row_values), _batch_id) = runtime
             .insert(
                 "organizations",
                 row([
@@ -890,7 +890,7 @@ fn seed_project_board_dataset<S: Storage>(
 
     for project_idx in 0..profile.projects {
         let org_id = organizations[project_idx % organizations.len()];
-        let (project_id, _row_values) = runtime
+        let ((project_id, _row_values), _batch_id) = runtime
             .insert(
                 "projects",
                 row([
@@ -915,7 +915,7 @@ fn seed_project_board_dataset<S: Storage>(
             _ => "done",
         };
         let priority = ((task_idx % 5) + 1) as i32;
-        let (task_id, _row_values) = runtime
+        let ((task_id, _row_values), _batch_id) = runtime
             .insert(
                 "tasks",
                 row([
@@ -1404,7 +1404,7 @@ impl<S: Storage> PermissionR5State<S> {
             timestamp: 1_770_000_000_000_000,
         };
 
-        let (alice_root, _row_values) = state
+        let ((alice_root, _row_values), _batch_id) = state
             .runtime
             .insert(
                 "folders",
@@ -1419,7 +1419,7 @@ impl<S: Storage> PermissionR5State<S> {
         let mut shared_folders = vec![alice_root];
         let mut parent = alice_root;
         for idx in 0..scenario.shared_chain_depth {
-            let (folder_id, _row_values) = state
+            let ((folder_id, _row_values), _batch_id) = state
                 .runtime
                 .insert(
                     "folders",
@@ -1439,7 +1439,7 @@ impl<S: Storage> PermissionR5State<S> {
             for doc_idx in 0..scenario.docs_per_folder {
                 let updated_at = state.next_timestamp();
                 let owner_id = if doc_idx % 8 == 0 { "alice" } else { "bob" };
-                let (doc_id, _row_values) = state
+                let ((doc_id, _row_values), _batch_id) = state
                     .runtime
                     .insert(
                         "documents",
@@ -1463,7 +1463,7 @@ impl<S: Storage> PermissionR5State<S> {
             }
         }
 
-        let (private_root, _row_values) = state
+        let ((private_root, _row_values), _batch_id) = state
             .runtime
             .insert(
                 "folders",
@@ -1477,7 +1477,7 @@ impl<S: Storage> PermissionR5State<S> {
             .expect("seed private root folder");
         for doc_idx in 0..scenario.denied_docs {
             let updated_at = state.next_timestamp();
-            let (doc_id, _row_values) = state
+            let ((doc_id, _row_values), _batch_id) = state
                 .runtime
                 .insert(
                     "documents",
