@@ -51,7 +51,7 @@ Current system uses object-level `QueryScope` subscriptions. Sharding needs tabl
 
 This requires refactoring from current object-level scoping to table-level awareness.
 
-> Current: `crates/groove/src/sync_manager.rs:124-129` (QueryScope — object-level)
+> Current: `crates/jazz-tools/src/sync_manager/types.rs` still models query scope in object/branch terms.
 
 ## Shard Migration: Epoch-Based State Machine
 
