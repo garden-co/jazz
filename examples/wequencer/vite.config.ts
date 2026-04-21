@@ -18,7 +18,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/apps": `http://127.0.0.1:${JAZZ_PORT}`,
+      "/apps": { target: `http://127.0.0.1:${JAZZ_PORT}`, ws: true },
       "/sync": `http://127.0.0.1:${JAZZ_PORT}`,
       "/events": `http://127.0.0.1:${JAZZ_PORT}`,
       "/health": `http://127.0.0.1:${JAZZ_PORT}`,
