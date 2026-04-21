@@ -25,11 +25,18 @@ async function resolveWrappedConfig(
 // to process.env on successful init; that state leaks across vitest workers in
 // the same thread pool and flips later tests onto the env-driven cloud branch.
 // Scrub before each test so every case starts from the same baseline.
-beforeEach(() => {
+beforeEach(async () => {
   delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
+
+  // withJazz copies jazz_wasm_bg.wasm into the host's public/ dir (derived
+  // from process.cwd() when no schemaDir is provided). Redirect cwd to a
+  // per-test temp dir so tests that don't pass schemaDir don't pollute the
+  // package directory.
+  const fakeCwd = await tempRoots.create("jazz-next-test-cwd-");
+  vi.spyOn(process, "cwd").mockReturnValue(fakeCwd);
 });
 
 afterEach(async () => {
@@ -62,7 +69,10 @@ describe("withJazz", () => {
     );
 
     expect(resolved.reactStrictMode).toBe(true);
-    expect(resolved.env).toEqual({ EXISTING_ENV: "1" });
+    expect(resolved.env).toEqual({
+      EXISTING_ENV: "1",
+      NEXT_PUBLIC_JAZZ_WASM_URL: "/_jazz/jazz_wasm_bg.wasm",
+    });
     expect(resolved.serverExternalPackages).toEqual(
       expect.arrayContaining(["sharp", "jazz-tools", "jazz-napi"]),
     );

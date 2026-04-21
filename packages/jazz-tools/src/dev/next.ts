@@ -34,7 +34,9 @@ const DEVELOPMENT_PHASE = "phase-development-server";
 const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const PUBLIC_APP_ID_ENV = "NEXT_PUBLIC_JAZZ_APP_ID";
 const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
+const PUBLIC_WASM_URL_ENV = "NEXT_PUBLIC_JAZZ_WASM_URL";
 const PUBLIC_WASM_SUBPATH = "_jazz/jazz_wasm_bg.wasm";
+const PUBLIC_WASM_URL = `/${PUBLIC_WASM_SUBPATH}`;
 
 const runtime = new ManagedDevRuntime({
   appId: PUBLIC_APP_ID_ENV,
@@ -84,14 +86,21 @@ export function withJazz(
     // don't transform wasm-bindgen's `new URL('*.wasm', import.meta.url)`
     // pattern inside worker chunks. Runs in dev and production-build so the
     // asset is present in the built output.
-    if (phase === DEVELOPMENT_PHASE || phase === PRODUCTION_BUILD_PHASE) {
+    const copyAndAdvertiseWasm = phase === DEVELOPMENT_PHASE || phase === PRODUCTION_BUILD_PHASE;
+    if (copyAndAdvertiseWasm) {
       await copyWasmToPublic(options.schemaDir ?? process.cwd());
     }
+    const mergedWithWasmEnv: NextConfigLike = copyAndAdvertiseWasm
+      ? {
+          ...merged,
+          env: { ...merged.env, [PUBLIC_WASM_URL_ENV]: PUBLIC_WASM_URL },
+        }
+      : merged;
 
     // Everything below is dev-only: managed server, APP_ID/SERVER_URL
     // injection. In production the host app supplies those via its own env.
     if (phase !== DEVELOPMENT_PHASE || options.server === false) {
-      return merged;
+      return mergedWithWasmEnv;
     }
 
     const serverOpt = options.server;
@@ -114,9 +123,9 @@ export function withJazz(
     }
 
     return {
-      ...merged,
+      ...mergedWithWasmEnv,
       env: {
-        ...merged.env,
+        ...mergedWithWasmEnv.env,
         [PUBLIC_APP_ID_ENV]: managed.appId,
         [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
         ...(managed.backendSecret ? { BACKEND_SECRET: managed.backendSecret } : {}),
