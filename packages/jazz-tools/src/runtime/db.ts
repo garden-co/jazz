@@ -20,21 +20,16 @@ import {
   type LocalBatchRecord,
   type MutationErrorEvent,
   loadWasmModule,
-  PersistedWrite as RuntimePersistedWrite,
   Transaction as RuntimeTransaction,
   WriteHandle,
   type CreateOptions,
-  type CreateDurabilityOptions,
   type UpdateOptions,
-  type UpdateDurabilityOptions,
   type UpsertOptions,
-  type UpsertDurabilityOptions,
   type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
-  type Row,
   resolveEffectiveQueryExecutionOptions,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
@@ -423,35 +418,13 @@ function backendScopedAuthState(session?: Session | null): AuthState {
   };
 }
 
-export class DbPersistedWrite<T> {
-  constructor(
-    private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
-    private readonly transformValue: (value: Row | void) => T,
-    private readonly loadBatchRecord: () => LocalBatchRecord | null,
-    private readonly acknowledgeRejected: () => boolean,
-  ) {}
-
-  batchId(): string {
-    return this.pendingWrite.batchId();
-  }
-
-  value(): T {
-    return this.transformValue(this.pendingWrite.value());
-  }
-
-  async wait(): Promise<T> {
-    return this.transformValue(await this.pendingWrite.wait());
-  }
-
-  localBatchRecord(): LocalBatchRecord | null {
-    return this.loadBatchRecord();
-  }
-
-  acknowledgeRejectedBatch(): boolean {
-    return this.acknowledgeRejected();
-  }
-}
-
+/**
+ * Transactions group a set of writes that should settle together after an authority validates them.
+ *
+ * Data read and written through this transaction is scoped to it, and will only be
+ * globally visible once it's committed using {@link DbTransaction.commit} and
+ * accepted by the authority.
+ */
 export class DbTransaction {
   private committed = false;
 
@@ -487,6 +460,11 @@ export class DbTransaction {
     return this.runtimeTransaction.batchId();
   }
 
+  /**
+   * Commit the transaction. Data will be globally visible once it's accepted by the authority.
+   *
+   * @returns the batch id of the committed transaction.
+   */
   commit(): string {
     if (this.committed) {
       return this.batchId();
@@ -496,6 +474,12 @@ export class DbTransaction {
     return batchId;
   }
 
+  /**
+   * Insert a new row into a table.
+   *
+   * The insert is scoped to this transaction, and will only be globally visible
+   * once it's committed with {@link DbTransaction.commit}.
+   */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
     this.ensureActive();
     const values = toInsertRecord(
@@ -508,6 +492,12 @@ export class DbTransaction {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
+  /**
+   * Update an existing row in a table.
+   *
+   * The update is scoped to this transaction, and will only be globally visible
+   * once it's committed with {@link DbTransaction.commit}.
+   */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     this.ensureActive();
     const updates = toUpdateRecord(
@@ -518,12 +508,23 @@ export class DbTransaction {
     return this.runtimeTransaction.update(id, updates);
   }
 
+  /**
+   * Delete an existing row from a table.
+   *
+   * The delete is scoped to this transaction, and will only be globally visible
+   * once it's committed with {@link DbTransaction.commit}.
+   */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     return this.runtimeTransaction.delete(id);
   }
 
+  /**
+   * Execute a query and return all matching rows.
+   *
+   * Read data is scoped to this transaction.
+   */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.ensureActive();
     this.assertOwnsQuery(query);
@@ -541,6 +542,11 @@ export class DbTransaction {
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
 
+  /**
+   * Execute a query and return the first matching row, or null.
+   *
+   * Read data is scoped to this transaction.
+   */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(query, options);
     return results[0] ?? null;
@@ -559,6 +565,12 @@ export class DbTransaction {
   }
 }
 
+/**
+ * Direct batches group a set of writes that should settle immediately, without an authority,
+ * while still being part of the same batch.
+ *
+ * Data written through this direct batch is globally visible immediately.
+ */
 export class DbDirectBatch {
   constructor(
     private readonly client: JazzClient,
@@ -2091,12 +2103,18 @@ export class Db {
     this.config.devMode = enabled;
   }
 
+  /**
+   * @internal
+   */
   getActiveQuerySubscriptions(): ActiveQuerySubscriptionTrace[] {
     return Array.from(this.activeQuerySubscriptionTraces.values())
       .filter((trace) => trace.visibility === "public")
       .map(({ visibility: _visibility, ...trace }) => cloneActiveQuerySubscriptionTrace(trace));
   }
 
+  /**
+   * @internal
+   */
   onActiveQuerySubscriptionsChange(listener: ActiveQuerySubscriptionTraceListener): () => void {
     this.activeQuerySubscriptionTraceListeners.add(listener);
     listener(this.getActiveQuerySubscriptions());
@@ -2107,6 +2125,8 @@ export class Db {
 
   /**
    * Insert a new row into a table without waiting for durability.
+   *
+   * Use {@link InsertHandle.wait} to wait for durable confirmation.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
@@ -2127,6 +2147,8 @@ export class Db {
 
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
+   *
+   * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   upsert<T, Init>(
     table: TableProxy<T, Init>,
@@ -2140,6 +2162,8 @@ export class Db {
 
   /**
    * Update an existing row without waiting for durability.
+   *
+   * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   update<T, Init>(
     table: TableProxy<T, Init>,
@@ -2154,12 +2178,21 @@ export class Db {
 
   /**
    * Delete a row without waiting for durability.
+   *
+   * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     const client = this.getClient(table._schema);
     return client.delete(id);
   }
 
+  /**
+   * Begin a new transaction.
+   *
+   * Use transactions when several writes should settle together after an authority validates them.
+   *
+   * Use {@link DbTransaction.commit} to commit the transaction.
+   */
   beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
     const client = this.getClient(table._schema);
     return new DbTransaction(
@@ -2175,6 +2208,12 @@ export class Db {
     );
   }
 
+  /**
+   * Begin a new direct batch.
+   *
+   * Use a direct batch when you want to group several writes under one batch,
+   * but still have each be auto-committed immediately.
+   */
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.getClient(table._schema);
     return new DbDirectBatch(
@@ -2514,19 +2553,6 @@ export class Db {
     }
     this.activeQuerySubscriptionTraces.clear();
     this.notifyActiveQuerySubscriptionTraceListeners();
-  }
-
-  protected wrapPersistedWrite<T>(
-    client: JazzClient,
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => client.localBatchRecord(pendingWrite.batchId()),
-      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
   }
 
   private parseRuntimeQueryTracePayload(

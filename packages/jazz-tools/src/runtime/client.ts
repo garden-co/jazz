@@ -216,10 +216,6 @@ type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
   transactionOverlay?: TransactionQueryOverlay;
 };
 
-export interface WriteDurabilityOptions {
-  tier?: DurabilityTier;
-}
-
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
@@ -267,21 +263,11 @@ export interface CreateOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
-export interface CreateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
-  id?: string;
-}
-
 export interface UpsertOptions extends TimestampOverrideOptions {
   id: string;
 }
 
-export interface UpsertDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
-  id: string;
-}
-
 export interface UpdateOptions extends TimestampOverrideOptions {}
-
-export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
 
 /**
  * A mutation error event emitted by {@link JazzClient.onMutationError}.
@@ -781,6 +767,9 @@ function rejectionFromSettlement(
   return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
 }
 
+/**
+ * Error returned when a write fails to be persisted at a given durability tier.
+ */
 export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
@@ -790,28 +779,6 @@ export class PersistedWriteRejectedError extends Error {
     readonly reason: string,
   ) {
     super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
-  }
-}
-
-export class PersistedWrite<T> {
-  constructor(
-    private readonly client: JazzClient,
-    private readonly requestedTier: DurabilityTier,
-    private readonly persistedBatchId: string,
-    private readonly persistedValue: T,
-  ) {}
-
-  batchId(): string {
-    return this.persistedBatchId;
-  }
-
-  value(): T {
-    return this.persistedValue;
-  }
-
-  async wait(): Promise<T> {
-    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
-    return this.persistedValue;
   }
 }
 
@@ -831,6 +798,8 @@ export class WriteHandle<T = void> {
 
   /**
    * Wait for the write to be persisted at a given durability tier.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
     return this.#client.waitForPersistedBatch(this.batchId, options.tier) as Promise<T>;
@@ -854,6 +823,12 @@ export class InsertHandle<T> extends WriteHandle<T> {
     super(batchId, client);
   }
 
+  /**
+   * Wait for the write to be persisted at a given durability tier.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * @returns the inserted row.
+   */
   override async wait(options: { tier: DurabilityTier }): Promise<T> {
     await super.wait(options);
     return this.value;
@@ -1529,10 +1504,6 @@ export class JazzClient {
       ...resolved,
       transactionOverlay: options.transactionOverlay,
     };
-  }
-
-  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
-    return options?.tier ?? this.defaultDurabilityTier;
   }
 
   private encodeWriteContext(
