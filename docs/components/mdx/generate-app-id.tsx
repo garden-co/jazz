@@ -3,15 +3,43 @@
 import { useState } from "react";
 import { Callout } from "fumadocs-ui/components/callout";
 import { DynamicCodeBlock } from "fumadocs-ui/components/dynamic-codeblock";
+import { Tab, Tabs } from "fumadocs-ui/components/tabs";
 import { type GeneratedApp, storeGeneratedApp } from "@/lib/generated-app-store";
 
-function CredentialsBlock({ app }: { app: GeneratedApp }) {
-  const code = [
-    `JAZZ_APP_ID="${app.appId}"`,
+const JAZZ_CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
+
+const BUNDLER_ITEMS = ["Vite", "Next.js", "SvelteKit", "Expo"] as const;
+type Bundler = (typeof BUNDLER_ITEMS)[number];
+
+// Client-exposed env var prefix per bundler, matching the dev plugins.
+// SvelteKit covers both SvelteKit itself and Svelte+Vite via jazzSvelteKit.
+const CLIENT_PREFIX: Record<Bundler, string> = {
+  Vite: "VITE_",
+  "Next.js": "NEXT_PUBLIC_",
+  SvelteKit: "PUBLIC_",
+  Expo: "EXPO_PUBLIC_",
+};
+
+function envBlockFor(bundler: Bundler, app: GeneratedApp): string {
+  const prefix = CLIENT_PREFIX[bundler];
+  return [
+    `${prefix}JAZZ_APP_ID="${app.appId}"`,
+    `${prefix}JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
     `JAZZ_ADMIN_SECRET="${app.adminSecret}"`,
-    `JAZZ_BACKEND_SECRET="${app.backendSecret}"`,
+    `BACKEND_SECRET="${app.backendSecret}"`,
   ].join("\n");
-  return <DynamicCodeBlock lang="env" code={code} />;
+}
+
+function CredentialsBlock({ app }: { app: GeneratedApp }) {
+  return (
+    <Tabs groupId="jazz-bundler" items={[...BUNDLER_ITEMS]} persist updateAnchor>
+      {BUNDLER_ITEMS.map((bundler) => (
+        <Tab key={bundler} value={bundler}>
+          <DynamicCodeBlock lang="env" code={envBlockFor(bundler, app)} />
+        </Tab>
+      ))}
+    </Tabs>
+  );
 }
 
 function ConfigBlock({ app }: { app: GeneratedApp }) {
@@ -51,6 +79,16 @@ export function GenerateAppId() {
           {loading ? "Generating…" : "Generate App ID"}
         </button>
         {error && <p className="text-sm text-red-500">{error}</p>}
+        <p className="text-sm text-fd-muted-foreground">
+          Or from the command line (AI agents: use this to provision your own app):
+        </p>
+        <DynamicCodeBlock
+          lang="bash"
+          code="curl -X POST https://v2.dashboard.jazz.tools/api/apps/generate"
+        />
+        <p className="text-sm text-fd-muted-foreground">
+          Jazz Cloud sync URL: <code>{JAZZ_CLOUD_SYNC_URL}</code>
+        </p>
       </div>
     );
   }
