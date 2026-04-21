@@ -4,7 +4,7 @@ Jazz uses a deliberately small transport surface:
 
 - `GET /apps/:app_id/ws` for bidirectional sync over WebSocket
 - `GET /apps/:app_id/schemas` and `GET /apps/:app_id/schema/:hash` for schema catalogue reads
-- `POST /apps/:app_id/admin/...` for admin publication flows
+- `GET /apps/:app_id/admin/permissions/head` plus `POST /apps/:app_id/admin/...` for admin publication and inspection flows
 - `GET /health` at the server root
 
 That is enough because the interesting structure lives inside the typed sync payloads, not in a sprawling list of special-purpose endpoints.
@@ -76,7 +76,11 @@ The in-repo server keeps a small route set:
 - `/apps/:app_id/ws`
 - `/apps/:app_id/schemas`
 - `/apps/:app_id/schema/:hash`
-- `/apps/:app_id/admin/...`
+- `/apps/:app_id/admin/schemas`
+- `/apps/:app_id/admin/migrations`
+- `/apps/:app_id/admin/schema-connectivity`
+- `/apps/:app_id/admin/permissions/head`
+- `/apps/:app_id/admin/permissions`
 - `/health`
 
 ## Key Files
@@ -86,6 +90,7 @@ The in-repo server keeps a small route set:
 | `crates/jazz-tools/src/transport_protocol.rs`       | Shared request/event types and framing |
 | `crates/jazz-tools/src/routes.rs`                   | In-repo server routes                  |
 | `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling                     |
-| `crates/jazz-tools/src/transport.rs`                | Rust client-side transport             |
+| `crates/jazz-tools/src/transport_manager.rs`        | Rust WebSocket transport manager       |
+| `crates/jazz-tools/src/ws_stream/`                  | Concrete WebSocket stream adapters     |
 | `packages/jazz-tools/src/runtime/sync-transport.ts` | TypeScript transport helpers           |
-| `crates/jazz-cloud-server/src/server.rs`            | Cloud server transport wiring          |
+| `packages/jazz-tools/src/runtime/worker-bridge.ts`  | Browser worker transport bridge        |
