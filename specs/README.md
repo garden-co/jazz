@@ -79,8 +79,8 @@ If you want one sentence to hold onto while reading the rest:
 
 Design work that has not landed yet lives in [`specs/todo/`](todo/). Useful entry points:
 
+- **[Commit Author as Principal + Created-By Permissions](todo/a_mvp/commit_author_principal_created_by_permissions.md)** — provenance-driven creator semantics and permission hooks
 - **[Opt-In Transactions with Replayable Reconciliation](todo/a_mvp/opt_in_transactions_replayable_reconciliation.md)** — remaining strict-visibility and reconciliation design work on top of the now-landed batch model
+- **[Globally Consistent Transactions](todo/b_launch/globally_consistent_transactions.md)** — minimally viable authority-backed transactional correctness
 - **[Protocol and Storage Version Tags](todo/b_launch/protocol_and_storage_version_tags.md)** — explicit format/versioning strategy for on-disk state and wire payloads
 - **[Sharding Design Sketch](todo/b_launch/sharding_design_sketch.md)** — future distribution work
-- **[Built-in File Storage](todo/a_mvp/built_in_file_storage.md)** — first-class file/blob storage using the same relational substrate
-- **[Weak Tests](todo/a_mvp/weak_tests.md)** — remaining test-hardening follow-up
