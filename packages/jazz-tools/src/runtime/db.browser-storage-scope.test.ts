@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
+import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "./client-session.js";
 
 function toBase64Url(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8")
@@ -51,5 +52,25 @@ describe("resolveDefaultPersistentDbName", () => {
     };
 
     expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+  });
+
+  it("does not scope by user_id for anonymous sessions", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      driver: { type: "persistent" },
+      jwtToken: makeJwt({ sub: "ephemeral-pubkey", iss: ANONYMOUS_JWT_ISSUER }),
+    };
+
+    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app");
+  });
+
+  it("scopes by user_id for local-first sessions", () => {
+    const config: DbConfig = {
+      appId: "chat-app",
+      driver: { type: "persistent" },
+      jwtToken: makeJwt({ sub: "stable-pubkey", iss: LOCAL_FIRST_JWT_ISSUER }),
+    };
+
+    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::stable-pubkey");
   });
 });
