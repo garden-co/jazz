@@ -89,152 +89,25 @@ distinctive strengths.
 One more important thing to note: Jazz is built as an integrated whole, not layered on top of an
 existing database or ORM. That is what lets us optimize the whole stack, provide a clean developer experience around universal abstractions and reuse much more implementation code across the different environments where Jazz runs.
 
-# Fresh Idea 1:<br/>Local-First Data With Tunable Consistency
+# The four fresh ideas behind Jazz
 
-Local-first goes hand-in-hand with eventual consistency. If data can be edited in many places at
-once, those copies will sometimes diverge temporarily. In eventual consistency, that is expected,
-and is what makes low-latency local edits and truly offline writes possible.
+The deeper argument for Jazz really lives in four ideas that fall out of taking local-first
+seriously as a database constraint rather than as one more feature. I pulled those into a companion
+post so this launch post can stay focused on the big picture:
+[The four fresh ideas behind Jazz](/blog/four-fresh-ideas-behind-jazz).
 
-Our surprising learning is that eventual consistency is actually fine for 90% of the state in most
-apps, and that very simple conflict resolution strategies often capture the intent of concurrent
-editors well.
+- `Local-first data with tunable consistency:` most state can stay naturally eventual, but the same
+  system should still let you opt into global coordination where the semantics demand it.
+- `Row-level security with per-query auth:` in a synced system, permissions have to determine what
+  is allowed to exist locally, not just what a centralized backend returns.
+- `Real-time collaboration and deep histories:` once concurrent work becomes normal, history,
+  authorship, branching, and merges stop looking like app-specific extras and start looking like
+  database concerns.
+- `Fluid migrations for parallel schema evolution:` once clients can stay local and old versions can
+  keep writing, schema changes become compatibility problems the database itself should help absorb.
 
-The cases where you want globally consistent transactions are usually obvious: purchases, claims of
-limited resources, or multi-row and multi-table updates that should be all-or-nothing.
-
-What we've learned from adopters is that even if only a small part of an app's schema needs strong
-consistency, that still isn't a good reason to introduce a second database system. What you
-actually want is one database that lets you trade low-latency for global consistency only where the
-semantics demand it.
-
-Jazz offers that combined model. Individual tables or writes can be declared transactional, while
-the rest of the system stays naturally local-first. Those transactional writes can still begin as
-optimistic local actions, then resolve once they are centrally approved or rejected, including after
-time spent offline.
-
-# Fresh Idea 2:<br/>Row-Level Security With Per-Query Auth
-
-In a local-first system, permissions do not only control what a centralized backend returns. They
-also determine what is allowed to sync down and exist locally on a device in the first place. That
-makes authorization a much deeper part of the data model.
-
-Row-level security is still the best prior art for thinking about this. PostgreSQL introduced it as
-a way to make precise permission policies the database's concern, expressed in the same language as
-queries themselves. That is a powerful idea because it centralizes one of the backend's most
-important jobs: deciding who can see and change which data.
-
-But in PostgreSQL, RLS still feels like an optional layer on top of a primarily centralized system.
-Authentication, querying, and authorization are adjacent concepts rather than one clearly integrated
-flow.
-
-Jazz leans into that integration. Users and authentication usually come from external systems and
-are expressed through JWTs, but authenticating directly to the database for queries and mutations is
-the expected norm.
-
-Permission policies are then written as queries over both data and user claims, so visibility and
-mutability are shaped by the same model that shapes the rest of the database.
-
-That is what we mean by per-query auth: auth is not a wrapper around database access, it is part of
-how database access itself is evaluated. The same query machinery that determines which rows match
-also helps determine which rows a user is allowed to read or mutate.
-
-Backend clients can still bypass this when an app needs more specialized authorization or gate-like
-business logic, but for most application queries the path is much more direct.
-
-Our TypeScript-first approach helps here too. Permission policies are typechecked against the schema
-they are written over, and we provide helpers to unit-test them without involving more parts of
-your app or infrastructure. That matters for small apps with simple team-and-invite models, for
-larger enterprise apps mapping detailed external role claims onto complex data schemas, and
-especially for agentic workflows where permission rules need to stay legible and verifiable.
-
-This integrated model has performance consequences too. Because Jazz is RLS-first, we can combine a
-user query with the policy queries it depends on and run that whole unit through the query
-optimizer. That is particularly helpful when access control is more complicated than the governed
-data itself, because multi-hop permission checks across many relations can still be evaluated in one
-go.
-
-# Fresh Idea 3:<br/>Real-Time Collaboration And Deep Histories
-
-Collaboration in apps can look like a UI feature from the outside. But once multiple people and
-agents are working on the same data, you need low-latency propagation, offline work, drafts,
-concurrent edits, and a coherent notion of how changes relate over time.
-
-Jazz's answer is to make history and branching first-class parts of the database. Instead of asking
-each app to bolt on its own collaboration logic, Jazz asks: what if each row had its own branched,
-Git-like history, with sync and merge semantics built in?
-
-The motivation is that collaboration is a qualitatively new need over classic Web 2.0 apps. The
-hard part is propagating edits quickly _and_ representing concurrent work: authorship
-metadata, overlapping edits, offline changes, and deciding when a merge should be automatic versus
-explicit.
-Today, most apps implement that themselves in business logic. Similarly to permissions, a large part
-of the complexity is app-specific on the surface, but generalizable underneath.
-
-Version control systems like Git are proof that general collaboration abstractions can be useful
-across many workflows. But Git is shaped around files and line-based diffs. A database needs
-something finer-grained: individual column updates, structured merge behavior, and histories that
-scale to large relational datasets. Datomic points at another important idea: that edits and
-historical queries matter, not just the latest materialized state.
-
-In Jazz, branching is native from the storage format to the sync protocol to the high-level APIs.
-That lets collaborative apps support concurrent edits with merge strategies that fit the data
-(per-column last-writer-wins, json merging, rich-text merging). It also lets you expose branching
-directly when you want drafts, review flows, or explicit handoffs between people and agents.
-
-Even apps with simple or no collaboration still benefit from this model, because the database will
-track writer identity and create change history as a side-effect of normal mutation.
-
-That is why metadata like `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` can fall out
-naturally.
-
-To summarize, we designed Jazz with the belief that data is more than just a mutable "current state".
-The actors involved in writing that data and the exact series of events that resulted in the current
-state are part of what really makes the data what it is. We think that will matter more than ever as
-users edit data at a much higher volume with agents, whether those agents live inside or outside your app.
-
-# Fresh Idea 4:<br/>Fluid Migrations for Parallel Schema Evolution
-
-Local-first and offline first bring two challenges. We already talked about data consistency; that is
-the obvious one. The subtler challenge is schema evolution. Once you have truly distributed state, you
-have to assume that old clients may still be writing data locally against an outdated schema, and that
-data may only sync into a newer server schema later. But even in conventional apps, API drift and old
-clients are already a real problem.
-
-Traditionally, migrations are stop-the-world events for the database, and it is the job of the API in
-front of it to maintain backward compatibility for old clients. If our goal is to lessen the backend's
-burden of shuffling data around, schema compatibility has to become a responsibility of the database
-too.
-
-Jazz's promise is simple: clients should be able to keep speaking the schema they know,
-old and new versions should naturally interoperate, and rolling out schema changes should stop feeling
-like a coordinated freeze across your whole product. We call that idea "fluid migrations".
-
-Jazz gets there by combining two ideas.
-
-First, we make use of our native per-row branching and introduce schema version as an additional branch
-dimension. A row with a stable identity can then coexist in different schema branches at once.
-Updating the schema creates a new isolated branch where rows have the new shape, instead of forcing a
-single in-place mutation of all data.
-
-Second, we take inspiration from the smart folks at Ink & Switch, who thought deeply about exactly
-this problem in their Cambria paper. Their key idea is to treat migrations not as one-time mutations
-of data, but as purely functional mappings between schema versions. And the important part is that
-those mappings are bidirectional. That unlocks old data being readable in the new format _and_ new
-data being readable in the old format.
-
-This is exactly how migrations work in Jazz. You define them in our TypeScript migration DSL as
-two-way mappings between old and new columns. Jazz can then read data in any target schema by reading
-from _all_ schema branches and mapping data from those with different native schemas.
-
-This idea also extends beyond simple old/new pairs. By chaining mappings, you can build whole graphs
-of mutually compatible schema versions. Jazz handles that automatically, so clients simply connect
-with the schema version they know, while still being able to read and write data that exists in other
-compatible schema versions.
-
-That removes what is often one of the biggest bottlenecks in shipping new versions of an app.
-Particularly complex apps built by large teams benefit from this, because many features are developed and rolled out concurrently, often behind feature flags.
-
-And with agents, even small teams or solo developers can reach that same level of parallel change. Fluid migrations provide a way to ship entire features including changes to the shape of your data quickly and often.
+If those are the parts you are most curious about, the longer version is here:
+[The four fresh ideas behind Jazz](/blog/four-fresh-ideas-behind-jazz).
 
 # The Franken-stack that Jazz replaces
 
@@ -372,54 +245,26 @@ pilot. (Link to book a call)
 
 # What we learned from classic Jazz and how to migrate
 
-We have hinted a few times that Jazz v2 is quite different from Jazz v0.x, which we will now call
-classic Jazz. Several years of building, hosting, and watching people use classic Jazz taught us which
-ideas were essential and which ones were making the system harder than it needed to be.
+Jazz v2 is also a fairly radical departure from Jazz v0.x, which we now call classic Jazz. That
+deserves its own fuller write-up, so I pulled the redesign and migration details into a companion
+post: [What we learned from classic Jazz](/blog/what-we-learned-from-classic-jazz).
 
-The biggest design choice that defined classic Jazz from the beginning was the use of cryptography
-to implement permissions. This enabled a true local-first notion of permissions to govern local-first
-data, in the extreme letting you build end-to-end encrypted apps that don't have to trust its syncing
-infrastructure at all.
+The short version is that several years of building, hosting, and watching people use classic Jazz
+taught us which ideas were essential and which ones were making the system harder than it needed to
+be.
 
-What we learned, though, was that most adopters cared more about the experience this design enabled
-than about the cryptographic machinery itself. They loved the feel of local-first state plus
-local-first permissions. But even teams for whom encryption was genuinely important did not love the
-public-key complexity, the unusual permission APIs, or the fact that permission mistakes were hard to
-evolve once baked into the system. And in practice, some useful permission rules still wanted at
-least a semi-trusted authority somewhere.
+- Permissions moved away from cryptographic enforcement around the whole system toward a trusted
+  server applying richer policies at sync time, while still leaving room for encrypted fields where
+  they matter.
+- Concurrent history moved away from CRDT replay and toward a more git-like snapshot model that
+  keeps deep history while making reads and merges more efficient.
+- The API moved away from "local JSON state with granular loading caveats" toward a more relational,
+  ORM-like query shape that is easier to reason about.
+- Classic Jazz is still being maintained while we help adopters migrate, and we are actively working
+  on better migration automation.
 
-That is why Jazz v2's biggest departure is around permissions. We now lean into the Jazz server as a
-trusted authority responsible for enforcing usefully complex permission policies that can evolve over
-time. The key unlock was to apply permissions at sync time while still giving local-first data
-accurate local previews of its likely fate.
-
-There will still be an end-to-end encryption story in Jazz v2, but it is framed differently. Instead
-of making the whole system revolve around cryptographic permissions, Jazz v2 treats the server as
-trusted for access control while still allowing especially sensitive fields to be hidden from it via
-encrypted columns and keys shared between end-user devices directly.
-
-The second biggest change is how we represent concurrent and branching edit histories. Classic Jazz
-was all-in on CRDTs. CRDTs naturally provide local-first, eventually consistent semantics, but they
-also rely on substantial history replay to materialize current values. We pushed that surprisingly
-far, even for large datasets, but eventually concluded that a more git-like model of snapshot DAGs
-could preserve the same fidelity of history while making current-state and historical reads much more
-efficient by pushing more of the work to the rarer merge points.
-
-The API changed for similar reasons. After permissions, the biggest source of confusion for adopters
-was that we were trying to make Jazz feel like local JSON state while also supporting granular
-loading. That produced a brittle model of partially available data and turned "local JSON state" into
-a leaky abstraction with lots of custom caveats. The relational model and ORM-like query shape in
-Jazz v2 are much more familiar and well-defined.
-
-Finally, we want to make a clear promise to existing adopters. While we do recommend migrating to
-Jazz v2 as soon as practical, and we are actively working on better automation to help with that, we
-are not abandoning classic Jazz in the meantime. We will keep maintaining it with security patches,
-blocking bug fixes and smaller missing features. Most importantly, we will keep classic Jazz Cloud
-running until everyone has had a fair chance to migrate.
-
-For teams already on classic Jazz, we are happy to help directly with migration planning. And if your
-classic app suddenly grows into a scale where Jazz v2 would serve it much better, we may proactively
-reach out to help with that transition too.
+If you are on classic Jazz already, or just want the rationale behind the redesign, the longer
+write-up is here: [What we learned from classic Jazz](/blog/what-we-learned-from-classic-jazz).
 
 We would genuinely love to hear what you think of all of this. If you are a current adopter, a
 curious skeptic, or someone considering Jazz for the first time, please reach out on Discord,
