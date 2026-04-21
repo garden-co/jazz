@@ -1,5 +1,12 @@
 # jazz-wasm
 
+## 2.0.0-alpha.36
+
+### Patch Changes
+
+- Cache runtime schema lookups across query paths and surface unhandled rejected mutations through targeted batch-id queues instead of rescanning every retained local batch record. This also brings the React Native runtime onto the same rejected-batch helper surface as WASM and N-API.
+- 8bb9fbc: Allow caller-supplied row ids to use any valid UUID and rely on explicit row metadata for created-at semantics.
+
 ## 2.0.0-alpha.35
 
 ### Patch Changes
