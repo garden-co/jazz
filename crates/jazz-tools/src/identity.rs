@@ -79,7 +79,7 @@ pub fn mint_jazz_self_signed_token_at(
 ) -> Result<String, String> {
     let signing_key = derive_signing_key(seed, SIGN_DOMAIN);
     let verifying_key = signing_key.verifying_key();
-    let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+    let user_id = user_id_from_public_key(verifying_key.as_bytes());
     let user_id_str = user_id.to_string();
 
     let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
@@ -238,7 +238,7 @@ pub fn verify_jazz_self_signed_proof_with_max_ttl_at(
         .map_err(|e| format!("signature verification failed: {e}"))?;
 
     // Re-derive user ID and validate sub
-    let derived_user_id = Uuid::new_v5(&KEY_NAMESPACE, &pub_key_bytes);
+    let derived_user_id = user_id_from_public_key(&pub_key_bytes);
     let sub = claims.sub.as_deref().ok_or("missing sub")?;
     if sub != derived_user_id.to_string() {
         return Err(format!(
@@ -296,12 +296,27 @@ pub fn derive_verifying_key(seed: &[u8; 32]) -> VerifyingKey {
     derive_signing_key(seed, SIGN_DOMAIN).verifying_key()
 }
 
-/// Derive a stable UUIDv5 user identity from a 32-byte seed.
+/// Derive a stable user identity UUID from a 32-byte seed.
 /// Derives the signing key for the sign domain, extracts the public key,
-/// then produces UUIDv5(KEY_NAMESPACE, public_key_bytes).
+/// then produces a deterministic UUID whose version nibble is 7 so it
+/// satisfies Jazz's UUIDv7 validation while retaining UUIDv5-style
+/// name-based determinism (see `user_id_from_public_key`).
 pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
     let verifying_key = derive_verifying_key(seed);
-    Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes())
+    user_id_from_public_key(verifying_key.as_bytes())
+}
+
+/// Deterministically derive a user-id UUID from Ed25519 public key bytes.
+///
+/// Computes UUIDv5(KEY_NAMESPACE, pub_key_bytes) and rewrites the version
+/// nibble to 7. The variant nibble of UUIDv5 is already in the v7-valid
+/// range (`0b10xx`), so no other bits need to change. The result is
+/// deterministic, collision-resistant like v5, and passes Jazz's
+/// `get_version_num() == 7` check.
+fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
+    let mut bytes = *Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes).as_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    Uuid::from_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -337,9 +352,9 @@ mod tests {
     }
 
     #[test]
-    fn user_id_is_uuid_v5() {
+    fn user_id_is_uuid_v7() {
         let id = derive_user_id(&alice_seed());
-        assert_eq!(id.get_version_num(), 5);
+        assert_eq!(id.get_version_num(), 7);
     }
 
     #[test]
@@ -381,7 +396,7 @@ mod tests {
         let seed = alice_seed();
         let signing_key = derive_signing_key(&seed, SIGN_DOMAIN);
         let verifying_key = signing_key.verifying_key();
-        let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+        let user_id = user_id_from_public_key(verifying_key.as_bytes());
         let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
 
         let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
