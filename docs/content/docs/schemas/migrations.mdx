@@ -1,7 +1,7 @@
 ---
 title: Migrations
 description: Structural schema evolution workflow and reviewed migration edges.
-reviewedAt: "f6535a533"
+reviewedAt: "22485728"
 ---
 
 <Callout type="info" title="You can skip this first">
@@ -23,8 +23,8 @@ Traditional migration systems run a linear sequence and require peers to converg
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface warnings
-   about tables with no explicit permission policy, without needing server credentials.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to ensure policies
+   are valid before they are deployed. `deploy` does not run these checks.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -34,7 +34,7 @@ Traditional migration systems run a linear sequence and require peers to converg
    By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
-5. **Review and customise**&hairsp;—&hairsp; the migration, if needed (see below).
+5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
