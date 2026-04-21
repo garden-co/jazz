@@ -147,6 +147,9 @@ pub enum RelExpr {
         input: Box<RelExpr>,
         predicate: PredicateExpr,
     },
+    Union {
+        inputs: Vec<RelExpr>,
+    },
     Join {
         left: Box<RelExpr>,
         right: Box<RelExpr>,
@@ -225,6 +228,12 @@ pub fn canonicalize_rel_expr(expr: RelExpr) -> Result<RelExpr, RelationIrError> 
         RelExpr::Filter { input, predicate } => Ok(RelExpr::Filter {
             input: Box::new(canonicalize_rel_expr(*input)?),
             predicate: canonicalize_predicate(predicate),
+        }),
+        RelExpr::Union { inputs } => Ok(RelExpr::Union {
+            inputs: inputs
+                .into_iter()
+                .map(canonicalize_rel_expr)
+                .collect::<Result<Vec<_>, _>>()?,
         }),
         RelExpr::Join {
             left,
@@ -422,6 +431,31 @@ mod tests {
 
         let encoded = serde_json::to_string(&expr).expect("serialize relation IR");
         let decoded: RelExpr = serde_json::from_str(&encoded).expect("deserialize relation IR");
+        assert_eq!(decoded, expr);
+    }
+
+    #[test]
+    fn rel_expr_union_roundtrip_json() {
+        let expr = RelExpr::Union {
+            inputs: vec![
+                RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                },
+                RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    predicate: PredicateExpr::Cmp {
+                        left: ColumnRef::unscoped("kind"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::Literal(Value::Text("individual".to_string())),
+                    },
+                },
+            ],
+        };
+
+        let encoded = serde_json::to_string(&expr).expect("serialize union relation IR");
+        let decoded: RelExpr = serde_json::from_str(&encoded).expect("deserialize union relation");
         assert_eq!(decoded, expr);
     }
 

@@ -2,10 +2,10 @@
 
 // CLI for jazz-tools schema tooling
 
-import { access, mkdir, readFile, readdir, writeFile } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
+import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
-import { register as registerEsm } from "tsx/esm/api";
+import { build } from "esbuild";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -15,11 +15,14 @@ import type { DefinedMigration } from "./migrations.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { Lens, SqlType } from "./schema.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "./schema-loader.js";
+import { collectMissingExplicitPolicyDiagnostics } from "./schema-permissions.js";
 import {
   encodePublishedMigrationValue,
   fetchPermissionsHead,
+  fetchSchemaConnectivity,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredSchema,
   publishStoredPermissions,
   publishStoredMigration,
   type PublishedTableLens,
@@ -36,6 +39,7 @@ export interface SchemaExportOptions {
   schemaDir: string;
   migrationsDir?: string;
   schemaHash?: string;
+  appId?: string;
   serverUrl?: string;
   adminSecret?: string;
 }
@@ -64,9 +68,23 @@ function parseArgs(): { command: string; options: BuildOptions } {
   return { command, options: { jazzBin, schemaDir } };
 }
 
-registerEsm();
-
 let importCounter = 0;
+
+async function bundleToTempFile(filePath: string): Promise<string> {
+  const sourceDir = dirname(resolve(filePath));
+  const outFile = join(sourceDir, `.jazz-bundle-${++importCounter}.mjs`);
+
+  await build({
+    entryPoints: [resolve(filePath)],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: outFile,
+    packages: "external",
+  });
+
+  return outFile;
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -85,8 +103,14 @@ export async function validate(options: BuildOptions): Promise<void> {
     console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
     console.log(
-      "Use `jazz-tools permissions status` or `jazz-tools permissions push` for auth publication.",
+      "Use `jazz-tools permissions status <appId>` or `jazz-tools deploy <appId>` for auth publication.",
     );
+  }
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
@@ -104,6 +128,7 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
 }
 
 export interface MigrationCommandOptions {
+  appId?: string;
   serverUrl?: string;
   adminSecret?: string;
   migrationsDir: string;
@@ -111,6 +136,7 @@ export interface MigrationCommandOptions {
 }
 
 export interface PermissionsCommandOptions {
+  appId: string;
   serverUrl: string;
   adminSecret: string;
   schemaDir: string;
@@ -124,8 +150,19 @@ export interface CreateMigrationOptions extends MigrationCommandOptions {
 }
 
 export interface PushMigrationOptions extends MigrationCommandOptions {
+  // Can be a full hash or short hash prefix
   fromHash: string;
+  // Can be a full hash or short hash prefix
   toHash: string;
+}
+
+export interface DeployOptions {
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+  schemaDir: string;
+  migrationsDir: string;
+  noVerify?: boolean;
 }
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
@@ -147,6 +184,22 @@ function getFlagValue(args: string[], flag: string): string | undefined {
   return undefined;
 }
 
+function hasFlag(args: string[], flag: string): boolean {
+  return args.includes(flag);
+}
+
+function splitLeadingAppId(args: string[]): { appId?: string; args: string[] } {
+  const first = args[0];
+  if (!first || first.startsWith("-")) {
+    return { args };
+  }
+
+  return {
+    appId: first,
+    args: args.slice(1),
+  };
+}
+
 function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   const serverUrl = getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL;
   const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
@@ -164,7 +217,7 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function resolvePermissionsOptions(args: string[]): PermissionsCommandOptions {
+function resolvePermissionsOptions(args: string[]): Omit<PermissionsCommandOptions, "appId"> {
   const serverUrl = getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL;
   const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
   const schemaDir = resolve(process.cwd(), getFlagValue(args, "--schema-dir") ?? process.cwd());
@@ -393,11 +446,23 @@ function requireSchemaExportServerValue(
   throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
 }
 
+function requireAppId(appId: string | undefined): string {
+  if (appId) {
+    return appId;
+  }
+
+  throw new Error(
+    "Missing app ID. Pass an <appId> positional argument for server-backed requests.",
+  );
+}
+
 function requireMigrationServerOptions(options: MigrationCommandOptions): {
+  appId: string;
   serverUrl: string;
   adminSecret: string;
 } {
   return {
+    appId: requireAppId(options.appId),
     serverUrl: requireSchemaExportServerValue(options.serverUrl, "serverUrl"),
     adminSecret: requireSchemaExportServerValue(options.adminSecret, "adminSecret"),
   };
@@ -423,6 +488,7 @@ async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promis
     options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET,
     "adminSecret",
   );
+  const appId = requireAppId(options.appId);
 
   const resolvedHash =
     schemaHash.length === 64
@@ -430,9 +496,10 @@ async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promis
       : resolveKnownSchemaHash(
           schemaHash,
           "schema hash",
-          (await fetchSchemaHashes(serverUrl, { adminSecret })).hashes,
+          (await fetchSchemaHashes(serverUrl, { appId, adminSecret })).hashes,
         );
   const storedSchema = await fetchStoredWasmSchema(serverUrl, {
+    appId,
     adminSecret,
     schemaHash: resolvedHash,
   });
@@ -486,6 +553,7 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.name === right.name &&
     left.nullable === right.nullable &&
     left.references === right.references &&
+    left.merge_strategy === right.merge_strategy &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }
@@ -508,6 +576,41 @@ function tableSchemasEqual(
   return leftColumns.every((column, index) => columnsEqual(column, rightColumns[index]!));
 }
 
+function tableSchemasRequireRowTransform(
+  left: WasmSchema[string] | undefined,
+  right: WasmSchema[string] | undefined,
+): boolean {
+  if (!left || !right) {
+    return true;
+  }
+
+  const leftColumnNames = left.columns.map((column) => column.name).sort();
+  const rightColumnNames = right.columns.map((column) => column.name).sort();
+
+  if (leftColumnNames.length !== rightColumnNames.length) {
+    return true;
+  }
+
+  for (const [index, columnName] of leftColumnNames.entries()) {
+    if (columnName !== rightColumnNames[index]) {
+      return true;
+    }
+  }
+
+  const leftColumns = new Map(left.columns.map((column) => [column.name, column]));
+  const rightColumns = new Map(right.columns.map((column) => [column.name, column]));
+
+  return leftColumnNames.some((columnName) => {
+    const leftColumn = leftColumns.get(columnName)!;
+    const rightColumn = rightColumns.get(columnName)!;
+    return (
+      leftColumn.nullable !== rightColumn.nullable ||
+      leftColumn.references !== rightColumn.references ||
+      columnTypeSignature(leftColumn.column_type) !== columnTypeSignature(rightColumn.column_type)
+    );
+  });
+}
+
 function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
   const leftTableNames = Object.keys(left).sort();
   const rightTableNames = Object.keys(right).sort();
@@ -522,6 +625,28 @@ function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
     }
     return tableSchemasEqual(left[tableName], right[tableName]);
   });
+}
+
+function schemaTransitionRequiresRowTransform(
+  fromSchema: WasmSchema,
+  toSchema: WasmSchema,
+): boolean {
+  const fromTableNames = Object.keys(fromSchema).sort();
+  const toTableNames = Object.keys(toSchema).sort();
+
+  if (fromTableNames.length !== toTableNames.length) {
+    return true;
+  }
+
+  for (const [index, tableName] of fromTableNames.entries()) {
+    if (tableName !== toTableNames[index]) {
+      return true;
+    }
+  }
+
+  return fromTableNames.some((tableName) =>
+    tableSchemasRequireRowTransform(fromSchema[tableName], toSchema[tableName]),
+  );
 }
 
 function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
@@ -571,7 +696,7 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
 } {
   if (!compiled.permissions || !compiled.permissionsFile) {
     throw new Error(
-      "No permissions.ts found for this app. Create permissions.ts before using permissions commands.",
+      "No permissions found for this app. Create a permissions.ts file before using permissions commands.",
     );
   }
 
@@ -581,27 +706,42 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
   };
 }
 
-async function resolveStoredStructuralSchemaHash(
+/**
+ * If the provided schema exists in the server, returns its hash. Otherwise, throws an error.
+ */
+async function resolveStoredStructuralSchemaHashOrThrow(
+  appId: string,
   serverUrl: string,
   adminSecret: string,
   wasmSchema: WasmSchema,
 ): Promise<string> {
-  const { hashes } = await fetchSchemaHashes(serverUrl, { adminSecret });
-  const storedSchemas = await Promise.all(
-    hashes.map(async (hash) => ({
-      hash,
-      schema: (await fetchStoredWasmSchema(serverUrl, { adminSecret, schemaHash: hash })).schema,
-    })),
-  );
-
-  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
-  if (!match) {
+  const hash = await resolveStoredStructuralSchemaHash(appId, serverUrl, adminSecret, wasmSchema);
+  if (!hash) {
     throw new Error(
       "No stored structural schema matches the local schema.ts. Publish the structural schema before pushing permissions.",
     );
   }
 
-  return match.hash;
+  return hash;
+}
+
+async function resolveStoredStructuralSchemaHash(
+  appId: string,
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<string | null> {
+  const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+  const storedSchemas = await Promise.all(
+    hashes.map(async (hash) => ({
+      hash,
+      schema: (await fetchStoredWasmSchema(serverUrl, { appId, adminSecret, schemaHash: hash }))
+        .schema,
+    })),
+  );
+
+  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
+  return match?.hash ?? null;
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
@@ -655,7 +795,11 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
 
 function builderExpressionForColumn(column: ColumnDescriptor): string {
   const base = baseBuilderExpression(column.column_type, column.references);
-  return column.nullable ? `${base}.optional()` : base;
+  const withOptional = column.nullable ? `${base}.optional()` : base;
+  if (column.merge_strategy === "Counter") {
+    return `${withOptional}.merge("counter")`;
+  }
+  return withOptional;
 }
 
 function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
@@ -1096,15 +1240,37 @@ function isDefinedMigration(value: unknown): value is DefinedMigration {
 }
 
 async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
-  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
-  const loaded = (await import(url)) as { default?: unknown; migration?: unknown };
-  const migration = loaded.default ?? loaded.migration;
-  if (!isDefinedMigration(migration)) {
-    throw new Error(
-      `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
-    );
+  const outFile = await bundleToTempFile(filePath);
+  try {
+    const loaded = (await import(pathToFileURL(outFile).href)) as {
+      default?: unknown;
+      migration?: unknown;
+    };
+    const migration = unwrapMigrationExport(loaded.default ?? loaded.migration);
+    if (!isDefinedMigration(migration)) {
+      throw new Error(
+        `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
+      );
+    }
+    return migration;
+  } finally {
+    await rm(outFile, { force: true }).catch(() => undefined);
   }
-  return migration;
+}
+
+function unwrapMigrationExport(value: unknown): unknown {
+  let current = value;
+
+  while (
+    typeof current === "object" &&
+    current !== null &&
+    "default" in current &&
+    Object.keys(current as Record<string, unknown>).length === 1
+  ) {
+    current = (current as { default: unknown }).default;
+  }
+
+  return current;
 }
 
 async function findMigrationFile(
@@ -1112,6 +1278,10 @@ async function findMigrationFile(
   fromHash: string,
   toHash: string,
 ): Promise<string> {
+  if (!(await pathExists(migrationsDir))) {
+    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
+  }
+
   const fromShortHash = shortSchemaHash(fromHash);
   const toShortHash = shortSchemaHash(toHash);
   const files = await readdir(migrationsDir);
@@ -1196,6 +1366,7 @@ async function resolveHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,
+  appId: string | undefined,
   serverUrl: string | undefined,
   adminSecret: string | undefined,
 ): Promise<ResolvedSchemaInput> {
@@ -1234,16 +1405,19 @@ async function resolveHistoricalSchema(
           label,
           (
             await fetchSchemaHashes(requireSchemaExportServerValue(serverUrl, "serverUrl"), {
+              appId: requireAppId(appId),
               adminSecret: requireSchemaExportServerValue(adminSecret, "adminSecret"),
             })
           ).hashes,
         );
 
+  const resolvedAppId = requireAppId(appId);
   const resolvedServerUrl = requireSchemaExportServerValue(serverUrl, "serverUrl");
   const resolvedAdminSecret = requireSchemaExportServerValue(adminSecret, "adminSecret");
 
   try {
     const storedSchema = await fetchStoredWasmSchema(resolvedServerUrl, {
+      appId: resolvedAppId,
       adminSecret: resolvedAdminSecret,
       schemaHash: resolvedHash,
     });
@@ -1282,6 +1456,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
         options.migrationsDir,
         options.fromHash,
         "fromHash",
+        options.appId,
         options.serverUrl,
         options.adminSecret,
       );
@@ -1300,6 +1475,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
           options.migrationsDir,
           options.toHash,
           "toHash",
+          options.appId,
           options.serverUrl,
           options.adminSecret,
         )
@@ -1330,6 +1506,21 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
 
   if (fromSchema.hash === toSchema.hash) {
     console.log("No structural schema changes detected.");
+    return null;
+  }
+
+  if (!schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+    if (shouldWriteCommittedSnapshot) {
+      await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp);
+    }
+
+    const version = await packageVersion();
+    console.log(
+      "No reviewed migration file needed because this schema change does not require row transformations.",
+    );
+    console.log(
+      `Next step: Run npx jazz-tools@${version} migrations push ${options.appId ?? "<appId>"} ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
+    );
     return null;
   }
 
@@ -1368,20 +1559,71 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     console.log("2. Rename the file by replacing 'unnamed'.");
   }
   console.log(
-    `${options.name ? "2" : "3"}. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
+    `${options.name ? "2" : "3"}. Run npx jazz-tools@${version} migrations push ${options.appId ?? "<appId>"} ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
   );
 
   return filePath;
 }
 
 export async function pushMigration(options: PushMigrationOptions): Promise<void> {
-  const { serverUrl, adminSecret } = requireMigrationServerOptions(options);
+  const { appId, serverUrl, adminSecret } = requireMigrationServerOptions(options);
   const { hashes } = await fetchSchemaHashes(serverUrl, {
+    appId,
     adminSecret,
   });
   const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
   const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
-  const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
+  let filePath: string | null = null;
+
+  try {
+    filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !error.message.startsWith(`No migration file found in ${options.migrationsDir}`)
+    ) {
+      throw error;
+    }
+  }
+
+  if (!filePath) {
+    const fromSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      fromHash,
+      "fromHash",
+      appId,
+      serverUrl,
+      adminSecret,
+    );
+    const toSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      toHash,
+      "toHash",
+      appId,
+      serverUrl,
+      adminSecret,
+    );
+
+    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+      throw new Error(
+        `No migration file found in ${options.migrationsDir} for ${fromHash} -> ${toHash}. Run \`jazz-tools migrations create ${appId} --fromHash ${shortSchemaHash(fromHash)} --toHash ${shortSchemaHash(toHash)}\` first.`,
+      );
+    }
+
+    await publishStoredMigration(serverUrl, {
+      appId,
+      adminSecret,
+      fromHash,
+      toHash,
+      forward: [],
+    });
+
+    console.log(
+      `Pushed migration ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} without a reviewed migration file because no row transformations are required.`,
+    );
+    return;
+  }
+
   const migration = await loadDefinedMigration(filePath);
 
   if (
@@ -1397,11 +1639,31 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   schemaDefinitionToAst(migration.to as any);
 
   if (migration.forward.length === 0) {
-    throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
+    const fromSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      fromHash,
+      "fromHash",
+      appId,
+      serverUrl,
+      adminSecret,
+    );
+    const toSchema = await resolveHistoricalSchema(
+      options.migrationsDir,
+      toHash,
+      "toHash",
+      appId,
+      serverUrl,
+      adminSecret,
+    );
+
+    if (schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+      throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
+    }
   }
 
-  const forward = serializeForwardLenses(migration.forward);
+  const forward = migration.forward.length === 0 ? [] : serializeForwardLenses(migration.forward);
   await publishStoredMigration(serverUrl, {
+    appId,
     adminSecret,
     fromHash,
     toHash,
@@ -1419,12 +1681,14 @@ function describePermissionsHead(head: StoredPermissionsHead): string {
 
 export async function permissionsStatus(options: PermissionsCommandOptions): Promise<void> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
-  const localSchemaHash = await resolveStoredStructuralSchemaHash(
+  const localSchemaHash = await resolveStoredStructuralSchemaHashOrThrow(
+    options.appId,
     options.serverUrl,
     options.adminSecret,
     compiled.wasmSchema,
   );
   const { head } = await fetchPermissionsHead(options.serverUrl, {
+    appId: options.appId,
     adminSecret: options.adminSecret,
   });
 
@@ -1450,40 +1714,88 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
   console.log(`Next push will require parent bundle ${head.bundleObjectId}.`);
 }
 
-export async function pushPermissions(options: PermissionsCommandOptions): Promise<void> {
+export async function deploy(options: DeployOptions): Promise<void> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
-  const localSchemaHash = await resolveStoredStructuralSchemaHash(
+  console.log(`Loaded current schema from ${compiled.schemaFile}.`);
+  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
+
+  let localSchemaHash = await resolveStoredStructuralSchemaHash(
+    options.appId,
     options.serverUrl,
     options.adminSecret,
     compiled.wasmSchema,
   );
+
+  if (!localSchemaHash) {
+    const publishedSchema = await publishStoredSchema(options.serverUrl, {
+      appId: options.appId,
+      adminSecret: options.adminSecret,
+      schema: compiled.wasmSchema,
+    });
+    localSchemaHash = publishedSchema.hash;
+    console.log(`Published the current schema as ${shortSchemaHash(localSchemaHash)}.`);
+  } else {
+    console.log(
+      `The current schema is already stored in the server as ${shortSchemaHash(localSchemaHash)}; skipping publish.`,
+    );
+  }
+
   const { head: currentHead } = await fetchPermissionsHead(options.serverUrl, {
+    appId: options.appId,
     adminSecret: options.adminSecret,
   });
+  if (currentHead && currentHead.schemaHash !== localSchemaHash) {
+    const fromShortHash = shortSchemaHash(currentHead.schemaHash);
+    const toShortHash = shortSchemaHash(localSchemaHash);
+
+    try {
+      const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
+        appId: options.appId,
+        adminSecret: options.adminSecret,
+        fromHash: currentHead.schemaHash,
+        toHash: localSchemaHash,
+      });
+
+      if (!connected) {
+        await pushMigration({
+          appId: options.appId,
+          serverUrl: options.serverUrl,
+          adminSecret: options.adminSecret,
+          migrationsDir: options.migrationsDir,
+          fromHash: currentHead.schemaHash,
+          toHash: localSchemaHash,
+        });
+      }
+    } catch (error) {
+      const migrationMissingPrefix = `No migration file found in ${options.migrationsDir}`;
+      if (!(error instanceof Error) || !error.message.startsWith(migrationMissingPrefix)) {
+        throw error;
+      }
+
+      const message = `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${options.appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
+      if (options.noVerify) {
+        console.warn(`Warning: ${message}`);
+      } else {
+        throw Error(message);
+      }
+    }
+  }
+
   const { head: publishedHead } = await publishStoredPermissions(options.serverUrl, {
+    appId: options.appId,
     adminSecret: options.adminSecret,
     schemaHash: localSchemaHash,
     permissions: compiled.permissions,
     expectedParentBundleObjectId: currentHead?.bundleObjectId ?? null,
   });
-
-  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
-  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
-  console.log(`Resolved structural schema hash ${shortSchemaHash(localSchemaHash)}.`);
-  if (currentHead) {
-    console.log(`Publishing from parent ${describePermissionsHead(currentHead)}.`);
-  } else {
-    console.log("Publishing first permissions head for this app.");
-  }
-
   const nextHead = publishedHead ?? {
     schemaHash: localSchemaHash,
     version: currentHead ? currentHead.version + 1 : 1,
     parentBundleObjectId: currentHead?.bundleObjectId ?? null,
     bundleObjectId: currentHead?.bundleObjectId ?? "",
   };
-  console.log(`Published permissions head ${describePermissionsHead(nextHead)}.`);
-  console.log(PERMISSIONS_LIFECYCLE_NOTE);
+
+  console.log(`Published permissions as ${describePermissionsHead(nextHead)}.`);
 }
 
 function isMainModule(): boolean {
@@ -1507,12 +1819,12 @@ if (isMainModule()) {
     const subcommand = process.argv[3] ?? "";
     if (subcommand !== "export") {
       console.error(
-        "Usage: node dist/cli.js schema export [--schema-dir <path> | --schema-hash <hash>] [--migrations-dir <path>] [--server-url <url>] [--admin-secret <secret>]",
+        "Usage: node dist/cli.js schema export [<appId>] [--schema-dir <path> | --schema-hash <hash>] [--migrations-dir <path>] [--server-url <url>] [--admin-secret <secret>]",
       );
       process.exit(1);
     }
 
-    const args = process.argv.slice(4);
+    const { appId, args } = splitLeadingAppId(process.argv.slice(4));
     const schemaDirFlag = getFlagValue(args, "--schema-dir");
     const schemaHash = getFlagValue(args, "--schema-hash");
     if (schemaDirFlag && schemaHash) {
@@ -1527,6 +1839,7 @@ if (isMainModule()) {
         ? resolve(process.cwd(), getFlagValue(args, "--migrations-dir")!)
         : undefined,
       schemaHash,
+      appId,
       serverUrl: getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL,
       adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
     }).catch((err) => {
@@ -1538,30 +1851,34 @@ if (isMainModule()) {
     let task: Promise<unknown>;
 
     if (subcommand === "create") {
-      const args = process.argv.slice(4);
+      const { appId, args } = splitLeadingAppId(process.argv.slice(4));
       const options = resolveMigrationOptions(args);
       task = createMigration({
         ...options,
+        appId,
         schemaDir: options.schemaDir ?? process.cwd(),
         fromHash: getFlagValue(args, "--fromHash"),
         toHash: getFlagValue(args, "--toHash"),
         name: getFlagValue(args, "--name"),
       });
     } else if (subcommand === "push") {
-      const fromHash = process.argv[4];
-      const toHash = process.argv[5];
-      const sharedArgs = process.argv.slice(6);
+      const appId = process.argv[4];
+      const fromHash = process.argv[5];
+      const toHash = process.argv[6];
+      const sharedArgs = process.argv.slice(7);
 
-      if (!fromHash || !toHash) {
-        console.error("Usage: node dist/cli.js migrations push <fromHash> <toHash> [options]");
+      if (!appId || !fromHash || !toHash) {
+        console.error(
+          "Usage: node dist/cli.js migrations push <appId> <fromHash> <toHash> [options]",
+        );
         process.exit(1);
       }
 
       const options = resolveMigrationOptions(sharedArgs);
-      task = pushMigration({ ...options, fromHash, toHash });
+      task = pushMigration({ ...options, appId, fromHash, toHash });
     } else {
       task = Promise.reject(
-        new Error("Usage: node dist/cli.js migrations <create|push> [options]"),
+        new Error("Usage: node dist/cli.js migrations <create|push> [<appId>] [options]"),
       );
     }
 
@@ -1571,17 +1888,26 @@ if (isMainModule()) {
     });
   } else if (command === "permissions") {
     const subcommand = process.argv[3] ?? "";
-    const options = resolvePermissionsOptions(process.argv.slice(4));
+    const { appId, args } = splitLeadingAppId(process.argv.slice(4));
+    const options = { ...resolvePermissionsOptions(args), appId: requireAppId(appId) };
     const task =
       subcommand === "status"
         ? permissionsStatus(options)
-        : subcommand === "push"
-          ? pushPermissions(options)
-          : Promise.reject(
-              new Error("Usage: node dist/cli.js permissions <status|push> [options]"),
-            );
+        : Promise.reject(new Error("Usage: node dist/cli.js permissions status <appId> [options]"));
 
     task.catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+  } else if (command === "deploy") {
+    const { appId, args } = splitLeadingAppId(process.argv.slice(3));
+    const options = { ...resolveMigrationOptions(args), appId };
+    deploy({
+      ...requireMigrationServerOptions(options),
+      schemaDir: options.schemaDir ?? process.cwd(),
+      migrationsDir: options.migrationsDir,
+      noVerify: hasFlag(args, "--no-verify"),
+    }).catch((err) => {
       console.error(err.message);
       process.exit(1);
     });
@@ -1590,27 +1916,32 @@ if (isMainModule()) {
     console.log("\nCommands:");
     console.log("  validate              Validate root schema.ts and optional permissions.ts");
     console.log("  schema export         Print the compiled structural schema as JSON");
-    console.log("  permissions status    Show the current server permissions head for this app");
+    console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
     console.log(
-      "  permissions push      Publish the current permissions.ts with head-parent checks",
+      "  permissions status <appId> Show the current server permissions head for this app",
     );
     console.log(
       "  migrations create     Generate a typed structural migration stub between two schema versions",
     );
-    console.log("  migrations push       Push a reviewed migration edge to the server");
+    console.log(
+      "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
+    );
     console.log("\nValidation options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");
+    console.log("  <appId>               Required for server-backed schema export by hash");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
     console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("\nPermissions options:");
+    console.log("  <appId>               Required");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("\nMigration options:");
+    console.log("  <appId>               Required for remote create/push commands");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");

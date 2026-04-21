@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Db, createDb } from "./db.js";
 
-vi.mock("./local-auth.js", () => ({
-  resolveLocalAuthDefaults: vi.fn((config) => config),
-}));
-
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
 

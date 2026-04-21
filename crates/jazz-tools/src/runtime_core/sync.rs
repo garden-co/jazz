@@ -1,6 +1,44 @@
 use super::*;
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn retained_batch_terminal_tier(&self) -> DurabilityTier {
+        let sync_manager = self.schema_manager.query_manager().sync_manager();
+
+        if sync_manager.has_connected_servers() {
+            DurabilityTier::GlobalServer
+        } else {
+            sync_manager
+                .max_local_durability_tier()
+                .unwrap_or(DurabilityTier::Local)
+        }
+    }
+    fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
+        let Ok(records) = self.storage.scan_local_batch_records() else {
+            return Vec::new();
+        };
+        let terminal_tier = self.retained_batch_terminal_tier();
+
+        records
+            .into_iter()
+            .filter(|record| {
+                record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
+            })
+            .filter(|record| match record.latest_settlement.as_ref() {
+                None => true,
+                Some(crate::batch_fate::BatchSettlement::Missing { .. }) => true,
+                Some(crate::batch_fate::BatchSettlement::Rejected { .. }) => false,
+                Some(crate::batch_fate::BatchSettlement::DurableDirect {
+                    confirmed_tier, ..
+                })
+                | Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                    confirmed_tier,
+                    ..
+                }) => confirmed_tier < &terminal_tier,
+            })
+            .map(|record| record.batch_id)
+            .collect()
+    }
+
     // =========================================================================
     // Sync Operations
     // =========================================================================
@@ -35,6 +73,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.schema_manager
             .query_manager_mut()
             .add_server_with_storage(&self.storage, server_id, skip_catalogue_sync);
+        let pending_batch_ids = self.pending_batch_ids_needing_reconciliation();
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .request_batch_settlements_from_server(server_id, pending_batch_ids);
         self.immediate_tick();
     }
 

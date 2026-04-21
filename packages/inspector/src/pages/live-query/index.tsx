@@ -103,7 +103,7 @@ function formatTime(value: string | number): string {
 
 function tierRank(tier: DurabilityTier): number {
   switch (tier) {
-    case "worker":
+    case "local":
       return 0;
     case "edge":
       return 1;
@@ -157,7 +157,6 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
         const response = await fetchServerSubscriptions(standaloneContext.connection.serverUrl, {
           adminSecret: standaloneContext.connection.adminSecret,
           appId: standaloneContext.connection.appId,
-          pathPrefix: standaloneContext.connection.serverPathPrefix,
         });
         if (cancelled) {
           return;
@@ -190,7 +189,6 @@ function useServerSubscriptionTelemetry(runtime: "standalone" | "extension") {
     runtime,
     standaloneContext?.connection.adminSecret,
     standaloneContext?.connection.appId,
-    standaloneContext?.connection.serverPathPrefix,
     standaloneContext?.connection.serverUrl,
   ]);
 

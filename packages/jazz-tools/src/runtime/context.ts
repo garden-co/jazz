@@ -4,9 +4,6 @@
 
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
-/** Local auth mode for client-generated identities. */
-export type LocalAuthMode = "anonymous" | "demo";
-
 /**
  * Runtime source overrides for Jazz WASM and worker startup.
  *
@@ -36,13 +33,20 @@ export interface RuntimeSourcesConfig {
 }
 
 /**
+ * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/query_manager/session.rs`.
+ */
+export type AuthMode = "external" | "local-first" | "anonymous";
+
+/**
  * Session context for policy evaluation.
  */
 export interface Session {
   /** User identifier */
   user_id: string;
-  /** Additional claims (roles, teams, etc.) */
+  /** User-defined claims (roles, teams, etc.) */
   claims: Record<string, unknown>;
+  /** Auth mode — derived from the JWT's `iss` claim. */
+  authMode: AuthMode;
 }
 
 /**
@@ -60,8 +64,6 @@ export interface AppContext {
 
   /** Optional server URL for sync */
   serverUrl?: string;
-  /** Optional route prefix for multi-tenant servers (e.g. `/apps/<appId>`). */
-  serverPathPrefix?: string;
 
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
@@ -84,21 +86,10 @@ export interface AppContext {
   jwtToken?: string;
 
   /**
-   * Local auth mode for client-generated identities.
-   *
-   * Browser clients default to `"anonymous"` when no other auth is configured.
-   * Sent as `X-Jazz-Local-Mode`.
+   * Mirrored session used for local permission evaluation when auth rides on
+   * an HttpOnly cookie instead of a JS-readable bearer token.
    */
-  localAuthMode?: LocalAuthMode;
-
-  /**
-   * Client-generated auth token for anonymous/demo identity.
-   *
-   * For browser clients, if local auth mode is active and this is omitted,
-   * Jazz auto-generates and persists a per-app device token in localStorage.
-   * Sent as `X-Jazz-Local-Token`.
-   */
-  localAuthToken?: string;
+  cookieSession?: Session;
 
   /**
    * Backend secret for session impersonation.
@@ -107,8 +98,8 @@ export interface AppContext {
   backendSecret?: string;
 
   /**
-   * Admin secret for schema/policy sync.
-   * Required to sync catalogue objects.
+   * Admin secret for privileged sync and `/admin/*` catalogue endpoints.
+   * On `/ws`, a valid admin secret authenticates this client as the backend.
    */
   adminSecret?: string;
 
@@ -117,10 +108,10 @@ export interface AppContext {
    * Set for server nodes to enable durability notifications.
    * Clients typically leave this undefined.
    */
-  tier?: "worker" | "edge" | "global" | Array<"worker" | "edge" | "global">;
+  tier?: "local" | "edge" | "global" | Array<"local" | "edge" | "global">;
 
   /**
    * Default durability tier for reads and writes when no explicit tier is provided.
    */
-  defaultDurabilityTier?: "worker" | "edge" | "global";
+  defaultDurabilityTier?: "local" | "edge" | "global";
 }

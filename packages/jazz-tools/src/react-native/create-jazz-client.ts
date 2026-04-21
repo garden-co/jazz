@@ -1,7 +1,6 @@
 import type { Db, DbConfig } from "./db.js";
 import { createDb } from "./db.js";
 import type { Session } from "../runtime/context.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 
 export interface JazzClient {
@@ -12,10 +11,9 @@ export interface JazzClient {
 }
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
-  const db = await createDb(resolvedConfig);
+  const db = await createDb(config);
   let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db, session);
+  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db, session);
 
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {

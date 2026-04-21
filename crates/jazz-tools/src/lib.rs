@@ -1,6 +1,9 @@
+pub mod batch_fate;
 pub mod binding_support;
 pub mod catalogue;
 pub mod commit;
+pub mod digest;
+pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
@@ -27,15 +30,14 @@ pub mod runtime_tokio;
 #[cfg(feature = "runtime-tokio")]
 pub use runtime_tokio as jazz_tokio;
 
-#[cfg(feature = "transport")]
 pub mod transport_protocol;
-#[cfg(feature = "transport")]
 pub use transport_protocol as jazz_transport;
+pub mod transport_manager;
+#[cfg(feature = "transport-websocket")]
+pub mod ws_stream;
 
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
-mod transport;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;
@@ -46,8 +48,6 @@ use thiserror::Error;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, SessionClient};
 
-#[cfg(all(feature = "client", feature = "transport"))]
-pub use jazz_transport::ServerEvent;
 #[cfg(feature = "client")]
 pub use object::ObjectId;
 #[cfg(feature = "client")]
@@ -92,8 +92,8 @@ pub struct AppContext {
     /// Backend secret for session impersonation.
     /// Enables `for_session()` to act as any user.
     pub backend_secret: Option<String>,
-    /// Admin secret for schema/policy sync.
-    /// Required to sync catalogue objects.
+    /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
+    /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
 
     /// Optional sync message tracer for test observability.
@@ -133,9 +133,6 @@ pub enum JazzError {
 
     #[error("Schema error: {0}")]
     Schema(String),
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

@@ -85,6 +85,17 @@ function literalToWasmValue(value: unknown): Value {
   throw new Error(`Unsupported policy literal type: ${typeof value}`);
 }
 
+function columnMergeStrategyToWasm(
+  strategy: Schema["tables"][number]["columns"][number]["mergeStrategy"],
+): ColumnDescriptor["merge_strategy"] {
+  switch (strategy) {
+    case undefined:
+      return undefined;
+    case "counter":
+      return "Counter";
+  }
+}
+
 function clonePolicyValue(value: DslPolicyValue): PolicyValue {
   if (value.type === "SessionRef") {
     return { type: "SessionRef", path: [...value.path] };
@@ -224,6 +235,11 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   for (const table of schema.tables) {
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
+      if (col.mergeStrategy === "counter" && (col.sqlType !== "INTEGER" || col.nullable)) {
+        throw new Error(
+          "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+        );
+      }
       const descriptor: ColumnDescriptor = {
         name: col.name,
         column_type: columnType,
@@ -234,6 +250,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       }
       if (col.references) {
         descriptor.references = col.references;
+      }
+      if (col.mergeStrategy) {
+        descriptor.merge_strategy = columnMergeStrategyToWasm(col.mergeStrategy);
       }
       return descriptor;
     });

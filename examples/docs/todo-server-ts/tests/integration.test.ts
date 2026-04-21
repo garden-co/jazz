@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { TestingServer } from "jazz-tools/testing";
+import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -25,6 +25,13 @@ describe("Todo Server Integration", () => {
 
   beforeAll(async () => {
     upstream = await TestingServer.start();
+
+    await pushSchemaCatalogue({
+      serverUrl: upstream.url,
+      appId: upstream.appId,
+      adminSecret: upstream.adminSecret,
+      schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+    });
 
     // Create server with temp persistent storage plus an ephemeral upstream server.
     const todoServer = await createServer({
@@ -259,6 +266,12 @@ describe("Todo Server Integration", () => {
     it("streams all todos and updates on changes", async () => {
       // Use an isolated upstream and local server so this test starts from a clean global state.
       const sseUpstream = await TestingServer.start();
+      await pushSchemaCatalogue({
+        serverUrl: sseUpstream.url,
+        appId: sseUpstream.appId,
+        adminSecret: sseUpstream.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+      });
       const sseServer = await startServer(
         await createServer({
           appId: sseUpstream.appId,

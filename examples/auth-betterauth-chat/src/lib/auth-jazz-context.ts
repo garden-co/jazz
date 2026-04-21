@@ -16,13 +16,13 @@ declare global {
 
 function createAuthJazzContext() {
   return createJazzContext({
-    appId: process.env.NEXT_PUBLIC_APP_ID!,
+    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
     driver: { type: "memory" },
-    serverUrl: process.env.NEXT_PUBLIC_SYNC_SERVER_URL!,
+    serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
     userBranch: "main",
     backendSecret: process.env.BACKEND_SECRET!,
-    tier: "worker",
+    tier: "global",
   });
 }
 

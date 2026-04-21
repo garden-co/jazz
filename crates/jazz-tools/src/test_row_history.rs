@@ -1,14 +1,11 @@
-#![cfg(test)]
-
 use std::collections::HashMap;
 
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{Schema, SchemaHash};
 use crate::row_histories::{
-    ApplyRowVersionResult, RowHistoryError, StoredRowVersion, apply_row_version,
+    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch,
 };
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
@@ -53,9 +50,11 @@ pub fn create_test_row_with_id<H: Storage>(
     metadata: Option<HashMap<String, String>>,
 ) -> ObjectId {
     let metadata = metadata.unwrap_or_default();
+    let row_locator = row_locator_from_metadata(&metadata)
+        .expect("test rows should provide row-locator metadata");
     storage
-        .put_metadata(object_id, metadata)
-        .expect("test row metadata should persist");
+        .put_row_locator(object_id, Some(&row_locator))
+        .expect("test row locator should persist");
     object_id
 }
 
@@ -64,18 +63,20 @@ pub fn put_test_row_metadata<H: Storage>(
     object_id: ObjectId,
     metadata: HashMap<String, String>,
 ) {
+    let row_locator = row_locator_from_metadata(&metadata)
+        .expect("test rows should provide row-locator metadata");
     storage
-        .put_metadata(object_id, metadata)
-        .expect("test row metadata should persist");
+        .put_row_locator(object_id, Some(&row_locator))
+        .expect("test row locator should persist");
 }
 
-pub fn apply_test_row_version<H: Storage>(
+pub fn apply_test_row_batch<H: Storage>(
     storage: &mut H,
     object_id: ObjectId,
     branch: impl AsRef<str>,
-    row: StoredRowVersion,
-) -> Result<ApplyRowVersionResult, RowHistoryError> {
-    apply_row_version(
+    row: StoredRowBatch,
+) -> Result<ApplyRowBatchResult, RowHistoryError> {
+    apply_row_batch(
         storage,
         object_id,
         &BranchName::new(branch.as_ref()),
@@ -92,23 +93,13 @@ pub fn load_test_row_metadata<H: Storage>(
         .load_row_locator(object_id)
         .expect("test row locator lookup should succeed")
         .map(|locator| metadata_from_row_locator(&locator))
-        .or_else(|| {
-            storage
-                .load_metadata(object_id)
-                .expect("test metadata lookup should succeed")
-                .and_then(|metadata| {
-                    row_locator_from_metadata(&metadata)
-                        .map(|locator| metadata_from_row_locator(&locator))
-                        .or(Some(metadata))
-                })
-        })
 }
 
 pub fn load_test_row_tip_ids<H: Storage>(
     storage: &H,
     object_id: ObjectId,
     branch: impl ToString,
-) -> Result<Vec<CommitId>, StorageError> {
+) -> Result<Vec<BatchId>, StorageError> {
     let branch = branch.to_string();
     let row_locator = storage.load_row_locator(object_id)?.ok_or_else(|| {
         StorageError::IoError(format!("missing row locator for test row {}", object_id))

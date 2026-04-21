@@ -73,7 +73,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
@@ -105,7 +105,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
@@ -138,7 +138,7 @@ describe("LiveQuery", () => {
     expect(screen.getByRole("cell", { name: "projects" })).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("Filter by tier"), {
-      target: { value: "worker" },
+      target: { value: "local" },
     });
 
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
@@ -169,7 +169,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-3",
         table: "users",
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
@@ -236,7 +236,6 @@ describe("LiveQuery", () => {
     expect(mockFetchServerSubscriptions).toHaveBeenCalledWith("http://localhost:1625", {
       adminSecret: "admin-secret",
       appId: "test-app",
-      pathPrefix: undefined,
     });
     expect(screen.getByRole("cell", { name: "2" })).not.toBeNull();
     expect(screen.queryByLabelText("Filter by tier")).toBeNull();

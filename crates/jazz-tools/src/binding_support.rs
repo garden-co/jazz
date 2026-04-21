@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use serde_json::{Value as JsonValue, json};
+use uuid::Uuid;
 
+use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -14,21 +17,37 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
+use crate::row_histories::BatchId;
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
-use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerializedOutboxEntry {
-    pub destination_kind: String,
-    pub destination_id: String,
-    pub payload_json: String,
-    pub is_catalogue: bool,
-}
+use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeSchemaInput {
+    pub schema: Schema,
+    pub loaded_policy_bundle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeSchemaEnvelopeWire {
+    #[serde(rename = "__jazzRuntimeSchema")]
+    version: u8,
+    schema: Schema,
+    #[serde(default)]
+    loaded_policy_bundle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RuntimeSchemaWire {
+    Envelope(RuntimeSchemaEnvelopeWire),
+    Schema(Schema),
 }
 
 pub fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
@@ -124,6 +143,27 @@ pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
     parse_query_json(query_json)
 }
 
+pub fn parse_runtime_schema_input(schema_json: &str) -> Result<RuntimeSchemaInput, String> {
+    match serde_json::from_str::<RuntimeSchemaWire>(schema_json).map_err(|err| err.to_string())? {
+        RuntimeSchemaWire::Envelope(envelope) => {
+            if envelope.version != 1 {
+                return Err(format!(
+                    "unsupported runtime schema envelope version {}",
+                    envelope.version
+                ));
+            }
+            Ok(RuntimeSchemaInput {
+                schema: envelope.schema,
+                loaded_policy_bundle: envelope.loaded_policy_bundle,
+            })
+        }
+        RuntimeSchemaWire::Schema(schema) => Ok(RuntimeSchemaInput {
+            schema,
+            loaded_policy_bundle: false,
+        }),
+    }
+}
+
 pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>, String> {
     match session_json {
         Some(json) => serde_json::from_str(json)
@@ -137,7 +177,54 @@ pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>
 #[serde(untagged)]
 enum WriteContextWire {
     Session(Session),
-    Context(WriteContext),
+    Context(WriteContextPayloadWire),
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteContextPayloadWire {
+    #[serde(default)]
+    session: Option<Session>,
+    #[serde(default)]
+    attribution: Option<String>,
+    #[serde(default)]
+    updated_at: Option<u64>,
+    #[serde(default)]
+    batch_mode: Option<String>,
+    #[serde(default)]
+    batch_id: Option<String>,
+    #[serde(default)]
+    target_branch_name: Option<String>,
+}
+
+impl TryFrom<WriteContextPayloadWire> for WriteContext {
+    type Error = String;
+
+    fn try_from(value: WriteContextPayloadWire) -> Result<Self, Self::Error> {
+        let batch_mode = match value.batch_mode.as_deref() {
+            None => None,
+            Some("direct") | Some("Direct") => Some(BatchMode::Direct),
+            Some("transactional") | Some("Transactional") => Some(BatchMode::Transactional),
+            Some(other) => {
+                return Err(format!(
+                    "Invalid batch mode '{other}'. Must be 'direct' or 'transactional'."
+                ));
+            }
+        };
+        let batch_id = value
+            .batch_id
+            .as_deref()
+            .map(parse_batch_id_input)
+            .transpose()?;
+
+        Ok(WriteContext {
+            session: value.session,
+            attribution: value.attribution,
+            updated_at: value.updated_at,
+            batch_mode,
+            batch_id,
+            target_branch_name: value.target_branch_name,
+        })
+    }
 }
 
 pub fn parse_write_context_input(
@@ -146,7 +233,7 @@ pub fn parse_write_context_input(
     match write_context_json {
         Some(json) => match serde_json::from_str::<WriteContextWire>(json) {
             Ok(WriteContextWire::Session(session)) => Ok(Some(WriteContext::from_session(session))),
-            Ok(WriteContextWire::Context(context)) => Ok(Some(context)),
+            Ok(WriteContextWire::Context(context)) => context.try_into().map(Some),
             Err(err) => Err(err.to_string()),
         },
         None => Ok(None),
@@ -155,20 +242,108 @@ pub fn parse_write_context_input(
 
 pub fn parse_durability_tier(tier: &str) -> Result<DurabilityTier, String> {
     match tier {
-        "worker" => Ok(DurabilityTier::Worker),
+        "local" => Ok(DurabilityTier::Local),
         "edge" => Ok(DurabilityTier::EdgeServer),
         "global" => Ok(DurabilityTier::GlobalServer),
         _ => Err(format!(
-            "Invalid tier '{}'. Must be 'worker', 'edge', or 'global'.",
+            "Invalid tier '{}'. Must be 'local', 'edge', or 'global'.",
             tier
         )),
     }
+}
+
+pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
+    batch_id
+        .parse()
+        .map_err(|err: String| format!("Invalid BatchId: {err}"))
+}
+
+pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
+    match tier {
+        DurabilityTier::Local => "local",
+        DurabilityTier::EdgeServer => "edge",
+        DurabilityTier::GlobalServer => "global",
+    }
+}
+
+fn serialize_batch_mode(mode: BatchMode) -> &'static str {
+    match mode {
+        BatchMode::Direct => "direct",
+        BatchMode::Transactional => "transactional",
+    }
+}
+
+fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
+    json!({
+        "objectId": member.object_id.uuid().to_string(),
+        "branchName": member.branch_name.to_string(),
+        "batchId": member.batch_id.to_string(),
+    })
+}
+
+fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
+    match settlement {
+        BatchSettlement::Rejected {
+            batch_id,
+            code,
+            reason,
+        } => json!({
+            "kind": "rejected",
+            "batchId": batch_id.to_string(),
+            "code": code,
+            "reason": reason,
+        }),
+        BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "durableDirect",
+            "batchId": batch_id.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier,
+            visible_members,
+        } => json!({
+            "kind": "acceptedTransaction",
+            "batchId": batch_id.to_string(),
+            "confirmedTier": serialize_durability_tier(*confirmed_tier),
+            "visibleMembers": visible_members
+                .iter()
+                .map(serialize_visible_batch_member)
+                .collect::<Vec<_>>(),
+        }),
+        BatchSettlement::Missing { batch_id } => json!({
+            "kind": "missing",
+            "batchId": batch_id.to_string(),
+        }),
+    }
+}
+
+pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
+    json!({
+        "batchId": record.batch_id.to_string(),
+        "mode": serialize_batch_mode(record.mode),
+        "sealed": record.sealed,
+        "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
+    })
+}
+
+pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
+    JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
 }
 
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
     ReadDurabilityOptions {
         tier,
         local_updates: LocalUpdates::Immediate,
+        strict_transactions: false,
     }
 }
 
@@ -209,6 +384,7 @@ pub fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
+            strict_transactions: false,
         },
         propagation,
     ))
@@ -270,24 +446,24 @@ pub fn subscription_delta_to_json(
     serde_json::Value::Array(delta_obj)
 }
 
-pub fn serialize_outbox_entry(message: &OutboxEntry) -> Result<SerializedOutboxEntry, String> {
-    let payload_json = serde_json::to_string(&message.payload).map_err(|err| err.to_string())?;
-    let is_catalogue = message.payload.is_catalogue();
-    let (destination_kind, destination_id) = match message.destination {
-        Destination::Server(server_id) => ("server".to_string(), server_id.0.to_string()),
-        Destination::Client(client_id) => ("client".to_string(), client_id.0.to_string()),
-    };
-
-    Ok(SerializedOutboxEntry {
-        destination_kind,
-        destination_id,
-        payload_json,
-        is_catalogue,
-    })
-}
-
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
+}
+
+pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<ObjectId>, String> {
+    let Some(object_id) = object_id else {
+        return Ok(None);
+    };
+
+    let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
+    if uuid.get_version_num() != 7 {
+        return Err(format!(
+            "Invalid ObjectId: expected UUIDv7, got version {}",
+            uuid.get_version_num()
+        ));
+    }
+
+    Ok(Some(ObjectId::from_uuid(uuid)))
 }
 
 pub fn current_timestamp_ms() -> i64 {
@@ -303,15 +479,16 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        parse_read_durability_options, query_rows_can_be_schema_aligned, serialize_outbox_entry,
+        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
+        query_rows_can_be_schema_aligned,
     };
+    use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
     use crate::query_manager::query::Query;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
-    use crate::sync_manager::{Destination, OutboxEntry, QueryId, ServerId, SyncPayload};
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -401,11 +578,11 @@ mod tests {
     #[test]
     fn read_durability_options_default_to_full_and_immediate() {
         let (durability, propagation) =
-            parse_read_durability_options(Some("worker"), None).expect("parse options");
+            parse_read_durability_options(Some("local"), None).expect("parse options");
 
         assert_eq!(
             durability.tier,
-            Some(crate::sync_manager::DurabilityTier::Worker)
+            Some(crate::sync_manager::DurabilityTier::Local)
         );
         assert_eq!(
             durability.local_updates,
@@ -415,19 +592,119 @@ mod tests {
     }
 
     #[test]
-    fn outbox_entries_are_serialized_for_bindings() {
-        let message = OutboxEntry {
-            destination: Destination::Server(ServerId::new()),
-            payload: SyncPayload::QueryUnsubscription {
-                query_id: QueryId(7),
+    fn runtime_schema_envelope_reads_ts_policy_bundle_flag() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        },
+                        {
+                            "name": "done",
+                            "column_type": { "type": "Boolean" },
+                            "nullable": false
+                        }
+                    ]
+                }
             },
-        };
+            "loadedPolicyBundle": true
+        }"#;
 
-        let serialized = serialize_outbox_entry(&message).expect("serialize outbox");
+        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
 
-        assert_eq!(serialized.destination_kind, "server");
-        assert!(!serialized.destination_id.is_empty());
-        assert!(!serialized.payload_json.is_empty());
-        assert!(!serialized.is_catalogue);
+        assert!(input.loaded_policy_bundle);
+        assert!(input.schema.contains_key(&TableName::new("todos")));
+    }
+
+    #[test]
+    fn runtime_schema_envelope_defaults_missing_policy_bundle_flag_to_permissive_local() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let input = parse_runtime_schema_input(schema_json).expect("parse runtime schema");
+
+        assert!(!input.loaded_policy_bundle);
+        assert!(input.schema.contains_key(&TableName::new("todos")));
+    }
+
+    #[test]
+    fn parse_write_context_accepts_ts_batch_id_strings() {
+        let batch_id = "0123456789abcdef0123456789abcdef";
+        let input = format!(
+            r#"{{
+                "session": {{
+                    "user_id": "alice",
+                    "claims": {{}},
+                    "authMode": "external"
+                }},
+                "batch_mode": "transactional",
+                "batch_id": "{batch_id}",
+                "target_branch_name": "dev-123456789abc-main"
+            }}"#
+        );
+
+        let context = parse_write_context_input(Some(&input))
+            .expect("parse write context")
+            .expect("write context");
+
+        assert_eq!(
+            context
+                .batch_id()
+                .map(|parsed| parsed.to_string())
+                .as_deref(),
+            Some(batch_id)
+        );
+        assert_eq!(context.target_branch_name(), Some("dev-123456789abc-main"));
+    }
+
+    #[test]
+    fn parse_write_context_rejects_legacy_batch_id_arrays() {
+        let input = r#"{
+            "session": {
+                "user_id": "alice",
+                "claims": {},
+                "authMode": "external"
+            },
+            "batch_mode": "transactional",
+            "batch_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            "target_branch_name": "dev-123456789abc-main"
+        }"#;
+
+        let error =
+            parse_write_context_input(Some(input)).expect_err("legacy batch_id should fail");
+        assert!(error.contains("WriteContextWire"));
+    }
+
+    #[test]
+    fn write_context_accepts_lowercase_transactional_batch_mode() {
+        let context = parse_write_context_input(Some(
+            r#"{
+                "batch_mode": "transactional",
+                "batch_id": "0196721ac2617f10a4bebbc7f7ffdb3f",
+                "target_branch_name": "dev-111111111111-main"
+            }"#,
+        ))
+        .expect("parse write context")
+        .expect("write context present");
+
+        assert_eq!(context.batch_mode(), BatchMode::Transactional);
+        assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
+        assert!(context.batch_id().is_some());
     }
 }

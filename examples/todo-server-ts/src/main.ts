@@ -120,12 +120,16 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const todo = db.insert(schemaApp.todos, {
-        title: body.title,
-        done: false,
-        description: body.description?.trim(),
-        owner_id: body.owner_id ?? "anonymous",
-      });
+      const todo = await db.insertDurable(
+        schemaApp.todos,
+        {
+          title: body.title,
+          done: false,
+          description: body.description?.trim(),
+          owner_id: body.owner_id ?? "unknown",
+        },
+        { tier: "edge" },
+      );
 
       res.status(201).json(todo);
 
@@ -141,6 +145,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const userDb = context.forSession({
         user_id: req.params.userId,
+        authMode: "external",
         claims: {},
       });
       const todos = await userDb.all(schemaApp.todos);

@@ -1,10 +1,11 @@
-import type { WasmSchema, QueryPropagation } from "jazz-tools";
+import type { QueryPropagation, StoredPermissionsResponse, WasmSchema } from "jazz-tools";
 import { createContext, useContext, useState, type PropsWithChildren } from "react";
 
 export type InspectorRuntime = "standalone" | "extension";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
+  storedPermissions: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
   queryPropagation: QueryPropagation;
   setQueryPropagation: (value: QueryPropagation) => void;
@@ -15,10 +16,12 @@ export const DevtoolsContext = createContext<DevtoolsContextValue | null>(null);
 export function DevtoolsProvider({
   children,
   wasmSchema,
+  storedPermissions = null,
   runtime,
   queryPropagation,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
+  storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
   queryPropagation?: QueryPropagation;
 }>) {
@@ -35,6 +38,7 @@ export function DevtoolsProvider({
     <DevtoolsContext.Provider
       value={{
         wasmSchema,
+        storedPermissions,
         runtime,
         queryPropagation: resolvedPropagation,
         setQueryPropagation,

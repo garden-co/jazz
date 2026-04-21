@@ -875,7 +875,6 @@ describe("jazzAdapter", () => {
         database: jazzAdapter({
           db: () => context.asBackend(wasmSchemaExample),
           schema: wasmSchemaExample,
-          durabilityTier: "edge",
         }),
         emailAndPassword: {
           enabled: true,
@@ -892,7 +891,6 @@ describe("jazzAdapter", () => {
       const adapter = jazzAdapter({
         db: () => context.asBackend(wasmSchemaExample),
         schema: wasmSchemaExample,
-        durabilityTier: "worker",
       })({});
 
       const user = await adapter.create({
@@ -947,7 +945,6 @@ describe("jazzAdapter", () => {
         const adapter1 = jazzAdapter({
           db: () => ctx1.asBackend(wasmSchemaExample),
           schema: wasmSchemaExample,
-          durabilityTier: "edge",
         })({});
 
         const user = await adapter1.create({
@@ -966,7 +963,6 @@ describe("jazzAdapter", () => {
         const adapter2 = jazzAdapter({
           db: () => ctx2.asBackend(wasmSchemaExample),
           schema: wasmSchemaExample,
-          durabilityTier: "edge",
         })({});
 
         await vi.waitFor(
@@ -1038,7 +1034,6 @@ describe("jazzAdapter", () => {
       const adapter = jazzAdapter({
         db: () => context.asBackend(wasmSchemaExample),
         schema: wasmSchemaExample,
-        durabilityTier: "edge",
       })({});
 
       await adapter.create({

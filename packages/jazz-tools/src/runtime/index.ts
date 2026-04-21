@@ -1,9 +1,19 @@
 export {
+  type CreateDurabilityOptions,
+  type CreateOptions,
+  DirectBatch,
   JazzClient,
-  type LinkExternalIdentityOptions,
-  type LinkExternalIdentityResult,
+  type AuthConfig,
+  type BatchMode,
+  type BatchSettlement,
+  type LocalBatchRecord,
   type LocalUpdatesMode,
+  type MutationErrorEvent,
+  PersistedWrite,
+  PersistedWriteRejectedError,
   SessionClient,
+  Transaction,
+  type VisibleBatchMember,
   loadWasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
@@ -14,32 +24,41 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
+  type UpdateDurabilityOptions,
+  type UpdateOptions,
+  type UpsertDurabilityOptions,
+  type UpsertOptions,
   type WriteDurabilityOptions,
   type WasmModule,
 } from "./client.js";
-export type { AppContext, LocalAuthMode, RuntimeSourcesConfig, Session } from "./context.js";
-export { linkExternalIdentity, type LinkExternalResponse } from "./sync-transport.js";
+export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {
   createDb,
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
+  type LogoutOptions,
+  DbDirectBatch,
+  DbPersistedWrite,
+  DbTransaction,
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,
+  type InsertHandle,
+  WriteHandle,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
-export {
-  deriveLocalPrincipalId,
-  deriveLocalPrincipalIdSync,
-  resolveClientSessionSync,
-  resolveClientSessionStateSync,
-} from "./client-session.js";
+export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
+  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredPermissions,
+  type PublishStoredPermissionsOptions,
+  type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
+  type StoredPermissionsResponse,
 } from "./schema-fetch.js";
 export {
   fetchServerSubscriptions,
@@ -47,7 +66,6 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export { resolveLocalAuthDefaults } from "./local-auth.js";
 export { translateQuery } from "./query-adapter.js";
 export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
 export { toInsertRecord, toValue, toUpdateRecord } from "./value-converter.js";
@@ -68,3 +86,5 @@ export {
   type SubscriptionDelta,
 } from "./subscription-manager.js";
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
+export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
+export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

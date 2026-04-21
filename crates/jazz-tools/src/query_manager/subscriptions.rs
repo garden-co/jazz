@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::object::ObjectId;
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
@@ -20,10 +21,34 @@ use super::session::Session;
 #[cfg(test)]
 use super::types::Value;
 use super::types::{ComposedBranchName, Schema, SchemaHash};
-#[cfg(test)]
-use crate::object::ObjectId;
+
+type ReplayableQuerySubscription = (
+    QueryId,
+    Query,
+    Option<Session>,
+    QueryPropagation,
+    Vec<String>,
+);
+
+pub(crate) struct SubscriptionExecutionOptions {
+    pub(crate) local_updates: LocalUpdates,
+    pub(crate) strict_transactions: bool,
+    pub(crate) propagation: QueryPropagation,
+    pub(crate) local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
+}
 
 impl QueryManager {
+    pub(crate) fn policy_context_tables_for_graph(graph: &super::graph::QueryGraph) -> Vec<String> {
+        let mut tables: Vec<String> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| table.as_str().to_string())
+            .collect();
+        tables.sort();
+        tables.dedup();
+        tables
+    }
+
     fn should_send_local_subscription_upstream(&self, propagation: QueryPropagation) -> bool {
         propagation == QueryPropagation::Full || !self.sync_manager.has_durability_identity()
     }
@@ -75,8 +100,12 @@ impl QueryManager {
             query,
             session,
             durability_tier,
-            local_updates,
-            QueryPropagation::Full,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions: false,
+                propagation: QueryPropagation::Full,
+                local_overlay_rows: HashMap::new(),
+            },
         )
     }
 
@@ -85,9 +114,14 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
-        local_updates: LocalUpdates,
-        propagation: QueryPropagation,
+        options: SubscriptionExecutionOptions,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let SubscriptionExecutionOptions {
+            local_updates,
+            strict_transactions,
+            propagation,
+            local_overlay_rows,
+        } = options;
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
@@ -108,19 +142,26 @@ impl QueryManager {
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
         let compile_schema = self.local_subscription_compile_schema(session.as_ref());
+        let compile_row_policy_mode = if uses_explicit_authorization_filtering {
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal
+        } else {
+            self.row_policy_mode
+        };
         let graph = Self::compile_graph(
             &query,
             &compile_schema,
             session.clone(),
             &self.schema_context,
+            compile_row_policy_mode,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
         let query_frontier_complete = durability_tier.is_none()
             || !self.should_send_local_subscription_upstream(propagation)
-            || !self.sync_manager.has_servers();
+            || !self.sync_manager.has_servers_or_pending_servers();
 
         tracing::debug!(
             sub_id = id.0,
@@ -139,12 +180,16 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier,
                 local_updates,
+                strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
+                local_overlay_rows,
                 query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering,
+                sync_backed: false,
                 propagation,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -193,8 +238,15 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
-            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            session.clone(),
+            schema_context,
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -210,12 +262,16 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
+                strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
+                local_overlay_rows: HashMap::new(),
                 query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering: false,
+                sync_backed: false,
                 propagation: QueryPropagation::Full,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -230,7 +286,7 @@ impl QueryManager {
     /// 1. Creates a local subscription (like `subscribe_with_session`)
     /// 2. Sends a QuerySubscription to all connected servers
     ///
-    /// Servers will evaluate the query against their data and send row-version
+    /// Servers will evaluate the query against their data and send row-batch
     /// messages for matching rows plus legacy object updates for non-row
     /// objects. As new objects match the query on the server, they are
     /// automatically synced.
@@ -262,6 +318,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -279,26 +336,63 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
+            false,
             propagation,
         )
     }
 
-    pub fn subscribe_with_sync_and_propagation_with_local_updates(
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_updates(
         &mut self,
         query: Query,
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        // Create local subscription
+        self.subscribe_with_sync_and_propagation_with_local_overlay(
+            query,
+            session,
+            durability_tier,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions,
+                propagation,
+                local_overlay_rows: HashMap::new(),
+            },
+        )
+    }
+
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_overlay(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        options: SubscriptionExecutionOptions,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        let overlay_row_ids: HashSet<_> = options.local_overlay_rows.keys().copied().collect();
+        let propagation = options.propagation;
         let sub_id = self.subscribe_with_session_and_propagation(
             query.clone(),
             session.clone(),
             durability_tier,
-            local_updates,
-            propagation,
+            options,
         )?;
+
+        if let Some(subscription) = self.subscriptions.get_mut(&sub_id) {
+            subscription.sync_backed = true;
+            if !overlay_row_ids.is_empty() {
+                subscription.pending_local_row_ids.extend(overlay_row_ids);
+                subscription.has_pending_local_updates = true;
+            } else if subscription.local_updates == LocalUpdates::Immediate
+                && !self.pending_local_row_batches.is_empty()
+            {
+                subscription
+                    .pending_local_row_ids
+                    .extend(self.pending_local_row_batches.keys().copied());
+                subscription.has_pending_local_updates = true;
+            }
+        }
 
         let sync_query = self.sync_query_payload_for_upstream(&query);
 
@@ -307,11 +401,17 @@ impl QueryManager {
         // (e.g. worker OPFS), and will be prevented from forwarding upstream.
         if self.should_send_local_subscription_upstream(propagation) {
             let query_id = QueryId(sub_id.0);
+            let policy_context_tables = self
+                .subscriptions
+                .get(&sub_id)
+                .map(|subscription| subscription.policy_context_tables.clone())
+                .unwrap_or_default();
             self.sync_manager.send_query_subscription_to_servers(
                 query_id,
                 sync_query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
 
@@ -364,7 +464,7 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let local_subs: Vec<ReplayableQuerySubscription> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
@@ -373,11 +473,12 @@ impl QueryManager {
                     self.sync_query_payload_for_upstream(&sub.query),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in local_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in local_subs {
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
@@ -385,11 +486,12 @@ impl QueryManager {
                     query,
                     session,
                     propagation,
+                    policy_context_tables,
                 );
             }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let downstream_subs: Vec<ReplayableQuerySubscription> = self
             .server_subscriptions
             .iter()
             .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
@@ -399,17 +501,19 @@ impl QueryManager {
                     sub.query.clone(),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in downstream_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in downstream_subs {
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
                 query_id,
                 query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
     }

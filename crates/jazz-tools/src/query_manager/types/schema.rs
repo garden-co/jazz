@@ -90,6 +90,8 @@ pub enum ColumnType {
     Double,
     /// 16-byte UUID (ObjectId).
     Uuid,
+    /// 16-byte batch/version identity.
+    BatchId,
     /// Variable-length binary payload.
     Bytea,
     /// JSON payload stored as UTF-8 text, optionally constrained by JSON Schema.
@@ -114,9 +116,11 @@ impl ColumnType {
             ColumnType::Boolean => Some(1),
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
+            ColumnType::BatchId => Some(16),
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
+            ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
             ColumnType::Enum { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length
@@ -143,6 +147,11 @@ impl ColumnType {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnMergeStrategy {
+    Counter,
 }
 
 /// Interned column name type.
@@ -222,6 +231,9 @@ pub struct ColumnDescriptor {
     /// Optional schema-level default used for omitted values on insert.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+    /// Optional per-column merge strategy. Absence means MRCA-relative LWW.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_strategy: Option<ColumnMergeStrategy>,
 }
 
 impl ColumnDescriptor {
@@ -232,6 +244,7 @@ impl ColumnDescriptor {
             nullable: false,
             references: None,
             default: None,
+            merge_strategy: None,
         }
     }
 
@@ -253,6 +266,29 @@ impl ColumnDescriptor {
     pub fn default(mut self, value: Value) -> Self {
         self.default = Some(value);
         self
+    }
+
+    pub fn merge_strategy(mut self, strategy: ColumnMergeStrategy) -> Self {
+        self.merge_strategy = Some(strategy);
+        self
+    }
+
+    pub fn validate_merge_strategy(&self) -> Result<(), String> {
+        match self.merge_strategy {
+            None => Ok(()),
+            Some(ColumnMergeStrategy::Counter) => {
+                if self.nullable || self.column_type != ColumnType::Integer {
+                    Err(format!(
+                        "counter merge strategy is only supported on non-nullable INTEGER columns, got {} ({:?}, nullable={})",
+                        self.name_str(),
+                        self.column_type,
+                        self.nullable
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -326,7 +362,9 @@ fn table_policies_are_default(policies: &TablePolicies) -> bool {
 }
 
 impl TableSchema {
-    /// Create a new table schema with no policies (allow all).
+    /// Create a new table schema with no explicit policies.
+    ///
+    /// Runtime behavior depends on whether a compiled policy bundle is loaded.
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,

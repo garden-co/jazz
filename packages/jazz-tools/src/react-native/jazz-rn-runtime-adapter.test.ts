@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
+import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
   return {
@@ -7,27 +8,32 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     addServer: vi.fn(),
     batchedTick: vi.fn(),
     close: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    updateAuth: vi.fn(),
+    onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
-    delete_: vi.fn(),
-    deleteWithSession: vi.fn(),
+    delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
+    deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
-    insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
+    insert: vi.fn((_table, _valuesJson) =>
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
+    ),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
-      JSON.stringify({ id: "row-1", values: [] }),
+      JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
     ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
-    onSyncMessageToSend: vi.fn(),
     query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
-    update: vi.fn(),
-    updateWithSession: vi.fn(),
+    update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
+    updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
   };
 }
@@ -52,10 +58,11 @@ describe("JazzRnRuntimeAdapter", () => {
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-1" });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      undefined,
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
@@ -68,6 +75,79 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.delete_).toHaveBeenCalledWith("row-1");
 
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
+  });
+
+  it("encodes Bytea mutations with an explicit FFI transport shape", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.insert("files", {
+      data: { type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) },
+    });
+
+    expect(binding.insert).toHaveBeenCalledWith(
+      "files",
+      JSON.stringify({
+        data: { type: "Bytea", value: "0102ff" },
+      }),
+      undefined,
+    );
+  });
+
+  it("round-trips Bytea values through the RN FFI JSON codec", () => {
+    const encoded = JSON.parse(
+      encodeFFIRecordToJson({
+        data: { type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) },
+        chunks: {
+          type: "Array",
+          value: [{ type: "Bytea", value: new Uint8Array([0x0a, 0x0b]) }],
+        },
+        nested: {
+          type: "Row",
+          value: {
+            id: "nested-row",
+            values: [{ type: "Bytea", value: new Uint8Array([0x7f]) }],
+          },
+        },
+      }),
+    ) as Record<string, unknown>;
+
+    expect(encoded).toEqual({
+      data: { type: "Bytea", value: "0102ff" },
+      chunks: {
+        type: "Array",
+        value: [{ type: "Bytea", value: "0a0b" }],
+      },
+      nested: {
+        type: "Row",
+        value: {
+          id: "nested-row",
+          values: [{ type: "Bytea", value: "7f" }],
+        },
+      },
+    });
+
+    const decoded = decodeFFIRowFromJson(
+      JSON.stringify({
+        id: "row-1",
+        values: [encoded.data, encoded.chunks, encoded.nested],
+      }),
+    );
+
+    const [data, chunks, nested] = decoded.values;
+    expect(decoded.id).toBe("row-1");
+    expect(data).toEqual({ type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) });
+    expect(chunks).toEqual({
+      type: "Array",
+      value: [{ type: "Bytea", value: new Uint8Array([0x0a, 0x0b]) }],
+    });
+    expect(nested).toEqual({
+      type: "Row",
+      value: {
+        id: "nested-row",
+        values: [{ type: "Bytea", value: new Uint8Array([0x7f]) }],
+      },
+    });
   });
 
   it("serializes write context payloads for session-aware mutations", async () => {
@@ -83,11 +163,12 @@ describe("JazzRnRuntimeAdapter", () => {
       { title: { type: "Text", value: "milk" } },
       writeContextJson,
     );
-    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-2" });
     expect(binding.insertWithSession).toHaveBeenCalledWith(
       "todos",
       JSON.stringify({ title: { type: "Text", value: "milk" } }),
       writeContextJson,
+      undefined,
     );
 
     adapter.updateWithSession(
@@ -105,33 +186,24 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
 
     await expect(
-      adapter.insertDurableWithSession("todos", {}, writeContextJson, "worker"),
+      adapter.insertDurableWithSession("todos", {}, writeContextJson, "local"),
     ).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-2",
     });
     await expect(
-      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
+      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "local"),
     ).resolves.toBeUndefined();
     await expect(
-      adapter.deleteDurableWithSession("row-1", writeContextJson, "worker"),
+      adapter.deleteDurableWithSession("row-1", writeContextJson, "local"),
     ).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
-  it("bridges sync and subscription callbacks with handle conversion", () => {
+  it("bridges subscription callbacks with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
-
-    // New callback shape: direct 4-arg payload (after RN callback API update).
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    callbackObject.onSyncMessage("server", "server-1", "{}", false);
-    expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
     const onUpdate = vi.fn();
     const handle = adapter.subscribe("{}", onUpdate, null, null);
@@ -179,16 +251,9 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.unsubscribe).toHaveBeenCalledWith(9n);
   });
 
-  it("swallows exceptions thrown by JS callbacks crossing the native boundary", () => {
+  it("swallows exceptions thrown by subscription callbacks crossing the native boundary", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    adapter.onSyncMessageToSend(() => {
-      throw new Error("sync boom");
-    });
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const syncCallback = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
       throw new Error("sub boom");
@@ -197,25 +262,6 @@ describe("JazzRnRuntimeAdapter", () => {
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
     const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
-  });
-
-  it("rejects legacy one-arg outbox callbacks", () => {
-    const binding = createBinding();
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-    const syncHandler = vi.fn();
-    adapter.onSyncMessageToSend(syncHandler);
-
-    const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
-    expect(() =>
-      (callbackObject as any).onSyncMessage(
-        JSON.stringify({
-          destination: { Server: "server-1" },
-          payload: { QueryUnsubscription: { query_id: 1 } },
-        }),
-      ),
-    ).not.toThrow();
-    expect(syncHandler).not.toHaveBeenCalled();
   });
 
   it("passes canonical subscription tuple updates through unchanged", () => {
@@ -254,42 +300,22 @@ describe("JazzRnRuntimeAdapter", () => {
     });
   });
 
-  it("supports worker-tier persisted mutations and rejects global tiers", async () => {
+  it("supports local-tier persisted mutations and rejects global tiers", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
+    await expect(adapter.insertDurable("todos", {}, "local")).resolves.toEqual({
       id: "row-1",
       values: [],
+      batchId: "batch-1",
     });
     expect(binding.flush).toHaveBeenCalledTimes(1);
 
-    await expect(adapter.updateDurable("row-1", {}, "worker")).resolves.toBeUndefined();
-    await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
+    await expect(adapter.updateDurable("row-1", {}, "local")).resolves.toBeUndefined();
+    await expect(adapter.deleteDurable("row-1", "local")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'worker' tier");
-  });
-
-  it("swallows ObjectNotFound runtime errors for update/delete", () => {
-    const objectNotFound = {
-      tag: "Runtime",
-      inner: {
-        message: 'WriteError("ObjectNotFound(ObjectId(019c70f1-8514-72f0-bad8-8d849e1c3e70))")',
-      },
-    };
-    const binding = createBinding({
-      update: vi.fn(() => {
-        throw objectNotFound;
-      }),
-      delete_: vi.fn(() => {
-        throw objectNotFound;
-      }),
-    });
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    expect(() => adapter.update("row-1", { done: true })).not.toThrow();
-    expect(() => adapter.delete("row-1")).not.toThrow();
+    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'local' tier");
   });
 
   it("wraps Jazz RN errors with error name and cause", async () => {
@@ -338,7 +364,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const updateError = (() => {
       try {
-        adapter.update("row-1", { done: true });
+        adapter.update("row-1", { done: { type: "Boolean", value: true } });
         return null;
       } catch (error) {
         return error;
@@ -432,5 +458,34 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.removeServer).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceived).not.toHaveBeenCalled();
     expect(binding.onSyncMessageReceivedFromClient).not.toHaveBeenCalled();
+  });
+
+  it("forwards updateAuth JSON payload to the native binding", () => {
+    const updateAuth = vi.fn();
+    const binding = createBinding({ updateAuth });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.updateAuth?.(JSON.stringify({ jwt_token: "refreshed" }));
+
+    expect(updateAuth).toHaveBeenCalledWith(JSON.stringify({ jwt_token: "refreshed" }));
+  });
+
+  it("registers onAuthFailure callback with the native binding and invokes it on failure", () => {
+    let captured: { onFailure: (reason: string) => void } | null = null;
+    const onAuthFailure = vi.fn((cb: { onFailure: (reason: string) => void }) => {
+      captured = cb;
+    });
+    const binding = createBinding({ onAuthFailure });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const listener = vi.fn();
+    adapter.onAuthFailure?.(listener);
+
+    expect(onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(captured).not.toBeNull();
+    expect(captured!.onFailure).toBeInstanceOf(Function);
+
+    captured!.onFailure("token expired");
+    expect(listener).toHaveBeenCalledWith("token expired");
   });
 });

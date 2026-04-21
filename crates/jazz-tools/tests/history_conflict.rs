@@ -51,8 +51,8 @@ fn todo_values(title: &str) -> HashMap<String, Value> {
 #[tokio::test]
 async fn concurrent_updates_resolve_to_lww_winner() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -174,8 +174,8 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 #[tokio::test]
 async fn concurrent_creates_both_survive() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -261,8 +261,8 @@ async fn concurrent_creates_both_survive() {
 #[tokio::test]
 async fn rapid_concurrent_updates_converge() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -386,8 +386,8 @@ async fn rapid_concurrent_updates_converge() {
 #[tokio::test]
 async fn fresh_client_sees_lww_winner_after_conflict() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -542,8 +542,8 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 #[tokio::test]
 async fn subscription_reflects_concurrent_update() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -615,8 +615,8 @@ async fn subscription_reflects_concurrent_update() {
 #[tokio::test]
 async fn sequential_updates_preserve_latest() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -700,19 +700,18 @@ async fn sequential_updates_preserve_latest() {
 }
 
 /// Alice edits the title, Bob edits completed — concurrently on the same row.
-/// Current LWW is whole-object: the latest commit wins ALL fields.
-/// This test documents the behavior (may lose one side's field change).
+/// The visible row should merge both field updates against the shared base.
 ///
 /// ```text
 /// alice ──update title──► server ◄──update completed── bob
 ///
-///          both query → see same row (one writer's full state wins)
+///          both query → see same merged row
 /// ```
 #[tokio::test]
 async fn concurrent_edits_on_different_fields() {
     let _suite_guard = lock_history_conflict_suite().await;
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -778,44 +777,45 @@ async fn concurrent_edits_on_different_fields() {
     a_res.expect("alice task panicked");
     b_res.expect("bob task panicked");
 
-    // Both must converge to the same state
-    support::wait_for(QUERY_TIMEOUT, "alice and bob converge on same row", || {
-        let alice = Arc::clone(&alice);
-        let bob = Arc::clone(&bob);
-        let query = query.clone();
-        async move {
-            let alice_rows = alice
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
-                .await
-                .ok()?;
-            let bob_rows = bob
-                .query(query, Some(DurabilityTier::EdgeServer))
-                .await
-                .ok()?;
+    // Both must converge to the same merged state.
+    let merged_row = support::wait_for(
+        QUERY_TIMEOUT,
+        "alice and bob converge on merged row",
+        || {
+            let alice = Arc::clone(&alice);
+            let bob = Arc::clone(&bob);
+            let query = query.clone();
+            async move {
+                let alice_rows = alice
+                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+                let bob_rows = bob
+                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
 
-            if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                // Both see the same title and completed values
-                if alice_rows[0].1 == bob_rows[0].1 {
-                    let title = &alice_rows[0].1[0];
-                    let completed = &alice_rows[0].1[1];
-                    // Must have moved past the original state
-                    if *title != Value::Text("task".to_string())
-                        || *completed != Value::Boolean(false)
-                    {
-                        return Some((title.clone(), completed.clone()));
+                if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                    if alice_rows[0].1 == bob_rows[0].1 {
+                        let title = &alice_rows[0].1[0];
+                        let completed = &alice_rows[0].1[1];
+                        if *title == Value::Text("alice-title".to_string())
+                            && *completed == Value::Boolean(true)
+                        {
+                            return Some(alice_rows[0].1.clone());
+                        }
                     }
                 }
+                None
             }
-            None
-        }
-    })
+        },
+    )
     .await;
 
-    // NOTE: With whole-object LWW, the "winner" commit overwrites all fields.
-    // If alice's commit wins (higher timestamp), we get title="alice-title"
-    // but completed reverts to false (alice's snapshot didn't include bob's change).
-    // If bob's commit wins, we get completed=true but title reverts to "task".
-    // Per-field CRDTs would preserve both changes — that's a future enhancement.
+    assert_eq!(
+        merged_row,
+        vec![Value::Text("alice-title".to_string()), Value::Boolean(true),]
+    );
 
     Arc::try_unwrap(alice)
         .unwrap_or_else(|_| panic!("alice still shared"))
@@ -827,6 +827,157 @@ async fn concurrent_edits_on_different_fields() {
         .shutdown()
         .await
         .expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Alice and Bob first create a conflicting merged preview. Charlie then updates one
+/// field, and that write must rebase on the merged preview rather than on one stale tip.
+///
+/// ```text
+/// alice ──update title──────► server
+///                              ▲
+/// bob   ──update completed──►  │
+///                              │ merged preview = ("alice-title", true)
+/// charlie ──update title────►  │
+///
+/// everyone queries ───────────► sees ("charlie-title", true)
+/// ```
+#[tokio::test]
+async fn post_conflict_update_rebases_on_merged_preview() {
+    let _suite_guard = lock_history_conflict_suite().await;
+    let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-rebase")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-rebase")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let charlie = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("charlie-rebase")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let (todo_id, _) = alice
+        .create("todos", todo_values("task"))
+        .await
+        .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+    wait_for_query(
+        &charlie,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "charlie sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let alice2 = Arc::clone(&alice);
+    let bob2 = Arc::clone(&bob);
+    let alice_handle = tokio::spawn(async move {
+        alice2
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text("alice-title".to_string()))],
+            )
+            .await
+            .expect("alice updates title");
+    });
+    let bob_handle = tokio::spawn(async move {
+        bob2.update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .await
+        .expect("bob updates completed");
+    });
+    let (a_res, b_res) = tokio::join!(alice_handle, bob_handle);
+    a_res.expect("alice task panicked");
+    b_res.expect("bob task panicked");
+
+    wait_for_query(
+        &charlie,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "charlie sees merged preview",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].1 == vec![Value::Text("alice-title".to_string()), Value::Boolean(true)])
+            .then_some(())
+        },
+    )
+    .await;
+
+    charlie
+        .update(
+            todo_id,
+            vec![(
+                "title".to_string(),
+                Value::Text("charlie-title".to_string()),
+            )],
+        )
+        .await
+        .expect("charlie updates title");
+
+    for client in [&*alice, &*bob, &charlie] {
+        wait_for_query(
+            client,
+            query.clone(),
+            Some(DurabilityTier::EdgeServer),
+            QUERY_TIMEOUT,
+            "client sees rebased merged row",
+            |rows| {
+                (rows.len() == 1
+                    && rows[0].1
+                        == vec![
+                            Value::Text("charlie-title".to_string()),
+                            Value::Boolean(true),
+                        ])
+                .then_some(())
+            },
+        )
+        .await;
+    }
+
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
+    charlie.shutdown().await.expect("shutdown charlie");
     server.shutdown().await;
 }
 
@@ -843,8 +994,8 @@ async fn establish_offline_reconnect_baseline(
     alice_user_id: &str,
     bob_user_id: &str,
 ) -> OfflineReconnectBaseline {
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
 
     let alice = TestingClient::builder()
         .with_server(&server)

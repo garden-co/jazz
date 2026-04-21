@@ -3,5 +3,5 @@
   "name": "cold_start_reopen",
   "seed": 20260215,
   "mode": "cold_start",
-  "reopen_cycles": 150
+  "reopen_cycles": 50
 }

@@ -11,7 +11,7 @@ interface OpenIsolatedAppOpts {
   playerId?: string;
   physicsSpeed?: number;
   spawnX?: number;
-  localAuthToken?: string;
+  localFirstSecret?: string;
   adminSecret?: string;
 }
 

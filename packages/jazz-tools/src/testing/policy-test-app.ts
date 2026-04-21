@@ -180,7 +180,6 @@ export async function createPolicyTestApp(
     backendSecret,
     env: "test",
     userBranch: "main",
-    tier: "worker",
   });
 
   return new PolicyTestApp(expectFn, app, jazzContext, server);

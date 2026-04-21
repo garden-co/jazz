@@ -9,6 +9,7 @@ mod common;
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 const USER_ID: &str = "benchmark_user";
@@ -26,6 +27,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_ctx = WriteContext::from_session(session);
                 let doc_ids = data.owned_documents;
                 let mut doc_idx = 0usize;
                 let mut update_counter = 0u64;
@@ -47,7 +49,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                                 Value::Timestamp(current_timestamp() + update_counter),
                             ),
                         ],
-                        Some(&session),
+                        Some(&write_ctx),
                     )
                     .expect("update without observer should succeed");
                 });
@@ -61,12 +63,13 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_ctx = WriteContext::from_session(session.clone());
                 let doc_ids = data.owned_documents;
                 let mut doc_idx = 0usize;
                 let mut update_counter = 0u64;
 
                 let _handle = core
-                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
+                    .subscribe(Query::new("documents"), |_delta| {}, Some(session))
                     .expect("subscribe");
                 core.immediate_tick();
                 core.batched_tick();
@@ -88,7 +91,7 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                                 Value::Timestamp(current_timestamp() + update_counter),
                             ),
                         ],
-                        Some(&session),
+                        Some(&write_ctx),
                     )
                     .expect("update with observer should succeed");
                 });

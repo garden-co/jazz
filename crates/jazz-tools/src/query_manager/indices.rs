@@ -5,6 +5,28 @@ use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
 use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IndexUpdateError {
+    pub column: String,
+    pub source: QueryError,
+}
+
+impl std::fmt::Display for IndexUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "index update failed for column {}: {}",
+            self.column, self.source
+        )
+    }
+}
+
+impl std::error::Error for IndexUpdateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl QueryManager {
     fn map_index_storage_error(error: StorageError) -> QueryError {
         match error {
@@ -323,12 +345,23 @@ impl QueryManager {
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), IndexUpdateError> {
         let mutations =
             Self::index_mutations_for_insert_on_branch(table, branch, object_id, data, descriptor);
-        storage
-            .apply_index_mutations(&mutations)
-            .map_err(Self::map_index_storage_error)
+        for mutation in &mutations {
+            if let Err(error) = storage.apply_index_mutations(std::slice::from_ref(mutation)) {
+                let column = match mutation {
+                    IndexMutation::Insert { column, .. } | IndexMutation::Remove { column, .. } => {
+                        (*column).to_string()
+                    }
+                };
+                return Err(IndexUpdateError {
+                    column,
+                    source: Self::map_index_storage_error(error),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Update indices when a row is updated on a specific branch.
@@ -398,5 +431,63 @@ impl QueryManager {
         storage
             .apply_index_mutations(&mutations)
             .map_err(Self::map_index_storage_error)
+    }
+
+    pub(crate) fn retract_local_pending_transaction_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+    ) {
+        self.retract_local_rejected_row(storage, table, branch, row_id, row_data, false);
+    }
+
+    pub(crate) fn retract_local_rejected_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        row_data: &[u8],
+        was_visible: bool,
+    ) {
+        let table_name = TableName::new(table);
+        let Some(table_schema) = self.schema.get(&table_name) else {
+            if was_visible {
+                self.pending_local_row_batches.remove(&row_id);
+                self.mark_subscriptions_dirty_local(table);
+                self.mark_local_row_deleted_in_subscriptions(table, row_id);
+            } else {
+                self.clear_local_pending_row_overlay(table, row_id);
+            }
+            return;
+        };
+
+        if let Err(error) = Self::update_indices_for_hard_delete_on_branch(
+            storage,
+            table,
+            branch,
+            row_id,
+            Some(row_data),
+            &table_schema.columns,
+        ) {
+            tracing::warn!(
+                table,
+                branch,
+                object_id = %row_id,
+                %error,
+                "failed to retract local rejected row indices"
+            );
+        }
+
+        if was_visible {
+            self.pending_local_row_batches.remove(&row_id);
+            self.mark_subscriptions_dirty_local(table);
+            self.mark_local_row_deleted_in_subscriptions(table, row_id);
+        } else {
+            self.clear_local_pending_row_overlay(table, row_id);
+        }
     }
 }

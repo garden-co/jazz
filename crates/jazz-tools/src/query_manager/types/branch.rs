@@ -132,6 +132,17 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+
+    if let Some(strategy) = col.merge_strategy {
+        hasher.update(&[1]);
+        match strategy {
+            ColumnMergeStrategy::Counter => {
+                hasher.update(&[1]);
+            }
+        }
+    } else {
+        hasher.update(&[0]);
+    }
     hasher.update(&[0]); // delimiter
 }
 
@@ -164,6 +175,10 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         Value::Uuid(v) => {
             hasher.update(&[6]);
             hasher.update(v.uuid().as_bytes());
+        }
+        Value::BatchId(v) => {
+            hasher.update(&[12]);
+            hasher.update(v);
         }
         Value::Bytea(v) => {
             hasher.update(&[11]);
@@ -225,6 +240,9 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         }
         ColumnType::Uuid => {
             hasher.update(&[6]);
+        }
+        ColumnType::BatchId => {
+            hasher.update(&[12]);
         }
         ColumnType::Bytea => {
             hasher.update(&[10]);

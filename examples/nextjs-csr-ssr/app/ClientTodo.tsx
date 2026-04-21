@@ -1,15 +1,26 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { app } from "../schema";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
 export default function ClientTodo() {
+  const [secret, setSecret] = useState("");
+  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
+
+  useEffect(() => {
+    BrowserAuthSecretStore.getOrCreateSecret({ appId }).then(setSecret);
+  }, [appId]);
+
+  if (!secret) return null;
+
   return (
     <JazzProvider
       config={{
-        appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+        appId,
         serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-        localAuthMode: "anonymous",
+        secret,
         driver: { type: "memory" },
       }}
     >

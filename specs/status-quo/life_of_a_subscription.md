@@ -75,7 +75,7 @@ The worker runtime owns:
 
 - OPFS-backed storage
 - durable row histories and visible entries
-- upstream `/sync` and `/events`
+- upstream app-scoped `/apps/<appId>/ws`
 - query replay beyond the main-thread cache
 
 So if the main thread subscribes to a query whose answer depends on worker or server state, the worker is the place that settles and relays that answer back.
@@ -108,7 +108,7 @@ db.subscribeAll(...)
   -> main runtime registers subscription
   -> worker/runtime sync path receives forwarded query state
   -> worker settles current answer from OPFS + upstream state
-  -> worker sends row versions + QuerySettled
+  -> worker sends row batch entries + QuerySettled
   -> main runtime updates its local graph
   -> callback receives first snapshot
 ```

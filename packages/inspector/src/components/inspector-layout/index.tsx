@@ -34,12 +34,8 @@ export function InspectorLayout() {
               onSelectSchema={standaloneContext.onSelectSchema}
               isSwitchingSchema={standaloneContext.isSwitchingSchema}
             />
-            <button
-              type="button"
-              onClick={standaloneContext.onReset}
-              className={styles.resetButton}
-            >
-              Reset connection
+            <button type="button" onClick={standaloneContext.onEdit} className={styles.resetButton}>
+              Edit connection
             </button>
           </div>
         ) : null}

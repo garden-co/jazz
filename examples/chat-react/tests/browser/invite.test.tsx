@@ -9,7 +9,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
+import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,8 +53,7 @@ describe("Invite Flow E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      localAuthMode?: "anonymous" | "demo";
-      localAuthToken?: string;
+      secret?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -91,6 +91,7 @@ describe("Invite Flow E2E", () => {
   }
 
   afterEach(async () => {
+    resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
         await act(async () => root.unmount());
@@ -120,8 +121,7 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-a"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `invite-user-a-${Date.now()}`,
+      secret: await testSecret(`invite-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -170,6 +170,12 @@ describe("Invite Flow E2E", () => {
     await act(async () => simulateClick(privateChatButton));
 
     await waitFor(
+      () => aliceContainer.textContent?.includes("This is a private chat.") ?? false,
+      10000,
+      "Private chat seed message should appear",
+    );
+
+    await waitFor(
       () => aliceContainer.querySelector("#messageEditor") !== null,
       10000,
       "Private chat editor should appear",
@@ -188,7 +194,7 @@ describe("Invite Flow E2E", () => {
 
     await waitFor(
       () => aliceContainer.textContent?.includes(randomSecret) ?? false,
-      5000,
+      10000,
       "Secret message should appear for user A",
     );
 
@@ -255,8 +261,7 @@ describe("Invite Flow E2E", () => {
       appId: APP_ID,
       dbName: uniqueDbName("invite-b"),
       serverUrl,
-      localAuthMode: "demo",
-      localAuthToken: `invite-user-b-${Date.now()}`,
+      secret: await testSecret(`invite-user-b-${Date.now()}`),
     });
 
     // User B should see the secret message after joining via invite

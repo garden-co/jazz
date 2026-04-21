@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type Db } from "jazz-tools/backend";
+import { createJazzContext, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -54,6 +54,9 @@ export interface TodoServerConfig {
   serverUrl?: string;
   backendSecret?: string;
   adminSecret?: string;
+  jwksUrl?: string;
+  jwtPublicKey?: BackendJwtPublicKey;
+  allowLocalFirstAuth?: boolean;
 }
 
 // ============================================================================
@@ -72,6 +75,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const serverUrl = config.serverUrl ?? process.env.JAZZ_SERVER_URL?.trim();
   const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
   const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
+  const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
+  const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
+  const allowLocalFirstAuth =
+    config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
 
   if (!serverUrl || !backendSecret) {
     throw new Error(
@@ -88,6 +95,9 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     serverUrl,
     backendSecret,
     adminSecret,
+    jwksUrl,
+    jwtPublicKey,
+    allowLocalFirstAuth,
     env: "dev",
     userBranch: "main",
   });
@@ -100,12 +110,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
   // Track active SSE connections for live updates
   const sseConnections = new Set<Response>();
-  const remoteQueryOptions = { tier: "edge" as const };
-  const remoteWriteDurability = { tier: "edge" as const };
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+    const todos = await db.all(schemaApp.todos);
     const data = `data: ${JSON.stringify(todos)}\n\n`;
 
     for (const res of sseConnections) {
@@ -125,7 +133,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // List all todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+      const todos = await db.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -149,7 +157,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
           done: false,
           owner_id: body.owner_id ?? "anonymous",
         },
-        remoteWriteDurability,
+        { tier: "edge" },
       );
 
       res.status(201).json(todo);
@@ -166,9 +174,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const userDb = context.forSession({
         user_id: req.params.userId,
+        authMode: "external",
         claims: {},
       });
-      const todos = await userDb.all(schemaApp.todos, remoteQueryOptions);
+      const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -187,7 +196,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     sseConnections.add(res);
 
     // Send initial state
-    const todos = await db.all(schemaApp.todos, remoteQueryOptions);
+    const todos = await db.all(schemaApp.todos);
     res.write(`data: ${JSON.stringify(todos)}\n\n`);
 
     // Clean up on disconnect
@@ -201,7 +210,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+      const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found" });
         return;
@@ -226,7 +235,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
       if (Object.values(updates).every((value) => value === undefined)) {
         // No updates, just return the current todo
-        const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+        const todo = await db.one(schemaApp.todos.where({ id }));
         if (!todo) {
           res.status(404).json({ error: "Todo not found" });
           return;
@@ -235,10 +244,10 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.updateDurable(schemaApp.todos, id, updates, remoteWriteDurability);
+      await db.updateDurable(schemaApp.todos, id, updates);
 
       // Fetch updated todo
-      const todo = await db.one(schemaApp.todos.where({ id }), remoteQueryOptions);
+      const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found after update" });
         return;
@@ -257,7 +266,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.deleteDurable(schemaApp.todos, id, remoteWriteDurability);
+      await db.deleteDurable(schemaApp.todos, id);
       res.status(204).send();
 
       // Notify SSE connections

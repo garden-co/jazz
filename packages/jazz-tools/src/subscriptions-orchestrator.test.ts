@@ -525,10 +525,12 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const initialSession: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      authMode: "external",
     };
     const nextSession: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-session", initialSession);
 
@@ -552,6 +554,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-same-session", session);
 
@@ -563,6 +566,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       harness.manager.setSession({
         user_id: "alice",
         claims: { role: "reader" },
+        authMode: "external",
       });
 
       expect(harness.calls).toHaveLength(1);

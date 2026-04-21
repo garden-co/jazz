@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
@@ -6,6 +7,7 @@ import { playwright } from "@vitest/browser-playwright";
 import {
   blockTestingServerNetwork,
   debugTestingServerNetwork,
+  isolatedTestingServerInfo,
   testingServerInfo,
   testingServerJwtForUser,
   unblockTestingServerNetwork,
@@ -22,12 +24,16 @@ import {
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
+const realisticBrowserLimitOverrides =
+  process.env.JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON ?? "";
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
+const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
 
 export default defineConfig({
   define: {
     __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
     __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
+    __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
   },
   plugins: [wasm(), topLevelAwait()],
   server: {
@@ -58,7 +64,8 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
-        testingServerInfo: async () => testingServerInfo(),
+        testingServerInfo: async (_context, appId) => testingServerInfo(appId),
+        isolatedTestingServerInfo: async () => isolatedTestingServerInfo(),
         testingServerBlockNetwork: async ({ context }, serverUrl) =>
           blockTestingServerNetwork(context, serverUrl),
         testingServerUnblockNetwork: async ({ context }, serverUrl) =>
@@ -70,8 +77,14 @@ export default defineConfig({
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
-        testingServerJwtForUser: async (_context, userId, claims) =>
-          testingServerJwtForUser(userId, claims),
+        testingServerJwtForUser: async (_context, userId, claims, appId) =>
+          testingServerJwtForUser(userId, claims, appId),
+        writeRealisticBrowserReport: async (_context, runId, report) => {
+          mkdirSync(realisticBrowserBenchReportDir, { recursive: true });
+          const reportFile = resolve(realisticBrowserBenchReportDir, `${runId}.json`);
+          writeFileSync(reportFile, JSON.stringify(report), "utf8");
+          return reportFile;
+        },
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],

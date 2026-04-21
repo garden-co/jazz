@@ -171,6 +171,13 @@ export function toLegacyRelExprForTest(value: unknown): any {
         input: toLegacyRelExprForTest(payload.input),
         predicate: toLegacyRelPredicateForTest(payload.predicate),
       };
+    case "Union":
+      return {
+        type: "Union",
+        inputs: Array.isArray(payload.inputs)
+          ? payload.inputs.map((input) => toLegacyRelExprForTest(input))
+          : [],
+      };
     case "Join":
       return {
         type: "Join",

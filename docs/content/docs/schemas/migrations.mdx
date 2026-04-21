@@ -38,11 +38,21 @@ Traditional migration systems run a linear sequence and require peers to converg
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
-   npx jazz-tools@alpha migrations push <fromHash> <toHash>
+   npx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
    ```
 
+   If you also want to publish the current schema, the migration and permissions in one step, you can run:
+
+   ```bash
+   npx jazz-tools@alpha deploy <appId>
+   ```
+
+   `deploy` publishes the current schema if the server does not already know it, checks whether the
+   previous permissions schema is connected to the new one on the server, pushes the local migration
+   if needed, and then publishes the current permissions.
+
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha permissions push`. See [Permissions](/docs/auth/permissions) for details.
+`npx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 
@@ -100,8 +110,8 @@ The Jazz server will detect when there are rows that are not reachable from the 
 In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
-npx jazz-tools@alpha migrations create --fromHash <fromHash>
-npx jazz-tools@alpha migrations create --fromHash <fromHash> --toHash <toHash>
+npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
+npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -115,12 +125,15 @@ also saves a snapshot of the schema in the local snapshot directory.
 ```bash
 npx jazz-tools@alpha schema export
 npx jazz-tools@alpha schema export --schema-dir ./packages/app
-npx jazz-tools@alpha schema export --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
+npx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
 ```
 
 Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it
 loads the schema from the local snapshot folder or, if missing, from the server.
 `--schema-dir` and `--schema-hash` are mutually exclusive.
+
+Server-backed commands require the app id so Jazz can resolve app-scoped routes like
+`/apps/<appId>/schema/:hash`.
 
 | Flag                   | Default             | Description                                                     |
 | ---------------------- | ------------------- | --------------------------------------------------------------- |
@@ -132,7 +145,8 @@ loads the schema from the local snapshot folder or, if missing, from the server.
 
 ## Migration flags
 
-`migrations create` uses flags rather than positional hashes.
+`migrations create` uses flags rather than positional hashes. When it needs to resolve missing
+schema hashes from a server, pass `<appId>` as the leading positional argument.
 
 | Flag                   | Default             | Description                                      |
 | ---------------------- | ------------------- | ------------------------------------------------ |

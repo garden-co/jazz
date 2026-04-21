@@ -1,0 +1,35 @@
+{
+  "name": "react-hybrid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names server,vite \"pnpm dev:server\" \"pnpm dev:vite\"",
+    "dev:vite": "wait-on --timeout 20000 http-get://127.0.0.1:3001/health && vite",
+    "dev:server": "tsx watch --env-file=.env server/index.ts",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node server-dist/index.js",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "better-auth": "^1.5.5",
+    "hono": "^4.7.11",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.4",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "wait-on": "^8.0.2"
+  }
+}

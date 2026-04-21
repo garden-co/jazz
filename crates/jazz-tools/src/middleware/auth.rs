@@ -2,22 +2,25 @@
 //!
 //! # Auth Methods
 //!
-//! 1. **JWT Auth** (`Authorization: Bearer <JWT>`): Frontend/mobile clients authenticate
-//!    via JWT validated with JWKS.
+//! 1. **Local-first Auth** (`Authorization: Bearer <self-signed Ed25519 JWT>`):
+//!    Clients authenticate with a self-signed JWT containing an Ed25519 identity proof.
 //!
-//! 2. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): Backend clients
+//! 2. **External JWT Auth** (`Authorization: Bearer <JWT>`): Frontend/mobile clients
+//!    authenticate via JWT validated with JWKS or a configured static key.
+//!
+//! 3. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): Backend clients
 //!    can impersonate any user by providing the backend secret and a session header.
 //!
-//! 3. **Admin Secret** (`X-Jazz-Admin-Secret`): Required for schema/lens/policy sync.
+//! 4. **Admin Secret** (`X-Jazz-Admin-Secret`): Required for schema/lens/policy sync.
 //!
 //! # Session Resolution Priority
 //!
 //! When resolving the request session:
 //! 1. Backend impersonation (if `X-Jazz-Backend-Secret` + `X-Jazz-Session` present)
-//! 2. JWT auth (if `Authorization: Bearer` present)
-//! 3. No session (anonymous)
+//! 2. JWT auth (if `Authorization: Bearer` present — local-first or external JWT)
+//! 3. No session
 
-use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,17 +36,14 @@ use jsonwebtoken::{
     jwk::{Jwk, JwkSet, KeyAlgorithm},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::identity;
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
 use crate::server::ServerState;
 use crate::transport_protocol::UnauthenticatedResponse;
-
-const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
-const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
 pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -58,38 +58,104 @@ const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 /// refused and the fetch error propagates.
 pub const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
 
-pub type ExternalIdentityMap = HashMap<(String, String), String>;
-
 // ============================================================================
 // Auth Configuration
 // ============================================================================
+
+#[derive(Clone)]
+pub struct AuthClock {
+    now_seconds: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl AuthClock {
+    pub fn system() -> Self {
+        Self {
+            now_seconds: Arc::new(system_now_seconds),
+        }
+    }
+
+    pub fn now_seconds(&self) -> u64 {
+        (self.now_seconds)()
+    }
+}
+
+impl Default for AuthClock {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+impl fmt::Debug for AuthClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthClock").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "test-utils")]
+#[derive(Clone, Debug)]
+pub struct TestClock {
+    now_seconds: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "test-utils")]
+impl TestClock {
+    pub fn new(now_seconds: u64) -> Self {
+        Self {
+            now_seconds: Arc::new(AtomicU64::new(now_seconds)),
+        }
+    }
+
+    pub fn now_seconds(&self) -> u64 {
+        self.now_seconds.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self, now_seconds: u64) {
+        self.now_seconds.store(now_seconds, Ordering::SeqCst);
+    }
+
+    pub fn advance(&self, delta: Duration) {
+        self.now_seconds
+            .fetch_add(delta.as_secs(), Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "test-utils")]
+impl From<TestClock> for AuthClock {
+    fn from(clock: TestClock) -> Self {
+        Self {
+            now_seconds: Arc::new(move || clock.now_seconds()),
+        }
+    }
+}
 
 /// Authentication configuration for the server.
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     /// URL to fetch JWKS keys (production).
     pub jwks_url: Option<String>,
-    /// Whether anonymous local auth mode is allowed.
-    pub allow_anonymous: bool,
-    /// Whether demo local auth mode is allowed.
-    pub allow_demo: bool,
+    /// Single JWK JSON object or PEM public key used to verify external JWTs.
+    pub jwt_public_key: Option<String>,
+    /// Cookie name used to read browser auth tokens during the WS upgrade.
+    pub auth_cookie_name: Option<String>,
+    /// Whether local-first Ed25519 JWT auth is allowed (default: true for new apps).
+    pub allow_local_first_auth: bool,
     /// Secret for backend session impersonation.
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
+    /// Time source for auth expiry checks. Defaults to the system clock.
+    pub clock: AuthClock,
 }
 
 impl AuthConfig {
     /// Check if any auth is configured.
     pub fn is_configured(&self) -> bool {
-        self.jwks_url.is_some() || self.backend_secret.is_some() || self.admin_secret.is_some()
-    }
-
-    pub fn is_local_mode_enabled(&self, mode: LocalAuthMode) -> bool {
-        match mode {
-            LocalAuthMode::Anonymous => self.allow_anonymous,
-            LocalAuthMode::Demo => self.allow_demo,
-        }
+        self.jwks_url.is_some()
+            || self.jwt_public_key.is_some()
+            || self.auth_cookie_name.is_some()
+            || self.allow_local_first_auth
+            || self.backend_secret.is_some()
+            || self.admin_secret.is_some()
     }
 }
 
@@ -114,9 +180,6 @@ pub struct JwtClaims {
     /// Optional issuer.
     #[serde(default)]
     pub iss: Option<String>,
-    /// Preferred principal ID claim for Jazz.
-    #[serde(default)]
-    pub jazz_principal_id: Option<String>,
     /// Additional claims.
     #[serde(default)]
     pub claims: serde_json::Value,
@@ -133,7 +196,6 @@ pub struct JwtClaims {
 pub struct VerifiedJwt {
     pub subject: String,
     pub issuer: Option<String>,
-    pub principal_id_claim: Option<String>,
     pub claims: serde_json::Value,
     pub exp: Option<u64>,
 }
@@ -302,6 +364,107 @@ impl JwksCache {
     }
 }
 
+pub enum JwtVerifier {
+    Jwks(JwksCache),
+    Static(StaticJwtVerifier),
+}
+
+impl JwtVerifier {
+    pub async fn validate_at(
+        &self,
+        token: &str,
+        now_seconds: u64,
+    ) -> Result<VerifiedJwt, JwtError> {
+        match self {
+            Self::Jwks(cache) => validate_jwt_with_cache_at(token, cache, now_seconds).await,
+            Self::Static(verifier) => validate_jwt_with_static_key_at(token, verifier, now_seconds),
+        }
+    }
+}
+
+pub enum StaticJwtVerifier {
+    JwkSet(JwkSet),
+    Pem(PemPublicKeyVerifier),
+}
+
+impl StaticJwtVerifier {
+    pub fn from_public_key(public_key: &str) -> Result<Self, String> {
+        let trimmed = public_key.trim();
+        if trimmed.is_empty() {
+            return Err("JWT public key is empty".to_string());
+        }
+
+        if let Ok(jwk) = serde_json::from_str::<Jwk>(trimmed) {
+            return Ok(Self::JwkSet(JwkSet { keys: vec![jwk] }));
+        }
+
+        if let Ok(decoding_key) = DecodingKey::from_rsa_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::rsa(decoding_key)));
+        }
+        if let Ok(decoding_key) = DecodingKey::from_ec_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::ec(decoding_key)));
+        }
+        if let Ok(decoding_key) = DecodingKey::from_ed_pem(trimmed.as_bytes()) {
+            return Ok(Self::Pem(PemPublicKeyVerifier::ed(decoding_key)));
+        }
+
+        Err(
+            "unsupported JWT public key format; expected a single JWK JSON object or a PEM public key"
+                .to_string(),
+        )
+    }
+}
+
+pub struct PemPublicKeyVerifier {
+    decoding_key: DecodingKey,
+    kind: PemPublicKeyKind,
+}
+
+impl PemPublicKeyVerifier {
+    fn rsa(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Rsa,
+        }
+    }
+
+    fn ec(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Ec,
+        }
+    }
+
+    fn ed(decoding_key: DecodingKey) -> Self {
+        Self {
+            decoding_key,
+            kind: PemPublicKeyKind::Ed,
+        }
+    }
+
+    fn supports(&self, algorithm: Algorithm) -> bool {
+        match self.kind {
+            PemPublicKeyKind::Rsa => matches!(
+                algorithm,
+                Algorithm::RS256
+                    | Algorithm::RS384
+                    | Algorithm::RS512
+                    | Algorithm::PS256
+                    | Algorithm::PS384
+                    | Algorithm::PS512
+            ),
+            PemPublicKeyKind::Ec => matches!(algorithm, Algorithm::ES256 | Algorithm::ES384),
+            PemPublicKeyKind::Ed => matches!(algorithm, Algorithm::EdDSA),
+        }
+    }
+}
+
+enum PemPublicKeyKind {
+    Rsa,
+    Ec,
+    Ed,
+}
+
 async fn fetch_jwks(http_client: &reqwest::Client, endpoint: &str) -> Result<JwkSet, String> {
     let response = http_client
         .get(endpoint)
@@ -333,27 +496,39 @@ fn now_timestamp_us() -> u64 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalAuthMode {
-    Anonymous,
-    Demo,
+fn system_now_seconds() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    }
 }
 
-impl LocalAuthMode {
-    pub fn from_header(value: &str) -> Option<Self> {
-        match value {
-            "anonymous" => Some(Self::Anonymous),
-            "demo" => Some(Self::Demo),
-            _ => None,
-        }
+fn local_first_auth_error(message: String) -> UnauthenticatedResponse {
+    if message.starts_with("token expired:") {
+        UnauthenticatedResponse::expired("JWT has expired")
+    } else {
+        UnauthenticatedResponse::invalid(message)
     }
+}
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Anonymous => "anonymous",
-            Self::Demo => "demo",
+fn extract_cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
+    cookie_header.split(';').find_map(|segment| {
+        let trimmed = segment.trim();
+        let (candidate_name, candidate_value) = trimmed.split_once('=')?;
+        if candidate_name == name && !candidate_value.is_empty() {
+            Some(candidate_value)
+        } else {
+            None
         }
-    }
+    })
+}
+
+fn read_auth_token_from_cookie<'a>(headers: &'a HeaderMap, config: &AuthConfig) -> Option<&'a str> {
+    let cookie_name = config.auth_cookie_name.as_deref()?;
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    extract_cookie_value(cookie_header, cookie_name).map(str::trim)
 }
 
 // ============================================================================
@@ -391,21 +566,18 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
             ));
         };
 
-        let jwt_result = if let Some(ref cache) = state.jwks_cache {
-            validate_jwt_with_cache(token, cache).await
+        let jwt_result = if let Some(ref verifier) = state.jwt_verifier {
+            verifier
+                .validate_at(token, state.auth_config.clock.now_seconds())
+                .await
         } else {
             Err(JwtError::NoKeyConfigured)
         };
 
         match jwt_result {
             Ok(verified) => {
-                let external_identities = state.external_identities.read().await;
-                let session = resolve_verified_jwt_session(
-                    state.app_id,
-                    verified,
-                    Some(&external_identities),
-                )
-                .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
+                let session = resolve_verified_jwt_session(verified)
+                    .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
                 Ok(JwtAuth(Some(session)))
             }
             Err(JwtError::NoKeyConfigured) => Err((
@@ -479,13 +651,11 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
         parts: &mut Parts,
         state: &Arc<ServerState>,
     ) -> Result<Self, Self::Rejection> {
-        let external_identities = state.external_identities.read().await;
         let session = extract_session(
             &parts.headers,
             state.app_id,
             &state.auth_config,
-            Some(&external_identities),
-            state.jwks_cache.as_deref(),
+            state.jwt_verifier.as_deref(),
         )
         .await
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
@@ -584,7 +754,6 @@ pub fn verify_jwt_signature_with_jwks(
                 return Ok(VerifiedJwt {
                     subject: data.claims.sub,
                     issuer: data.claims.iss,
-                    principal_id_claim: data.claims.jazz_principal_id,
                     claims: data.claims.claims,
                     exp: data.claims.exp,
                 });
@@ -600,15 +769,10 @@ pub fn verify_jwt_signature_with_jwks(
     )))
 }
 
-fn ensure_jwt_not_expired(verified: &VerifiedJwt) -> Result<(), JwtError> {
+fn ensure_jwt_not_expired_at(verified: &VerifiedJwt, now: u64) -> Result<(), JwtError> {
     let Some(exp) = verified.exp else {
         return Ok(());
     };
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     if exp <= now {
         return Err(JwtError::Expired);
@@ -627,6 +791,14 @@ pub async fn validate_jwt_with_cache(
     token: &str,
     cache: &JwksCache,
 ) -> Result<VerifiedJwt, JwtError> {
+    validate_jwt_with_cache_at(token, cache, system_now_seconds()).await
+}
+
+pub async fn validate_jwt_with_cache_at(
+    token: &str,
+    cache: &JwksCache,
+    now_seconds: u64,
+) -> Result<VerifiedJwt, JwtError> {
     let cached_jwks = cache.load(false).await.map_err(|e| {
         warn!(error = %e, "failed to load cached JWKS");
         JwtError::Invalid("unable to load JWKS".to_string())
@@ -634,7 +806,7 @@ pub async fn validate_jwt_with_cache(
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired(&verified)?;
+            ensure_jwt_not_expired_at(&verified, now_seconds)?;
             return Ok(verified);
         }
         Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
@@ -653,7 +825,7 @@ pub async fn validate_jwt_with_cache(
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
         Ok(verified) => {
-            ensure_jwt_not_expired(&verified)?;
+            ensure_jwt_not_expired_at(&verified, now_seconds)?;
             Ok(verified)
         }
         Err(JwtVerificationError::Retryable(e) | JwtVerificationError::Fatal(e)) => {
@@ -663,11 +835,62 @@ pub async fn validate_jwt_with_cache(
     }
 }
 
-/// Resolve a session from validated JWT identity + optional external mappings.
+fn verify_jwt_signature_with_pem_public_key(
+    token: &str,
+    verifier: &PemPublicKeyVerifier,
+) -> Result<VerifiedJwt, JwtVerificationError> {
+    let header = decode_header(token)
+        .map_err(|e| JwtVerificationError::Fatal(format!("invalid JWT header: {e}")))?;
+
+    if !verifier.supports(header.alg) {
+        return Err(JwtVerificationError::Fatal(format!(
+            "token algorithm {:?} is not compatible with the configured JWT public key",
+            header.alg
+        )));
+    }
+
+    let validation = signature_only_validation(header.alg);
+    match decode::<JwtClaims>(token, &verifier.decoding_key, &validation) {
+        Ok(data) => Ok(VerifiedJwt {
+            subject: data.claims.sub,
+            issuer: data.claims.iss,
+            claims: data.claims.claims,
+            exp: data.claims.exp,
+        }),
+        Err(e) => Err(JwtVerificationError::Fatal(format!(
+            "JWT signature verification failed: {e}"
+        ))),
+    }
+}
+
+pub fn validate_jwt_with_static_key_at(
+    token: &str,
+    verifier: &StaticJwtVerifier,
+    now_seconds: u64,
+) -> Result<VerifiedJwt, JwtError> {
+    let verified = match verifier {
+        StaticJwtVerifier::JwkSet(jwks) => verify_jwt_signature_with_jwks(token, jwks),
+        StaticJwtVerifier::Pem(verifier) => {
+            verify_jwt_signature_with_pem_public_key(token, verifier)
+        }
+    }
+    .map_err(|error| match error {
+        JwtVerificationError::Retryable(message) | JwtVerificationError::Fatal(message) => {
+            JwtError::Invalid(message)
+        }
+    })?;
+
+    ensure_jwt_not_expired_at(&verified, now_seconds)?;
+    Ok(verified)
+}
+
+/// Resolve a session from a validated external JWT.
+///
+/// The session's `user_id` is the JWT `sub` claim verbatim. Integrations that
+/// need a different identity (e.g. mapping a stable provider id to a Jazz user
+/// id) must do that mapping upstream and mint `sub` accordingly.
 pub fn resolve_verified_jwt_session(
-    app_id: AppId,
     verified: VerifiedJwt,
-    external_identities: Option<&ExternalIdentityMap>,
 ) -> Result<Session, UnauthenticatedResponse> {
     let subject = verified.subject.trim();
     if subject.is_empty() {
@@ -679,83 +902,47 @@ pub fn resolve_verified_jwt_session(
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
-    let principal_claim = verified
-        .principal_id_claim
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
-
-    let mapped_principal = match (issuer, external_identities) {
-        (Some(iss), Some(mappings)) => mappings
-            .get(&(iss.to_string(), subject.to_string()))
-            .cloned(),
-        _ => None,
-    };
-
-    if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
-        && claim != mapped
-    {
-        return Err(UnauthenticatedResponse::invalid(
-            "External identity mapping conflict",
-        ));
-    }
-
-    let principal_id = if let Some(claim) = principal_claim {
-        claim.to_string()
-    } else if let Some(mapped) = mapped_principal {
-        mapped
-    } else if let Some(iss) = issuer {
-        derive_external_principal_id(app_id, iss, subject)
-    } else {
-        subject.to_string()
-    };
 
     let claims = match verified.claims {
         serde_json::Value::Object(mut map) => {
-            map.insert("auth_mode".to_string(), serde_json::json!("external"));
             map.insert("subject".to_string(), serde_json::json!(subject));
             if let Some(iss) = issuer {
                 map.insert("issuer".to_string(), serde_json::json!(iss));
             }
             serde_json::Value::Object(map)
         }
-        other => serde_json::json!({
-            "auth_mode": "external",
+        _ => serde_json::json!({
             "subject": subject,
             "issuer": issuer,
-            "raw_claims": other,
         }),
     };
 
     Ok(Session {
-        user_id: principal_id,
+        user_id: subject.to_string(),
         claims,
+        auth_mode: crate::query_manager::session::AuthMode::External,
     })
 }
 
-pub fn parse_local_auth_headers(
-    headers: &HeaderMap,
-) -> Result<Option<(LocalAuthMode, String)>, (StatusCode, &'static str)> {
-    let local_mode = headers.get(LOCAL_MODE_HEADER).and_then(|v| v.to_str().ok());
-    let local_token = headers
-        .get(LOCAL_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok());
-
-    match (local_mode, local_token) {
-        (Some(mode), Some(token)) => {
-            let mode = LocalAuthMode::from_header(mode)
-                .ok_or((StatusCode::BAD_REQUEST, "Invalid local auth mode"))?;
-            let token = token.trim();
-            if token.is_empty() {
-                return Err((StatusCode::UNAUTHORIZED, "Empty local auth token"));
-            }
-            Ok(Some((mode, token.to_string())))
-        }
-        (Some(_), None) | (None, Some(_)) => Err((
-            StatusCode::BAD_REQUEST,
-            "Both X-Jazz-Local-Mode and X-Jazz-Local-Token are required",
-        )),
-        (None, None) => Ok(None),
+/// Check if a JWT has a Jazz self-signed `iss` (local-first or anonymous) by
+/// decoding claims without verification.
+fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
+    #[derive(serde::Deserialize)]
+    struct IssOnly {
+        iss: Option<String>,
+    }
+    let claims = serde_json::from_slice::<IssOnly>(&claims_bytes).ok()?;
+    match claims.iss.as_deref() {
+        Some(identity::LOCAL_FIRST_ISSUER) => Some(identity::LOCAL_FIRST_ISSUER),
+        Some(identity::ANONYMOUS_ISSUER) => Some(identity::ANONYMOUS_ISSUER),
+        _ => None,
     }
 }
 
@@ -763,18 +950,16 @@ pub fn parse_local_auth_headers(
 ///
 /// Priority:
 /// 1. Backend impersonation (X-Jazz-Backend-Secret + X-Jazz-Session)
-/// 2. JWT auth (Authorization: Bearer)
+/// 2. JWT auth (`Authorization: Bearer`, or auth cookie when configured)
 /// 3. No session
 ///
-/// When `jwks_cache` is provided, JWT validation uses the cache with on-demand
-/// refresh on retryable errors (unknown kid, signature mismatch). Without a
-/// cache, JWT auth returns "not configured."
+/// When `jwt_verifier` is provided, external JWT validation uses the configured
+/// verifier. Without one, JWT auth returns "not configured."
 pub async fn extract_session(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
-    external_identities: Option<&ExternalIdentityMap>,
-    jwks_cache: Option<&JwksCache>,
+    jwt_verifier: Option<&JwtVerifier>,
 ) -> Result<Option<Session>, UnauthenticatedResponse> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
@@ -808,7 +993,7 @@ pub async fn extract_session(
     }
 
     // Priority 2: JWT auth
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+    let token = if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let Some(token) = auth_value.strip_prefix("Bearer ") else {
             return Err(UnauthenticatedResponse::invalid(
                 "Invalid Authorization header format",
@@ -819,16 +1004,53 @@ pub async fn extract_session(
         if token.is_empty() {
             return Err(UnauthenticatedResponse::invalid("Empty bearer token"));
         }
+        Some(token)
+    } else {
+        read_auth_token_from_cookie(headers, config)
+    };
 
-        let jwt_result = if let Some(cache) = jwks_cache {
-            validate_jwt_with_cache(token, cache).await
+    if let Some(token) = token {
+        // Self-signed JWT path (local-first or anonymous).
+        //
+        // Anonymous is always accepted at the transport layer — apps gate
+        // anonymous reads/writes via the permissions DSL
+        // (`session.where({ authMode: "anonymous" })`) and Task 6's write-deny
+        // middleware. Local-first still requires the explicit config opt-in.
+        if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
+            if issuer == identity::LOCAL_FIRST_ISSUER && !config.allow_local_first_auth {
+                return Err(UnauthenticatedResponse::disabled(
+                    "Local-first auth is not enabled for this app",
+                ));
+            }
+            let verified = identity::verify_jazz_self_signed_proof_at(
+                token,
+                &app_id.to_string(),
+                config.clock.now_seconds(),
+            )
+            .map_err(local_first_auth_error)?;
+            let auth_mode = match issuer {
+                identity::ANONYMOUS_ISSUER => crate::query_manager::session::AuthMode::Anonymous,
+                _ => crate::query_manager::session::AuthMode::LocalFirst,
+            };
+            return Ok(Some(Session {
+                user_id: verified.user_id,
+                claims: serde_json::Value::Object(serde_json::Map::new()),
+                auth_mode,
+            }));
+        }
+
+        // External JWT path.
+        let jwt_result = if let Some(verifier) = jwt_verifier {
+            verifier
+                .validate_at(token, config.clock.now_seconds())
+                .await
         } else {
             Err(JwtError::NoKeyConfigured)
         };
 
         match jwt_result {
             Ok(verified) => {
-                let session = resolve_verified_jwt_session(app_id, verified, external_identities)?;
+                let session = resolve_verified_jwt_session(verified)?;
                 return Ok(Some(session));
             }
             Err(JwtError::NoKeyConfigured) => {
@@ -845,29 +1067,6 @@ pub async fn extract_session(
         }
     }
 
-    // Priority 3: Local anonymous/demo token auth
-    if let Some((mode, token)) = parse_local_auth_headers(headers)
-        .map_err(|(_status, message)| UnauthenticatedResponse::invalid(message))?
-    {
-        if !config.is_local_mode_enabled(mode) {
-            return Err(match mode {
-                LocalAuthMode::Anonymous => {
-                    UnauthenticatedResponse::disabled("Anonymous auth disabled")
-                }
-                LocalAuthMode::Demo => UnauthenticatedResponse::disabled("Demo auth disabled"),
-            });
-        }
-
-        let principal_id = derive_local_principal_id(app_id, mode, &token);
-        return Ok(Some(Session {
-            user_id: principal_id,
-            claims: serde_json::json!({
-                "auth_mode": "local",
-                "local_mode": mode.as_str(),
-            }),
-        }));
-    }
-
     // No auth provided
     Ok(None)
 }
@@ -877,20 +1076,6 @@ fn decode_session_header(b64: &str) -> Option<Session> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let json_str = std::str::from_utf8(&bytes).ok()?;
     serde_json::from_str(json_str).ok()
-}
-
-pub fn derive_local_principal_id(app_id: AppId, mode: LocalAuthMode, token: &str) -> String {
-    let input = format!("{app_id}:{}:{token}", mode.as_str());
-    let digest = Sha256::digest(input.as_bytes());
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    format!("local:{encoded}")
-}
-
-pub fn derive_external_principal_id(app_id: AppId, issuer: &str, subject: &str) -> String {
-    let input = format!("{app_id}:external:{issuer}:{subject}");
-    let digest = Sha256::digest(input.as_bytes());
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    format!("external:{encoded}")
 }
 
 /// Check if backend secret is valid.
@@ -946,10 +1131,10 @@ mod tests {
     fn make_test_config() -> AuthConfig {
         AuthConfig {
             jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
-            allow_anonymous: true,
-            allow_demo: true,
+            allow_local_first_auth: false,
             backend_secret: Some("backend-secret-12345".to_string()),
             admin_secret: Some("admin-secret-67890".to_string()),
+            ..Default::default()
         }
     }
 
@@ -972,6 +1157,10 @@ mod tests {
         JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
     }
 
+    fn test_jwt_verifier() -> JwtVerifier {
+        JwtVerifier::Jwks(test_jwks_cache())
+    }
+
     fn make_jwt(claims: &JwtClaims, secret: &str, kid: &str) -> String {
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
@@ -985,7 +1174,6 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: serde_json::json!({"role": "admin"}),
             exp: None,
             iat: None,
@@ -1003,7 +1191,6 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1020,7 +1207,6 @@ mod tests {
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1063,7 +1249,7 @@ mod tests {
         );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None)
+        let result = extract_session(&headers, test_app_id(), &config, None)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -1082,7 +1268,7 @@ mod tests {
         headers.insert("X-Jazz-Backend-Secret", "wrong-secret".parse().unwrap());
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
+        let result = extract_session(&headers, test_app_id(), &config, None).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
@@ -1090,13 +1276,12 @@ mod tests {
     #[tokio::test]
     async fn test_extract_session_jwt_fallback() {
         let config = make_test_config();
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
 
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1105,7 +1290,7 @@ mod tests {
 
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None, Some(&cache))
+        let result = extract_session(&headers, test_app_id(), &config, Some(&cache))
             .await
             .unwrap();
         assert!(result.is_some());
@@ -1113,73 +1298,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_extract_session_jwt_uses_external_mapping_fallback() {
-        let config = make_test_config();
-        let cache = test_jwks_cache();
+    async fn test_extract_session_jwt_cookie_fallback() {
+        let mut config = make_test_config();
+        config.auth_cookie_name = Some("jazz-auth".to_string());
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
-        let mut mappings = ExternalIdentityMap::new();
-        mappings.insert(
-            ("https://issuer.example".to_string(), "jwt-user".to_string()),
-            "local:mapped-principal".to_string(),
-        );
 
         let claims = JwtClaims {
-            sub: "jwt-user".to_string(),
+            sub: "cookie-user".to_string(),
             iss: Some("https://issuer.example".to_string()),
-            jazz_principal_id: None,
-            claims: serde_json::json!({}),
+            claims: serde_json::json!({ "role": "editor" }),
             exp: None,
             iat: None,
         };
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
 
-        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("other=value; jazz-auth={token}").parse().unwrap(),
+        );
 
-        let result = extract_session(
-            &headers,
-            test_app_id(),
-            &config,
-            Some(&mappings),
-            Some(&cache),
-        )
-        .await
-        .unwrap();
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().user_id, "local:mapped-principal");
+        let result = extract_session(&headers, test_app_id(), &config, Some(&cache))
+            .await
+            .unwrap();
+        let session = result.expect("session");
+        assert_eq!(session.user_id, "cookie-user");
+        assert_eq!(session.claims["role"], "editor");
     }
 
     #[tokio::test]
-    async fn test_extract_session_jwt_claim_conflict_with_mapping_is_rejected() {
+    async fn test_extract_session_external_jwt_uses_sub_as_user_id() {
         let config = make_test_config();
-        let cache = test_jwks_cache();
+        let cache = test_jwt_verifier();
         let mut headers = HeaderMap::new();
-        let mut mappings = ExternalIdentityMap::new();
-        mappings.insert(
-            ("https://issuer.example".to_string(), "jwt-user".to_string()),
-            "local:mapped-principal".to_string(),
-        );
 
         let claims = JwtClaims {
-            sub: "jwt-user".to_string(),
+            sub: "user-42".to_string(),
             iss: Some("https://issuer.example".to_string()),
-            jazz_principal_id: Some("different-principal".to_string()),
-            claims: serde_json::json!({}),
+            claims: serde_json::json!({ "role": "admin" }),
             exp: None,
             iat: None,
         };
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
-        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
-        let result = extract_session(
-            &headers,
-            test_app_id(),
-            &config,
-            Some(&mappings),
-            Some(&cache),
-        )
-        .await;
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
+        let session = extract_session(&headers, test_app_id(), &config, Some(&cache))
+            .await
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(session.user_id, "user-42");
+        assert_eq!(
+            session.auth_mode,
+            crate::query_manager::session::AuthMode::External
+        );
+        assert_eq!(session.claims["subject"], "user-42");
+        assert_eq!(session.claims["issuer"], "https://issuer.example");
     }
 
     #[tokio::test]
@@ -1201,7 +1375,6 @@ mod tests {
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
             iss: None,
-            jazz_principal_id: None,
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1209,7 +1382,7 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None)
+        let result = extract_session(&headers, test_app_id(), &config, None)
             .await
             .unwrap();
         assert!(result.is_some());
@@ -1221,7 +1394,7 @@ mod tests {
         let config = make_test_config();
         let headers = HeaderMap::new();
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None)
+        let result = extract_session(&headers, test_app_id(), &config, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1257,62 +1430,205 @@ mod tests {
         assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
-    async fn test_extract_session_local_anonymous() {
-        let config = make_test_config();
-        let mut headers = HeaderMap::new();
-        headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
-        headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
+    // Self-signed auth tests
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None)
+    fn alice_seed() -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        seed[0] = 0xAA;
+        seed[31] = 0x01;
+        seed
+    }
+
+    #[tokio::test]
+    async fn local_first_session_has_auth_mode_localfirst_and_no_claim() {
+        let app_id = AppId::from_name("test-app");
+        let seed = [7u8; 32];
+        let token = crate::identity::mint_jazz_self_signed_token(
+            &seed,
+            crate::identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let config = AuthConfig {
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+
+        let session = extract_session(&headers, app_id, &config, None)
             .await
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(
+            session.auth_mode,
+            crate::query_manager::session::AuthMode::LocalFirst
+        );
+        if let serde_json::Value::Object(map) = &session.claims {
+            assert!(
+                !map.contains_key("auth_mode"),
+                "claims must not carry auth_mode anymore"
+            );
+        } else {
+            panic!("expected object claims");
+        }
+    }
+
+    fn make_local_first_auth_config() -> AuthConfig {
+        AuthConfig {
+            jwks_url: None,
+            allow_local_first_auth: true,
+            backend_secret: None,
+            admin_secret: None,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn local_first_auth_jwt_authenticates() {
+        let seed = alice_seed();
+        let app_id = test_app_id();
+        let token = identity::mint_jazz_self_signed_token(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
+        let config = make_local_first_auth_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let session = extract_session(&headers, app_id, &config, None)
+            .await
+            .unwrap()
             .unwrap();
-        let session = result.unwrap();
-        assert!(session.user_id.starts_with("local:"));
-        assert_eq!(session.claims["auth_mode"], "local");
-        assert_eq!(session.claims["local_mode"], "anonymous");
+        assert_eq!(session.user_id, identity::derive_user_id(&seed).to_string());
     }
 
     #[tokio::test]
-    async fn test_extract_session_local_requires_both_headers() {
-        let config = make_test_config();
+    async fn local_first_auth_jwt_wrong_audience_rejected() {
+        let token = identity::mint_jazz_self_signed_token(
+            &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
+            "wrong-app",
+            3600,
+        )
+        .unwrap();
+        let config = make_local_first_auth_config();
         let mut headers = HeaderMap::new();
-        headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
-
-        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let result = extract_session(&headers, test_app_id(), &config, None).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
 
     #[tokio::test]
-    async fn test_extract_session_local_anonymous_disabled() {
-        let mut config = make_test_config();
-        config.allow_anonymous = false;
+    async fn local_first_auth_disabled_rejects() {
+        let app_id = test_app_id();
+        let token = identity::mint_jazz_self_signed_token(
+            &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3600,
+        )
+        .unwrap();
+        let mut config = make_local_first_auth_config();
+        config.allow_local_first_auth = false;
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        let result = extract_session(&headers, app_id, &config, None).await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn local_first_auth_expiry_uses_configured_test_clock() {
+        let app_id = test_app_id();
+        let clock = TestClock::new(1_700_000_000);
+        let config = AuthConfig {
+            allow_local_first_auth: true,
+            clock: clock.clone().into(),
+            ..Default::default()
+        };
+        let token = identity::mint_jazz_self_signed_token_at(
+            &alice_seed(),
+            identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            5,
+            clock.now_seconds(),
+        )
+        .unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
-        headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
+        let session = extract_session(&headers, app_id, &config, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.user_id,
+            identity::derive_user_id(&alice_seed()).to_string()
+        );
+
+        clock.advance(Duration::from_secs(6));
+
+        let result = extract_session(&headers, app_id, &config, None).await;
         assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert_eq!(error.code, UnauthenticatedCode::Disabled);
-        assert_eq!(error.message, "Anonymous auth disabled");
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Expired);
     }
 
     #[tokio::test]
-    async fn test_extract_session_local_demo_disabled() {
-        let mut config = make_test_config();
-        config.allow_demo = false;
+    async fn non_local_first_auth_iss_does_not_use_local_first_auth_path() {
+        let config = make_local_first_auth_config();
+        let claims = JwtClaims {
+            sub: "user-123".to_string(),
+            iss: Some("https://auth.example.com".to_string()),
+            claims: serde_json::json!({}),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        // Should fail because no JWKS configured in local_first_auth_config
+        let result = extract_session(&headers, test_app_id(), &config, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn anonymous_session_has_auth_mode_anonymous() {
+        let app_id = AppId::from_name("test-app");
+        let seed = [9u8; 32];
+        let clock = TestClock::new(1_000_000);
+        let token = crate::identity::mint_jazz_self_signed_token_at(
+            &seed,
+            crate::identity::ANONYMOUS_ISSUER,
+            &app_id.to_string(),
+            3600,
+            clock.now_seconds(),
+        )
+        .unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
-        headers.insert(LOCAL_TOKEN_HEADER, "device-token-2".parse().unwrap());
+        headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        // Deliberately NOT setting allow_local_first_auth — anonymous is always
+        // accepted at the transport layer; permissions gate reads, Task 6 gates writes.
+        let config = AuthConfig {
+            clock: clock.into(),
+            ..Default::default()
+        };
 
-        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
-        assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert_eq!(error.code, UnauthenticatedCode::Disabled);
-        assert_eq!(error.message, "Demo auth disabled");
+        let session = extract_session(&headers, app_id, &config, None)
+            .await
+            .unwrap()
+            .expect("session");
+
+        assert_eq!(
+            session.auth_mode,
+            crate::query_manager::session::AuthMode::Anonymous
+        );
     }
 }

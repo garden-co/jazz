@@ -16,6 +16,25 @@ function toTimestampMs(value: unknown): number {
   return numeric;
 }
 
+function normalizeByteaValue(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const bytes = value.map((entry) => {
+      const n = Number(entry);
+      if (!Number.isInteger(n) || n < 0 || n > 255) {
+        throw new Error("Bytea arrays must contain integers in range 0..255");
+      }
+      return n;
+    });
+    return new Uint8Array(bytes);
+  }
+
+  throw new Error("Expected Uint8Array or byte array for Bytea column type");
+}
+
 /**
  * Convert a JS value to WasmValue based on column type.
  */
@@ -40,20 +59,7 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Uuid":
       return { type: "Uuid", value: String(value) };
     case "Bytea": {
-      if (value instanceof Uint8Array) {
-        return { type: "Bytea", value };
-      }
-      if (Array.isArray(value)) {
-        const bytes = value.map((entry) => {
-          const n = Number(entry);
-          if (!Number.isInteger(n) || n < 0 || n > 255) {
-            throw new Error("Bytea arrays must contain integers in range 0..255");
-          }
-          return n;
-        });
-        return { type: "Bytea", value: new Uint8Array(bytes) };
-      }
-      throw new Error("Expected Uint8Array or byte array for Bytea column type");
+      return { type: "Bytea", value: normalizeByteaValue(value) };
     }
     case "Json":
       return { type: "Text", value: toJsonText(value) };

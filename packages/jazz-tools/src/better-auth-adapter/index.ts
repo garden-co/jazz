@@ -3,7 +3,7 @@ import {
   DBAdapterDebugLogOption,
   type CleanedWhere,
 } from "better-auth/adapters";
-import type { Db, DurabilityTier } from "jazz-tools";
+import type { Db } from "jazz-tools";
 import type { BackendSchemaInput } from "../backend/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSchemaSourceFile } from "./schema.js";
@@ -20,7 +20,6 @@ import {
 interface JazzAdapterConfig {
   debugLogs?: DBAdapterDebugLogOption;
   usePlural?: boolean;
-  durabilityTier?: DurabilityTier;
   prefix?: string;
   db: () => Db;
   schema: BackendSchemaInput;
@@ -28,7 +27,6 @@ interface JazzAdapterConfig {
 
 export const jazzAdapter = (config: JazzAdapterConfig) => {
   const prefix = config.prefix ?? "better_auth_";
-  const durabilityTier = config.durabilityTier ?? "edge";
 
   return createAdapterFactory({
     config: {
@@ -123,7 +121,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             offset: options.offset,
           });
 
-          return config.db().all(qb, { tier: durabilityTier }) as Promise<JazzRowRecord[]>;
+          return config.db().all(qb, { tier: "global" }) as Promise<JazzRowRecord[]>;
         } else {
           console.warn(
             `Query not supported yet by Jazz engine: ${JSON.stringify(options.where?.map((c) => ({ ...c, value: typeof c.value === "string" ? "..." : c.value })))}`,
@@ -132,7 +130,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
         const qb = createQueryBuilder(table, wasmSchema);
 
-        let rows = (await config.db().all(qb, { tier: durabilityTier })) as JazzRowRecord[];
+        let rows = (await config.db().all(qb, { tier: "global" })) as JazzRowRecord[];
 
         rows = filterListByWhere(rows, options.where);
         rows = sortListByField(rows, options.sortBy);
@@ -149,36 +147,45 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             conditions: [{ column: "id", op: "eq", value: jazzRowId }],
             limit: 1,
           }),
-          { tier: durabilityTier },
+          { tier: "global" },
         );
+      };
+
+      const assertUniqueConstraints = async (
+        model: string,
+        data: Record<string, unknown>,
+        excludeRowId?: string,
+      ): Promise<void> => {
+        const table = getPrefixedModelName(model);
+        const uniqueFields = getUniqueFields(model);
+        for (const { storedFieldName } of uniqueFields) {
+          if (!Object.prototype.hasOwnProperty.call(data, storedFieldName)) continue;
+          const value = data[storedFieldName];
+          if (value === undefined || value === null) continue;
+
+          const checkQb = createQueryBuilder(table, wasmSchema, {
+            conditions: [{ column: storedFieldName, op: "eq", value }],
+            limit: 2,
+          });
+
+          const existing = (await config.db().all(checkQb, { tier: "global" })) as JazzRowRecord[];
+          const conflict = existing.find((row) => row.id !== excludeRowId);
+          if (conflict) {
+            throw new Error(
+              `Unique constraint violated: "${table}.${storedFieldName}" already has a row with value "${String(value)}"`,
+            );
+          }
+        }
       };
 
       return {
         async create({ model, data }): Promise<any> {
           const table = getPrefixedModelName(model);
 
-          const uniqueFields = getUniqueFields(model);
-          for (const { storedFieldName } of uniqueFields) {
-            const value = (data as Record<string, unknown>)[storedFieldName];
-            if (value === undefined || value === null) continue;
-
-            const checkQb = createQueryBuilder(table, wasmSchema, {
-              conditions: [{ column: storedFieldName, op: "eq", value }],
-              limit: 1,
-            });
-
-            const existing = (await config
-              .db()
-              .all(checkQb, { tier: durabilityTier })) as JazzRowRecord[];
-            if (existing.length > 0) {
-              throw new Error(
-                `Unique constraint violated: "${table}.${storedFieldName}" already has a row with value "${String(value)}"`,
-              );
-            }
-          }
+          await assertUniqueConstraints(model, data as Record<string, unknown>);
 
           const qb = createQueryBuilder(table, wasmSchema);
-          return config.db().insertDurable(qb, data, { tier: durabilityTier });
+          return config.db().insertDurable(qb, data, { tier: "global" });
         },
 
         async findOne({ model, where, select, join }): Promise<any> {
@@ -223,10 +230,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return null;
           }
 
+          await assertUniqueConstraints(model, update as Record<string, unknown>, match.id);
+
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
-          await config.db().updateDurable(qb, match.id, update as any, { tier: durabilityTier });
+          await config.db().updateDurable(qb, match.id, update as any, { tier: "global" });
 
           return findByJazzRowId(model, match.id);
         },
@@ -237,11 +246,15 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return 0;
           }
 
+          for (const match of matches) {
+            await assertUniqueConstraints(model, update as Record<string, unknown>, match.id);
+          }
+
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
           for (const match of matches) {
-            await config.db().updateDurable(qb, match.id, update, { tier: durabilityTier });
+            await config.db().updateDurable(qb, match.id, update, { tier: "global" });
           }
 
           return matches.length;
@@ -255,7 +268,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          await config.db().deleteDurable(qb, match.id, { tier: durabilityTier });
+          await config.db().deleteDurable(qb, match.id, { tier: "global" });
         },
 
         async deleteMany({ model, where }) {
@@ -267,7 +280,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
           for (const match of matches) {
-            await config.db().deleteDurable(qb, match.id, { tier: durabilityTier });
+            await config.db().deleteDurable(qb, match.id, { tier: "global" });
           }
 
           return matches.length;

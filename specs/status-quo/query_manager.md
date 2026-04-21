@@ -4,7 +4,7 @@ The Query Manager is where Jazz turns raw tables into live relational reads.
 
 If the storage layer answers:
 
-> "What row versions and visible entries exist?"
+> "What row batch entries and visible entries exist?"
 
 the Query Manager answers:
 
@@ -83,7 +83,7 @@ Both APIs use the same graph engine.
 
 ### Live subscription
 
-`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row versions, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
+`db.subscribeAll(...)` keeps that graph around. Later local writes, remote row batch entries, policy changes, or schema activations mark parts of the graph dirty, and the next settle pass emits just the changed rows.
 
 This shared machinery is why one-shot reads and live reads stay behaviorally aligned.
 
@@ -109,7 +109,35 @@ The Query Manager can attach a session to a query and use policy graphs to answe
 - does this join path imply inherited access?
 - should this subscription ever receive this row?
 
-That is the reason sync can stay query-scoped without every transport layer needing to understand policy evaluation itself.
+That is the reason sync can stay query-scoped without every transport layer
+needing to understand policy evaluation itself.
+
+The current runtime also carries an explicit row-policy mode:
+
+- `PermissiveLocal`: no compiled policy bundle is loaded in this runtime
+- `Enforcing`: this runtime must fail closed for missing explicit policy,
+  either because a compiled policy bundle is loaded or because a dynamic server
+  is waiting for its current permissions head
+
+That mode is shared across local query compilation, subscription filtering,
+server-side authorization, and sync-scope derivation.
+
+In `PermissiveLocal`, the Query Manager does not synthesize deny-all filters
+just because policy clauses are absent. Local session-scoped reads and writes
+remain usable for offline/local-only runtimes.
+
+In `Enforcing`, missing explicit clauses deny by default:
+
+- `read` requires `select.using`, otherwise rows are filtered out
+- `insert` requires `insert.with_check`
+- `update` requires at least one explicit update clause, and every present
+  clause must pass
+- `delete` prefers `delete.using`, falls back to `update.using`, and otherwise
+  denies
+- inherited and recursive checks fail closed when the parent policy or graph
+  context cannot be resolved
+- dynamic servers that have learned schema but not yet learned a permissions
+  head stay closed instead of temporarily behaving like local permissive runtimes
 
 ## Key Files
 

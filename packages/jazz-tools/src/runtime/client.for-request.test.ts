@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Row, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  type DirectInsertResult,
+  type DirectMutationResult,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
-import { deriveLocalPrincipalId } from "./client-session.js";
 
 const schemaWithTodos = {
   todos: {
@@ -29,8 +33,12 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-function mockRow(id = "todo-1"): Row {
-  return { id, values: [] };
+function mockRow(id = "todo-1"): DirectInsertResult {
+  return { id, values: [], batchId: `batch-${id}` };
+}
+
+function mockMutation(batchId = "batch-id"): DirectMutationResult {
+  return { batchId };
 }
 
 function makeClient() {
@@ -44,9 +52,17 @@ function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
-    update: () => {},
-    delete: () => {},
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -82,7 +98,10 @@ function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -105,7 +124,7 @@ function makeClient() {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
   return {
@@ -120,15 +139,26 @@ function makeClient() {
 function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
-    update: () => {},
-    delete: () => {},
+    insert: () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+      batchId: "plain-insert-batch",
+    }),
+    update: () => ({
+      batchId: "batch-id",
+    }),
+    delete: () => ({
+      batchId: "batch-id",
+    }),
     query: async () => [],
     subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insertDurable: async () => ({
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [],
+    }),
     updateDurable: async () => {},
     deleteDurable: async () => {},
     onSyncMessageReceived: () => {},
@@ -144,7 +174,7 @@ function makeClientWithContext(context: AppContext): JazzClient {
     new (
       runtime: Runtime,
       context: AppContext,
-      defaultDurabilityTier: "worker" | "edge" | "global",
+      defaultDurabilityTier: "local" | "edge" | "global",
     ): JazzClient;
   };
   return new JazzClientCtor(runtime, context, "edge");
@@ -194,6 +224,7 @@ describe("JazzClient.forRequest", () => {
       JSON.stringify({
         user_id: "user-123",
         claims: { role: "admin" },
+        authMode: "external",
       }),
     );
   });
@@ -214,6 +245,7 @@ describe("JazzClient.forRequest", () => {
       JSON.stringify({
         user_id: "user-456",
         claims: {},
+        authMode: "external",
       }),
     );
   });
@@ -422,10 +454,106 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
+  it("passes strict transaction visibility options to runtime query", async () => {
+    const { client, queryCalls } = makeClient();
+    await client.query('{"table":"todos"}', { strictTransactions: true });
+    expect(queryCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
+  });
+
+  it("passes transaction overlay options to runtime query for transaction reads", async () => {
+    const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
+      [];
+    let writeContextJson: string | null | undefined;
+
+    const runtime: Runtime = {
+      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
+      insertWithSession: (_table, _values, contextJson) => {
+        writeContextJson = contextJson;
+        return mockRow("00000000-0000-0000-0000-000000000001");
+      },
+      update: () => mockMutation(),
+      updateWithSession: () => mockMutation(),
+      delete: () => mockMutation(),
+      deleteWithSession: () => mockMutation(),
+      query: async (
+        queryJson: string,
+        sessionJson?: string | null,
+        tier?: string | null,
+        optionsJson?: string | null,
+      ) => {
+        queryCalls.push([
+          queryJson,
+          sessionJson ?? undefined,
+          tier ?? undefined,
+          optionsJson ?? undefined,
+        ]);
+        return [];
+      },
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "00000000-0000-0000-0000-000000000001",
+      getSchema: () => ({}),
+      getSchemaHash: () => "schema-hash",
+    };
+
+    const JazzClientCtor = JazzClient as unknown as {
+      new (
+        runtime: Runtime,
+        context: AppContext,
+        defaultDurabilityTier: "local" | "edge" | "global",
+      ): JazzClient;
+    };
+    const client = new JazzClientCtor(
+      runtime,
+      {
+        appId: "test-app",
+        schema: {},
+        serverUrl: "http://localhost:1625",
+        backendSecret: "test-backend-secret",
+      },
+      "edge",
+    );
+
+    const tx = client.beginTransaction();
+    tx.create("todos", { done: { type: "Boolean", value: false } });
+    await tx.query('{"table":"todos"}');
+
+    const writeContext = JSON.parse(writeContextJson ?? "{}");
+    expect(queryCalls[0]![3]).toBe(
+      JSON.stringify({
+        local_updates: "deferred",
+        transaction_overlay: {
+          batch_id: writeContext.batch_id,
+          branch_name: writeContext.target_branch_name,
+          row_ids: ["00000000-0000-0000-0000-000000000001"],
+        },
+      }),
+    );
+  });
+
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
-    client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
+    client.subscribe('{"table":"todos"}', () => {}, {
+      propagation: "local-only",
+    });
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
+  });
+
+  it("passes strict transaction visibility options to runtime createSubscription", () => {
+    const { client, createSubscriptionCalls } = makeClient();
+    client.subscribe('{"table":"todos"}', () => {}, {
+      strictTransactions: true,
+    });
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
   });
 
   // =========================================================================
@@ -483,8 +611,12 @@ describe("JazzClient schema order", () => {
     const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
       insert,
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 0,
@@ -552,85 +684,15 @@ describe("JazzClient schema order", () => {
     expect(insertDurable).not.toHaveBeenCalled();
   });
 
-  it("uses the local auth session for direct queries and subscriptions", async () => {
-    const query = vi.fn(async () => []);
-    const createSubscription = vi.fn(() => 0);
-    const runtime: Runtime = {
-      insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
-      query,
-      subscribe: () => 0,
-      createSubscription,
-      executeSubscription: () => {},
-      unsubscribe: () => {},
-      insertDurable: async () => mockRow(),
-      updateDurable: async () => {},
-      deleteDurable: async () => {},
-      onSyncMessageReceived: () => {},
-      onSyncMessageToSend: () => {},
-      addServer: () => {},
-      removeServer: () => {},
-      addClient: () => "client-1",
-      getSchema: () =>
-        new Map([
-          [
-            "todos",
-            {
-              columns: [
-                {
-                  name: "title",
-                  column_type: { type: "Text" as const },
-                  nullable: false,
-                },
-              ],
-            },
-          ],
-        ]),
-      getSchemaHash: () => "schema-hash",
-    };
-    const client = JazzClient.connectWithRuntime(runtime, {
-      appId: "test-app",
-      schema: {
-        todos: {
-          columns: [
-            {
-              name: "title",
-              column_type: { type: "Text" as const },
-              nullable: false,
-            },
-          ],
-        },
-      },
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    await client.query(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }));
-    client.subscribe(JSON.stringify({ relation_ir: { TableScan: { table: "todos" } } }), () => {});
-
-    const expectedSession = JSON.stringify({
-      user_id: await deriveLocalPrincipalId("test-app", "anonymous", "device-token"),
-      claims: {
-        auth_mode: "local",
-        local_mode: "anonymous",
-      },
-    });
-
-    expect(query).toHaveBeenCalledWith(expect.any(String), expectedSession, "worker", undefined);
-    expect(createSubscription).toHaveBeenCalledWith(
-      expect.any(String),
-      expectedSession,
-      "worker",
-      undefined,
-    );
-  });
-
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -712,8 +774,12 @@ describe("JazzClient schema order", () => {
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -819,8 +885,12 @@ describe("JazzClient schema order", () => {
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -966,8 +1036,12 @@ describe("JazzClient schema order", () => {
   it("keeps magic projection values ahead of included rows during schema alignment", async () => {
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [
         {
           id: "todo-1",
@@ -1116,8 +1190,12 @@ describe("JazzClient schema order", () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
       insert: () => mockRow(),
-      update: () => {},
-      delete: () => {},
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 1,

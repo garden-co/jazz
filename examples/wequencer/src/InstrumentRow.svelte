@@ -36,7 +36,7 @@
         jamId: jamId,
         instrumentId: instrument.id,
         beat_index: index,
-        placed_by: session?.user_id ?? "anonymous",
+        placed_by: session?.user_id ?? "unknown",
       });
     }
   }

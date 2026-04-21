@@ -56,7 +56,10 @@ describe("react/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("mutation-query") });
 
-      const inserted = await client.db.insert(todosTable, { title: "buy milk", done: false });
+      const { value: inserted } = await client.db.insert(todosTable, {
+        title: "buy milk",
+        done: false,
+      });
       const rows = await client.db.all(allTodosQuery);
 
       expect(
@@ -71,18 +74,26 @@ describe("react/create-jazz-client integration", () => {
     }
   }, 15000);
 
-  it("RC-I02: local auth defaults return a non-null local session in local mode", async () => {
+  it("RC-I02: uses a caller-supplied uuidv7 for inserts", async () => {
     let client: JazzClient | null = null;
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
 
     try {
-      client = await createJazzClient({
-        appId: makeAppId("local-session"),
-        localAuthMode: "anonymous",
-      });
+      client = await createJazzClient({ appId: makeAppId("external-id") });
 
-      expect(client.session).not.toBeNull();
-      expect(client.session?.claims.auth_mode).toBe("local");
-      expect(client.session?.claims.local_mode).toBe("anonymous");
+      const { value: inserted } = await client.db.insert(
+        todosTable,
+        { title: "with external id", done: false },
+        { id: externalId },
+      );
+      const rows = await client.db.all(allTodosQuery);
+
+      expect(inserted.id).toBe(externalId);
+      expect(
+        rows.some(
+          (row) => row.id === externalId && row.title === "with external id" && row.done === false,
+        ),
+      ).toBe(true);
     } finally {
       if (client) {
         await client.shutdown();

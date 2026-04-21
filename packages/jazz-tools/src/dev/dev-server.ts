@@ -24,10 +24,9 @@ export interface StartLocalJazzServerOptions {
   dataDir?: string;
   inMemory?: boolean;
   jwksUrl?: string;
-  allowAnonymous?: boolean;
-  allowDemo?: boolean;
   backendSecret?: string;
   adminSecret?: string;
+  allowLocalFirstAuth?: boolean;
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
@@ -107,10 +106,9 @@ export async function startLocalJazzServer(
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
-      allowAnonymous: options.allowAnonymous,
-      allowDemo: options.allowDemo,
       backendSecret: options.backendSecret,
       adminSecret: options.adminSecret,
+      allowLocalFirstAuth: options.allowLocalFirstAuth,
       catalogueAuthority: options.catalogueAuthority,
       catalogueAuthorityUrl: options.catalogueAuthorityUrl,
       catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
@@ -167,15 +165,18 @@ export async function pushSchemaCatalogue(
 ): Promise<{ hash: string }> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   const result = await publishStoredSchema(options.serverUrl, {
+    appId: options.appId,
     adminSecret: options.adminSecret,
     schema: compiled.wasmSchema,
   });
 
   if (compiled.permissions) {
     const { head } = await fetchPermissionsHead(options.serverUrl, {
+      appId: options.appId,
       adminSecret: options.adminSecret,
     });
     await publishStoredPermissions(options.serverUrl, {
+      appId: options.appId,
       adminSecret: options.adminSecret,
       schemaHash: result.hash,
       permissions: compiled.permissions,

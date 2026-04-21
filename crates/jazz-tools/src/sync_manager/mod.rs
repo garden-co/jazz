@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
+use web_time::Instant;
+
+use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::RowVisibilityChange;
+use crate::row_histories::{BatchId, RowVisibilityChange};
 use crate::storage::Storage;
 
 // Module declarations
@@ -20,6 +24,10 @@ mod tests;
 
 // Re-export all public types
 pub use types::*;
+
+/// How long an installed transport may sit in `pending_servers` before callers
+/// treat it as offline.
+pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ============================================================================
 // SyncManager
@@ -37,6 +45,7 @@ pub struct SyncManager {
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
+    pub(super) pending_servers: HashMap<ServerId, Instant>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -56,16 +65,22 @@ pub struct SyncManager {
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in row-version state updates.
-    pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
+    /// Tracks which clients are interested in row batch-member state updates.
+    pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
+    /// Latest remote scope snapshots keyed by upstream server and query id.
+    pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
+    /// Pending query rejections waiting for QueryManager to fail local subscriptions.
+    pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
+    /// Pending replayable batch settlements for RuntimeCore to process.
+    pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
-    /// Row-version state acks received during inbox processing.
-    pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
+    /// Row batch-member state acks received during inbox processing.
+    pub(super) received_row_batch_acks: Vec<(RowBatchKey, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -78,6 +93,7 @@ impl std::fmt::Debug for SyncManager {
                 &self.allow_unprivileged_schema_catalogue_writes,
             )
             .field("servers", &self.servers)
+            .field("pending_servers", &self.pending_servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
             .field("outbox", &self.outbox)
@@ -97,10 +113,13 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("row_version_interest", &self.row_version_interest)
+            .field("row_batch_interest", &self.row_batch_interest)
             .field("query_origin", &self.query_origin)
+            .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
-            .field("received_row_version_acks", &self.received_row_version_acks)
+            .field("pending_query_rejections", &self.pending_query_rejections)
+            .field("pending_batch_settlements", &self.pending_batch_settlements)
+            .field("received_row_batch_acks", &self.received_row_batch_acks)
             .finish()
     }
 }
@@ -181,6 +200,7 @@ impl SyncManager {
             catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
+            pending_servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -191,10 +211,13 @@ impl SyncManager {
             pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            row_version_interest: HashMap::new(),
+            row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
+            remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
-            received_row_version_acks: Vec::new(),
+            pending_query_rejections: Vec::new(),
+            pending_batch_settlements: Vec::new(),
+            received_row_batch_acks: Vec::new(),
         }
     }
 
@@ -243,9 +266,102 @@ impl SyncManager {
         self.my_tiers.clone()
     }
 
+    /// True when this runtime currently has at least one upstream server.
+    pub fn has_connected_servers(&self) -> bool {
+        !self.servers.is_empty()
+    }
+
     /// Return the strongest durability tier this node can attest to locally.
     pub fn max_local_durability_tier(&self) -> Option<DurabilityTier> {
         self.my_tiers.iter().copied().max()
+    }
+
+    /// Approximate heap-backed memory owned by sync state, grouped for benches.
+    ///
+    /// Returns `(catalogue, connections, subscriptions, queues, total)`.
+    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
+        let mut catalogue = 0usize;
+        for (object_id, entry) in &self.catalogue_entries {
+            catalogue += std::mem::size_of_val(object_id);
+            catalogue += std::mem::size_of_val(entry);
+            catalogue += 48;
+        }
+
+        let mut connections = 0usize;
+        for (server_id, state) in &self.servers {
+            connections += std::mem::size_of_val(server_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        for (client_id, state) in &self.clients {
+            connections += std::mem::size_of_val(client_id);
+            connections += std::mem::size_of_val(state);
+            connections += 48;
+            connections += state.sent_metadata.len() * std::mem::size_of::<ObjectId>();
+            if let Some(session) = &state.session {
+                connections += session.user_id.len();
+            }
+            for ((object_id, branch_name), batch_ids) in &state.sent_batch_ids {
+                connections += std::mem::size_of_val(object_id);
+                connections += std::mem::size_of_val(branch_name);
+                connections += batch_ids.len() * std::mem::size_of::<BatchId>();
+                connections += 48;
+            }
+        }
+        connections += self.my_tiers.len() * std::mem::size_of::<DurabilityTier>();
+
+        let mut subscriptions = 0usize;
+        for state in self.clients.values() {
+            for (query_id, scope) in &state.queries {
+                subscriptions += std::mem::size_of_val(query_id);
+                subscriptions += std::mem::size_of_val(scope);
+                subscriptions += scope.scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+                if let Some(session) = &scope.session {
+                    subscriptions += session.user_id.len();
+                }
+                subscriptions += 48;
+            }
+        }
+        for (row_batch_key, clients) in &self.row_batch_interest {
+            subscriptions += std::mem::size_of_val(row_batch_key);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (query_id, clients) in &self.query_origin {
+            subscriptions += std::mem::size_of_val(query_id);
+            subscriptions += clients.len() * std::mem::size_of::<ClientId>();
+            subscriptions += 48;
+        }
+        for (key, scope) in &self.remote_query_scopes {
+            subscriptions += std::mem::size_of_val(key);
+            subscriptions += scope.len() * std::mem::size_of::<(ObjectId, BranchName)>();
+            subscriptions += 48;
+        }
+
+        let queues = self.inbox.len() * std::mem::size_of::<InboxEntry>()
+            + self.outbox.len() * std::mem::size_of::<OutboxEntry>()
+            + self.pending_permission_checks.len() * std::mem::size_of::<PendingPermissionCheck>()
+            + self.pending_query_subscriptions.len()
+                * std::mem::size_of::<PendingQuerySubscription>()
+            + self.pending_query_unsubscriptions.len()
+                * std::mem::size_of::<PendingQueryUnsubscription>()
+            + self.pending_row_visibility_changes.len()
+                * std::mem::size_of::<RowVisibilityChange>()
+            + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
+            + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
+            + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
+            + self.received_row_batch_acks.len()
+                * std::mem::size_of::<(RowBatchKey, DurabilityTier)>();
+
+        let total = catalogue + connections + subscriptions + queues;
+        (catalogue, connections, subscriptions, queues, total)
     }
 
     // ========================================================================
@@ -259,6 +375,7 @@ impl SyncManager {
         skip_catalogue_sync: bool,
         storage: &H,
     ) {
+        self.pending_servers.remove(&server_id);
         self.servers.insert(server_id, ServerState::default());
         self.queue_full_sync_to_server_from_storage(server_id, storage);
         if !skip_catalogue_sync {
@@ -266,9 +383,60 @@ impl SyncManager {
         }
     }
 
+    pub fn add_pending_server(&mut self, server_id: ServerId) {
+        if self.servers.contains_key(&server_id) {
+            return;
+        }
+        self.pending_servers.insert(server_id, Instant::now());
+    }
+
+    pub fn remove_pending_server(&mut self, server_id: ServerId) {
+        self.pending_servers.remove(&server_id);
+    }
+
+    pub fn has_servers_or_pending_servers(&self) -> bool {
+        if !self.servers.is_empty() {
+            return true;
+        }
+        let now = Instant::now();
+        self.pending_servers
+            .values()
+            .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
+    }
+
+    pub fn request_batch_settlements_from_server(
+        &mut self,
+        server_id: ServerId,
+        batch_ids: Vec<crate::row_histories::BatchId>,
+    ) {
+        if batch_ids.is_empty() {
+            return;
+        }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+        });
+    }
+
+    pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::SealBatch {
+                    submission: submission.clone(),
+                },
+            });
+        }
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
+        self.pending_servers.remove(&server_id);
+        self.remote_query_scopes
+            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
@@ -298,7 +466,7 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.row_version_interest.retain(|_, clients| {
+        self.row_batch_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });
@@ -355,6 +523,15 @@ impl SyncManager {
     /// Take all outbox entries, clearing the outbox.
     pub fn take_outbox(&mut self) -> Vec<OutboxEntry> {
         std::mem::take(&mut self.outbox)
+    }
+
+    /// Restore previously dequeued outbox entries ahead of any newly queued ones.
+    pub(crate) fn prepend_outbox(&mut self, mut entries: Vec<OutboxEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        entries.append(&mut self.outbox);
+        self.outbox = entries;
     }
 
     /// Get a reference to the outbox (for checking if empty).
@@ -455,6 +632,14 @@ impl SyncManager {
                 true,
             );
         }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::QueryScopeSnapshot {
+                query_id,
+                scope: sorted_query_scope_snapshot(&scope),
+            },
+        });
     }
 
     /// Drop a client's query subscription state.
@@ -495,26 +680,26 @@ impl SyncManager {
             return;
         }
 
-        let mut removed_row_versions = Vec::new();
+        let mut removed_row_batches = Vec::new();
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
 
         for &(object_id, branch_name) in removed_scope {
-            if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
-                removed_row_versions.extend(
-                    version_ids
+            if let Some(batch_ids) = client.sent_batch_ids.remove(&(object_id, branch_name)) {
+                removed_row_batches.extend(
+                    batch_ids
                         .into_iter()
-                        .map(|version_id| RowVersionKey::new(object_id, branch_name, version_id)),
+                        .map(|batch_id| RowBatchKey::new(object_id, branch_name, batch_id)),
                 );
             }
         }
 
-        for key in removed_row_versions {
-            if let Some(clients) = self.row_version_interest.get_mut(&key) {
+        for key in removed_row_batches {
+            if let Some(clients) = self.row_batch_interest.get_mut(&key) {
                 clients.remove(&client_id);
                 if clients.is_empty() {
-                    self.row_version_interest.remove(&key);
+                    self.row_batch_interest.remove(&key);
                 }
             }
         }
@@ -530,6 +715,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         for server_id in server_ids {
@@ -539,6 +725,7 @@ impl SyncManager {
                 query.clone(),
                 session.clone(),
                 propagation,
+                policy_context_tables.clone(),
             );
         }
     }
@@ -553,6 +740,7 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
         propagation: QueryPropagation,
+        policy_context_tables: Vec<String>,
     ) {
         if !self.servers.contains_key(&server_id) {
             return;
@@ -565,6 +753,7 @@ impl SyncManager {
                 query: Box::new(query),
                 session,
                 propagation,
+                policy_context_tables,
             },
         });
     }
@@ -591,10 +780,36 @@ impl SyncManager {
         self.pending_query_settled.extend(pending);
     }
 
-    /// Take received row-version persistence state since last call.
+    /// Take pending query rejections for QueryManager to process.
+    pub fn take_pending_query_rejections(&mut self) -> Vec<PendingQueryRejection> {
+        std::mem::take(&mut self.pending_query_rejections)
+    }
+
+    /// Return the union of latest upstream scope snapshots for this query.
+    pub fn remote_query_scope(&self, query_id: QueryId) -> HashSet<(ObjectId, BranchName)> {
+        self.remote_query_scopes
+            .iter()
+            .filter(|((_, remote_query_id), _)| *remote_query_id == query_id)
+            .flat_map(|(_, scope)| scope.iter().copied())
+            .collect()
+    }
+
+    /// Whether we have received at least one upstream scope snapshot for this query.
+    pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
+        self.remote_query_scopes
+            .keys()
+            .any(|(_, remote_query_id)| *remote_query_id == query_id)
+    }
+
+    /// Take pending replayable batch settlements for RuntimeCore to process.
+    pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
+        std::mem::take(&mut self.pending_batch_settlements)
+    }
+
+    /// Take received row batch-member persistence state since last call.
     /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_version_acks(&mut self) -> Vec<(RowVersionKey, DurabilityTier)> {
-        std::mem::take(&mut self.received_row_version_acks)
+    pub fn take_received_row_batch_acks(&mut self) -> Vec<(RowBatchKey, DurabilityTier)> {
+        std::mem::take(&mut self.received_row_batch_acks)
     }
 
     /// Take pending row visibility changes for QueryManager to materialize
@@ -646,14 +861,30 @@ impl SyncManager {
         &mut self,
         client_id: ClientId,
         query_id: QueryId,
+        code: impl Into<String>,
         reason: impl Into<String>,
     ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::Error(SyncError::QuerySubscriptionRejected {
                 query_id,
+                code: code.into(),
                 reason: reason.into(),
             }),
         });
     }
+}
+
+fn sorted_query_scope_snapshot(
+    scope: &HashSet<(ObjectId, BranchName)>,
+) -> Vec<(ObjectId, BranchName)> {
+    let mut entries: Vec<_> = scope.iter().copied().collect();
+    entries.sort_by(
+        |(left_object_id, left_branch), (right_object_id, right_branch)| {
+            left_object_id
+                .cmp(right_object_id)
+                .then_with(|| left_branch.as_str().cmp(right_branch.as_str()))
+        },
+    );
+    entries
 }
