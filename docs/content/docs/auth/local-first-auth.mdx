@@ -80,9 +80,9 @@ The parser accepts upper-case input and extra whitespace. Invalid input throws
 `invalid-checksum`.
 
 <Callout type="info">
-  In React, prefer `useLocalFirstAuth()` for backup and restore so the mounted `JazzProvider`
-  updates immediately. The lower-level `BrowserAuthSecretStore` and `ExpoAuthSecretStore` APIs are
-  still useful outside React.
+  In React and Expo, prefer `useLocalFirstAuth()` for backup and restore so the mounted
+  `JazzProvider` updates immediately. The lower-level `BrowserAuthSecretStore` and
+  `ExpoAuthSecretStore` APIs are still useful outside React-based UIs.
 </Callout>
 
 ### Passkey backup
