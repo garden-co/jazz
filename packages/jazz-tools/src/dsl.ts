@@ -110,12 +110,21 @@ export type TypedColumnBuilder<
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
   readonly __jazzHasDefault: HasDefault;
+  /**
+   * Set the default value for the column
+   */
   default(
     value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
   ): ColumnAlias<Sql, Optional, Ref, true>;
+  /**
+   * Set the merge strategy for the column (defaults to LWW)
+   */
   merge(
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
   ): ColumnAlias<Sql, Optional, Ref, HasDefault>;
+  /**
+   * Make the column nullable
+   */
   optional(): ColumnAlias<Sql, true, Ref, HasDefault>;
 };
 
@@ -716,6 +725,7 @@ class DropBuilder<Optional extends boolean = false> {
 
 export const col = {
   // Schema context
+
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
   int: () => new ScalarBuilder("INTEGER") as unknown as IntColumn,
@@ -741,9 +751,23 @@ export const col = {
     >,
 
   // Migration context
+
+  /**
+   * Add a new column to the table
+   */
   add: new AddBuilder<true>(),
+  /**
+   * Drop a column from the table
+   */
   drop: new DropBuilder<true>(),
+  /**
+   * Rename a column in the table
+   * @deprecated Use {@link col.renameFrom} instead
+   */
   rename: (oldName: string): RenameOp => ({ _type: "rename", oldName }),
+  /**
+   * Rename a column in the table
+   */
   renameFrom: <const TOldName extends string>(oldName: TOldName): RenameOp<TOldName> => ({
     _type: "rename",
     oldName,

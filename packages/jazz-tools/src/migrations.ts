@@ -919,6 +919,40 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
   return definitionToSchema(definition as SchemaDefinition);
 }
 
+/**
+ * Create a new migration lens: a bidirectional transformation between two schema versions.
+ * The forward direction applies the migration; the backward direction is generated automatically
+ * so older clients can still read data written under the new schema.
+ *
+ * Migration stubs can be generated with the `jazz-tools@alpha migrations create` command
+ * and published with the `jazz-tools@alpha migrations push` command.
+ *
+ * @example
+ * ```typescript
+ * export default s.defineMigration({
+ *   migrate: {
+ *     todos: {
+ *       priority: s.add.enum("low", "medium", "high", { default: "medium" }),
+ *     },
+ *   },
+ *   fromHash: "aaaaaaaaaaaa",
+ *   toHash: "bbbbbbbbbbbb",
+ *   from: {
+ *     todos: s.table({
+ *       title: s.string(),
+ *       done: s.boolean(),
+ *     }),
+ *   },
+ *   to: {
+ *     todos: s.table({
+ *       title: s.string(),
+ *       done: s.boolean(),
+ *       priority: s.enum("low", "medium", "high"),
+ *     }),
+ *   },
+ * });
+ * ```
+ */
 export function defineMigration<
   const TFrom extends SchemaLike,
   const TTo extends SchemaLike,
