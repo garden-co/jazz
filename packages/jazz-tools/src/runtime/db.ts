@@ -2458,10 +2458,7 @@ export class Db {
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     await this.ensureQueryReady(options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
-    const rows =
-      "queryInternal" in client && typeof client.queryInternal === "function"
-        ? await client.queryInternal(wasmQuery, undefined, options, runtimeSchema.peek())
-        : await client.query(wasmQuery, options);
+    const rows = await client.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
@@ -2580,16 +2577,15 @@ export class Db {
       return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
     };
 
-    const subId = client.subscribeInternal(
-      wasmQuery,
-      (delta) => {
-        const typedDelta = manager.handleDelta(delta, transform);
-        callback(typedDelta);
-      },
-      session,
-      options,
-      runtimeSchema.peek(),
-    );
+    const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
+      const typedDelta = manager.handleDelta(delta, transform);
+      callback(typedDelta);
+    };
+
+    const subId =
+      session !== undefined
+        ? client.subscribeInternal(wasmQuery, handleDelta, session, options, runtimeSchema.peek())
+        : client.subscribe(wasmQuery, handleDelta, options);
     const traceId = this.registerActiveQuerySubscriptionTrace(wasmQuery, builtQuery.table, options);
 
     // Return unsubscribe function
