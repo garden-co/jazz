@@ -9,14 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
+use serde::Deserialize;
 
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
     current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
-    generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
-    parse_query_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_outbox_entry, subscription_delta_to_json,
+    generate_id as generate_binding_id, parse_batch_id_input,
+    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    serialize_local_batch_record, serialize_local_batch_records, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -24,13 +26,12 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
 };
-use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
-    SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
+    SyncPayload,
 };
 
 // ============================================================================
@@ -96,12 +97,77 @@ where
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", content = "value")]
+enum FfiJsonValue {
+    Integer(i32),
+    BigInt(i64),
+    Double(f64),
+    Boolean(bool),
+    Text(String),
+    Timestamp(u64),
+    Uuid(ObjectId),
+    Bytea(String),
+    Array(Vec<FfiJsonValue>),
+    Row(FfiJsonRow),
+    Null,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FfiJsonRow {
+    #[serde(default)]
+    id: Option<ObjectId>,
+    values: Vec<FfiJsonValue>,
+}
+
+fn ffi_json_err(message: impl Into<String>) -> JazzRnError {
+    JazzRnError::InvalidJson {
+        message: message.into(),
+    }
+}
+
+fn decode_ffi_json_value(value: FfiJsonValue) -> Result<Value, JazzRnError> {
+    match value {
+        FfiJsonValue::Integer(value) => Ok(Value::Integer(value)),
+        FfiJsonValue::BigInt(value) => Ok(Value::BigInt(value)),
+        FfiJsonValue::Double(value) => Ok(Value::Double(value)),
+        FfiJsonValue::Boolean(value) => Ok(Value::Boolean(value)),
+        FfiJsonValue::Text(value) => Ok(Value::Text(value)),
+        FfiJsonValue::Timestamp(value) => Ok(Value::Timestamp(value)),
+        FfiJsonValue::Uuid(value) => Ok(Value::Uuid(value)),
+        FfiJsonValue::Bytea(value) => hex::decode(value)
+            .map(Value::Bytea)
+            .map_err(|error| ffi_json_err(format!("invalid Bytea hex payload: {error}"))),
+        FfiJsonValue::Array(values) => values
+            .into_iter()
+            .map(decode_ffi_json_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        FfiJsonValue::Row(row) => row
+            .values
+            .into_iter()
+            .map(decode_ffi_json_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| Value::Row { id: row.id, values }),
+        FfiJsonValue::Null => Ok(Value::Null),
+    }
+}
+
+fn decode_ffi_json_record(values_json: &str) -> Result<HashMap<String, Value>, JazzRnError> {
+    let values: HashMap<String, FfiJsonValue> =
+        serde_json::from_str(values_json).map_err(json_err)?;
+    values
+        .into_iter()
+        .map(|(key, value)| decode_ffi_json_value(value).map(|value| (key, value)))
+        .collect()
+}
+
 fn convert_insert_values(values_json: &str) -> Result<HashMap<String, Value>, JazzRnError> {
-    serde_json::from_str(values_json).map_err(json_err)
+    decode_ffi_json_record(values_json)
 }
 
 fn convert_updates(values_json: &str) -> Result<Vec<(String, Value)>, JazzRnError> {
-    let partial: HashMap<String, Value> = serde_json::from_str(values_json).map_err(json_err)?;
+    let partial = decode_ffi_json_record(values_json)?;
     Ok(partial.into_iter().collect())
 }
 
@@ -166,25 +232,20 @@ pub trait BatchedTickCallback: Send + Sync {
 }
 
 #[uniffi::export(callback_interface)]
-pub trait SyncMessageCallback: Send + Sync {
-    /// Called by Rust when it has an outbox message to send.
-    fn on_sync_message(
-        &self,
-        destination_kind: String,
-        destination_id: String,
-        payload_json: String,
-        is_catalogue: bool,
-    );
-}
-
-#[uniffi::export(callback_interface)]
 pub trait SubscriptionCallback: Send + Sync {
     /// Called when a subscription produces an update.
     fn on_update(&self, delta_json: String);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait AuthFailureCallback: Send + Sync {
+    /// Invoked when the Rust transport receives an auth rejection from the server.
+    /// `reason` is a human-readable string (e.g. "Unauthorized").
+    fn on_failure(&self, reason: String);
+}
+
 // ============================================================================
-// RnScheduler + RnSyncSender
+// RnScheduler
 // ============================================================================
 
 #[derive(Clone, Default)]
@@ -230,45 +291,11 @@ impl Scheduler for RnScheduler {
     }
 }
 
-#[derive(Clone, Default)]
-struct RnSyncSender {
-    callback: Arc<Mutex<Option<Box<dyn SyncMessageCallback>>>>,
-}
-
-impl RnSyncSender {
-    fn set_callback(&self, cb: Option<Box<dyn SyncMessageCallback>>) {
-        if let Ok(mut slot) = self.callback.lock() {
-            *slot = cb;
-        }
-    }
-}
-
-impl SyncSender for RnSyncSender {
-    fn send_sync_message(&self, message: OutboxEntry) {
-        let Ok(serialized) = serialize_outbox_entry(&message) else {
-            return;
-        };
-
-        if let Ok(guard) = self.callback.lock() {
-            if let Some(cb) = guard.as_ref() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    cb.on_sync_message(
-                        serialized.destination_kind,
-                        serialized.destination_id,
-                        serialized.payload_json,
-                        serialized.is_catalogue,
-                    );
-                }));
-            }
-        }
-    }
-}
-
 // ============================================================================
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -302,7 +329,7 @@ impl RnRuntime {
 
             let app_id_obj =
                 AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
-            let schema_manager =
+            let mut schema_manager =
                 SchemaManager::new(sync_manager, schema, app_id_obj, &jazz_env, &user_branch)
                     .map_err(|e| JazzRnError::Schema {
                         message: format!("{:?}", e),
@@ -330,10 +357,21 @@ impl RnRuntime {
                         resolved_data_path, e
                     ),
                 })?;
-            let scheduler = RnScheduler::default();
-            let sync_sender = RnSyncSender::default();
 
-            let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            // Load previously-persisted schema history, permissions bundle, and lens
+            // catalogue entries from storage into the in-memory schema manager so
+            // offline cold-starts can decode and serve locally stored rows.
+            if let Err(error) =
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id_obj)
+            {
+                eprintln!(
+                    "jazz-rn: failed to rehydrate schema manager from catalogue storage for app {app_id_obj}: {error}"
+                );
+            }
+
+            let scheduler = RnScheduler::default();
+
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -359,20 +397,6 @@ impl RnRuntime {
         })
     }
 
-    /// Register a JS callback for outbound sync messages.
-    pub fn on_sync_message_to_send(
-        &self,
-        callback: Option<Box<dyn SyncMessageCallback>>,
-    ) -> Result<(), JazzRnError> {
-        with_panic_boundary("on_sync_message_to_send", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.sync_sender().set_callback(callback);
-            Ok(())
-        })
-    }
-
     /// Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
     pub fn batched_tick(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("batched_tick", || {
@@ -389,14 +413,21 @@ impl RnRuntime {
     // CRUD
     // =========================================================================
 
-    pub fn insert(&self, table: String, values_json: String) -> Result<String, JazzRnError> {
+    pub fn insert(
+        &self,
+        table: String,
+        values_json: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert", || {
             let named_values = convert_insert_values(&values_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let (id, row_values) = core
-                .insert(&table, named_values, None)
+            let ((id, row_values), batch_id) = core
+                .insert_with_id(&table, named_values, object_id, None)
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -407,6 +438,7 @@ impl RnRuntime {
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
+                "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("insert serialization failed: {e}"),
@@ -419,15 +451,18 @@ impl RnRuntime {
         table: String,
         values_json: String,
         write_context_json: Option<String>,
+        object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
         with_panic_boundary("insert_with_session", || {
             let named_values = convert_insert_values(&values_json)?;
             let write_context = parse_write_context(write_context_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let (id, row_values) = core
-                .insert(&table, named_values, write_context.as_ref())
+            let ((id, row_values), batch_id) = core
+                .insert_with_id(&table, named_values, object_id, write_context.as_ref())
                 .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -438,6 +473,7 @@ impl RnRuntime {
             serde_json::to_string(&serde_json::json!({
                 "id": id.uuid().to_string(),
                 "values": row_values,
+                "batchId": batch_id.to_string(),
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("insert serialization failed: {e}"),
@@ -445,7 +481,7 @@ impl RnRuntime {
         })
     }
 
-    pub fn update(&self, object_id: String, values_json: String) -> Result<(), JazzRnError> {
+    pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
         with_panic_boundary("update", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
@@ -455,8 +491,13 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.update(oid, updates, None).map_err(runtime_err)?;
-            Ok(())
+            let batch_id = core.update(oid, updates, None).map_err(runtime_err)?;
+            serde_json::to_string(&serde_json::json!({
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("update serialization failed: {e}"),
+            })
         })
     }
 
@@ -465,7 +506,7 @@ impl RnRuntime {
         object_id: String,
         values_json: String,
         write_context_json: Option<String>,
-    ) -> Result<(), JazzRnError> {
+    ) -> Result<String, JazzRnError> {
         with_panic_boundary("update_with_session", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
@@ -476,14 +517,20 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.update(oid, updates, write_context.as_ref())
+            let batch_id = core
+                .update(oid, updates, write_context.as_ref())
                 .map_err(runtime_err)?;
-            Ok(())
+            serde_json::to_string(&serde_json::json!({
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("update serialization failed: {e}"),
+            })
         })
     }
 
     #[uniffi::method(name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> Result<(), JazzRnError> {
+    pub fn delete_row(&self, object_id: String) -> Result<String, JazzRnError> {
         with_panic_boundary("delete", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
@@ -492,8 +539,13 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.delete(oid, None).map_err(runtime_err)?;
-            Ok(())
+            let batch_id = core.delete(oid, None).map_err(runtime_err)?;
+            serde_json::to_string(&serde_json::json!({
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("delete serialization failed: {e}"),
+            })
         })
     }
 
@@ -502,7 +554,7 @@ impl RnRuntime {
         &self,
         object_id: String,
         write_context_json: Option<String>,
-    ) -> Result<(), JazzRnError> {
+    ) -> Result<String, JazzRnError> {
         with_panic_boundary("delete_with_session", || {
             let uuid = uuid::Uuid::parse_str(&object_id).map_err(|e| JazzRnError::InvalidUuid {
                 message: e.to_string(),
@@ -512,9 +564,15 @@ impl RnRuntime {
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            core.delete(oid, write_context.as_ref())
+            let batch_id = core
+                .delete(oid, write_context.as_ref())
                 .map_err(runtime_err)?;
-            Ok(())
+            serde_json::to_string(&serde_json::json!({
+                "batchId": batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("delete serialization failed: {e}"),
+            })
         })
     }
 
@@ -859,6 +917,78 @@ impl RnRuntime {
         })
     }
 
+    pub fn load_local_batch_record(&self, batch_id: String) -> Result<Option<String>, JazzRnError> {
+        with_panic_boundary("load_local_batch_record", || {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let record = core.local_batch_record(batch_id).map_err(runtime_err)?;
+            record
+                .map(|record| {
+                    serde_json::to_string(&serialize_local_batch_record(&record)).map_err(|error| {
+                        JazzRnError::Internal {
+                            message: format!(
+                                "load_local_batch_record serialization failed: {error}"
+                            ),
+                        }
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    pub fn load_local_batch_records(&self) -> Result<String, JazzRnError> {
+        with_panic_boundary("load_local_batch_records", || {
+            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let records = core.local_batch_records().map_err(runtime_err)?;
+            serde_json::to_string(&serialize_local_batch_records(&records)).map_err(|error| {
+                JazzRnError::Internal {
+                    message: format!("load_local_batch_records serialization failed: {error}"),
+                }
+            })
+        })
+    }
+
+    pub fn drain_rejected_batch_ids(&self) -> Result<Vec<String>, JazzRnError> {
+        with_panic_boundary("drain_rejected_batch_ids", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            Ok(core
+                .drain_rejected_batch_ids()
+                .into_iter()
+                .map(|batch_id| batch_id.to_string())
+                .collect())
+        })
+    }
+
+    pub fn acknowledge_rejected_batch(&self, batch_id: String) -> Result<bool, JazzRnError> {
+        with_panic_boundary("acknowledge_rejected_batch", || {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.acknowledge_rejected_batch(batch_id)
+                .map_err(runtime_err)
+        })
+    }
+
+    pub fn seal_batch(&self, batch_id: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("seal_batch", || {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.seal_batch(batch_id).map_err(runtime_err)
+        })
+    }
+
     /// Flush and close the underlying storage, releasing filesystem locks.
     pub fn close(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("close", || {
@@ -869,6 +999,104 @@ impl RnRuntime {
             core.storage().close().map_err(runtime_err)?;
             Ok(())
         })
+    }
+
+    /// Connect to a Jazz server over WebSocket.
+    ///
+    /// Parses `auth_json` into `AuthConfig`, wires a `TransportManager` into
+    /// `RuntimeCore`, and spawns the manager loop on a dedicated Tokio thread.
+    pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("connect", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            let scheduler = self
+                .core
+                .lock()
+                .map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?
+                .scheduler()
+                .clone();
+            let tick = RnTickNotifier { scheduler };
+            let manager = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                jazz_tools::runtime_core::install_transport::<
+                    _,
+                    _,
+                    jazz_tools::ws_stream::NativeWsStream,
+                    _,
+                >(&mut core, url, auth, tick)
+            };
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                rt.block_on(manager.run());
+            });
+            Ok(())
+        })
+    }
+
+    /// Disconnect from the Jazz server and drop the transport handle.
+    pub fn disconnect(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            if let Some(handle) = core.transport() {
+                handle.disconnect();
+            }
+            core.clear_transport();
+        }
+    }
+
+    /// Push updated auth credentials into the live transport.
+    pub fn update_auth(&self, auth_json: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("update_auth", || {
+            let auth: jazz_tools::transport_manager::AuthConfig =
+                serde_json::from_str(&auth_json).map_err(json_err)?;
+            if let Ok(core) = self.core.lock() {
+                if let Some(handle) = core.transport() {
+                    handle.update_auth(auth);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Register a callback that fires when the transport receives an auth
+    /// rejection from the server during the WS handshake.
+    pub fn on_auth_failure(
+        &self,
+        callback: Box<dyn AuthFailureCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("on_auth_failure", || {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.set_auth_failure_callback(move |reason| {
+                callback.on_failure(reason);
+            });
+            Ok(())
+        })
+    }
+}
+
+// ============================================================================
+// RnTickNotifier
+// ============================================================================
+
+/// `TickNotifier` implementation for the React Native (UniFFI) runtime.
+///
+/// Holds a clone of `RnScheduler` and calls `schedule_batched_tick()` whenever
+/// the transport layer needs to wake up `batched_tick`.
+struct RnTickNotifier {
+    scheduler: RnScheduler,
+}
+
+impl jazz_tools::transport_manager::TickNotifier for RnTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
     }
 }
 
@@ -983,4 +1211,33 @@ pub fn generate_id() -> String {
 #[uniffi::export]
 pub fn current_timestamp_ms() -> i64 {
     binding_current_timestamp_ms()
+}
+
+/// Mint a local-first JWT from a base64url-encoded 32-byte seed.
+///
+/// Returns a signed JWT that can be used as a bearer token for local-first auth.
+/// `audience` should be the app ID (UUID) or a human-readable app name.
+/// `ttl_seconds` controls token lifetime (e.g. 3600 for one hour).
+#[uniffi::export]
+pub fn mint_local_first_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: i64,
+) -> Result<String, JazzRnError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&seed_b64)
+        .map_err(|e| JazzRnError::Internal {
+            message: format!("invalid base64 seed: {e}"),
+        })?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| JazzRnError::Internal {
+        message: "seed must be exactly 32 bytes".to_string(),
+    })?;
+    jazz_tools::identity::mint_jazz_self_signed_token(
+        &seed,
+        jazz_tools::identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        ttl_seconds as u64,
+    )
+    .map_err(|e| JazzRnError::Internal { message: e })
 }

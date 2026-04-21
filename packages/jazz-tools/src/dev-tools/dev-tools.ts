@@ -348,11 +348,8 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          const row = await client.createDurable(
-            table,
-            values as InsertValues,
-            tier ? { tier } : undefined,
-          );
+          const insertHandle = await client.create(table, values as InsertValues);
+          const row = tier ? await insertHandle.wait({ tier }) : insertHandle.value;
           respond({ ok: true, payload: row });
           return;
         }
@@ -371,11 +368,10 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          await client.updateDurable(
-            objectId,
-            updates as Record<string, Value>,
-            tier ? { tier } : undefined,
-          );
+          const updateHandle = client.update(objectId, updates as Record<string, Value>);
+          if (tier) {
+            await updateHandle.wait({ tier });
+          }
           respond({ ok: true, payload: { updated: true } });
           return;
         }
@@ -393,7 +389,10 @@ function hookRegistration(
           }
 
           const client = await resolveCommandClient();
-          await client.deleteDurable(objectId, tier ? { tier } : undefined);
+          const deleteHandle = client.delete(objectId);
+          if (tier) {
+            await deleteHandle.wait({ tier });
+          }
           respond({ ok: true, payload: { deleted: true } });
           return;
         }

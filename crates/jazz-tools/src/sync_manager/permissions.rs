@@ -1,6 +1,8 @@
 use super::*;
+use crate::batch_fate::BatchSettlement;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
+use crate::row_histories::RowState;
 use crate::storage::Storage;
 use std::collections::HashMap;
 
@@ -33,20 +35,69 @@ impl SyncManager {
     ///
     /// This takes the full PendingPermissionCheck since it was already taken
     /// from the queue by take_pending_permission_checks().
-    pub fn reject_permission_check(&mut self, check: PendingPermissionCheck, reason: String) {
-        // Extract object_id and branch_name from payload
-        let (object_id, branch_name) = match &check.payload {
-            SyncPayload::ObjectUpdated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            SyncPayload::ObjectTruncated {
-                object_id,
-                branch_name,
-                ..
-            } => (*object_id, *branch_name),
-            _ => return,
+    pub fn reject_permission_check<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        check: PendingPermissionCheck,
+        reason: String,
+    ) {
+        self.reject_permission_check_with_code(
+            storage,
+            check,
+            "permission_denied".to_string(),
+            reason,
+        );
+    }
+
+    pub fn reject_permission_check_with_code<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        check: PendingPermissionCheck,
+        code: String,
+        reason: String,
+    ) {
+        if let SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } =
+            &check.payload
+            && matches!(
+                row.state,
+                RowState::StagingPending | RowState::VisibleDirect
+            )
+        {
+            let settlement = BatchSettlement::Rejected {
+                batch_id: row.batch_id,
+                code: code.clone(),
+                reason: reason.clone(),
+            };
+            if let Err(error) = storage.upsert_authoritative_batch_settlement(&settlement) {
+                tracing::warn!(
+                    batch_id = ?row.batch_id,
+                    %error,
+                    "failed to persist rejected transactional batch settlement"
+                );
+                return;
+            }
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(check.client_id),
+                payload: SyncPayload::RowBatchStateChanged {
+                    row_id: row.row_id,
+                    branch_name: crate::object::BranchName::new(&row.branch),
+                    batch_id: row.batch_id,
+                    state: Some(RowState::Rejected),
+                    confirmed_tier: None,
+                },
+            });
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(check.client_id),
+                payload: SyncPayload::BatchSettlement { settlement },
+            });
+            return;
+        }
+
+        let Some(object_id) = check.payload.object_id() else {
+            return;
+        };
+        let Some(branch_name) = check.payload.branch_name() else {
+            return;
         };
 
         self.outbox.push(OutboxEntry {
@@ -54,6 +105,7 @@ impl SyncManager {
             payload: SyncPayload::Error(SyncError::PermissionDenied {
                 object_id,
                 branch_name,
+                code,
                 reason,
             }),
         });

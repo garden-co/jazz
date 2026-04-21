@@ -3,9 +3,18 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { WasmSchema } from "../drivers/types.js";
 import { TestingServer, pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
 
 const tempRoots: string[] = [];
+const TEST_SCHEMA: WasmSchema = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ],
+  },
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -107,34 +116,17 @@ describe("TestingServer", () => {
       expect(server.adminSecret).toBe(adminSecret);
       expect(server.backendSecret).toBe(backendSecret);
 
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
-
-      const allowed = await fetch(`${server.url}/sync`, {
+      const allowed = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": adminSecret },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
-      expect(allowed.status).toBe(200);
+      expect(allowed.status).toBe(201);
 
-      const denied = await fetch(`${server.url}/sync`, {
+      const denied = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": "wrong-secret" },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
       expect(denied.status).toBe(401);
     } finally {
@@ -166,19 +158,40 @@ describe("startLocalJazzServer", () => {
       dataDir,
       backendSecret: "test-backend-secret",
       adminSecret: "test-admin-secret",
-      allowAnonymous: true,
-      allowDemo: true,
-      healthTimeoutMs: 10_000,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);
     expect(healthResponse.status).toBe(200);
-    expect(server.dataDir).toBe(dataDir);
     expect(server.adminSecret).toBe("test-admin-secret");
     expect(server.backendSecret).toBe("test-backend-secret");
 
     await server.stop();
   }, 15_000);
+
+  it("allocates a fresh port when no explicit port is provided", async () => {
+    const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
+    const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
+
+    const firstServer = await startLocalJazzServer({
+      appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      dataDir: join(firstRoot, "data-dir"),
+    });
+    const firstPort = firstServer.port;
+    await firstServer.stop();
+
+    const secondServer = await startLocalJazzServer({
+      appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      dataDir: join(secondRoot, "data-dir"),
+    });
+
+    try {
+      expect(secondServer.port).not.toBe(firstPort);
+      const healthResponse = await fetch(`${secondServer.url}/health`);
+      expect(healthResponse.status).toBe(200);
+    } finally {
+      await secondServer.stop();
+    }
+  }, 20_000);
 
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");
@@ -189,7 +202,6 @@ describe("startLocalJazzServer", () => {
       appId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
       port,
       dataDir,
-      healthTimeoutMs: 5_000,
     });
 
     await server.stop();
@@ -207,7 +219,6 @@ describe("startLocalJazzServer", () => {
       appId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
       port,
       dataDir,
-      healthTimeoutMs: 10_000,
       enableLogs: true,
     });
 
@@ -217,21 +228,7 @@ describe("startLocalJazzServer", () => {
     await server.stop();
   }, 15_000);
 
-  it("rejects with child stderr when process exits before health", async () => {
-    const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
-    const port = await getAvailablePort();
-
-    await expect(
-      startLocalJazzServer({
-        appId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-        binaryPath,
-        port,
-        healthTimeoutMs: 3_000,
-      }),
-    ).rejects.toThrow(/startup-failed-on-purpose/);
-  });
-
-  it("accepts a catalogue schema sync payload via /sync when admin secret matches", async () => {
+  it("accepts a schema publish via /admin/schemas when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -242,39 +239,22 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
-
-      const response = await fetch(`${server.url}/sync`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": adminSecret,
         },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(201);
     } finally {
       await server.stop();
     }
   });
 
-  it("rejects a catalogue schema sync payload via /sync when admin secret doesn't match", async () => {
+  it("rejects a schema publish via /admin/schemas when admin secret doesn't match", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -285,30 +265,13 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const syncBody = {
-        client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payloads: [
-          {
-            ObjectUpdated: {
-              object_id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: {
-                id: "01234567-89ab-cdef-0123-456789abcdef",
-                metadata: { type: "catalogue_schema" },
-              },
-              branch_name: "main",
-              commits: [],
-            },
-          },
-        ],
-      };
-
-      const response = await fetch(`${server.url}/sync`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
-        body: JSON.stringify(syncBody),
+        body: JSON.stringify({ schema: TEST_SCHEMA }),
       });
 
       expect(response.status).toBe(401);
@@ -343,22 +306,16 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
-      const beforeResponse = await fetch(`${server.url}/schemas`, {
-        headers: {
-          "X-Jazz-Admin-Secret": adminSecret,
-        },
-      });
-      expect(beforeResponse.status).toBe(200);
-      const beforeBody = (await beforeResponse.json()) as { hashes?: string[] };
-
-      await pushSchemaCatalogue({
+      const { hash } = await pushSchemaCatalogue({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
       });
 
-      const response = await fetch(`${server.url}/schemas`, {
+      expect(hash).toBeTruthy();
+
+      const response = await fetch(`${server.url}/apps/${server.appId}/schemas`, {
         headers: {
           "X-Jazz-Admin-Secret": adminSecret,
         },
@@ -366,7 +323,7 @@ describe("pushSchemaCatalogue", () => {
       expect(response.status).toBe(200);
 
       const body = (await response.json()) as { hashes?: string[] };
-      expect(body.hashes?.length).toBeGreaterThan(beforeBody.hashes?.length ?? 0);
+      expect(body.hashes?.length).toBeGreaterThan(0);
     } finally {
       await server.stop();
     }

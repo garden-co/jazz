@@ -2,34 +2,30 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
-use crate::jazz_transport::ServerEvent;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
-use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 #[cfg(feature = "rocksdb")]
 use crate::storage::{RocksDBStorage, StorageError};
-use crate::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
-};
+use crate::sync_manager::{ClientId, DurabilityTier, OutboxEntry, SyncManager};
+use crate::transport_manager::AuthConfig as WsAuthConfig;
 use base64::Engine;
-use bytes::BytesMut;
-use futures::StreamExt;
 use serde::Deserialize;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
+use uuid::Uuid;
 
-use crate::transport::{AuthConfig, ServerConnection};
 use crate::{
-    AppContext, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream,
+    AppContext, AppId, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle,
+    SubscriptionStream,
 };
 
 type DynStorage = Box<dyn Storage + Send>;
@@ -52,14 +48,12 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
-    /// Connection to the server (shared for event processor).
-    server_connection: Option<Arc<ServerConnection>>,
+    /// Whether a server URL was provided at construction time.
+    has_server: bool,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
-    /// Handle for the stream listener task.
-    stream_listener_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// State for an active subscription.
@@ -81,7 +75,7 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     )
     .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
 
-    rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, context.app_id)
+    rehydrate_schema_manager_from_catalogue(&mut schema_manager, storage, context.app_id)
         .map_err(JazzError::Storage)?;
 
     Ok(schema_manager)
@@ -102,6 +96,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     Some(Session {
         user_id: user_id.to_string(),
         claims: claims.claims,
+        ..Session::new(user_id)
     })
 }
 
@@ -122,33 +117,17 @@ impl JazzClient {
     /// This will:
     /// 1. Open local storage
     /// 2. Initialize the runtime
-    /// 3. Connect to the server (if URL provided)
-    /// 4. Start syncing
+    /// 3. Connect to the server over WebSocket (if URL provided)
+    /// 4. Wait for the initial WS handshake to complete
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
-        let client_id = match context.storage {
+        // Loaded for its side effect of persisting the client-id file on disk;
+        // the wire ClientId is assigned by `TransportManager::create` at connect
+        // time and is exposed via `runtime.transport_client_id()`.
+        let _client_id = match context.storage {
             ClientStorage::Persistent => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
-        };
-
-        // Register client name with tracer so server-side hooks resolve the human name
-        if let Some((ref tracer, ref name)) = context.sync_tracer {
-            tracer.register_client(client_id, name);
-        }
-
-        // Connect to server if URL provided (before creating runtime so we have the connection)
-        let auth_config = AuthConfig::from_context(&context);
-        let server_connection = if !context.server_url.is_empty() {
-            match ServerConnection::connect(&context.server_url, auth_config).await {
-                Ok(conn) => Some(Arc::new(conn)),
-                Err(e) => {
-                    tracing::warn!("Failed to connect to server: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
         };
 
         let storage: DynStorage = match context.storage {
@@ -158,203 +137,69 @@ impl JazzClient {
 
         let schema_manager = build_client_schema_manager(&storage, &context)?;
 
-        // Clone server connection for sync callback
-        let server_conn_for_sync = server_connection.clone();
-        let client_id_for_sync = client_id;
-        let server_id = ServerId::default();
-        let tracer_for_outgoing = context.sync_tracer.clone();
+        // Create runtime. The sync callback is a no-op — the WS TransportManager
+        // drives the outbox directly via its own channel.
+        let runtime = TokioRuntime::new(schema_manager, storage, move |_entry: OutboxEntry| {});
 
-        // Create runtime with sync callback
-        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
-            // Record outgoing message to tracer if present
-            if let Some((ref tracer, ref name)) = tracer_for_outgoing {
-                tracer.record_outgoing(name, &entry.destination, &entry.payload);
-            }
-            // Send to server if connected and destination is server
-            if let Destination::Server(_) = entry.destination
-                && let Some(ref conn) = server_conn_for_sync
-            {
-                let conn = conn.clone();
-                let payload = entry.payload.clone();
-                let cid = client_id_for_sync;
-                tokio::spawn(async move {
-                    if let Some(delay) = test_send_delay_for_object_updated(&payload) {
-                        tokio::time::sleep(delay).await;
-                    }
-
-                    if let Err(e) = conn.push_sync(payload, cid).await {
-                        tracing::warn!("Failed to push sync to server: {}", e);
-                    }
-                });
-            }
-        });
+        // Attach the tracer to the runtime so all outbox/inbox traffic is
+        // recorded under the participant name.
+        if let Some((ref tracer, ref name)) = context.sync_tracer {
+            runtime.set_sync_tracer(tracer.clone(), name.clone());
+        }
 
         // Persist schema to catalogue for server sync
         runtime
             .persist_schema()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
-        // Spawn binary stream listener if connected to server
-        let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
-            let (tx, rx) = oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
+        let has_server = !context.server_url.is_empty();
 
-        let stream_listener_task = if let Some(ref conn) = server_connection {
-            let conn_for_stream = conn.clone();
-            let client_id_str = client_id.to_string();
-            let runtime_for_stream = runtime.clone();
-            let stream_headers = conn.build_stream_headers();
-            let server_id_for_stream = server_id;
-            let mut initial_stream_ready_tx = initial_stream_ready_tx;
-            let tracer_for_incoming = context.sync_tracer.clone();
-
-            Some(tokio::spawn(async move {
-                let http_client = reqwest::Client::new();
-                loop {
-                    let url = conn_for_stream.stream_url(&client_id_str);
-
-                    tracing::info!("Connecting to server event stream: {}", url);
-
-                    match http_client
-                        .get(&url)
-                        .headers(stream_headers.clone())
-                        .send()
-                        .await
-                    {
-                        Ok(response) => {
-                            if !response.status().is_success() {
-                                tracing::warn!(
-                                    "Event stream connection failed: {}",
-                                    response.status()
-                                );
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                continue;
-                            }
-
-                            tracing::info!("Event stream connected");
-
-                            let mut body = response.bytes_stream();
-                            let mut buffer = BytesMut::new();
-
-                            while let Some(chunk_result) = body.next().await {
-                                match chunk_result {
-                                    Ok(chunk) => {
-                                        buffer.extend_from_slice(&chunk);
-
-                                        // Read complete frames from buffer
-                                        while buffer.len() >= 4 {
-                                            let len =
-                                                u32::from_be_bytes(buffer[..4].try_into().unwrap())
-                                                    as usize;
-                                            if buffer.len() < 4 + len {
-                                                break; // Incomplete frame
-                                            }
-                                            let json = &buffer[4..4 + len];
-
-                                            match serde_json::from_slice::<ServerEvent>(json) {
-                                                Ok(event) => {
-                                                    if matches!(
-                                                        &event,
-                                                        ServerEvent::Connected { .. }
-                                                    ) && let Some(tx) =
-                                                        initial_stream_ready_tx.take()
-                                                    {
-                                                        let catalogue_state_hash = match &event {
-                                                            ServerEvent::Connected {
-                                                                catalogue_state_hash,
-                                                                ..
-                                                            } => catalogue_state_hash.clone(),
-                                                            _ => None,
-                                                        };
-                                                        let _ = tx.send(catalogue_state_hash);
-                                                    }
-                                                    if let Err(e) = handle_server_event(
-                                                        event,
-                                                        &runtime_for_stream,
-                                                        server_id_for_stream,
-                                                        tracer_for_incoming.as_ref(),
-                                                    ) {
-                                                        tracing::warn!(
-                                                            "Error handling server event: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to parse server event: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-
-                                            // Advance buffer past this frame
-                                            let _ = buffer.split_to(4 + len);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Stream chunk error: {}", e);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Event stream connection error: {}", e);
-                        }
-                    }
-
-                    // Reconnect after delay
-                    tracing::info!("Event stream disconnected, reconnecting in 5s...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }))
-        } else {
-            None
-        };
-
-        let initial_server_catalogue_state_hash =
-            if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
-                tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
-                    .await
-                    .map_err(|_| {
-                        JazzError::Connection(
-                            "timed out waiting for server event stream to connect".to_string(),
-                        )
-                    })?
-                    .map_err(|_| {
-                        JazzError::Connection(
-                            "server event stream ended before sending Connected".to_string(),
-                        )
-                    })?
-            } else {
-                None
+        if has_server {
+            let ws_url = http_url_to_ws(&context.server_url, context.app_id)?;
+            let auth = WsAuthConfig {
+                jwt_token: context.jwt_token.clone(),
+                backend_secret: context.backend_secret.clone(),
+                admin_secret: context.admin_secret.clone(),
+                backend_session: None,
             };
+            runtime.connect(ws_url, auth);
 
-        // Register server with sync manager if connected.
-        //
-        // The initial Connected event carries the server's catalogue digest, so
-        // we wait for it before deciding whether catalogue replay can be skipped.
-        if server_connection.is_some()
-            && let Err(e) = runtime.add_server_with_catalogue_state_hash(
-                server_id,
-                initial_server_catalogue_state_hash.as_deref(),
-            )
-        {
-            tracing::warn!("Failed to register server with sync manager: {}", e);
+            // Register the transport's wire ClientId with the tracer so the
+            // server's outbox recorder can resolve `Destination::Client(cid)`
+            // to the human-readable participant name.
+            if let Some((ref tracer, ref name)) = context.sync_tracer
+                && let Some(wire_cid) = runtime.transport_client_id()
+            {
+                tracer.register_client(wire_cid, name);
+            }
+
+            // Wait until the WS handshake has completed at least once.
+            // `batched_tick` handles `TransportInbound::Connected` automatically —
+            // it calls `add_server_with_catalogue_state_hash` — so we only need
+            // to gate here until that first tick fires.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if runtime.transport_ever_connected() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                JazzError::Connection(
+                    "timed out waiting for WebSocket handshake to complete".to_string(),
+                )
+            })?;
         }
 
         Ok(Self {
             declared_schema,
             default_session,
             runtime,
-            server_connection,
+            has_server,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
-            stream_listener_task,
         })
     }
 
@@ -424,6 +269,7 @@ impl JazzClient {
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
+                    strict_transactions: false,
                 },
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
@@ -439,9 +285,25 @@ impl JazzClient {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        self.create_with_id(table, Option::<Uuid>::None, values)
+            .await
+    }
+
+    /// Create a new row in a table using a caller-supplied UUID.
+    pub async fn create_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values, _batch_id) = self
             .runtime
-            .insert(table, values, None)
+            .insert_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                None,
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -455,18 +317,112 @@ impl JazzClient {
         Ok((object_id, row_values))
     }
 
+    /// Create a new row and wait until it reaches the requested durability tier.
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
+            .await
+    }
+
+    /// Create a new row with a caller-supplied UUID and wait for durability.
+    pub async fn create_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .runtime
+            .insert_persisted_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                None,
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
+    /// Create or update a row using a caller-supplied UUID.
+    pub async fn upsert(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+    ) -> Result<()> {
+        self.runtime
+            .upsert_with_id(table, ObjectId::from_uuid(object_id), values, None)
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Create or update a row and wait until it reaches the requested durability tier.
+    pub async fn upsert_persisted(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .runtime
+            .upsert_persisted_with_id(table, ObjectId::from_uuid(object_id), values, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "upsert row", tier).await
+    }
+
     /// Update a row.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.runtime
             .update(object_id, updates, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Update a row and wait until it reaches the requested durability tier.
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .runtime
+            .update_persisted(object_id, updates, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
     }
 
     /// Delete a row.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.runtime
             .delete(object_id, None)
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    /// Delete a row and wait until it reaches the requested durability tier.
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .runtime
+            .delete_persisted(object_id, None, tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     /// Unsubscribe from a subscription.
@@ -487,7 +443,7 @@ impl JazzClient {
 
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
-        self.server_connection.is_some()
+        self.has_server && self.runtime.transport_ever_connected()
     }
 
     /// Create a session-scoped client for backend operations.
@@ -499,11 +455,10 @@ impl JazzClient {
     }
 
     /// Shutdown the client and release resources.
-    pub async fn shutdown(mut self) -> Result<()> {
-        // Abort stream listener first (it holds TokioRuntime clone)
-        if let Some(handle) = self.stream_listener_task.take() {
-            handle.abort();
-            let _ = handle.await;
+    pub async fn shutdown(self) -> Result<()> {
+        // Disconnect from server (drops the TransportHandle; manager task exits cleanly)
+        if self.has_server {
+            self.runtime.disconnect();
         }
 
         // Flush pending operations
@@ -566,10 +521,25 @@ impl<'a> SessionClient<'a> {
         table: &str,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values) = self
+        self.create_with_id(table, Option::<Uuid>::None, values)
+            .await
+    }
+
+    pub async fn create_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let (object_id, row_values, _batch_id) = self
             .client
             .runtime
-            .insert(table, values, Some(&self.session))
+            .insert_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                Some(&self.session),
+            )
             .map_err(|e| JazzError::Write(e.to_string()))?;
         let row_values = match self.client.runtime.current_schema() {
             Ok(schema) => align_row_values_to_declared_schema(
@@ -583,18 +553,122 @@ impl<'a> SessionClient<'a> {
         Ok((object_id, row_values))
     }
 
+    pub async fn create_persisted(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        self.create_persisted_with_id(table, Option::<Uuid>::None, values, tier)
+            .await
+    }
+
+    pub async fn create_persisted_with_id(
+        &self,
+        table: &str,
+        object_id: impl Into<Option<Uuid>>,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<(ObjectId, Vec<Value>)> {
+        let ((object_id, row_values), receiver) = self
+            .client
+            .runtime
+            .insert_persisted_with_id(
+                table,
+                values,
+                object_id.into().map(ObjectId::from_uuid),
+                Some(&self.session),
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        let row_values = match self.client.runtime.current_schema() {
+            Ok(schema) => align_row_values_to_declared_schema(
+                &self.client.declared_schema,
+                &schema,
+                &TableName::new(table),
+                row_values,
+            ),
+            Err(_) => row_values,
+        };
+        wait_for_persisted_write(receiver, "create row", tier).await?;
+        Ok((object_id, row_values))
+    }
+
+    pub async fn upsert(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+    ) -> Result<()> {
+        self.client
+            .runtime
+            .upsert_with_id(
+                table,
+                ObjectId::from_uuid(object_id),
+                values,
+                Some(&self.session),
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn upsert_persisted(
+        &self,
+        table: &str,
+        object_id: Uuid,
+        values: HashMap<String, Value>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .upsert_persisted_with_id(
+                table,
+                ObjectId::from_uuid(object_id),
+                values,
+                Some(&self.session),
+                tier,
+            )
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "upsert row", tier).await
+    }
+
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
             .runtime
             .update(object_id, updates, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn update_persisted(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .update_persisted(object_id, updates, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "update row", tier).await
     }
 
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
             .delete(object_id, Some(&self.session))
+            .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
+    }
+
+    pub async fn delete_persisted(&self, object_id: ObjectId, tier: DurabilityTier) -> Result<()> {
+        let receiver = self
+            .client
+            .runtime
+            .delete_persisted(object_id, Some(&self.session), tier)
+            .map_err(|e| JazzError::Write(e.to_string()))?;
+        wait_for_persisted_write(receiver, "delete row", tier).await
     }
 
     pub async fn query(
@@ -612,6 +686,7 @@ impl<'a> SessionClient<'a> {
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
+                    strict_transactions: false,
                 },
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
@@ -637,6 +712,27 @@ fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
         && query.recursive.is_none()
         && query.select_columns.is_none()
         && query.result_element_index.is_none()
+}
+
+async fn wait_for_persisted_write(
+    receiver: futures::channel::oneshot::Receiver<crate::runtime_core::PersistedWriteAck>,
+    operation: &str,
+    tier: DurabilityTier,
+) -> Result<()> {
+    receiver
+        .await
+        .map_err(|_| {
+            JazzError::Sync(format!(
+                "{operation} was cancelled before reaching {tier:?} durability"
+            ))
+        })?
+        .map_err(|rejection| {
+            JazzError::Sync(format!(
+                "{operation} was rejected before reaching {tier:?} durability ({}): {}",
+                rejection.code, rejection.reason
+            ))
+        })?;
+    Ok(())
 }
 
 fn align_row_values_to_declared_schema(
@@ -685,9 +781,8 @@ mod tests {
     use super::*;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
-    use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+    use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
-    use crate::storage::CatalogueManifestOp;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
@@ -757,6 +852,7 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
+    #[cfg(feature = "rocksdb")]
     fn seed_rehydrated_client_storage(
         data_dir: &std::path::Path,
         app_id: AppId,
@@ -782,15 +878,14 @@ mod tests {
             "main",
         )
         .expect("seed schema manager");
-        let mut runtime =
-            RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
-        let learned_schema_object_id = runtime.persist_schema();
-        let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
+        let mut runtime = RuntimeCore::new(schema_manager, storage, NoopScheduler);
+        runtime.persist_schema();
+        runtime.publish_schema(bundled_schema.clone());
         let lens = runtime
             .schema_manager()
             .generate_lens(&bundled_schema, &learned_schema);
         assert!(!lens.is_draft(), "seed lens should be publishable");
-        let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
+        runtime.publish_lens(&lens).expect("persist learned lens");
 
         if publish_permissions {
             runtime
@@ -805,33 +900,14 @@ mod tests {
                 .expect("seed permissions bundle");
         }
 
-        let mut storage = runtime.into_storage();
-        storage
-            .append_catalogue_manifest_ops(
-                app_id.as_object_id(),
-                &[
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: learned_schema_object_id,
-                        schema_hash: learned_hash,
-                    },
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: bundled_schema_object_id,
-                        schema_hash: bundled_hash,
-                    },
-                    CatalogueManifestOp::LensSeen {
-                        object_id: lens_object_id,
-                        source_hash: bundled_hash,
-                        target_hash: learned_hash,
-                    },
-                ],
-            )
-            .expect("append seeded client catalogue manifest ops");
+        let storage = runtime.into_storage();
         storage.flush();
         storage.close().expect("close seeded client storage");
 
         (bundled_hash, learned_hash)
     }
 
+    #[cfg(feature = "rocksdb")]
     fn expected_client_catalogue_hash(context: &AppContext) -> String {
         #[cfg(feature = "rocksdb")]
         let storage = {
@@ -843,6 +919,79 @@ mod tests {
         let catalogue_hash = schema_manager.catalogue_state_hash();
         storage.close().expect("close seeded client storage");
         catalogue_hash
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn seeded_client_storage_persists_learned_schema_and_lens() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-seeded-storage");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+
+        let db_path = data_dir.path().join("jazz.rocksdb");
+        let storage =
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        let entries = storage
+            .scan_catalogue_entries()
+            .expect("scan seeded catalogue entries");
+        let learned_object_id = learned_hash.to_object_id();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.object_id == learned_object_id),
+            "seeded storage should persist the learned schema object"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.object_type()
+                == Some(crate::metadata::ObjectType::CatalogueLens.as_str())),
+            "seeded storage should persist at least one learned lens"
+        );
+
+        storage.close().expect("close seeded client storage");
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn boxed_client_storage_rehydrates_learned_schema_from_catalogue() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-boxed-rehydrate");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let concrete_storage = {
+            let db_path = data_dir.path().join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
+                .expect("open seeded client storage concretely")
+        };
+        let concrete_manager = build_client_schema_manager(&concrete_storage, &context)
+            .expect("rehydrate schema manager from concrete storage");
+        assert!(
+            concrete_manager
+                .known_schema_hashes()
+                .contains(&learned_hash),
+            "concrete storage rehydrate should learn the newer schema"
+        );
+        concrete_storage
+            .close()
+            .expect("close seeded client storage");
+
+        let boxed_storage = open_persistent_storage(data_dir.path())
+            .await
+            .expect("open boxed client storage");
+        let boxed_manager = build_client_schema_manager(boxed_storage.as_ref(), &context)
+            .expect("rehydrate schema manager from boxed storage");
+        assert!(
+            boxed_manager.known_schema_hashes().contains(&learned_hash),
+            "boxed client storage rehydrate should learn the newer schema"
+        );
+        boxed_storage.close().expect("close boxed client storage");
     }
 
     #[test]
@@ -930,6 +1079,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -967,6 +1117,7 @@ mod tests {
         client.shutdown().await.expect("shutdown client");
     }
 
+    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -1052,125 +1203,6 @@ mod tests {
     }
 }
 
-fn parse_delay_ms(raw: &str) -> Option<Duration> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((min_raw, max_raw)) = trimmed.split_once('-') {
-        let min = min_raw.trim().parse::<u64>().ok()?;
-        let max = max_raw.trim().parse::<u64>().ok()?;
-        if min > max {
-            return None;
-        }
-        return Some(Duration::from_millis(min + ((max - min) / 2)));
-    }
-
-    trimmed.parse::<u64>().ok().map(Duration::from_millis)
-}
-
-fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration> {
-    if !matches!(payload, SyncPayload::ObjectUpdated { .. }) {
-        return None;
-    }
-
-    let delay = parse_delay_ms(&std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_MS").ok()?)?;
-    let every_n = std::env::var("JAZZ_TEST_DELAY_SEND_OBJECT_UPDATED_EVERY")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(2);
-
-    static OBJECT_UPDATED_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
-    let seq = OBJECT_UPDATED_SEND_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if !seq.is_multiple_of(every_n) {
-        return None;
-    }
-
-    Some(delay)
-}
-
-/// Handle incoming server events.
-fn handle_server_event(
-    event: ServerEvent,
-    runtime: &ClientRuntime,
-    server_id: ServerId,
-    sync_tracer: Option<&(crate::sync_tracer::SyncTracer, String)>,
-) -> Result<()> {
-    fn short_hash(hash: &impl ToString) -> String {
-        let hash = hash.to_string();
-        hash.chars().take(12).collect()
-    }
-
-    match event {
-        ServerEvent::Connected {
-            connection_id,
-            client_id,
-            next_sync_seq,
-            ..
-        } => {
-            tracing::info!(
-                "Stream connected with id: {:?}, client_id: {}",
-                connection_id,
-                client_id
-            );
-            if let Some(next_sequence) = next_sync_seq {
-                runtime
-                    .set_server_next_sequence(server_id, next_sequence)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            }
-            Ok(())
-        }
-        ServerEvent::SyncUpdate { seq, payload } => {
-            if let SyncPayload::SchemaWarning(warning) = payload.as_ref() {
-                tracing::warn!(
-                    query_id = warning.query_id.0,
-                    table = warning.table_name,
-                    row_count = warning.row_count,
-                    from_hash = %warning.from_hash,
-                    to_hash = %warning.to_hash,
-                    "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools@alpha migrations create {} {}`",
-                    warning.row_count,
-                    warning.table_name,
-                    short_hash(&warning.from_hash),
-                    short_hash(&warning.to_hash),
-                );
-            }
-            // Record incoming message to tracer if present
-            if let Some((tracer, name)) = sync_tracer {
-                tracer.record_incoming(&Source::Server(server_id), name, &payload);
-            }
-            let entry = InboxEntry {
-                source: Source::Server(server_id),
-                payload: *payload,
-            };
-            if let Some(sequence) = seq {
-                runtime
-                    .push_sync_inbox_with_sequence(entry, sequence)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            } else {
-                runtime
-                    .push_sync_inbox(entry)
-                    .map_err(|e| JazzError::Sync(e.to_string()))?;
-            }
-            Ok(())
-        }
-        ServerEvent::Subscribed { query_id } => {
-            tracing::debug!("Server acknowledged subscription: {:?}", query_id);
-            Ok(())
-        }
-        ServerEvent::Error { message, code } => {
-            tracing::error!("Server error {:?}: {}", code, message);
-            Ok(())
-        }
-        ServerEvent::Heartbeat => {
-            tracing::trace!("Heartbeat received");
-            Ok(())
-        }
-    }
-}
-
 fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId> {
     std::fs::create_dir_all(&context.data_dir)?;
 
@@ -1192,6 +1224,29 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     };
 
     Ok(client_id)
+}
+
+/// Convert an HTTP(S) server URL to the app-scoped WebSocket endpoint URL.
+///
+/// `http://host`, `my-app` → `ws://host/apps/my-app/ws`
+/// `https://host` → `wss://host/apps/my-app/ws`
+fn http_url_to_ws(server_url: &str, app_id: AppId) -> Result<String> {
+    let trimmed = server_url.trim().trim_end_matches('/');
+    let ws_suffix = format!("/apps/{}/ws", app_id);
+    let (ws_scheme, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        ("wss", r)
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        ("ws", r)
+    } else if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        // Already a WS URL — replace any bare trailing /ws with the app-scoped path.
+        let without_ws_suffix = trimmed.strip_suffix("/ws").unwrap_or(trimmed);
+        return Ok(format!("{without_ws_suffix}{ws_suffix}"));
+    } else {
+        return Err(JazzError::Connection(format!(
+            "invalid server URL '{server_url}': expected http:// or https://"
+        )));
+    };
+    Ok(format!("{ws_scheme}://{rest}{ws_suffix}"))
 }
 
 async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {

@@ -9,7 +9,8 @@ use super::*;
 // ============================================================================
 
 /// Content-addressed hash of a schema's structural elements.
-/// Uses BLAKE3 over canonicalized (sorted) schema representation.
+/// Uses BLAKE3 over deterministic table ordering while preserving each table's
+/// declared column order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SchemaHash(pub [u8; 32]);
 
@@ -64,7 +65,7 @@ impl SchemaHash {
             hasher.update(table_name.as_str().as_bytes());
             hasher.update(&[0]); // delimiter
 
-            // Hash row descriptor (columns sorted by name)
+            // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
         }
 
@@ -97,13 +98,9 @@ impl<'de> Deserialize<'de> for SchemaHash {
     }
 }
 
-/// Hash a RowDescriptor into a hasher, sorting columns by name for order-independence.
+/// Hash a RowDescriptor into a hasher, preserving declared column order.
 pub(crate) fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
-    // Sort columns by name
-    let mut columns: Vec<_> = descriptor.columns.iter().collect();
-    columns.sort_by_key(|c| c.name.as_str());
-
-    for col in columns {
+    for col in &descriptor.columns {
         hash_column_descriptor(hasher, col);
     }
 }
@@ -132,6 +129,17 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     if let Some(default) = &col.default {
         hasher.update(&[1]);
         hash_value(hasher, default);
+    } else {
+        hasher.update(&[0]);
+    }
+
+    if let Some(strategy) = col.merge_strategy {
+        hasher.update(&[1]);
+        match strategy {
+            ColumnMergeStrategy::Counter => {
+                hasher.update(&[1]);
+            }
+        }
     } else {
         hasher.update(&[0]);
     }
@@ -167,6 +175,10 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         Value::Uuid(v) => {
             hasher.update(&[6]);
             hasher.update(v.uuid().as_bytes());
+        }
+        Value::BatchId(v) => {
+            hasher.update(&[12]);
+            hasher.update(v);
         }
         Value::Bytea(v) => {
             hasher.update(&[11]);
@@ -228,6 +240,9 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         }
         ColumnType::Uuid => {
             hasher.update(&[6]);
+        }
+        ColumnType::BatchId => {
+            hasher.update(&[12]);
         }
         ColumnType::Bytea => {
             hasher.update(&[10]);

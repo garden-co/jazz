@@ -14,11 +14,50 @@ app-root/
 
 - `schema.ts` is the root structural schema.
 - `permissions.ts` is optional and must be separate from `schema.ts`.
+- Omitting `permissions.ts` means the project has no compiled policy bundle by
+  default. Local runtimes that boot with structural schema only stay permissive
+  locally until they learn a bundle, while runtimes with a loaded bundle enforce
+  explicit row-policy grants only.
 - `migrations/*.ts` contains reviewed migration modules.
+
+Column definitions may also carry schema-level merge metadata. The current DSL shape is:
+
+```typescript
+import { schema as s } from "jazz-tools";
+
+export const schema = s.schema({
+  counters: s.table({
+    name: s.string(),
+    value: s.int().merge("counter"),
+  }),
+});
+```
+
+Current merge-strategy rules:
+
+- merge strategy is declared per column in `schema.ts`
+- omitted means implicit `lww`
+- `counter` is currently valid only on non-nullable integer columns
+- changing a column's merge strategy is allowed across schema versions
+- the new strategy applies only to consumers of the new schema; older schema consumers keep using
+  their own version's rule when resolving conflicting history
 
 ## `jazz-tools validate`
 
-`jazz-tools validate` compiles the schema into the runtime `wasmSchema` form to make sure it is valid, and checks permissions comply with the schema.
+`jazz-tools validate` compiles the schema into the runtime `wasmSchema` form to
+make sure it is valid, checks permissions comply with the schema, and emits
+explicit-policy diagnostics.
+
+Current validation behavior:
+
+- missing `permissions.ts` is treated as "zero explicit row grants" for
+  diagnostics
+- Jazz warns once per table x operation when explicit `read`, `insert`,
+  `update`, or `delete` policies are missing
+- missing explicit `delete` still warns even though enforcing runtimes may fall
+  back to `update.using` at runtime
+- malformed permissions, missing exports, and unknown tables still fail
+  validation
 
 ## Migrations
 
@@ -27,9 +66,13 @@ Migrations are a separate workflow from validation.
 The current mental model is:
 
 - schemas are stored on the server and identified by hash
-- `jazz-tools migrations create <fromHash> <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
+- `jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
 - the developer reviews and edits that file
-- `jazz-tools migrations push <fromHash> <toHash>` publishes the reviewed migration edge back to the server
+- `jazz-tools migrations push <appId> <fromHash> <toHash>` publishes the reviewed migration edge back to the server
+
+Merge-strategy-only schema changes count as structural schema changes for hashing and migration
+generation, but they do not require row transforms because they reinterpret future conflict
+resolution rather than rewriting stored row payloads.
 
 Generated migrations use `defineMigration(...)` and carry:
 
@@ -60,10 +103,12 @@ export default s.defineMigration({
 
 ## Key Files
 
-| File                                              | Purpose                                                               |
-| ------------------------------------------------- | --------------------------------------------------------------------- |
-| `packages/jazz-tools/src/cli.ts`                  | `validate`, `migrations`, `permissions`, and `schema export` commands |
-| `packages/jazz-tools/src/schema-loader.ts`        | Loads `schema.ts` and `permissions.ts`, then compiles to `wasmSchema` |
-| `packages/jazz-tools/src/migrations.ts`           | Typed migration DSL and forward-lens construction                     |
-| `packages/jazz-tools/src/runtime/schema-fetch.ts` | Fetch/publish helpers for stored schemas and migrations               |
-| `packages/jazz-tools/bin/jazz-tools.js`           | Top-level CLI wrapper and `build` rejection                           |
+| File                                              | Purpose                                                                |
+| ------------------------------------------------- | ---------------------------------------------------------------------- |
+| `packages/jazz-tools/src/cli.ts`                  | `validate`, `migrations`, `permissions`, and `schema export` commands  |
+| `packages/jazz-tools/src/schema-loader.ts`        | Loads `schema.ts` and `permissions.ts`, then compiles to `wasmSchema`  |
+| `packages/jazz-tools/src/schema-permissions.ts`   | Permission compilation, schema merge helpers, and validate diagnostics |
+| `packages/jazz-tools/src/drivers/schema-wire.ts`  | Runtime schema envelope with the loaded-policy-bundle bit              |
+| `packages/jazz-tools/src/migrations.ts`           | Typed migration DSL and forward-lens construction                      |
+| `packages/jazz-tools/src/runtime/schema-fetch.ts` | Fetch/publish helpers for stored schemas and migrations                |
+| `packages/jazz-tools/bin/jazz-tools.js`           | Top-level CLI wrapper and `build` rejection                            |

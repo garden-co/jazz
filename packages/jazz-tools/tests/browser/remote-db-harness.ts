@@ -10,8 +10,7 @@ export interface RemoteBrowserDbCreateInput {
   schemaJson: string;
   serverUrl?: string;
   adminSecret?: string;
-  localAuthMode?: "anonymous" | "demo";
-  localAuthToken?: string;
+  localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
 }
 
@@ -19,7 +18,7 @@ export interface RemoteBrowserDbWaitForTitleInput {
   id: string;
   title: string;
   timeoutMs: number;
-  tier?: "worker" | "edge";
+  tier?: "local" | "edge";
 }
 
 interface RemoteBrowserDbState {
@@ -94,8 +93,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    localAuthMode: input.localAuthMode,
-    localAuthToken: input.localAuthToken,
+    ...(input.localFirstSecret ? { auth: { localFirstSecret: input.localFirstSecret } } : {}),
     adminSecret: input.adminSecret,
     logLevel: input.logLevel,
   });

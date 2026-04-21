@@ -35,13 +35,15 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
+use super::policy::PolicyExpr;
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, Tuple, TupleDelta,
+    TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,26 @@ impl fmt::Display for QueryCompileError {
 }
 
 impl std::error::Error for QueryCompileError {}
+
+fn resolve_branch_schema_hash(schema_context: &SchemaContext, branch: &str) -> Option<SchemaHash> {
+    let branch_name = BranchName::new(branch);
+    let composed = ComposedBranchName::parse(&branch_name)?;
+    schema_context
+        .all_live_hashes()
+        .into_iter()
+        .find(|hash| hash.short() == composed.schema_hash.short())
+}
+
+fn effective_select_policy(
+    table_schema: &crate::query_manager::types::TableSchema,
+    row_policy_mode: RowPolicyMode,
+) -> Option<PolicyExpr> {
+    table_schema.policies.select_policy().cloned().or_else(|| {
+        row_policy_mode
+            .denies_missing_explicit_policy()
+            .then_some(PolicyExpr::False)
+    })
+}
 
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
@@ -280,12 +302,8 @@ fn resolve_magic_column_requests(
             let element_index = (tuple_descriptor.element_count() > 0).then_some(0);
             let table_name = tuple_descriptor
                 .element(0)
-                .and_then(|element| scope_table_map.get(&element.table).copied())
-                .or_else(|| {
-                    tuple_descriptor
-                        .element(0)
-                        .map(|element| TableName::new(&element.table))
-                });
+                .and_then(|element| scope_table_map.get(element.table.as_str()).copied())
+                .or_else(|| tuple_descriptor.element(0).map(|element| element.table));
             element_index.zip(table_name)
         };
 
@@ -309,7 +327,7 @@ fn project_columns_for_tuple_descriptor(tuple_descriptor: &TupleDescriptor) -> V
     let single_unscoped = tuple_descriptor.element_count() == 1
         && tuple_descriptor
             .element(0)
-            .is_some_and(|element| element.table.is_empty());
+            .is_some_and(|element| element.table.as_str().is_empty());
 
     tuple_descriptor
         .iter()
@@ -401,6 +419,52 @@ impl QueryGraph {
         self.add_node(node)
     }
 
+    fn absorb_compiled_subgraph(&mut self, other: Self) -> Option<NodeId> {
+        let offset = self.nodes.len() as u64;
+        let remap = |id: NodeId| NodeId(id.0 + offset);
+
+        for compact in other.nodes {
+            self.nodes.push(CompactNode {
+                node: compact.node,
+                inputs: compact.inputs.into_iter().map(remap).collect(),
+                outputs: compact.outputs.into_iter().map(remap).collect(),
+            });
+        }
+        self.dirty_bitmap.extend(other.dirty_bitmap);
+        self.index_scan_nodes.extend(
+            other
+                .index_scan_nodes
+                .into_iter()
+                .map(|(id, table, column)| (remap(id), table, column)),
+        );
+        self.array_subquery_tables.extend(
+            other
+                .array_subquery_tables
+                .into_iter()
+                .map(|(id, table)| (remap(id), table)),
+        );
+        self.policy_filter_tables.extend(
+            other
+                .policy_filter_tables
+                .into_iter()
+                .map(|(id, table)| (remap(id), table)),
+        );
+        self.magic_column_tables.extend(
+            other
+                .magic_column_tables
+                .into_iter()
+                .map(|(id, table)| (remap(id), table)),
+        );
+        self.recursive_relation_tables.extend(
+            other
+                .recursive_relation_tables
+                .into_iter()
+                .map(|(id, table)| (remap(id), table)),
+        );
+
+        Some(remap(other.output_node))
+    }
+
     /// Get a reference to a node by ID.
     fn get_node(&self, id: NodeId) -> Option<&GraphNode> {
         self.nodes.get(id.0 as usize).map(|c| &c.node)
@@ -465,6 +529,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
         .ok()
     }
@@ -481,6 +546,7 @@ impl QueryGraph {
             schema,
             None,
             &schema_context,
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -502,6 +568,12 @@ impl QueryGraph {
             branches,
             session,
             RelationCompileFeatures::default(),
+            if crate::query_manager::manager::QueryManager::schema_has_any_explicit_policies(schema)
+            {
+                RowPolicyMode::Enforcing
+            } else {
+                RowPolicyMode::PermissiveLocal
+            },
         )
     }
 
@@ -511,23 +583,18 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
-        let default_branches = vec!["main".to_string()];
-        let branches: &[String] = if branches.is_empty() {
-            &default_branches
-        } else {
-            branches
-        };
-        let plan = lower_relation_to_execution_plan(
-            relation,
-            branches,
-            features.include_deleted,
-            features.array_subqueries,
-            features.select_columns,
-        )?;
-        validate_execution_plan(&plan, schema).ok()?;
         let schema_context = Self::default_schema_context(schema);
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
+        Self::compile_relation_ir_with_schema_context_and_features(
+            relation,
+            schema,
+            branches,
+            session,
+            &schema_context,
+            features,
+            row_policy_mode,
+        )
     }
 
     /// Compile relation IR directly into a graph with schema context.
@@ -545,6 +612,7 @@ impl QueryGraph {
             session,
             schema_context,
             RelationCompileFeatures::default(),
+            RowPolicyMode::PermissiveLocal,
         )
     }
 
@@ -555,7 +623,18 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
+        if let RelExpr::Union { inputs } = relation {
+            return Self::compile_relation_ir_union_with_schema_context_and_features(
+                inputs,
+                schema,
+                branches,
+                session,
+                schema_context,
+                row_policy_mode,
+            );
+        }
         let plan = lower_relation_to_execution_plan(
             relation,
             branches,
@@ -564,7 +643,79 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
+    }
+
+    fn compile_relation_ir_union_with_schema_context_and_features(
+        inputs: &[RelExpr],
+        schema: &Schema,
+        branches: &[String],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
+    ) -> Option<Self> {
+        let mut compiled_inputs = inputs
+            .iter()
+            .map(|input| {
+                Self::compile_relation_ir_with_schema_context_and_features(
+                    input,
+                    schema,
+                    branches,
+                    session.clone(),
+                    schema_context,
+                    RelationCompileFeatures::default(),
+                    row_policy_mode,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let first_graph = compiled_inputs.first()?;
+        let first_output = match first_graph
+            .nodes
+            .get(first_graph.output_node.0 as usize)
+            .map(|ctx| &ctx.node)
+        {
+            Some(GraphNode::Output(node)) => node.output_tuple_descriptor().clone(),
+            _ => return None,
+        };
+
+        let mut graph = QueryGraph::new(first_graph.table, first_output.combined_descriptor());
+        let mut branch_outputs = Vec::with_capacity(compiled_inputs.len());
+        for compiled in compiled_inputs.drain(..) {
+            let output = graph.absorb_compiled_subgraph(compiled)?;
+            let output_tuple_descriptor =
+                match graph.nodes.get(output.0 as usize).map(|ctx| &ctx.node) {
+                    Some(GraphNode::Output(node)) => node.output_tuple_descriptor().clone(),
+                    _ => return None,
+                };
+            if !descriptors_compatible_by_shape(
+                &first_output.combined_descriptor(),
+                &output_tuple_descriptor.combined_descriptor(),
+            ) {
+                return None;
+            }
+            branch_outputs.push(output);
+        }
+
+        let union_node = UnionNode::with_tuple_descriptor(first_output.clone());
+        let union_id = graph.add_node(GraphNode::Union(union_node));
+        for branch_output in branch_outputs {
+            graph.add_edge(union_id, branch_output);
+        }
+
+        graph.combined_descriptor = first_output.combined_descriptor();
+        graph.table_descriptors = vec![graph.combined_descriptor.clone()];
+        let output_node = OutputNode::with_tuple_descriptor(first_output, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, union_id);
+        graph.output_node = output_id;
+
+        Some(graph)
     }
 
     fn compile_execution_plan_with_schema_context(
@@ -572,6 +723,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
         // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
@@ -598,19 +750,20 @@ impl QueryGraph {
             plan.branches.clone()
         };
 
-        if !plan.joins.is_empty() {
+        if plan.seed_relation.is_some() || !plan.joins.is_empty() {
             return Self::compile_join_plan(
                 plan,
                 schema,
                 &branches,
                 session.clone(),
                 schema_context,
+                row_policy_mode,
             );
         }
 
         let table_schema = schema.get(&plan.table)?;
         let descriptor = table_schema.columns.clone();
-        let select_policy = table_schema.policies.select.using.clone();
+        let select_policy = effective_select_policy(table_schema, row_policy_mode);
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
@@ -622,7 +775,10 @@ impl QueryGraph {
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map.get(branch).copied();
+            let branch_schema_hash = branch_schema_map
+                .get(branch)
+                .copied()
+                .or_else(|| resolve_branch_schema_hash(schema_context, branch));
             let Some(scan_table_name) =
                 translate_scan_table_name(schema_context, table_str, branch_schema_hash)
             else {
@@ -730,13 +886,14 @@ impl QueryGraph {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
+            let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                 current_descriptor.clone(),
                 policy,
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
                 branch_for_policy,
+                row_policy_mode,
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -803,7 +960,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor = Some(current_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -812,6 +969,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -873,7 +1031,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     current_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -882,6 +1040,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -963,7 +1122,14 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
-        Self::try_compile_with_schema_context(query, schema, session, schema_context).ok()
+        Self::try_compile_with_schema_context(
+            query,
+            schema,
+            session,
+            schema_context,
+            RowPolicyMode::PermissiveLocal,
+        )
+        .ok()
     }
 
     /// Compile a query with schema context for multi-schema queries.
@@ -974,6 +1140,7 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Result<Self, QueryCompileError> {
         let branches: Vec<String> = if query.branches.is_empty() {
             schema_context
@@ -1001,13 +1168,18 @@ impl QueryGraph {
 
         validate_execution_plan(&plan, schema)?;
 
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
-            .ok_or_else(|| {
-                QueryCompileError::InvalidPlan(
-                    "unsupported relation_ir shape for schema-context query compilation"
-                        .to_string(),
-                )
-            })
+        Self::compile_execution_plan_with_schema_context(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -1312,6 +1484,7 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Option<Self> {
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
         for schema_hash in schema_context.all_live_hashes() {
@@ -1339,80 +1512,111 @@ impl QueryGraph {
         let mut table_descriptors = vec![base_descriptor.clone()];
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(plan.table.as_str().to_string());
-
-        // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
-        let mut base_scan_ids = Vec::new();
-        for branch in &join_branches {
-            let branch_schema_hash = branch_schema_map.get(*branch).copied();
-            let Some(base_scan_table) =
-                translate_scan_table_name(schema_context, plan.table.as_str(), branch_schema_hash)
-            else {
-                continue;
-            };
-            let id_column = ColumnName::new("_id");
-            let base_scan = IndexScanNode::new_with_branch(
-                base_scan_table,
-                id_column,
-                *branch,
-                ScanCondition::All,
-                base_descriptor.clone(),
-            );
-            let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
-            graph
-                .index_scan_nodes
-                .push((base_scan_id, base_scan_table, id_column));
-            base_scan_ids.push(base_scan_id);
-        }
-        let base_scan_output = if base_scan_ids.len() > 1 {
-            let union_node = UnionNode::new();
-            let union_id = graph.add_node(GraphNode::Union(union_node));
-            for scan_id in base_scan_ids {
-                graph.add_edge(union_id, scan_id);
-            }
-            union_id
-        } else {
-            *base_scan_ids.first()?
-        };
-
-        let base_tuple_desc = TupleDescriptor::single_with_materialization(
-            plan.base_scope.as_str(),
-            base_descriptor.clone(),
-            true,
-        );
-        let base_mat = MaterializeNode::new_all(base_tuple_desc);
-        let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
-        graph.add_edge(base_mat_id, base_scan_output);
-
-        // Track current left side descriptor (accumulates columns from joins)
-        let mut left_id = base_mat_id;
-        if let (Some(session), Some(policy)) =
-            (&session, base_table_schema.policies.select.using.clone())
-        {
-            let branch_for_policy = branches
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "main".to_string());
-            let policy_node = PolicyFilterNode::new_with_branch(
-                base_descriptor.clone(),
-                policy,
+        let (mut left_id, mut left_descriptor) = if let Some(seed_relation) = &plan.seed_relation {
+            let seed_graph = Self::compile_relation_ir_with_schema_context_and_features(
+                seed_relation,
+                schema,
+                branches,
                 session.clone(),
-                schema.clone(),
-                plan.table.as_str(),
-                branch_for_policy,
-            );
-            let inherits_tables: Vec<TableName> = policy_node
-                .inherits_tables()
-                .iter()
-                .map(TableName::new)
-                .collect();
-            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
-            graph.add_edge(policy_id, left_id);
-            for inherits_table in inherits_tables {
-                graph.policy_filter_tables.push((policy_id, inherits_table));
+                schema_context,
+                RelationCompileFeatures::default(),
+                row_policy_mode,
+            )?;
+            let seed_output_id = graph.absorb_compiled_subgraph(seed_graph)?;
+            let seed_output_descriptor = match graph
+                .nodes
+                .get(seed_output_id.0 as usize)
+                .map(|ctx| &ctx.node)
+            {
+                Some(GraphNode::Output(node)) => {
+                    node.output_tuple_descriptor().combined_descriptor()
+                }
+                _ => return None,
+            };
+            if !descriptors_compatible_by_shape(&base_descriptor, &seed_output_descriptor) {
+                return None;
             }
-            left_id = policy_id;
-        }
-        let mut left_descriptor = base_descriptor.clone();
+            table_descriptors[0] = seed_output_descriptor.clone();
+            (seed_output_id, seed_output_descriptor)
+        } else {
+            // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
+            let mut base_scan_ids = Vec::new();
+            for branch in &join_branches {
+                let branch_schema_hash = branch_schema_map.get(*branch).copied();
+                let Some(base_scan_table) = translate_scan_table_name(
+                    schema_context,
+                    plan.table.as_str(),
+                    branch_schema_hash,
+                ) else {
+                    continue;
+                };
+                let id_column = ColumnName::new("_id");
+                let base_scan = IndexScanNode::new_with_branch(
+                    base_scan_table,
+                    id_column,
+                    *branch,
+                    ScanCondition::All,
+                    base_descriptor.clone(),
+                );
+                let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
+                graph
+                    .index_scan_nodes
+                    .push((base_scan_id, base_scan_table, id_column));
+                base_scan_ids.push(base_scan_id);
+            }
+            let base_scan_output = if base_scan_ids.len() > 1 {
+                let union_node = UnionNode::new();
+                let union_id = graph.add_node(GraphNode::Union(union_node));
+                for scan_id in base_scan_ids {
+                    graph.add_edge(union_id, scan_id);
+                }
+                union_id
+            } else {
+                *base_scan_ids.first()?
+            };
+
+            let base_tuple_desc = TupleDescriptor::single_with_materialization(
+                plan.base_scope.as_str(),
+                base_descriptor.clone(),
+                true,
+            );
+            let base_mat = MaterializeNode::new_all(base_tuple_desc);
+            let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
+            graph.add_edge(base_mat_id, base_scan_output);
+
+            // Track current left side descriptor (accumulates columns from joins)
+            let mut left_id = base_mat_id;
+            if let (Some(session), Some(policy)) = (
+                &session,
+                effective_select_policy(base_table_schema, row_policy_mode),
+            ) {
+                let branch_for_policy = branches
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
+                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
+                    base_descriptor.clone(),
+                    policy,
+                    session.clone(),
+                    schema.clone(),
+                    plan.table.as_str(),
+                    branch_for_policy,
+                    row_policy_mode,
+                );
+                let inherits_tables: Vec<TableName> = policy_node
+                    .inherits_tables()
+                    .iter()
+                    .map(TableName::new)
+                    .collect();
+                let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+                graph.add_edge(policy_id, left_id);
+                for inherits_table in inherits_tables {
+                    graph.policy_filter_tables.push((policy_id, inherits_table));
+                }
+                left_id = policy_id;
+            }
+            (left_id, base_descriptor.clone())
+        };
 
         if let Some(recursive_spec) = &plan.recursive
             && let Some((node, new_descriptor, step_table)) = graph.compile_recursive_relation(
@@ -1490,20 +1694,22 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_output);
             let mut right_input_id = right_mat_id;
-            if let (Some(session), Some(policy)) =
-                (&session, right_table_schema.policies.select.using.clone())
-            {
+            if let (Some(session), Some(policy)) = (
+                &session,
+                effective_select_policy(right_table_schema, row_policy_mode),
+            ) {
                 let branch_for_policy = branches
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "main".to_string());
-                let policy_node = PolicyFilterNode::new_with_branch(
+                let policy_node = PolicyFilterNode::new_with_branch_and_policy_mode(
                     right_descriptor.clone(),
                     policy,
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
                     branch_for_policy,
+                    row_policy_mode,
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -1607,7 +1813,7 @@ impl QueryGraph {
             );
             if !requests.is_empty() {
                 restore_tuple_descriptor_after_magic = Some(output_tuple_descriptor.clone());
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1616,6 +1822,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1674,7 +1881,7 @@ impl QueryGraph {
                 &project_magic_refs,
             );
             if !requests.is_empty() {
-                let magic_node = MagicColumnsNode::new(
+                let magic_node = MagicColumnsNode::new_with_policy_mode(
                     output_tuple_descriptor.clone(),
                     &requests,
                     session.clone(),
@@ -1683,6 +1890,7 @@ impl QueryGraph {
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "main".to_string()),
+                    row_policy_mode,
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -2033,7 +2241,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -2198,7 +2406,7 @@ impl QueryGraph {
                         let delta = recursive_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut row_loader,
+                            &mut |id, hint| row_loader(id, hint),
                         );
                         tracing::debug!(
                             node_id = node_id.0,
@@ -2224,8 +2432,10 @@ impl QueryGraph {
 
                         let mut merged = TupleDelta::new();
                         merged.added.extend(new_delta.added);
+                        merged.added.extend(update_delta.added);
                         merged.removed.extend(deleted_delta.removed);
                         merged.removed.extend(new_delta.removed);
+                        merged.removed.extend(update_delta.removed);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
 
@@ -2247,10 +2457,11 @@ impl QueryGraph {
                         .unwrap_or_default();
 
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
-                        let delta =
-                            magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            });
+                        let delta = magic_node.process_with_context(
+                            input_delta,
+                            storage,
+                            &mut |id, hint| row_loader(id, hint),
+                        );
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2290,9 +2501,11 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            })
+                            policy_node.process_with_context(
+                                input_delta,
+                                storage,
+                                &mut |id, hint| row_loader(id, hint),
+                            )
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -2365,7 +2578,8 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id))
+                            subquery_node
+                                .reevaluate_all(storage, &mut |id, hint| row_loader(id, hint))
                         } else {
                             TupleDelta::new()
                         };
@@ -2374,7 +2588,7 @@ impl QueryGraph {
                         let outer_delta = subquery_node.process_with_context(
                             input_delta,
                             storage,
-                            &mut row_loader,
+                            &mut |id, hint| row_loader(id, hint),
                         );
 
                         // Merge outer delta into combined delta
@@ -2602,6 +2816,12 @@ fn ensure_relation_tables_exist(
             } else {
                 Err(QueryCompileError::UnknownTable(*table))
             }
+        }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                ensure_relation_tables_exist(input, schema)?;
+            }
+            Ok(())
         }
         RelExpr::Filter { input, .. }
         | RelExpr::Project { input, .. }
@@ -3586,6 +3806,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3624,6 +3845,7 @@ mod tests {
                 array_subqueries: query_with_arrays.array_subqueries,
                 select_columns: None,
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -3652,6 +3874,7 @@ mod tests {
                 array_subqueries: Vec::new(),
                 select_columns: Some(vec!["name".to_string()]),
             },
+            RowPolicyMode::PermissiveLocal,
         )
         .expect("Graph should compile");
 
@@ -4011,6 +4234,203 @@ mod tests {
         );
         assert_eq!(graph.recursive_relation_tables.len(), 1);
         assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+    }
+
+    #[test]
+    fn compile_query_with_relation_ir_gather_join_seed_uses_recursive_node() {
+        let schema = recursive_hop_schema();
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_edges"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("team_edges", "child_team"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::Literal(Value::Integer(1)),
+                        },
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__seed_hop_0", "id"),
+                    }],
+                    join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__seed_hop_0", "id")),
+                }],
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_edges"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("team_edges", "child_team"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Frontier),
+                        },
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: KeyRef::RowId(RowIdRef::Current),
+            max_depth: 8,
+            dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Gather relation IR with join seed should compile to RecursiveRelationNode"
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 1);
+        assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
+    }
+
+    #[test]
+    fn compile_query_with_relation_ir_gather_union_seed_uses_recursive_node() {
+        let schema = recursive_hop_schema();
+        let relation = RelExpr::Gather {
+            seed: Box::new(RelExpr::Union {
+                inputs: vec![
+                    RelExpr::Project {
+                        input: Box::new(RelExpr::Join {
+                            left: Box::new(RelExpr::Filter {
+                                input: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("team_edges"),
+                                }),
+                                predicate: PredicateExpr::Cmp {
+                                    left: ColumnRef::scoped("team_edges", "child_team"),
+                                    op: PredicateCmpOp::Eq,
+                                    right: ValueRef::Literal(Value::Integer(1)),
+                                },
+                            }),
+                            right: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            on: vec![JoinCondition {
+                                left: ColumnRef::scoped("team_edges", "parent_team"),
+                                right: ColumnRef::scoped("__seed_hop_0", "id"),
+                            }],
+                            join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                        }),
+                        columns: vec![ProjectColumn {
+                            alias: "id".to_string(),
+                            expr: ProjectExpr::Column(ColumnRef::scoped("__seed_hop_0", "id")),
+                        }],
+                    },
+                    RelExpr::Gather {
+                        seed: Box::new(RelExpr::Filter {
+                            input: Box::new(RelExpr::TableScan {
+                                table: TableName::new("teams"),
+                            }),
+                            predicate: PredicateExpr::Cmp {
+                                left: ColumnRef::scoped("teams", "name"),
+                                op: PredicateCmpOp::Eq,
+                                right: ValueRef::Literal(Value::Text("seed".to_string())),
+                            },
+                        }),
+                        step: Box::new(RelExpr::Project {
+                            input: Box::new(RelExpr::Join {
+                                left: Box::new(RelExpr::Filter {
+                                    input: Box::new(RelExpr::TableScan {
+                                        table: TableName::new("team_edges"),
+                                    }),
+                                    predicate: PredicateExpr::Cmp {
+                                        left: ColumnRef::scoped("team_edges", "child_team"),
+                                        op: PredicateCmpOp::Eq,
+                                        right: ValueRef::RowId(RowIdRef::Frontier),
+                                    },
+                                }),
+                                right: Box::new(RelExpr::TableScan {
+                                    table: TableName::new("teams"),
+                                }),
+                                on: vec![JoinCondition {
+                                    left: ColumnRef::scoped("team_edges", "parent_team"),
+                                    right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                                }],
+                                join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                            }),
+                            columns: vec![ProjectColumn {
+                                alias: "id".to_string(),
+                                expr: ProjectExpr::Column(ColumnRef::scoped(
+                                    "__recursive_hop_0",
+                                    "id",
+                                )),
+                            }],
+                        }),
+                        frontier_key: KeyRef::RowId(RowIdRef::Current),
+                        max_depth: 8,
+                        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+                    },
+                ],
+            }),
+            step: Box::new(RelExpr::Project {
+                input: Box::new(RelExpr::Join {
+                    left: Box::new(RelExpr::Filter {
+                        input: Box::new(RelExpr::TableScan {
+                            table: TableName::new("team_edges"),
+                        }),
+                        predicate: PredicateExpr::Cmp {
+                            left: ColumnRef::scoped("team_edges", "child_team"),
+                            op: PredicateCmpOp::Eq,
+                            right: ValueRef::RowId(RowIdRef::Frontier),
+                        },
+                    }),
+                    right: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    on: vec![JoinCondition {
+                        left: ColumnRef::scoped("team_edges", "parent_team"),
+                        right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                    }],
+                    join_kind: crate::query_manager::relation_ir::JoinKind::Inner,
+                }),
+                columns: vec![ProjectColumn {
+                    alias: "id".to_string(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                }],
+            }),
+            frontier_key: KeyRef::RowId(RowIdRef::Current),
+            max_depth: 8,
+            dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+        };
+
+        let branches = vec!["main".to_string()];
+        let graph = QueryGraph::compile_relation_ir(&relation, &schema, &branches, None)
+            .expect("Graph should compile");
+        assert!(
+            has_recursive_relation_node(&graph),
+            "Gather relation IR with union seed should compile to RecursiveRelationNode"
+        );
+        assert_eq!(graph.recursive_relation_tables.len(), 2);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(&ctx.node, GraphNode::Union(_)))
+        );
     }
 
     #[test]

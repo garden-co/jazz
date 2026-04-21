@@ -16,7 +16,8 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement,
+    LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
+    TupleElement,
 };
 
 use crate::storage::Storage;
@@ -31,6 +32,7 @@ use super::RowNode;
 pub struct PolicyFilterNode {
     descriptor: RowDescriptor,
     policy: PolicyExpr,
+    policy_operation: Operation,
     session: Session,
     /// Schema for INHERITS lookups (resolving foreign key references).
     schema: Schema,
@@ -38,6 +40,7 @@ pub struct PolicyFilterNode {
     table_name: String,
     /// Branch name for index lookups.
     branch: String,
+    row_policy_mode: RowPolicyMode,
     /// Initial recursion depth used for policy evaluation.
     initial_depth: usize,
     /// Current tuples that pass the policy.
@@ -53,6 +56,49 @@ pub struct PolicyFilterNode {
     inherits_dirty: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct PolicyFilterOptions {
+    branch: String,
+    initial_depth: usize,
+    row_policy_mode: RowPolicyMode,
+    policy_operation: Operation,
+}
+
+impl PolicyFilterOptions {
+    pub(crate) fn for_branch(branch: impl Into<String>) -> Self {
+        Self {
+            branch: branch.into(),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_initial_depth(mut self, initial_depth: usize) -> Self {
+        self.initial_depth = initial_depth;
+        self
+    }
+
+    pub(crate) fn with_row_policy_mode(mut self, row_policy_mode: RowPolicyMode) -> Self {
+        self.row_policy_mode = row_policy_mode;
+        self
+    }
+
+    pub(crate) fn with_policy_operation(mut self, policy_operation: Operation) -> Self {
+        self.policy_operation = policy_operation;
+        self
+    }
+}
+
+impl Default for PolicyFilterOptions {
+    fn default() -> Self {
+        Self {
+            branch: "main".to_string(),
+            initial_depth: 0,
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
+            policy_operation: Operation::Select,
+        }
+    }
+}
+
 impl PolicyFilterNode {
     /// Create a new policy filter node.
     pub fn new(
@@ -62,7 +108,14 @@ impl PolicyFilterNode {
         schema: Schema,
         table_name: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, "main", 0)
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::default(),
+        )
     }
 
     /// Create a new policy filter node with explicit branch.
@@ -74,7 +127,56 @@ impl PolicyFilterNode {
         table_name: impl Into<String>,
         branch: impl Into<String>,
     ) -> Self {
-        Self::new_with_branch_and_depth(descriptor, policy, session, schema, table_name, branch, 0)
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::for_branch(branch),
+        )
+    }
+
+    pub fn new_with_branch_and_policy_mode(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        row_policy_mode: RowPolicyMode,
+    ) -> Self {
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::for_branch(branch).with_row_policy_mode(row_policy_mode),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_branch_policy_mode_and_operation(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+        row_policy_mode: RowPolicyMode,
+        policy_operation: Operation,
+    ) -> Self {
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::for_branch(branch)
+                .with_row_policy_mode(row_policy_mode)
+                .with_policy_operation(policy_operation),
+        )
     }
 
     /// Create a new policy filter node with explicit branch and initial recursion depth.
@@ -87,17 +189,37 @@ impl PolicyFilterNode {
         branch: impl Into<String>,
         initial_depth: usize,
     ) -> Self {
+        Self::new_with_options(
+            descriptor,
+            policy,
+            session,
+            schema,
+            table_name,
+            PolicyFilterOptions::for_branch(branch).with_initial_depth(initial_depth),
+        )
+    }
+
+    pub(crate) fn new_with_options(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        options: PolicyFilterOptions,
+    ) -> Self {
         let table_name = table_name.into();
         let inherits_tables = collect_policy_dependency_tables(&policy, &descriptor);
         let has_inherits = !inherits_tables.is_empty();
         Self {
             descriptor,
             policy,
+            policy_operation: options.policy_operation,
             session,
             schema,
             table_name,
-            branch: branch.into(),
-            initial_depth,
+            branch: options.branch,
+            row_policy_mode: options.row_policy_mode,
+            initial_depth: options.initial_depth,
             current_tuples: AHashSet::new(),
             input_tuples: AHashSet::new(),
             dirty: true,
@@ -131,7 +253,7 @@ impl PolicyFilterNode {
         mut row_loader: F,
     ) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
 
@@ -211,7 +333,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     {
         let mut result = TupleDelta::default();
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -244,12 +366,17 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let evaluator = PolicyContextEvaluator::new(&self.schema, &self.session, &self.branch);
+        let evaluator = PolicyContextEvaluator::new(
+            &self.schema,
+            &self.session,
+            &self.branch,
+            self.row_policy_mode,
+        );
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
-            Operation::Select,
+            self.policy_operation,
             row,
             &self.descriptor,
             &self.table_name,
@@ -306,7 +433,7 @@ impl PolicyFilterNode {
 
     /// Evaluate INHERITS without context - fails closed.
     ///
-    /// INHERITS requires ObjectManager access to load parent rows.
+    /// INHERITS requires storage-backed access to load parent rows.
     /// When called without context (via regular process()), we fail closed
     /// for security. Use process_with_context() for proper INHERITS evaluation.
     ///
@@ -443,12 +570,12 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
         TupleElement::Row {
             id,
             content,
-            commit_id,
+            batch_id,
             row_provenance,
         } => Some(Row::new(
             *id,
             content.clone(),
-            *commit_id,
+            *batch_id,
             row_provenance.clone(),
         )),
         TupleElement::Id(_) => None, // Not materialized
@@ -458,7 +585,6 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::relation_ir::RelExpr;
@@ -487,7 +613,7 @@ mod tests {
         Row::new(
             ObjectId::new(),
             data,
-            CommitId([0; 32]),
+            crate::row_histories::BatchId([0; 16]),
             crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         )
     }
@@ -656,6 +782,63 @@ mod tests {
 
         let row = make_row("user1", "eng", "Doc 1");
         assert!(!node.evaluate(&row));
+    }
+
+    #[test]
+    fn inherits_context_passes_parent_table_hint_to_loader() {
+        let parent_id = ObjectId::new();
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor {
+                name: "parent_id".into(),
+                column_type: ColumnType::Uuid,
+                nullable: false,
+                references: Some(TableName::new("folders")),
+                default: None,
+                merge_strategy: None,
+            },
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+
+        let mut schema = Schema::new();
+        schema.insert(TableName::new("documents"), descriptor.clone().into());
+        schema.insert(
+            TableName::new("folders"),
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+        );
+
+        let node = PolicyFilterNode::new(
+            descriptor.clone(),
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "parent_id".into(),
+                max_depth: Some(1),
+            },
+            Session::new("user1"),
+            schema,
+            "documents",
+        );
+
+        let data = encode_row(
+            &descriptor,
+            &[Value::Uuid(parent_id), Value::Text("Doc 1".into())],
+        )
+        .unwrap();
+        let row = Row::new(
+            ObjectId::new(),
+            data,
+            crate::row_histories::BatchId([0; 16]),
+            crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+        );
+        let storage = crate::storage::MemoryStorage::new();
+        let mut seen = Vec::new();
+
+        let allowed = node.evaluate_with_context(&row, &storage, &mut |id, hint| {
+            seen.push((id, hint));
+            None
+        });
+
+        assert!(!allowed);
+        assert_eq!(seen, vec![(parent_id, Some(TableName::new("folders")))]);
     }
 
     #[test]

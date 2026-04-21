@@ -8,6 +8,8 @@
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { getTestingServerInfo } from "./testing-server.js";
+import type { TestingServerInfo } from "./testing-server.js";
+import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -65,7 +67,7 @@ export async function waitForQuery<T>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "worker" | "edge",
+  tier?: "local" | "edge",
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -103,7 +105,7 @@ export async function waitForQuery<T>(
  * Race a promise against a timeout.
  *
  * Useful for operations that should complete within a deadline (e.g.
- * `insertDurable`) but don't have built-in timeout support.
+ * `db.insert(...).wait({ tier: "edge" })`) but don't have built-in timeout support.
  */
 export async function withTimeout<T>(
   promise: Promise<T>,
@@ -261,17 +263,17 @@ export class TestCleanup {
 export async function createSyncedDb(
   ctx: TestCleanup,
   label: string,
-  localAuthToken: string,
+  secret?: string,
+  testingServer?: TestingServerInfo,
 ): Promise<Db> {
-  const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+  const localFirstSecret = secret ?? generateAuthSecret();
+  const { appId, serverUrl } = testingServer ?? (await getTestingServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
-      localAuthMode: "anonymous",
-      localAuthToken,
-      adminSecret,
+      auth: { localFirstSecret },
     }),
   );
 }

@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 const BATCH_SIZE = 500;
 const PROJECT_COUNT = 20;
@@ -155,7 +155,9 @@ export function StressTest() {
     // Generate projects first so we can assign them to todos
     const projectIds: string[] = [];
     for (let i = 0; i < PROJECT_COUNT; i++) {
-      const row = db.insert(app.projects, { name: PROJECT_NAMES[i % PROJECT_NAMES.length] });
+      const { value: row } = db.insert(app.projects, {
+        name: PROJECT_NAMES[i % PROJECT_NAMES.length],
+      });
       projectIds.push(row.id);
     }
     log(`Created ${PROJECT_COUNT} projects`);
@@ -180,7 +182,7 @@ export function StressTest() {
           description: generateDescription(i),
           owner_id: sessionUserId,
           // Assign ~70% of todos to a project
-          project_id: i % 10 < 7 ? projectIds[i % projectIds.length] : undefined,
+          projectId: i % 10 < 7 ? projectIds[i % projectIds.length] : undefined,
         });
         inserted++;
       }

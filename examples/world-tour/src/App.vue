@@ -27,12 +27,6 @@
       </div>
       <div class="control-bar__row">
         <BandLogo v-if="firstBandId" :bandId="firstBandId" />
-        <SyntheticUserSwitcher
-          v-if="canEdit"
-          :appId="appId"
-          :defaultMode="'demo'"
-          :reloadOnSwitch="true"
-        />
         <button v-if="canEdit" class="btn-auth" @click="switchView()">View as public</button>
         <span v-if="!canEdit" class="public-label">Public view</span>
         <button v-if="!canEdit" class="btn-auth" @click="switchView()">Log in</button>
@@ -120,7 +114,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, computed, watch, nextTick } from "vue";
-import { useAll, useDb, useSession, SyntheticUserSwitcher } from "jazz-tools/vue";
+import { useAll, useDb, useSession } from "jazz-tools/vue";
 import { app } from "../schema.js";
 import type { StopWithVenue } from "../schema.js";
 import { MapController, type StopMapData } from "./lib/map-controller";

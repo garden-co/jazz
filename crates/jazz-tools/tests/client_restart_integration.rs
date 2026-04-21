@@ -1,6 +1,7 @@
 #![cfg(feature = "test")]
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,9 +16,14 @@ use jazz_tools::{
     QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
+
+mod support;
+
+use support::publish_allow_all_permissions;
 
 const APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
@@ -78,11 +84,13 @@ async fn jwks_handler() -> Json<JsonValue> {
 struct ServerProcess {
     process: Child,
     port: u16,
+    bound_port_file: PathBuf,
     client: reqwest::Client,
 }
 
 impl ServerProcess {
     async fn start(port: u16, data_dir: &Path, jwks_endpoint: &str) -> Self {
+        let bound_port_file = data_dir.join("bound-port");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
         cmd.args([
             "server",
@@ -95,18 +103,20 @@ impl ServerProcess {
         .env("JAZZ_JWKS_URL", jwks_endpoint)
         .env("JAZZ_BACKEND_SECRET", BACKEND_SECRET)
         .env("JAZZ_ADMIN_SECRET", ADMIN_SECRET)
-        .stdout(Stdio::null());
+        .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
+        .stdout(Stdio::piped());
 
         if std::env::var("JAZZ_TEST_SERVER_LOGS").is_ok() {
             cmd.stderr(Stdio::inherit());
         } else {
-            cmd.stderr(Stdio::null());
+            cmd.stderr(Stdio::piped());
         }
 
         let process = cmd.spawn().expect("spawn jazz-tools server");
-        let server = Self {
+        let mut server = Self {
             process,
             port,
+            bound_port_file,
             client: reqwest::Client::new(),
         };
         server.wait_ready().await;
@@ -117,17 +127,61 @@ impl ServerProcess {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
-        let health_url = format!("{}/health", self.base_url());
-        for _ in 0..80 {
-            if let Ok(response) = self.client.get(&health_url).send().await
-                && response.status().is_success()
-            {
-                return;
+    async fn wait_ready(&mut self) {
+        for _ in 0..200 {
+            self.maybe_update_bound_port();
+            if let Some(status) = self.process.try_wait().expect("poll jazz-tools server") {
+                panic!(
+                    "jazz-tools server exited before becoming ready: {status}{}",
+                    self.process_output_summary()
+                );
+            }
+            if self.port != 0 {
+                let health_url = format!("{}/health", self.base_url());
+                if let Ok(response) = self.client.get(&health_url).send().await
+                    && response.status().is_success()
+                {
+                    return;
+                }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("jazz-tools server did not become ready in time");
+        panic!(
+            "jazz-tools server did not become ready within 20 seconds{}",
+            self.process_output_summary()
+        );
+    }
+
+    fn maybe_update_bound_port(&mut self) {
+        let Ok(contents) = std::fs::read_to_string(&self.bound_port_file) else {
+            return;
+        };
+        let Ok(port) = contents.trim().parse::<u16>() else {
+            return;
+        };
+        self.port = port;
+    }
+
+    fn process_output_summary(&mut self) -> String {
+        let stdout = take_pipe_text(&mut self.process.stdout);
+        let stderr = take_pipe_text(&mut self.process.stderr);
+        if stdout.is_empty() && stderr.is_empty() {
+            return String::new();
+        }
+
+        format!(
+            "\nstdout:\n{}\nstderr:\n{}",
+            if stdout.is_empty() {
+                "<empty>"
+            } else {
+                stdout.trim()
+            },
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                stderr.trim()
+            }
+        )
     }
 }
 
@@ -156,9 +210,14 @@ impl Drop for ServerProcess {
     }
 }
 
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port 0");
-    listener.local_addr().expect("local addr").port()
+fn take_pipe_text<T: Read>(pipe: &mut Option<T>) -> String {
+    let Some(mut pipe) = pipe.take() else {
+        return String::new();
+    };
+
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn make_jwt(sub: &str) -> String {
@@ -207,8 +266,8 @@ fn make_context(
         data_dir,
         storage: ClientStorage::Persistent,
         jwt_token: Some(jwt_token),
-        backend_secret: Some(BACKEND_SECRET.to_string()),
-        admin_secret: Some(ADMIN_SECRET.to_string()),
+        backend_secret: None,
+        admin_secret: None,
         sync_tracer: None,
     }
 }
@@ -263,7 +322,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     panic!("timed out waiting for EdgeServer query readiness");
 }
 
-async fn wait_for_catalogue_manifest_schema_count_on_disk(
+async fn wait_for_catalogue_schema_entry_count_on_disk(
     app_id: AppId,
     data_root: &Path,
     expected_min_count: usize,
@@ -282,11 +341,17 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
             None
         };
         if let Some(storage) = storage_result {
-            let manifest = storage
-                .load_catalogue_manifest(app_id.as_object_id())
-                .ok()
-                .flatten();
-            last_count = manifest.map(|m| m.schema_seen.len()).unwrap_or(0);
+            let expected_app_id = app_id.as_object_id().to_string();
+            let entries = storage.scan_catalogue_entries().unwrap_or_default();
+            last_count = entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.metadata.get("type").map(|value| value.as_str())
+                        == Some("catalogue_schema")
+                        && entry.metadata.get("app_id").map(|value| value.as_str())
+                            == Some(expected_app_id.as_str())
+                })
+                .count();
             let _ = storage.close();
             if last_count >= expected_min_count {
                 return;
@@ -297,7 +362,7 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     }
 
     panic!(
-        "timed out waiting for schema manifest count >= {expected_min_count}, last_count={last_count}"
+        "timed out waiting for catalogue schema entry count >= {expected_min_count}, last_count={last_count}"
     );
 }
 
@@ -308,9 +373,24 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
-    let port = get_free_port();
 
-    let server = ServerProcess::start(port, server_data.path(), &jwks_server.endpoint()).await;
+    let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
+    let publish_schema_response = Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/schemas",
+            server.base_url(),
+            APP_ID_STR
+        ))
+        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+        .json(&json!({ "schema": test_schema(), "permissions": null }))
+        .send()
+        .await
+        .expect("publish schema");
+    assert_eq!(
+        publish_schema_response.status(),
+        reqwest::StatusCode::CREATED
+    );
+    publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
     let client = JazzClient::connect(make_context(
@@ -321,11 +401,10 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     ))
     .await
     .expect("connect client");
-
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     client
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 (
@@ -334,6 +413,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create before restart");
@@ -346,8 +426,9 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     )
     .await;
 
+    let restart_port = server.port;
     drop(server);
-    wait_for_catalogue_manifest_schema_count_on_disk(
+    wait_for_catalogue_schema_entry_count_on_disk(
         app_id,
         server_data.path(),
         1,
@@ -355,7 +436,8 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     )
     .await;
 
-    let restarted = ServerProcess::start(port, server_data.path(), &jwks_server.endpoint()).await;
+    let restarted =
+        ServerProcess::start(restart_port, server_data.path(), &jwks_server.endpoint()).await;
 
     let rows_after_restart = wait_for_todos_count(
         &client,
@@ -371,7 +453,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     );
 
     client
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 (
@@ -380,6 +462,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                 ),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create after restart");

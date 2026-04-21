@@ -1,19 +1,21 @@
 # React Native Packaging — TODO
 
-Package jazz2 for React Native with native storage.
+React Native support now exists through the `jazz-rn` Turbo Module and the
+`packages/jazz-tools/src/react-native` adapter surface. The remaining launch
+work is packaging hardening, ergonomics, and operational clarity.
 
 ## Overview
 
-React Native can't use OPFS or Web Workers. Need a native module approach:
+React Native still cannot use OPFS or Web Workers, so it follows a separate
+native-runtime path:
 
-- Use `jazz-napi` (or a C FFI) compiled for iOS/Android via Hermes/JSI
-- Native Fjall storage on device filesystem
-- Bridge between JS thread and native Rust runtime
-- Same React hooks API as web (`react_bindings.md`) but backed by native storage
+- `crates/jazz-rn/` provides a UniFFI-backed Turbo Module for iOS and Android
+- `packages/jazz-tools/src/react-native/` exposes `createDb`, `createJazzClient`, and the RN runtime adapter
+- Local durability uses the native embedded storage backend instead of browser APIs
+- The React-facing API aims to stay close to the web bindings, but uses RN-specific runtime plumbing underneath
 
 ## Open Questions
 
-- NAPI (via Hermes) vs. JSI (C++ bridge) vs. Turbo Modules?
 - How to package pre-built Rust binaries for iOS (xcframework) and Android (JNI/NDK)?
 - Background sync: can we keep syncing when the app is backgrounded?
 - Expo plugin for zero-config setup?

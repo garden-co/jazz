@@ -8,6 +8,7 @@ import {
   type DevtoolsResponseEnvelope,
 } from "./protocol.js";
 import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
+import { InsertHandle, WriteHandle } from "../runtime/client.js";
 
 type MessageListener = (event: { source: FakeWindow; data: unknown }) => void;
 
@@ -124,7 +125,7 @@ describe("attachDevTools active query subscription bridge", () => {
         query: '{"table":"todos"}',
         table: "todos",
         branches: ["main"],
-        tier: "worker",
+        tier: "local",
         propagation: "full",
         createdAt: "2026-03-10T10:00:00.000Z",
         stack: "Error\n  at demo",
@@ -202,19 +203,26 @@ describe("attachDevTools active query subscription bridge", () => {
 });
 
 describe("attachDevTools mutation bridge", () => {
-  it("routes client.insertDurable to runtime createDurable", async () => {
+  it("routes client.insertDurable to runtime create + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
     const insertedRow = {
       id: "row-1",
       values: [{ type: "Text", value: "hello" }],
+      batchId: "batch-insert-devtools",
     };
-    const createDurable = vi.fn(async () => insertedRow);
+    const waitForPersistedBatch = vi.fn(async () => undefined);
+    const create = vi.fn(
+      () =>
+        new InsertHandle(insertedRow, insertedRow.batchId, {
+          waitForPersistedBatch,
+        } as any),
+    );
     const fakeClient = {
-      createDurable,
-      updateDurable: vi.fn(async () => undefined),
-      deleteDurable: vi.fn(async () => undefined),
+      create,
+      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForPersistedBatch } as any)),
+      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForPersistedBatch } as any)),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -237,29 +245,36 @@ describe("attachDevTools mutation bridge", () => {
       payload: {
         table: "todos",
         values: { title: { type: "Text", value: "hello" } },
-        tier: "worker",
+        tier: "local",
       },
     });
 
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
-    expect(createDurable).toHaveBeenCalledWith(
-      "todos",
-      { title: { type: "Text", value: "hello" } },
-      { tier: "worker" },
-    );
+    expect(create).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
   });
 
-  it("routes client.updateDurable to runtime updateDurable", async () => {
+  it("routes client.updateDurable to runtime update + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const updateDurable = vi.fn(async () => undefined);
+    const waitForPersistedBatch = vi.fn(async () => undefined);
+    const update = vi.fn(
+      () => new WriteHandle("batch-update-devtools", { waitForPersistedBatch } as any),
+    );
     const fakeClient = {
-      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
-      updateDurable,
-      deleteDurable: vi.fn(async () => undefined),
+      create: vi.fn(
+        () =>
+          new InsertHandle(
+            { id: "row-1", values: [], batchId: "batch-insert-unused" },
+            "batch-insert-unused",
+            { waitForPersistedBatch } as any,
+          ),
+      ),
+      update,
+      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForPersistedBatch } as any)),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -291,22 +306,29 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ updated: true });
-    expect(updateDurable).toHaveBeenCalledWith(
-      "row-1",
-      { title: { type: "Text", value: "updated" } },
-      { tier: "edge" },
-    );
+    expect(update).toHaveBeenCalledWith("row-1", { title: { type: "Text", value: "updated" } });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-update-devtools", "edge");
   });
 
-  it("routes client.deleteDurable to runtime deleteDurable", async () => {
+  it("routes client.deleteDurable to runtime delete + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const deleteDurable = vi.fn(async () => undefined);
+    const waitForPersistedBatch = vi.fn(async () => undefined);
+    const deleteMutation = vi.fn(
+      () => new WriteHandle("batch-delete-devtools", { waitForPersistedBatch } as any),
+    );
     const fakeClient = {
-      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
-      updateDurable: vi.fn(async () => undefined),
-      deleteDurable,
+      create: vi.fn(
+        () =>
+          new InsertHandle(
+            { id: "row-1", values: [], batchId: "batch-insert-unused" },
+            "batch-insert-unused",
+            { waitForPersistedBatch } as any,
+          ),
+      ),
+      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForPersistedBatch } as any)),
+      delete: deleteMutation,
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -335,7 +357,8 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
-    expect(deleteDurable).toHaveBeenCalledWith("row-1", { tier: "global" });
+    expect(deleteMutation).toHaveBeenCalledWith("row-1");
+    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-delete-devtools", "global");
   });
 
   it("returns command-specific errors for invalid mutation payloads", async () => {

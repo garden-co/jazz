@@ -15,3 +15,22 @@ export default function App() {
   );
 }
 // #endregion context-setup-react-minimal
+
+// #region context-setup-react-runtime-sources
+export function AppWithRuntimeSources() {
+  return (
+    <JazzProvider
+      config={{
+        appId: "my-app",
+        serverUrl: "https://my-jazz-server.example.com",
+        runtimeSources: {
+          baseUrl: "/assets/jazz/",
+        },
+      }}
+      fallback={<p>Loading...</p>}
+    >
+      {/* ... */}
+    </JazzProvider>
+  );
+}
+// #endregion context-setup-react-runtime-sources

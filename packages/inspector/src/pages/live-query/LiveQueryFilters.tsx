@@ -11,7 +11,7 @@ interface LiveQueryFiltersProps {
 
 const TIER_OPTIONS = [
   { value: "", label: "All tiers" },
-  { value: "worker", label: "worker" },
+  { value: "local", label: "local" },
   { value: "edge", label: "edge" },
   { value: "global", label: "global" },
 ] as const;

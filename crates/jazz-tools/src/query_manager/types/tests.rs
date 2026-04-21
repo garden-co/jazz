@@ -13,6 +13,7 @@ fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Boolean.fixed_size(), Some(1));
     assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
     assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
+    assert_eq!(ColumnType::BatchId.fixed_size(), Some(16));
     assert_eq!(ColumnType::Text.fixed_size(), None);
     assert_eq!(ColumnType::Bytea.fixed_size(), None);
     assert_eq!(
@@ -20,7 +21,7 @@ fn column_type_fixed_sizes() {
             variants: vec!["a".to_string()]
         }
         .fixed_size(),
-        None
+        Some(1)
     );
 }
 
@@ -78,6 +79,24 @@ fn column_descriptor_deserializes_payload_with_default() {
 }
 
 #[test]
+fn column_descriptor_deserializes_payload_with_merge_strategy() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"count",
+            "column_type":{"type":"Integer"},
+            "nullable":false,
+            "merge_strategy":"Counter"
+        }"#,
+    )
+    .expect("deserialize column descriptor with merge strategy");
+
+    assert_eq!(col.name, "count");
+    assert_eq!(col.column_type, ColumnType::Integer);
+    assert!(!col.nullable);
+    assert_eq!(col.merge_strategy, Some(ColumnMergeStrategy::Counter));
+}
+
+#[test]
 fn row_descriptor_column_lookup() {
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Uuid),
@@ -131,6 +150,10 @@ fn value_column_type() {
         Some(ColumnType::Uuid)
     );
     assert_eq!(
+        Value::BatchId([7; 16]).column_type(),
+        Some(ColumnType::BatchId)
+    );
+    assert_eq!(
         Value::Bytea(vec![0, 1, 2, 3]).column_type(),
         Some(ColumnType::Bytea)
     );
@@ -157,8 +180,8 @@ fn value_rejects_fractional_float_timestamp() {
 // Tuple Model Tests
 // ========================================================================
 
-fn make_commit_id(n: u8) -> crate::commit::CommitId {
-    crate::commit::CommitId([n; 32])
+fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
+    crate::row_histories::BatchId([n; 16])
 }
 
 #[test]
@@ -169,25 +192,40 @@ fn tuple_element_id() {
     assert_eq!(elem.id(), id);
     assert!(!elem.is_materialized());
     assert!(elem.content().is_none());
-    assert!(elem.commit_id().is_none());
+    assert!(elem.batch_id().is_none());
+}
+
+#[test]
+fn row_descriptor_hash_changes_when_merge_strategy_changes() {
+    let lww = RowDescriptor::new(vec![ColumnDescriptor::new("count", ColumnType::Integer)]);
+    let counter = RowDescriptor::new(vec![
+        ColumnDescriptor::new("count", ColumnType::Integer)
+            .merge_strategy(ColumnMergeStrategy::Counter),
+    ]);
+
+    assert_ne!(
+        lww.content_hash(),
+        counter.content_hash(),
+        "changing only the merge strategy should change the schema hash"
+    );
 }
 
 #[test]
 fn tuple_element_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
     let content = vec![1, 2, 3];
-    let commit_id = make_commit_id(1);
+    let batch_id = make_commit_id(1);
     let elem = TupleElement::Row {
         id,
-        content: content.clone(),
-        commit_id,
+        content: content.clone().into(),
+        batch_id,
         row_provenance: test_row_provenance(),
     };
 
     assert_eq!(elem.id(), id);
     assert!(elem.is_materialized());
     assert_eq!(elem.content(), Some(content.as_slice()));
-    assert_eq!(elem.commit_id(), Some(commit_id));
+    assert_eq!(elem.batch_id(), Some(batch_id));
 }
 
 #[test]
@@ -223,6 +261,20 @@ fn tuple_from_row() {
 }
 
 #[test]
+fn tuple_provenance_merge_deduplicates_scoped_objects() {
+    let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
+    let branch = crate::object::BranchName::new("main");
+
+    let mut tuple = Tuple::from_scoped_id(id, branch);
+    let same_scope: TupleProvenance = [(id, branch)].into_iter().collect();
+
+    tuple.merge_provenance(&same_scope);
+
+    assert_eq!(tuple.provenance().len(), 1);
+    assert!(tuple.provenance().contains(&(id, branch)));
+}
+
+#[test]
 fn tuple_equality_based_on_ids() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
 
@@ -230,8 +282,8 @@ fn tuple_equality_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -248,8 +300,8 @@ fn tuple_hash_based_on_ids() {
     let tuple1 = Tuple::from_id(id);
     let tuple2 = Tuple::new(vec![TupleElement::Row {
         id,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
 
@@ -273,8 +325,8 @@ fn tuple_in_hashset() {
     // Same ID with different content should be found
     let tuple_with_content = Tuple::new(vec![TupleElement::Row {
         id: id1,
-        content: vec![1, 2, 3],
-        commit_id: make_commit_id(1),
+        content: vec![1, 2, 3].into(),
+        batch_id: make_commit_id(1),
         row_provenance: test_row_provenance(),
     }]);
     assert!(set.contains(&tuple_with_content));
@@ -467,8 +519,9 @@ fn schema_hash_deterministic() {
 }
 
 #[test]
-fn schema_hash_column_order_independent() {
-    // Schema with columns in different order should have same hash
+fn schema_hash_column_order_sensitive() {
+    // Schema with columns in different order should have a different hash so
+    // physical row layouts can be bootstrapped precisely from catalogue schemas.
     let schema1 = SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
@@ -492,7 +545,7 @@ fn schema_hash_column_order_independent() {
 
     let hash1 = SchemaHash::compute(&schema1);
     let hash2 = SchemaHash::compute(&schema2);
-    assert_eq!(hash1, hash2, "Column order should not affect hash");
+    assert_ne!(hash1, hash2, "Column order should affect schema hash");
 }
 
 #[test]
@@ -713,8 +766,8 @@ fn row_descriptor_content_hash() {
         ColumnDescriptor::new("id", ColumnType::Uuid),
     ]);
 
-    // Same columns, different order -> same hash (order-independent)
-    assert_eq!(desc1.content_hash(), desc2.content_hash());
+    // Same columns, different order -> different hash because physical layout changes.
+    assert_ne!(desc1.content_hash(), desc2.content_hash());
 
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);

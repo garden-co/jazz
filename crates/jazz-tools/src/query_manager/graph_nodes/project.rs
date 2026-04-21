@@ -1,6 +1,5 @@
 use ahash::AHashSet;
 
-use crate::commit::CommitId;
 use crate::query_manager::encoding::{decode_column, encode_row};
 use crate::query_manager::relation_ir::{ProjectColumn, ProjectExpr, RowIdRef};
 use crate::query_manager::types::{
@@ -115,6 +114,7 @@ impl ProjectNode {
                         nullable: source_column.nullable,
                         references: source_column.references,
                         default: source_column.default.clone(),
+                        merge_strategy: source_column.merge_strategy,
                     }
                 }
                 ProjectionSource::RowId { .. } => ColumnDescriptor {
@@ -123,6 +123,7 @@ impl ProjectNode {
                     nullable: false,
                     references: None,
                     default: None,
+                    merge_strategy: None,
                 },
             };
 
@@ -197,10 +198,10 @@ impl ProjectNode {
             .collect();
         let projected_content = encode_row(&self.output_descriptor, &values?).ok()?;
         let id = tuple.first_id()?;
-        let commit_id = tuple
+        let batch_id = tuple
             .iter()
-            .find_map(TupleElement::commit_id)
-            .unwrap_or(CommitId([0; 32]));
+            .find_map(TupleElement::batch_id)
+            .unwrap_or(crate::row_histories::BatchId([0; 16]));
         let row_provenance = tuple
             .iter()
             .find_map(TupleElement::row_provenance)
@@ -209,11 +210,12 @@ impl ProjectNode {
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id,
-                content: projected_content,
-                commit_id,
+                content: projected_content.into(),
+                batch_id,
                 row_provenance,
             }])
-            .with_provenance(tuple.provenance().clone()),
+            .with_provenance(tuple.provenance().clone())
+            .with_batch_provenance(tuple.batch_provenance().clone()),
         )
     }
 }
@@ -287,7 +289,6 @@ impl RowNode for ProjectNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::relation_ir::ColumnRef;
@@ -307,8 +308,8 @@ mod tests {
         let data = encode_row(&descriptor, values).unwrap();
         Tuple::new(vec![TupleElement::Row {
             id,
-            content: data,
-            commit_id: CommitId([0; 32]),
+            content: data.into(),
+            batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
@@ -483,14 +484,14 @@ mod tests {
         let tuple = Tuple::new(vec![
             TupleElement::Row {
                 id: user_id,
-                content: user_row,
-                commit_id: CommitId([1; 32]),
+                content: user_row.into(),
+                batch_id: crate::row_histories::BatchId([1; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: post_id,
-                content: post_row,
-                commit_id: CommitId([2; 32]),
+                content: post_row.into(),
+                batch_id: crate::row_histories::BatchId([2; 16]),
                 row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ]);

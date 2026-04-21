@@ -1,3 +1,4 @@
+import jazzRn from "jazz-rn";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import { Db as RuntimeDb, type DbConfig as RuntimeDbConfig } from "../runtime/db.js";
@@ -20,7 +21,7 @@ export class Db extends RuntimeDb {
     const key = JSON.stringify(schema);
 
     if (!this.nativeClients.has(key)) {
-      const tier = this.nativeConfig.tier ?? "worker";
+      const tier = this.nativeConfig.tier ?? "local";
       const runtime = createJazzRnRuntime({
         schema,
         appId: this.nativeConfig.appId,
@@ -36,15 +37,12 @@ export class Db extends RuntimeDb {
           appId: this.nativeConfig.appId,
           schema,
           serverUrl: this.nativeConfig.serverUrl,
-          serverPathPrefix: this.nativeConfig.serverPathPrefix,
           env: this.nativeConfig.env,
           userBranch: this.nativeConfig.userBranch,
           jwtToken: this.nativeConfig.jwtToken,
-          localAuthMode: this.nativeConfig.localAuthMode,
-          localAuthToken: this.nativeConfig.localAuthToken,
           adminSecret: this.nativeConfig.adminSecret,
           tier,
-          defaultDurabilityTier: "worker",
+          defaultDurabilityTier: "local",
         },
         {
           onAuthFailure: (reason) => {
@@ -52,6 +50,13 @@ export class Db extends RuntimeDb {
           },
         },
       );
+
+      if (this.nativeConfig.serverUrl) {
+        client.connectTransport(this.nativeConfig.serverUrl, {
+          jwt_token: this.nativeConfig.jwtToken,
+          admin_secret: this.nativeConfig.adminSecret,
+        });
+      }
 
       this.nativeClients.set(key, client);
     }
@@ -78,5 +83,9 @@ export class Db extends RuntimeDb {
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
+  if (config.secret) {
+    const jwtToken = jazzRn.jazz_rn.mintLocalFirstToken(config.secret, config.appId, BigInt(3600));
+    return new Db({ ...config, jwtToken });
+  }
   return new Db(config);
 }

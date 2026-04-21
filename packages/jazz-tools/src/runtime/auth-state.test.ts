@@ -11,6 +11,9 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url(header)}.${toBase64Url(payload)}.signature`;
 }
 
+const validJwt = makeJwt({ sub: "alice", iss: "urn:jazz:local-first" });
+const anonymousJwt = makeJwt({ sub: "anon-user", iss: "urn:jazz:anonymous" });
+
 describe("auth-state", () => {
   it("keeps the last session while unauthenticated", () => {
     const store = createAuthStateStore({
@@ -21,15 +24,15 @@ describe("auth-state", () => {
     store.markUnauthenticated("expired");
 
     expect(store.getState()).toEqual({
-      status: "unauthenticated",
-      reason: "expired",
+      authMode: "external",
+      error: "expired",
       session: {
         user_id: "alice",
         claims: {
           role: "reader",
-          auth_mode: "external",
           subject: "alice",
         },
+        authMode: "external",
       },
     });
   });
@@ -51,8 +54,7 @@ describe("auth-state", () => {
 
     expect(states).toHaveLength(2);
     expect(states[1]).toMatchObject({
-      status: "unauthenticated",
-      reason: "expired",
+      error: "expired",
     });
   });
 
@@ -66,49 +68,38 @@ describe("auth-state", () => {
       "Changing auth principal on a live client is not supported. Recreate the Db.",
     );
   });
+});
 
-  it("rejects anonymous-to-jwt swap on a live client", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    expect(() => store.applyJwtToken(makeJwt({ sub: "alice" }))).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
+describe("AuthState — flattened shape", () => {
+  it("authenticated state has authMode + session, no error", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    const state = store.getState();
+    expect(state.session?.authMode).toBe("local-first"); // match fixture's iss
+    expect(state.error).toBeUndefined();
+    // @ts-expect-error — status has been removed
+    state.status;
+    // @ts-expect-error — transport has been removed
+    state.transport;
   });
 
-  it("rejects logout principal change on a live client", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
-      localAuthMode: "anonymous",
-      localAuthToken: "device-token",
-    });
-
-    expect(() => store.applyJwtToken(undefined)).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
+  it("markUnauthenticated sets error but preserves last-known session", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    const before = store.getState().session;
+    store.markUnauthenticated("expired");
+    const after = store.getState();
+    expect(after.error).toBe("expired");
+    expect(after.session).toEqual(before);
   });
 
-  it("falls back to local auth when jwt cannot be parsed", () => {
-    const store = createAuthStateStore({
-      appId: "test-app",
-      jwtToken: "not-a-jwt",
-      localAuthMode: "demo",
-      localAuthToken: "device-token",
-    });
+  it("applyJwtToken clears error on success", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    store.markUnauthenticated("expired");
+    store.applyJwtToken(validJwt);
+    expect(store.getState().error).toBeUndefined();
+  });
 
-    expect(store.getState()).toMatchObject({
-      status: "authenticated",
-      transport: "local",
-      session: {
-        claims: {
-          auth_mode: "local",
-          local_mode: "demo",
-        },
-      },
-    });
+  it("exposes authMode from JWT issuer at construction", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: anonymousJwt });
+    expect(store.getState().authMode).toBe("anonymous");
   });
 });

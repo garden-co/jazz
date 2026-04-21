@@ -1,49 +1,17 @@
-import * as React from "react";
-import { useState, useEffect } from "react";
-import {
-  JazzProvider,
-  getActiveSyntheticAuth,
-  attachDevTools,
-  useJazzClient,
-} from "jazz-tools/react";
+import { useState, useEffect, use, Suspense } from "react";
+import { JazzProvider, attachDevTools, useJazzClient } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { GenerateData } from "./GenerateData.js";
-import { app } from "../schema/app.js";
+import { app } from "../schema";
 
 const devToolsAttachedClients = new WeakSet<object>();
-
-function readEnvAppId(): string | undefined {
-  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-    ?.JAZZ_APP_ID;
-}
-
-// #region context-setup-react
-function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
-  const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
-
-  return {
-    appId,
-    env: "dev",
-    userBranch: "main",
-    devMode: true,
-    localAuthMode: active.localAuthMode,
-    localAuthToken: active.localAuthToken,
-    ...overrides,
-  };
-}
-// #endregion context-setup-react
-
-type AppProps = {
-  config?: Partial<DbConfig>;
-  fallback?: React.ReactNode;
-};
 
 function DevToolsRegistration() {
   const client = useJazzClient();
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (devToolsAttachedClients.has(client as object)) {
       return;
     }
@@ -90,15 +58,42 @@ function Router() {
   return <GenerateData />;
 }
 
-// #region context-setup-react
-export function App({ config, fallback }: AppProps = {}) {
-  const resolvedConfig = defaultConfig(config);
+const appId = import.meta.env.JAZZ_APP_ID;
+const serverUrl = import.meta.env.JAZZ_SERVER_URL;
+
+if (!appId) {
+  throw new Error("JAZZ_APP_ID is required");
+}
+
+if (!serverUrl) {
+  throw new Error("JAZZ_SERVER_URL is required");
+}
+
+function AppInner() {
+  const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
+  const config: DbConfig = {
+    appId,
+    env: import.meta.env.DEV ? "dev" : "prod",
+    userBranch: "main",
+    devMode: import.meta.env.DEV,
+    auth: { localFirstSecret: secret },
+    serverUrl,
+  };
 
   return (
-    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+    <JazzProvider config={config} fallback={<p>Loading...</p>}>
       <DevToolsRegistration />
       <Router />
     </JazzProvider>
+  );
+}
+
+// #region context-setup-react
+export function App() {
+  return (
+    <Suspense fallback={<p>Loading...</p>}>
+      <AppInner />
+    </Suspense>
   );
 }
 // #endregion context-setup-react

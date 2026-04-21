@@ -34,6 +34,8 @@ export interface JsonSqlType<Output = JsonValue> {
   __output?: Output;
 }
 export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
+export type ColumnMergeStrategy = "counter";
+export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
 
 export function sqlTypeToString(sqlType: SqlType): string {
   if (typeof sqlType === "string") {
@@ -84,6 +86,7 @@ export interface Column {
   nullable: boolean;
   default?: unknown;
   references?: string; // Target table name for foreign key
+  mergeStrategy?: ColumnMergeStrategy;
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

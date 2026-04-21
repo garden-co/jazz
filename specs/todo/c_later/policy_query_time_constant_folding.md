@@ -13,9 +13,9 @@ What remains open is the broader design for query-time folding/caching across al
 
 > Status quo background:
 >
-> - [PolicyFilter lifecycle](../../status-quo/life_of_a_subscription.md#11-read-policy-checks-in-compilation-and-settlement)
+> - [Life of a subscription](../../status-quo/life_of_a_subscription.md)
 > - [Query Manager](../../status-quo/query_manager.md)
-> - [TypeScript permissions DSL](../a_mvp/permissions_ts_policy_dsl.md)
+> - `packages/jazz-tools/src/permissions/index.ts`
 
 ## Problem
 

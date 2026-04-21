@@ -1,0 +1,81 @@
+---
+title: FAQ
+description: Frequently asked questions about Jazz.
+reviewedAt: "f6535a533"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+<Accordions type="multiple">
+
+<Accordion id="reset-browser-storage" title="How do I reset browser storage?">
+
+In browser apps using the React, Vue, or Svelte Jazz clients, open the devtools console and run:
+
+```ts
+await window.__jazz.clearStorage();
+```
+
+If the page has more than one live Jazz storage context, inspect the available namespaces and then choose one explicitly:
+
+```ts
+window.__jazz.listLiveStorageNamespaces();
+await window.__jazz.clearStorage("my-app::alice");
+```
+
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API.
+
+- Browser persistent storage only.
+- If exactly one live namespace exists, `clearStorage()` uses it automatically.
+- If multiple live namespaces exist, Jazz throws and lists the available namespaces until you choose one.
+- Can be initiated from either leader or follower tabs; Jazz coordinates the reset across tabs for that namespace.
+- Deletes OPFS storage only. It does not clear `localStorage` local-first auth data.
+- Reopens a clean worker/runtime so the same live client remains usable after the wipe.
+
+This is useful when iterating on your schema during development.
+
+</Accordion>
+
+<Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
+
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+
+</Accordion>
+
+<Accordion id="offline-only" title="Can I use Jazz without a server?">
+
+Yes. Omit `serverUrl` from your config — data will be persisted locally only.
+
+</Accordion>
+
+<Accordion id="local-first-to-external" title="Can I upgrade from local-first auth to external auth without losing data?">
+
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
+
+</Accordion>
+
+<Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
+
+No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+
+</Accordion>
+
+<Accordion id="common-errors" title="What do the sync error messages mean?">
+
+Jazz may return the following errors when a client's request is rejected by the server:
+
+- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
+  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
+  that operation on the row.
+- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
+  Make sure the client is using a valid auth mode (local-first or external JWT).
+- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
+  catalogue object without the required admin secret. In production, catalogue writes require
+  `--admin-secret`.
+- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
+  server, typically because the query references a table or schema the server doesn't know about.
+  This can happen if the schema hasn't synced yet or if there's a version mismatch.
+
+</Accordion>
+
+</Accordions>

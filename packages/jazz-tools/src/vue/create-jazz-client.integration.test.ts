@@ -56,7 +56,10 @@ describe("vue/create-jazz-client integration", () => {
     try {
       client = await createJazzClient({ appId: makeAppId("mutation-query") });
 
-      const inserted = await client.db.insert(todosTable, { title: "buy milk", done: false });
+      const { value: inserted } = await client.db.insert(todosTable, {
+        title: "buy milk",
+        done: false,
+      });
       const rows = await client.db.all(allTodosQuery);
 
       expect(
@@ -64,25 +67,6 @@ describe("vue/create-jazz-client integration", () => {
           (row) => row.id === inserted.id && row.title === "buy milk" && row.done === false,
         ),
       ).toBe(true);
-    } finally {
-      if (client) {
-        await client.shutdown();
-      }
-    }
-  }, 15000);
-
-  it("VU-I02: local auth defaults return a non-null local session in local mode", async () => {
-    let client: JazzClient | null = null;
-
-    try {
-      client = await createJazzClient({
-        appId: makeAppId("local-session"),
-        localAuthMode: "anonymous",
-      });
-
-      expect(client.session).not.toBeNull();
-      expect(client.session?.claims.auth_mode).toBe("local");
-      expect(client.session?.claims.local_mode).toBe("anonymous");
     } finally {
       if (client) {
         await client.shutdown();

@@ -5,7 +5,7 @@ use crate::query_manager::encoding::encode_value_with_type;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey, SortTarget};
 use crate::query_manager::magic_columns::is_magic_column_name;
-use crate::query_manager::types::{RowDescriptor, TableName, TupleDescriptor, Value};
+use crate::query_manager::types::{ColumnType, RowDescriptor, TableName, TupleDescriptor, Value};
 
 use super::query_to_relation_ir::normalize_query_to_rel_expr;
 use super::relation_ir::ColumnRef;
@@ -70,6 +70,49 @@ fn tuple_condition_column_index(tuple_descriptor: &TupleDescriptor, column: &str
     }
 }
 
+fn is_row_id_condition_column(column: &str) -> bool {
+    matches!(column, "id" | "_id")
+}
+
+fn row_condition_row_id_element(descriptor: &RowDescriptor, column: &str) -> Option<usize> {
+    let (scope, name) = parse_condition_column(column)?;
+    if scope.is_some()
+        || !is_row_id_condition_column(name)
+        || descriptor.column_index(name).is_some()
+    {
+        return None;
+    }
+    Some(0)
+}
+
+fn tuple_condition_row_id_element(
+    tuple_descriptor: &TupleDescriptor,
+    column: &str,
+) -> Option<usize> {
+    let (scope, name) = parse_condition_column(column)?;
+    if !is_row_id_condition_column(name)
+        || tuple_condition_column_index(tuple_descriptor, column).is_some()
+    {
+        return None;
+    }
+
+    match scope {
+        Some(scope) => {
+            let mut matches = tuple_descriptor
+                .iter()
+                .enumerate()
+                .filter_map(|(index, element)| (element.table == scope).then_some(index));
+            let index = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            Some(index)
+        }
+        None if tuple_descriptor.element_count() == 1 => Some(0),
+        None => None,
+    }
+}
+
 /// A join specification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSpec {
@@ -119,6 +162,74 @@ pub enum Condition {
 }
 
 impl Condition {
+    fn row_id_null_literal_predicate(&self, element_index: usize) -> Option<Predicate> {
+        match self {
+            Condition::Eq { value, .. } if value.is_null() => {
+                Some(Predicate::RowIdIsNull { element_index })
+            }
+            Condition::Ne { value, .. } if value.is_null() => {
+                Some(Predicate::RowIdIsNotNull { element_index })
+            }
+            Condition::Lt { value, .. } if value.is_null() => Some(Predicate::Or(vec![])),
+            Condition::Le { value, .. } if value.is_null() => {
+                Some(Predicate::RowIdIsNull { element_index })
+            }
+            Condition::Gt { value, .. } if value.is_null() => {
+                Some(Predicate::RowIdIsNotNull { element_index })
+            }
+            Condition::Ge { value, .. } if value.is_null() => Some(Predicate::True),
+            _ => None,
+        }
+    }
+
+    fn to_row_id_predicate(&self, element_index: usize) -> Predicate {
+        if let Some(predicate) = self.row_id_null_literal_predicate(element_index) {
+            return predicate;
+        }
+
+        let encode = |value: &Value| encode_value_with_type(value, &ColumnType::Uuid);
+
+        match self {
+            Condition::Eq { value, .. } => Predicate::RowIdEq {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Ne { value, .. } => Predicate::RowIdNe {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Lt { value, .. } => Predicate::RowIdLt {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Le { value, .. } => Predicate::RowIdLe {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Gt { value, .. } => Predicate::RowIdGt {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Ge { value, .. } => Predicate::RowIdGe {
+                element_index,
+                value: encode(value),
+            },
+            Condition::Between { min, max, .. } => Predicate::And(vec![
+                Predicate::RowIdGe {
+                    element_index,
+                    value: encode(min),
+                },
+                Predicate::RowIdLe {
+                    element_index,
+                    value: encode(max),
+                },
+            ]),
+            Condition::Contains { .. } => Predicate::Or(vec![]),
+            Condition::IsNull { .. } => Predicate::RowIdIsNull { element_index },
+            Condition::IsNotNull { .. } => Predicate::RowIdIsNotNull { element_index },
+        }
+    }
+
     /// Get the raw column selector string.
     pub fn raw_column(&self) -> &str {
         match self {
@@ -170,107 +281,115 @@ impl Condition {
 
     /// Convert to a Predicate for filter evaluation.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Option<Predicate> {
-        let col_index = descriptor.column_index(self.column())?;
-        let col_type = &descriptor.columns[col_index].column_type;
-        if let Some(predicate) = self.null_literal_predicate(col_index) {
-            return Some(predicate);
+        if let Some(col_index) = descriptor.column_index(self.column()) {
+            let col_type = &descriptor.columns[col_index].column_type;
+            if let Some(predicate) = self.null_literal_predicate(col_index) {
+                return Some(predicate);
+            }
+
+            return Some(match self {
+                Condition::Eq { value, .. } => Predicate::Eq {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Ne { value, .. } => Predicate::Ne {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Lt { value, .. } => Predicate::Lt {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Le { value, .. } => Predicate::Le {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Gt { value, .. } => Predicate::Gt {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Ge { value, .. } => Predicate::Ge {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Between { min, max, .. } => Predicate::And(vec![
+                    Predicate::Ge {
+                        col_index,
+                        value: encode_value_with_type(min, col_type),
+                    },
+                    Predicate::Le {
+                        col_index,
+                        value: encode_value_with_type(max, col_type),
+                    },
+                ]),
+                Condition::Contains { value, .. } => Predicate::Contains {
+                    col_index,
+                    value: value.clone(),
+                },
+                Condition::IsNull { .. } => Predicate::IsNull { col_index },
+                Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
+            });
         }
 
-        Some(match self {
-            Condition::Eq { value, .. } => Predicate::Eq {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Ne { value, .. } => Predicate::Ne {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Lt { value, .. } => Predicate::Lt {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Le { value, .. } => Predicate::Le {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Gt { value, .. } => Predicate::Gt {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Ge { value, .. } => Predicate::Ge {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Between { min, max, .. } => Predicate::And(vec![
-                Predicate::Ge {
-                    col_index,
-                    value: encode_value_with_type(min, col_type),
-                },
-                Predicate::Le {
-                    col_index,
-                    value: encode_value_with_type(max, col_type),
-                },
-            ]),
-            Condition::Contains { value, .. } => Predicate::Contains {
-                col_index,
-                value: value.clone(),
-            },
-            Condition::IsNull { .. } => Predicate::IsNull { col_index },
-            Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
-        })
+        row_condition_row_id_element(descriptor, self.raw_column())
+            .map(|element_index| self.to_row_id_predicate(element_index))
     }
 
     /// Convert to a Predicate using a TupleDescriptor so scoped join refs can resolve.
     pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Option<Predicate> {
-        let col_index = tuple_condition_column_index(tuple_descriptor, self.raw_column())?;
-        let combined_descriptor = tuple_descriptor.combined_descriptor();
-        let col_type = &combined_descriptor.columns[col_index].column_type;
-        if let Some(predicate) = self.null_literal_predicate(col_index) {
-            return Some(predicate);
+        if let Some(col_index) = tuple_condition_column_index(tuple_descriptor, self.raw_column()) {
+            let combined_descriptor = tuple_descriptor.combined_descriptor();
+            let col_type = &combined_descriptor.columns[col_index].column_type;
+            if let Some(predicate) = self.null_literal_predicate(col_index) {
+                return Some(predicate);
+            }
+
+            return Some(match self {
+                Condition::Eq { value, .. } => Predicate::Eq {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Ne { value, .. } => Predicate::Ne {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Lt { value, .. } => Predicate::Lt {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Le { value, .. } => Predicate::Le {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Gt { value, .. } => Predicate::Gt {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Ge { value, .. } => Predicate::Ge {
+                    col_index,
+                    value: encode_value_with_type(value, col_type),
+                },
+                Condition::Between { min, max, .. } => Predicate::And(vec![
+                    Predicate::Ge {
+                        col_index,
+                        value: encode_value_with_type(min, col_type),
+                    },
+                    Predicate::Le {
+                        col_index,
+                        value: encode_value_with_type(max, col_type),
+                    },
+                ]),
+                Condition::Contains { value, .. } => Predicate::Contains {
+                    col_index,
+                    value: value.clone(),
+                },
+                Condition::IsNull { .. } => Predicate::IsNull { col_index },
+                Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
+            });
         }
 
-        Some(match self {
-            Condition::Eq { value, .. } => Predicate::Eq {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Ne { value, .. } => Predicate::Ne {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Lt { value, .. } => Predicate::Lt {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Le { value, .. } => Predicate::Le {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Gt { value, .. } => Predicate::Gt {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Ge { value, .. } => Predicate::Ge {
-                col_index,
-                value: encode_value_with_type(value, col_type),
-            },
-            Condition::Between { min, max, .. } => Predicate::And(vec![
-                Predicate::Ge {
-                    col_index,
-                    value: encode_value_with_type(min, col_type),
-                },
-                Predicate::Le {
-                    col_index,
-                    value: encode_value_with_type(max, col_type),
-                },
-            ]),
-            Condition::Contains { value, .. } => Predicate::Contains {
-                col_index,
-                value: value.clone(),
-            },
-            Condition::IsNull { .. } => Predicate::IsNull { col_index },
-            Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
-        })
+        tuple_condition_row_id_element(tuple_descriptor, self.raw_column())
+            .map(|element_index| self.to_row_id_predicate(element_index))
     }
 
     fn null_literal_predicate(&self, col_index: usize) -> Option<Predicate> {
@@ -1440,6 +1559,56 @@ mod tests {
 
         let predicate = query.to_predicate(&descriptor);
         assert!(matches!(predicate, Predicate::Eq { col_index: 2, .. }));
+    }
+
+    #[test]
+    fn query_to_predicate_supports_implicit_row_id() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+        let row_id = crate::object::ObjectId::new();
+        let query = QueryBuilder::new("users")
+            .filter_eq("id", Value::Uuid(row_id))
+            .build();
+
+        let predicate = query.to_predicate(&descriptor);
+        assert!(matches!(
+            predicate,
+            Predicate::RowIdEq {
+                element_index: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn condition_to_tuple_predicate_supports_scoped_implicit_row_id() {
+        let condition = Condition::Eq {
+            column: "__hop_0._id".into(),
+            value: Value::Uuid(crate::object::ObjectId::new()),
+        };
+        let tuple_descriptor = TupleDescriptor::from_tables(&[
+            (
+                "user_team_edges".to_string(),
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("user_id", ColumnType::Text),
+                    ColumnDescriptor::new("team", ColumnType::Uuid),
+                ]),
+            ),
+            (
+                "__hop_0".to_string(),
+                RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            ),
+        ]);
+
+        let predicate = condition
+            .to_tuple_predicate(&tuple_descriptor)
+            .expect("scoped row id predicate");
+        assert!(matches!(
+            predicate,
+            Predicate::RowIdEq {
+                element_index: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

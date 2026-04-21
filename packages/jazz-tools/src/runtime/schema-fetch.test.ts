@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchSchemaConnectivity,
+  fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  publishStoredMigration,
+  publishStoredPermissions,
 } from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
 
@@ -19,18 +21,22 @@ describe("schema-fetch", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ users: { columns: [] } }),
+      json: async () => ({
+        schema: { users: { columns: [] } },
+        publishedAt: 1_744_011_200_000,
+      }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const result = await fetchStoredWasmSchema("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
       schemaHash: hash,
     });
 
     expect(result.schema.users).toBeDefined();
+    expect(result.publishedAt).toBe(1_744_011_200_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![0]).toBe(`http://localhost:1625/apps/app-123/schema/${hash}`);
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
@@ -52,6 +58,7 @@ describe("schema-fetch", () => {
 
     await expect(
       fetchStoredWasmSchema("http://localhost:1625", {
+        appId: "test-app",
         adminSecret: "admin-secret",
         schemaHash:
           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -71,8 +78,8 @@ describe("schema-fetch", () => {
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     const result = await fetchSchemaHashes("http://localhost:1625/", {
+      appId: "app-123",
       adminSecret: "admin-secret",
-      pathPrefix: "/apps/app-123",
     });
 
     expect(result.hashes).toEqual([
@@ -93,18 +100,267 @@ describe("schema-fetch", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({ users: { columns: [] } }),
+      json: async () => ({
+        schema: { users: { columns: [] } },
+        publishedAt: null,
+      }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
     await fetchStoredWasmSchema("http://localhost:1625/", {
+      appId: "test-app",
       adminSecret: "admin-secret",
       schemaHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
 
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:1625/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "http://localhost:1625/apps/test-app/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
+  });
+
+  it("publishes nested relation literals as tagged wire values", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      statusText: "Created",
+      json: async () => ({
+        head: {
+          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          version: 1,
+          parentBundleObjectId: null,
+          bundleObjectId: "99999999-9999-9999-9999-999999999999",
+        },
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await publishStoredPermissions("http://localhost:1625/", {
+      appId: "test-app",
+      adminSecret: "admin-secret",
+      schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      permissions: {
+        resources: {
+          select: {
+            using: {
+              type: "ExistsRel",
+              rel: {
+                Filter: {
+                  input: {
+                    TableScan: {
+                      table: "resource_access_edges",
+                    },
+                  },
+                  predicate: {
+                    And: [
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "resource",
+                          },
+                          op: "Eq",
+                          right: {
+                            OuterColumn: {
+                              column: "id",
+                            },
+                          },
+                        },
+                      },
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "grant_role",
+                          },
+                          op: "Eq",
+                          right: {
+                            Literal: "viewer",
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/test-app/admin/permissions",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
+      schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedParentBundleObjectId: null,
+      permissions: {
+        resources: {
+          select: {
+            using: {
+              type: "ExistsRel",
+              rel: {
+                Filter: {
+                  input: {
+                    TableScan: {
+                      table: "resource_access_edges",
+                    },
+                  },
+                  predicate: {
+                    And: [
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "resource",
+                          },
+                          op: "Eq",
+                          right: {
+                            OuterColumn: {
+                              column: "id",
+                            },
+                          },
+                        },
+                      },
+                      {
+                        Cmp: {
+                          left: {
+                            scope: "resource_access_edges",
+                            column: "grant_role",
+                          },
+                          op: "Eq",
+                          right: {
+                            Literal: {
+                              type: "Text",
+                              value: "viewer",
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("fetches stored permissions with admin secret header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        head: {
+          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          version: 2,
+          parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+          bundleObjectId: "22222222-2222-2222-2222-222222222222",
+        },
+        permissions: {
+          users: {
+            select: {
+              using: {
+                type: "True",
+              },
+            },
+          },
+        },
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchStoredPermissions("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+    });
+
+    expect(result).toEqual({
+      head: {
+        schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        version: 2,
+        parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+        bundleObjectId: "22222222-2222-2222-2222-222222222222",
+      },
+      permissions: {
+        users: {
+          select: {
+            using: {
+              type: "True",
+            },
+          },
+        },
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/app-123/admin/permissions",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
+  });
+
+  it("throws a descriptive error when fetching stored permissions fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      text: async () => '{"error":"bad secret"}',
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      fetchStoredPermissions("http://localhost:1625", {
+        appId: "test-app",
+        adminSecret: "admin-secret",
+      }),
+    ).rejects.toThrow('Permissions fetch failed: 401 Unauthorized - {"error":"bad secret"}');
+  });
+
+  it("fetches schema connectivity with admin secret and query params", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        connected: true,
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchSchemaConnectivity("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+
+    expect(result).toEqual({ connected: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(
+      "http://localhost:1625/apps/app-123/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
   });
 
   it("fetches grouped server subscriptions with admin secret and app id", async () => {
@@ -132,14 +388,13 @@ describe("schema-fetch", () => {
     const result = await fetchServerSubscriptions("http://localhost:1625/", {
       adminSecret: "admin-secret",
       appId: "test-app",
-      pathPrefix: "/apps/app-123",
     });
 
     expect(result.appId).toBe("app-123");
     expect(result.queries).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![0]).toBe(
-      "http://localhost:1625/apps/app-123/admin/introspection/subscriptions?appId=test-app",
+      "http://localhost:1625/apps/test-app/admin/introspection/subscriptions?appId=test-app",
     );
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "GET",

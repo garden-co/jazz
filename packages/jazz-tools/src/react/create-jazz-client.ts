@@ -1,9 +1,9 @@
 import type { Session } from "../runtime/context.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
+import { registerWindowJazzStorageClient } from "../window-client-storage.js";
 
 export interface JazzClient {
   db: Db;
@@ -13,15 +13,15 @@ export interface JazzClient {
 }
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
-  const resolvedConfig = resolveLocalAuthDefaults(config);
-  const db = await createDb(resolvedConfig);
+  const db = await createDb(config);
   let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db, session);
+  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db, session);
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;
     manager.setSession(nextSession ?? null);
   });
+  const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
   return {
     db,
@@ -31,6 +31,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     manager,
     async shutdown() {
       stopSessionSync?.();
+      unregisterWindowJazzStorageClient();
       await manager.shutdown();
       await db.shutdown();
     },

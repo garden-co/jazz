@@ -466,7 +466,9 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const { id: userId } = await client.db.insert(users, { name: "Owner", team_id: undefined });
+    const {
+      value: { id: userId },
+    } = await client.db.insert(users, { name: "Owner", team_id: undefined });
     await client.db.insert(todos, {
       title: "owned-todo",
       done: false,
@@ -500,8 +502,12 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const { id: orgId } = await client.db.insert(orgs, { name: "Hop Org" });
-    const { id: teamId } = await client.db.insert(teams, {
+    const {
+      value: { id: orgId },
+    } = await client.db.insert(orgs, { name: "Hop Org" });
+    const {
+      value: { id: teamId },
+    } = await client.db.insert(teams, {
       name: "Hop Team",
       org_id: orgId,
       parent_id: undefined,
@@ -540,12 +546,16 @@ describe("useAll browser integration", () => {
       </JazzProvider>,
     );
 
-    const { id: rootId } = await client.db.insert(teams, {
+    const {
+      value: { id: rootId },
+    } = await client.db.insert(teams, {
       name: "root",
       org_id: undefined,
       parent_id: undefined,
     });
-    const { id: midId } = await client.db.insert(teams, {
+    const {
+      value: { id: midId },
+    } = await client.db.insert(teams, {
       name: "mid",
       org_id: undefined,
       parent_id: rootId,

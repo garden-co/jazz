@@ -3,7 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::object_manager::AllObjectUpdate;
+use crate::object::ObjectId;
+use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
@@ -20,10 +21,34 @@ use super::session::Session;
 #[cfg(test)]
 use super::types::Value;
 use super::types::{ComposedBranchName, Schema, SchemaHash};
-#[cfg(test)]
-use crate::object::ObjectId;
+
+type ReplayableQuerySubscription = (
+    QueryId,
+    Query,
+    Option<Session>,
+    QueryPropagation,
+    Vec<String>,
+);
+
+pub(crate) struct SubscriptionExecutionOptions {
+    pub(crate) local_updates: LocalUpdates,
+    pub(crate) strict_transactions: bool,
+    pub(crate) propagation: QueryPropagation,
+    pub(crate) local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
+}
 
 impl QueryManager {
+    pub(crate) fn policy_context_tables_for_graph(graph: &super::graph::QueryGraph) -> Vec<String> {
+        let mut tables: Vec<String> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| table.as_str().to_string())
+            .collect();
+        tables.sort();
+        tables.dedup();
+        tables
+    }
+
     fn should_send_local_subscription_upstream(&self, propagation: QueryPropagation) -> bool {
         propagation == QueryPropagation::Full || !self.sync_manager.has_durability_identity()
     }
@@ -75,8 +100,12 @@ impl QueryManager {
             query,
             session,
             durability_tier,
-            local_updates,
-            QueryPropagation::Full,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions: false,
+                propagation: QueryPropagation::Full,
+                local_overlay_rows: HashMap::new(),
+            },
         )
     }
 
@@ -85,9 +114,14 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
-        local_updates: LocalUpdates,
-        propagation: QueryPropagation,
+        options: SubscriptionExecutionOptions,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let SubscriptionExecutionOptions {
+            local_updates,
+            strict_transactions,
+            propagation,
+            local_overlay_rows,
+        } = options;
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
@@ -108,17 +142,26 @@ impl QueryManager {
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
         let compile_schema = self.local_subscription_compile_schema(session.as_ref());
+        let compile_row_policy_mode = if uses_explicit_authorization_filtering {
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal
+        } else {
+            self.row_policy_mode
+        };
         let graph = Self::compile_graph(
             &query,
             &compile_schema,
             session.clone(),
             &self.schema_context,
+            compile_row_policy_mode,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
-        let achieved_tiers = self.sync_manager.local_durability_tiers();
+        let query_frontier_complete = durability_tier.is_none()
+            || !self.should_send_local_subscription_upstream(propagation)
+            || !self.sync_manager.has_servers_or_pending_servers();
 
         tracing::debug!(
             sub_id = id.0,
@@ -137,11 +180,16 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier,
                 local_updates,
+                strict_transactions,
                 has_pending_local_updates: false,
-                achieved_tiers,
+                pending_local_row_ids: HashSet::new(),
+                local_overlay_rows,
+                query_frontier_complete,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering,
+                sync_backed: false,
                 propagation,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -190,8 +238,15 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
-            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            session.clone(),
+            schema_context,
+            crate::query_manager::types::RowPolicyMode::PermissiveLocal,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let policy_context_tables = Self::policy_context_tables_for_graph(&graph);
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -207,11 +262,16 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
+                strict_transactions: false,
                 has_pending_local_updates: false,
-                achieved_tiers: HashSet::new(),
+                pending_local_row_ids: HashSet::new(),
+                local_overlay_rows: HashMap::new(),
+                query_frontier_complete: true,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
+                policy_context_tables,
                 uses_explicit_authorization_filtering: false,
+                sync_backed: false,
                 propagation: QueryPropagation::Full,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -226,9 +286,10 @@ impl QueryManager {
     /// 1. Creates a local subscription (like `subscribe_with_session`)
     /// 2. Sends a QuerySubscription to all connected servers
     ///
-    /// Servers will evaluate the query against their data and send ObjectUpdated
-    /// messages for all matching objects. As new objects match the query on
-    /// the server, they are automatically synced.
+    /// Servers will evaluate the query against their data and send row-batch
+    /// messages for matching rows plus legacy object updates for non-row
+    /// objects. As new objects match the query on the server, they are
+    /// automatically synced.
     ///
     /// The returned QuerySubscriptionId is used both locally and in the sync protocol.
     pub fn subscribe_with_sync(
@@ -257,6 +318,7 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
+            false,
             QueryPropagation::Full,
         )
     }
@@ -274,26 +336,63 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
+            false,
             propagation,
         )
     }
 
-    pub fn subscribe_with_sync_and_propagation_with_local_updates(
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_updates(
         &mut self,
         query: Query,
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
+        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        // Create local subscription
+        self.subscribe_with_sync_and_propagation_with_local_overlay(
+            query,
+            session,
+            durability_tier,
+            SubscriptionExecutionOptions {
+                local_updates,
+                strict_transactions,
+                propagation,
+                local_overlay_rows: HashMap::new(),
+            },
+        )
+    }
+
+    pub(crate) fn subscribe_with_sync_and_propagation_with_local_overlay(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability_tier: Option<DurabilityTier>,
+        options: SubscriptionExecutionOptions,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        let overlay_row_ids: HashSet<_> = options.local_overlay_rows.keys().copied().collect();
+        let propagation = options.propagation;
         let sub_id = self.subscribe_with_session_and_propagation(
             query.clone(),
             session.clone(),
             durability_tier,
-            local_updates,
-            propagation,
+            options,
         )?;
+
+        if let Some(subscription) = self.subscriptions.get_mut(&sub_id) {
+            subscription.sync_backed = true;
+            if !overlay_row_ids.is_empty() {
+                subscription.pending_local_row_ids.extend(overlay_row_ids);
+                subscription.has_pending_local_updates = true;
+            } else if subscription.local_updates == LocalUpdates::Immediate
+                && !self.pending_local_row_batches.is_empty()
+            {
+                subscription
+                    .pending_local_row_ids
+                    .extend(self.pending_local_row_batches.keys().copied());
+                subscription.has_pending_local_updates = true;
+            }
+        }
 
         let sync_query = self.sync_query_payload_for_upstream(&query);
 
@@ -302,34 +401,31 @@ impl QueryManager {
         // (e.g. worker OPFS), and will be prevented from forwarding upstream.
         if self.should_send_local_subscription_upstream(propagation) {
             let query_id = QueryId(sub_id.0);
+            let policy_context_tables = self
+                .subscriptions
+                .get(&sub_id)
+                .map(|subscription| subscription.policy_context_tables.clone())
+                .unwrap_or_default();
             self.sync_manager.send_query_subscription_to_servers(
                 query_id,
                 sync_query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
 
         Ok(sub_id)
     }
 
-    /// Add an upstream server and replay all active query subscriptions.
-    ///
-    /// This ensures subscriptions that became active before the server connection
-    /// are forwarded once the server is available.
-    pub fn add_server(&mut self, server_id: ServerId) {
-        self.add_server_with_catalogue_match(server_id, false);
-    }
-
-    /// Add an upstream server and optionally skip replaying catalogue objects
-    /// when the remote side already has the same catalogue state.
-    pub fn add_server_with_catalogue_match(
+    pub fn add_server_with_storage<H: Storage>(
         &mut self,
+        storage: &H,
         server_id: ServerId,
         skip_catalogue_sync: bool,
     ) {
         self.sync_manager
-            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
+            .add_server_with_storage(server_id, skip_catalogue_sync, storage);
         self.replay_active_query_subscriptions_to_server(server_id);
     }
 
@@ -368,7 +464,7 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let local_subs: Vec<ReplayableQuerySubscription> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
@@ -377,11 +473,12 @@ impl QueryManager {
                     self.sync_query_payload_for_upstream(&sub.query),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in local_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in local_subs {
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
@@ -389,11 +486,12 @@ impl QueryManager {
                     query,
                     session,
                     propagation,
+                    policy_context_tables,
                 );
             }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let downstream_subs: Vec<ReplayableQuerySubscription> = self
             .server_subscriptions
             .iter()
             .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
@@ -403,17 +501,19 @@ impl QueryManager {
                     sub.query.clone(),
                     sub.session.clone(),
                     sub.propagation,
+                    sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in downstream_subs {
+        for (query_id, query, session, propagation, policy_context_tables) in downstream_subs {
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
                 query_id,
                 query,
                 session,
                 propagation,
+                policy_context_tables,
             );
         }
     }
@@ -436,26 +536,26 @@ impl QueryManager {
         std::mem::take(&mut self.pending_catalogue_updates)
     }
 
-    /// Retry processing buffered row updates.
+    /// Retry processing buffered row visibility changes.
     ///
     /// Call this after activating new schemas (via try_activate_pending_schemas)
     /// and updating the schema context (via sync_context). Rows that arrived
     /// before their schema was known will be reprocessed.
-    pub fn retry_pending_row_updates(&mut self, storage: &mut dyn Storage) {
-        let pending = std::mem::take(&mut self.pending_row_updates);
+    pub fn retry_pending_row_visibility_changes(&mut self, storage: &mut dyn Storage) {
+        let pending = std::mem::take(&mut self.pending_row_visibility_changes);
         for update in pending {
-            self.handle_object_update(storage, update);
+            self.handle_row_update(storage, update);
         }
     }
 
-    /// Take all pending row updates (used by sync_context to preserve across rebuild).
-    pub fn take_pending_row_updates(&mut self) -> Vec<AllObjectUpdate> {
-        std::mem::take(&mut self.pending_row_updates)
+    /// Take all pending row visibility changes (used by sync_context to preserve across rebuild).
+    pub fn take_pending_row_visibility_changes(&mut self) -> Vec<RowVisibilityChange> {
+        std::mem::take(&mut self.pending_row_visibility_changes)
     }
 
-    /// Restore pending row updates (used by sync_context after rebuild).
-    pub fn restore_pending_row_updates(&mut self, updates: Vec<AllObjectUpdate>) {
-        self.pending_row_updates = updates;
+    /// Restore pending row visibility changes (used by sync_context after rebuild).
+    pub fn restore_pending_row_visibility_changes(&mut self, updates: Vec<RowVisibilityChange>) {
+        self.pending_row_visibility_changes = updates;
     }
 
     /// Set known schemas for server-mode operation.
@@ -476,14 +576,24 @@ impl QueryManager {
 
     /// Find a schema in known_schemas by its short hash prefix.
     ///
-    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
+    /// Returns the full SchemaHash if found. The partial hash has the first 6 bytes
     /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
     pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
-        let target_short = &partial.0[..4];
+        let target_short = &partial.0[..6];
+
+        if &self.schema_context.current_hash.0[..6] == target_short {
+            return Some(self.schema_context.current_hash);
+        }
+
+        for &full_hash in self.schema_context.live_schemas.keys() {
+            if &full_hash.0[..6] == target_short {
+                return Some(full_hash);
+            }
+        }
 
         // Search known_schemas for matching short hash
         for full_hash in self.known_schemas.keys() {
-            if &full_hash.0[..4] == target_short {
+            if &full_hash.0[..6] == target_short {
                 return Some(*full_hash);
             }
         }

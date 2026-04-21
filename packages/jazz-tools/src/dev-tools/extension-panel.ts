@@ -11,12 +11,13 @@ import {
   Session,
   SessionClient,
   SubscriptionCallback,
+  UpdateOptions,
   Value,
   WasmModule,
   WasmSchema,
 } from "../index.js";
+import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
 import { Db, DbConfig } from "../runtime/db.js";
-import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
@@ -424,8 +425,7 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
 
 export async function createDbFromInspectedPage(): Promise<DevToolsDb> {
   const bootstrap = await waitForDevToolsBootstrap();
-  const resolvedConfig = resolveLocalAuthDefaults(bootstrap.dbConfig);
-  return new DevToolsDb(resolvedConfig, null);
+  return new DevToolsDb(bootstrap.dbConfig, null);
 }
 
 export function getRegisteredWasmSchema(): WasmSchema | null {
@@ -486,13 +486,11 @@ class DevToolsDb extends Db {
   }
 
   protected getClient(schema: WasmSchema): JazzClient {
-    // @ts-expect-error proxy client intentionally implements a constrained bridge-backed surface.
-    return new DevToolsJazzClient(schema);
+    return new DevToolsJazzClient(schema) as unknown as JazzClient;
   }
 }
 
-// @ts-expect-error
-class DevToolsJazzClient implements JazzClient {
+class DevToolsJazzClient {
   private readonly fallbackSchema: WasmSchema;
 
   constructor(schema: WasmSchema) {
@@ -505,7 +503,7 @@ class DevToolsJazzClient implements JazzClient {
   forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues): DirectInsertResult {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
@@ -536,7 +534,7 @@ class DevToolsJazzClient implements JazzClient {
     objectId: string,
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
-  ): void {
+  ): DirectMutationResult {
     throw new Error("DevTools client does not support non-durable update().");
   }
   async updateDurable(
@@ -551,7 +549,7 @@ class DevToolsJazzClient implements JazzClient {
       tier: options?.tier,
     });
   }
-  delete(objectId: string, options?: { tier?: DurabilityTier }): void {
+  delete(objectId: string, options?: { tier?: DurabilityTier }): DirectMutationResult {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {

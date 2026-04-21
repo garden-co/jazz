@@ -1,5 +1,5 @@
-import { describe, expectTypeOf, it } from "vitest";
-import { definePermissions } from "./index.js";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { createSessionContext, definePermissions } from "./index.js";
 
 interface Todo {
   id: string;
@@ -209,6 +209,9 @@ describe("permissions type inference", () => {
           .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
           .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
         policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+        policy.teams.allowRead.where({
+          "resource_access_edges.grant_role": "viewer",
+        }),
       ];
     });
   });
@@ -264,6 +267,30 @@ describe("permissions type inference", () => {
     definePermissions(app, ({ policy }) => {
       policy.todos.managedByCreator();
       return [];
+    });
+  });
+});
+
+describe("SessionContext — typed authMode", () => {
+  it("authMode compiles as a leaf Session field", () => {
+    const session = createSessionContext();
+    const condition = session.where({ authMode: "local-first" });
+    expectTypeOf(condition).toMatchTypeOf<{ __jazzPermissionKind: "session-where" }>();
+  });
+
+  it("authMode accepts union of the three modes", () => {
+    const session = createSessionContext();
+    session.where({ authMode: "external" });
+    session.where({ authMode: "anonymous" });
+    session.where({ authMode: { in: ["local-first", "external"] } });
+  });
+
+  it("session.authMode produces a leaf SessionRefValue with path ['authMode']", () => {
+    const session = createSessionContext();
+    const ref = session.authMode;
+    expect(ref).toMatchObject({
+      __jazzPermissionKind: "session-ref",
+      path: ["authMode"],
     });
   });
 });

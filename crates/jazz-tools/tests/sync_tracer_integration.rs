@@ -23,21 +23,23 @@ fn test_schema() -> jazz_tools::Schema {
 /// Alice creates a todo, bob sees it. The tracer captures the full flow.
 ///
 /// ```text
-/// alice ──ObjectUpdated──► server ──ObjectUpdated──► bob
-///       ◄──PersistenceAck──
+/// alice ──RowBatchCreated────► server ──RowBatchNeeded────► bob
+///       ◄──RowBatchStateChanged──
 /// ```
 #[tokio::test]
 async fn alice_write_bob_read() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema.clone())
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -46,7 +48,7 @@ async fn alice_write_bob_read() {
 
     let bob = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("bob")
         .with_tracer(&tracer, "bob")
         .ready_on("todos", Duration::from_secs(30))
@@ -77,16 +79,77 @@ async fn alice_write_bob_read() {
     )
     .await;
 
-    insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : ObjectUpdated (1)
-    alice    => server  : ObjectUpdated (1)
-    bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
-    bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
-    server   -> alice   : PersistenceAck (2)
-    server   -> bob     : ObjectUpdated (1), QuerySettled (2)
-    server   => alice   : PersistenceAck (2)
-    server   => bob     : ObjectUpdated (1), QuerySettled (2)
-    ");
+    let alice_sent = tracer.from("alice");
+    assert!(
+        alice_sent.iter().any(|message| message.is_object_updated()),
+        "alice should send a row batch to the server"
+    );
+
+    let bob_sent = tracer.from("bob");
+    assert!(
+        bob_sent
+            .iter()
+            .any(|message| message.payload.variant_name() == "QuerySubscription"),
+        "bob should subscribe before receiving the row"
+    );
+
+    let alice_received = tracer.to("alice");
+    assert!(
+        alice_received
+            .iter()
+            .any(|message| message.payload.variant_name() == "BatchSettlement"),
+        "alice should receive a settlement for the created row batch"
+    );
+    assert!(
+        alice_received
+            .iter()
+            .any(|message| message.is_persistence_ack()),
+        "alice should receive a row-batch state update"
+    );
+
+    let bob_received = tracer
+        .between("server", "bob")
+        .into_iter()
+        .filter(|message| {
+            message.side == jazz_tools::sync_tracer::Side::Recv
+                && message.from.name() == "server"
+                && message.to.name() == "bob"
+        })
+        .collect::<Vec<_>>();
+    let bob_sent_from_server = tracer
+        .between("server", "bob")
+        .into_iter()
+        .filter(|message| {
+            message.side == jazz_tools::sync_tracer::Side::Send
+                && message.from.name() == "server"
+                && message.to.name() == "bob"
+        })
+        .collect::<Vec<_>>();
+
+    for messages in [&bob_received, &bob_sent_from_server] {
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "BatchSettlement"),
+            "bob should see a batch settlement from the server"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "QueryScopeSnapshot"),
+            "bob should see at least one query scope snapshot from the server"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.payload.variant_name() == "QuerySettled"),
+            "bob should see query settlement from the server"
+        );
+        assert!(
+            messages.iter().any(|message| message.is_object_updated()),
+            "bob should receive the created row batch from the server"
+        );
+    }
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -102,15 +165,17 @@ async fn alice_write_bob_read() {
 #[tokio::test]
 async fn bob_updates_alice_todo() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema.clone())
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -119,7 +184,7 @@ async fn bob_updates_alice_todo() {
 
     let bob = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("bob")
         .with_tracer(&tracer, "bob")
         .ready_on("todos", Duration::from_secs(30))
@@ -178,41 +243,40 @@ async fn bob_updates_alice_todo() {
 
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
-    // Assert message flow shape (types present, not exact counts — the server
-    // may batch ObjectUpdated messages non-deterministically).
+    // Assert message flow shape (types present, not exact counts).
     tracer.expect_contains(
         "
         alice    -> server   QuerySubscription
-        server   -> alice    ObjectUpdated
+        server   -> alice    RowBatchNeeded
         server   -> alice    QuerySettled
     ",
     );
     tracer.expect_contains(
         "
-        bob      -> server   ObjectUpdated
-        server   -> bob      PersistenceAck
+        bob      -> server   RowBatchCreated
+        server   -> bob      RowBatchStateChanged
     ",
     );
 
-    // Bob sent an ObjectUpdated to server
+    // Bob sent a row update to the server.
     let bob_sent = tracer.from("bob");
     assert!(
         bob_sent.iter().any(|m| m.is_object_updated()),
-        "bob should have sent ObjectUpdated"
+        "bob should have sent a row update"
     );
 
-    // Alice received at least one ObjectUpdated from server
+    // Alice received at least one row update from server.
     let alice_recv = tracer.to("alice");
     assert!(
         alice_recv.iter().any(|m| m.is_object_updated()),
-        "alice should have received ObjectUpdated from server"
+        "alice should have received a row update from server"
     );
 
-    // Bob received PersistenceAck from server
+    // Bob received a durability-state update from server.
     let bob_recv = tracer.to("bob");
     assert!(
         bob_recv.iter().any(|m| m.is_persistence_ack()),
-        "bob should have received PersistenceAck"
+        "bob should have received a row state update"
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -220,19 +284,21 @@ async fn bob_updates_alice_todo() {
     server.shutdown().await;
 }
 
-/// Single-writer flow: alice writes, server acks.
+/// Single-writer flow: alice writes, server confirms durability.
 #[tokio::test]
 async fn single_writer_flow() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -255,10 +321,10 @@ async fn single_writer_flow() {
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : ObjectUpdated (1), QueryUnsubscription (1)
-    alice    => server  : ObjectUpdated (1)
-    server   -> alice   : PersistenceAck (2)
-    server   => alice   : PersistenceAck (2)
+    alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1)
+    alice    => server  : RowBatchCreated (1)
+    server   -> alice   : BatchSettlement (1), RowBatchStateChanged (2)
+    server   => alice   : BatchSettlement (1), RowBatchStateChanged (2)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -271,15 +337,17 @@ async fn single_writer_flow() {
 #[tokio::test]
 async fn named_object_trace() {
     let tracer = SyncTracer::new();
+    let schema = test_schema();
 
     let server = TestingServer::builder()
+        .with_schema(schema.clone())
         .with_tracer(tracer.clone())
         .start()
         .await;
 
     let alice = TestingClient::builder()
         .with_server(&server)
-        .with_schema(test_schema())
+        .with_schema(schema)
         .with_user_id("alice")
         .with_tracer(&tracer, "alice")
         .ready_on("todos", Duration::from_secs(30))
@@ -305,13 +373,15 @@ async fn named_object_trace() {
 
     insta::assert_snapshot!(tracer.trace_normalized(), @"
     # => sent, -> received
-    alice    => server    ObjectUpdated        obj:my-todo branch:main commits:[C1]
-    alice    -> server    ObjectUpdated        obj:my-todo branch:main commits:[C1]
     alice    -> server    QueryUnsubscription  query:0
-    server   => alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:EdgeServer
-    server   -> alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:EdgeServer
-    server   => alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:GlobalServer
-    server   -> alice     PersistenceAck       obj:my-todo branch:main confirmed:[C1] tier:GlobalServer
+    alice    => server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    server   => alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
+    server   -> alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
+    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
+    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

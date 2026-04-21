@@ -59,7 +59,7 @@ MVP reserved system principal:
 
 - `jazz:system`
 
-The low-level object layer may still accept an explicit author parameter, but its meaning changes from "object id" to "principal id".
+The low-level row-history write path may still accept an explicit author parameter, but its meaning changes from "row id" to "principal id".
 
 ### 2. Use the resolved Jazz principal, not raw external ids
 
@@ -229,9 +229,9 @@ If the row is visible to the query, provenance magic columns evaluate from the v
 
 ## Execution Semantics
 
-### What row version is checked?
+### What row batch entry is checked?
 
-Policy evaluation should use the same visible row version the query/mutation path already uses.
+Policy evaluation should use the same visible row batch entry the query/mutation path already uses.
 
 - `created_by` comes from the visible row commit metadata
 - `updated_by` comes from the visible row commit author
@@ -313,7 +313,7 @@ This change is intentionally breaking at the commit layer.
 Why:
 
 - `Commit.author` changes type and serialized representation
-- `Commit.author` participates in `CommitId` hashing
+- `Commit.author` participates in `Digest32` hashing
 - new commits created under the new semantics will hash differently
 
 MVP stance:

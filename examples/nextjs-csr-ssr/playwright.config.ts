@@ -3,8 +3,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const SERVER_URL = process.env.NEXT_PUBLIC_SYNC_SERVER_URL!;
-const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
+const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
+const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const BACKEND_SECRET = process.env.BACKEND_SECRET!;
 const ADMIN_SECRET = process.env.ADMIN_SECRET!;
 const WEB_PORT = Number(process.env.WEB_PORT ?? "3000");
@@ -33,7 +33,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
-        NEXT_PUBLIC_APP_ID: APP_ID,
+        NEXT_PUBLIC_JAZZ_APP_ID: APP_ID,
         BACKEND_SECRET,
         ADMIN_SECRET,
         JAZZ_SERVER_PORT: String(new URL(SERVER_URL).port),
@@ -45,8 +45,8 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
-        NEXT_PUBLIC_SYNC_SERVER_URL: SERVER_URL,
-        NEXT_PUBLIC_APP_ID: APP_ID,
+        NEXT_PUBLIC_JAZZ_SERVER_URL: SERVER_URL,
+        NEXT_PUBLIC_JAZZ_APP_ID: APP_ID,
         BACKEND_SECRET,
         ADMIN_SECRET,
       },

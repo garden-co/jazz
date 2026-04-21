@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import type { Session } from "./context.js";
 import {
-  deriveLocalPrincipalId,
-  deriveLocalPrincipalIdSync,
   resolveClientSessionSync,
   resolveClientSessionStateSync,
+  resolveJwtSession,
+  LOCAL_FIRST_JWT_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
 } from "./client-session.js";
 
 function toBase64Url(value: string): string {
@@ -21,36 +22,34 @@ function makeJwt(payload: Record<string, unknown>): string {
 }
 
 describe("client session resolution", () => {
-  it("prefers jazz_principal_id from JWT when present", () => {
-    const jwt = makeJwt({
-      sub: "user-subject",
-      jazz_principal_id: "principal-123",
-      iss: "https://issuer.example",
-      claims: { role: "editor" },
-    });
-
-    const session = resolveClientSessionSync({
-      appId: "app-jwt-principal",
-      jwtToken: jwt,
-      localAuthMode: "demo",
-      localAuthToken: "device-a",
-    });
-
-    expect(session).toEqual({
-      user_id: "principal-123",
+  it("uses a mirrored cookie session when provided", () => {
+    const session: Session = {
+      user_id: "cookie-user",
       claims: {
-        role: "editor",
+        role: "writer",
         auth_mode: "external",
-        subject: "user-subject",
+        subject: "subject-123",
         issuer: "https://issuer.example",
       },
+      authMode: "external",
+    };
+
+    expect(
+      resolveClientSessionStateSync({
+        appId: "cookie-app",
+        cookieSession: session,
+      }),
+    ).toEqual({
+      transport: "cookie",
+      session,
     });
   });
 
-  it("falls back to JWT sub when principal claim is absent", () => {
+  it("uses JWT sub as user_id", () => {
     const jwt = makeJwt({
       sub: "user-subject",
-      claims: { team: "eng" },
+      iss: "https://issuer.example",
+      claims: { role: "editor" },
     });
 
     const session = resolveClientSessionSync({
@@ -61,65 +60,32 @@ describe("client session resolution", () => {
     expect(session).toEqual({
       user_id: "user-subject",
       claims: {
-        team: "eng",
-        auth_mode: "external",
+        role: "editor",
         subject: "user-subject",
+        issuer: "https://issuer.example",
       },
+      authMode: "external",
     });
   });
 
-  it("derives local principal id with the server-compatible hash format", async () => {
-    const appId = "app-local";
-    const mode = "anonymous";
-    const token = "device-token";
-    const digest = createHash("sha256")
-      .update(`${appId}:${mode}:${token}`, "utf8")
-      .digest("base64");
-    const expected = `local:${digest.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
-
-    expect(await deriveLocalPrincipalId(appId, mode, token)).toBe(expected);
-    expect(deriveLocalPrincipalIdSync(appId, mode, token)).toBe(expected);
+  it("accepts a JWT with only a sub claim", () => {
+    const jwt = makeJwt({
+      sub: "user-subject",
+      claims: { team: "eng" },
+    });
 
     const session = resolveClientSessionSync({
-      appId,
-      localAuthMode: mode,
-      localAuthToken: token,
+      appId: "app-jwt-sub-only",
+      jwtToken: jwt,
     });
+
     expect(session).toEqual({
-      user_id: expected,
+      user_id: "user-subject",
       claims: {
-        auth_mode: "local",
-        local_mode: mode,
+        team: "eng",
+        subject: "user-subject",
       },
-    });
-    expect(
-      resolveClientSessionStateSync({ appId, localAuthMode: mode, localAuthToken: token }),
-    ).toEqual({
-      transport: "local",
-      session: {
-        user_id: expected,
-        claims: {
-          auth_mode: "local",
-          local_mode: mode,
-        },
-      },
-    });
-  });
-
-  it("falls back to local auth when jwt cannot be parsed", () => {
-    const state = resolveClientSessionStateSync({
-      appId: "fallback-app",
-      jwtToken: "not-a-jwt",
-      localAuthMode: "demo",
-      localAuthToken: "device-token",
-    });
-
-    expect(state.transport).toBe("local");
-    expect(state.session).toMatchObject({
-      claims: {
-        auth_mode: "local",
-        local_mode: "demo",
-      },
+      authMode: "external",
     });
   });
 
@@ -129,5 +95,31 @@ describe("client session resolution", () => {
       transport: null,
       session: null,
     });
+  });
+});
+
+describe("resolveJwtSession — authMode derivation", () => {
+  function jwt(payload: Record<string, unknown>): string {
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return `${header}.${body}.sig`;
+  }
+
+  it("local-first issuer → authMode 'local-first' and no synthetic claim", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }))!;
+    expect(session.authMode).toBe("local-first");
+    expect(session.claims.auth_mode).toBeUndefined();
+  });
+
+  it("anonymous issuer → authMode 'anonymous'", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }))!;
+    expect(session.authMode).toBe("anonymous");
+    expect(session.claims.auth_mode).toBeUndefined();
+  });
+
+  it("any other issuer → authMode 'external'", () => {
+    const session = resolveJwtSession(jwt({ sub: "u1", iss: "https://auth.example.com" }))!;
+    expect(session.authMode).toBe("external");
+    expect(session.claims.auth_mode).toBeUndefined();
   });
 });
