@@ -1,5 +1,6 @@
 import type { CleanedWhere } from "better-auth/adapters";
-import type { QueryBuilder, TableProxy, WasmSchema } from "jazz-tools";
+import type { QueryBuilder, TableProxy } from "../runtime/db.js";
+import type { WasmSchema } from "../drivers/types.js";
 import type { JazzBuiltCondition, JazzSortBy } from "./types.js";
 
 export function assertNativeJoinsDisabled(join?: unknown): void {
