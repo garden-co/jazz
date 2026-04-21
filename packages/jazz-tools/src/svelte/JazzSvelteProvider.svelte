@@ -1,3 +1,7 @@
+<!--
+Makes a Jazz client available to descendant Svelte components through context.
+Pass a pre-created client or a promise that resolves to one.
+-->
 <script lang="ts">
 	import type { Db } from '../runtime/db.js';
 	import { initJazzContext } from './context.svelte.js';
