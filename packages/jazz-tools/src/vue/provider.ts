@@ -22,6 +22,10 @@ export interface JazzProviderProps {
 
 const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = Symbol("jazz");
 
+/**
+ * Makes a Jazz client available to child components through Vue dependency injection.
+ * Pass a pre-created client or a promise that resolves to one.
+ */
 export const JazzProvider = defineComponent({
   name: "JazzProvider",
   props: {
@@ -111,6 +115,10 @@ export const JazzProvider = defineComponent({
   },
 });
 
+/**
+ * Get the current Jazz client, including the backing {@link Db}, subscription manager,
+ * session snapshot, and shutdown helper.
+ */
 export function useJazzClient(): JazzClientContextValue {
   const ctx = inject(JazzContextKey, null);
   if (!ctx?.value) {
@@ -119,10 +127,16 @@ export function useJazzClient(): JazzClientContextValue {
   return ctx.value;
 }
 
+/**
+ * Get a Jazz {@link Db} instance that can be used to read and write data.
+ */
 export function useDb(): Db {
   return useJazzClient().db;
 }
 
+/**
+ * Get the current Jazz {@link Session}, including the user's id, claims and auth mode.
+ */
 export function useSession(): Session | null {
   return useJazzClient().session ?? null;
 }

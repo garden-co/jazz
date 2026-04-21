@@ -39,6 +39,13 @@ function subscribeToEntry<T extends { id: string }>(
   });
 }
 
+/**
+ * Read all matching rows and subscribe to changes that modify the query's results.
+ *
+ * @param query - the database query (e.g. `app.todos.where({ done: false })`)
+ *
+ * @returns the matching rows, or `undefined` if the query is not yet executed
+ */
 export function useAll<T extends { id: string }>(
   query: MaybeRefOrGetter<QueryBuilder<T> | undefined>,
   options?: MaybeRefOrGetter<QueryOptions | undefined>,
