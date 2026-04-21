@@ -10,17 +10,27 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 <Accordion id="reset-browser-storage" title="How do I reset browser storage?">
 
-Call `db.deleteClientStorage()` to delete the local OPFS database for the current namespace:
+In browser apps using the React, Vue, or Svelte Jazz clients, open the devtools console and run:
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/faq-snippets.ts#faq-delete-client-storage-ts
-</include>
+```ts
+await window.__jazz.clearStorage();
+```
 
-- Browser worker-backed `Db` only.
-- Must be called from the leader tab; otherwise it logs an error and returns without deleting. Close other tabs first.
-- Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
-- Does not clear `localStorage` local-first auth data.
-- Reopens a clean worker runtime, so the same `db` instance remains usable.
+If the page has more than one live Jazz storage context, inspect the available namespaces and then choose one explicitly:
+
+```ts
+window.__jazz.listLiveStorageNamespaces();
+await window.__jazz.clearStorage("my-app::alice");
+```
+
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API.
+
+- Browser persistent storage only.
+- If exactly one live namespace exists, `clearStorage()` uses it automatically.
+- If multiple live namespaces exist, Jazz throws and lists the available namespaces until you choose one.
+- Can be initiated from either leader or follower tabs; Jazz coordinates the reset across tabs for that namespace.
+- Deletes OPFS storage only. It does not clear `localStorage` local-first auth data.
+- Reopens a clean worker/runtime so the same live client remains usable after the wipe.
 
 This is useful when iterating on your schema during development.
 
