@@ -65,6 +65,13 @@ function useAllBase<T extends { id: string }>(
   return state.status === "fulfilled" ? state.data : undefined;
 }
 
+/**
+ * Read all matching rows and subscribe to changes that modify the query's results.
+ *
+ * @param query - the database query (e.g. `app.todos.where({done: false})`)
+ *
+ * @returns the matching rows, or `undefined` if the query is not yet executed
+ */
 export function useAll<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
@@ -72,6 +79,14 @@ export function useAll<T extends { id: string }>(
   return useAllBase(query, options, { suspense: false });
 }
 
+/**
+ * Read all matching rows and subscribe to changes that modify the query's results.
+ * Suspends until the query is executed.
+ *
+ * @param query - the database query (e.g. `app.todos.where({done: false})`)
+ *
+ * @returns the matching rows
+ */
 export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,

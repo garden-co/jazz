@@ -182,9 +182,7 @@ export interface QueryBuilder<T> {
   readonly _rowType: T;
 }
 
-export interface QueryOptions extends QueryExecutionOptions {
-  propagation?: QueryPropagation;
-}
+export type QueryOptions = QueryExecutionOptions;
 
 export interface ActiveQuerySubscriptionTrace {
   id: string;

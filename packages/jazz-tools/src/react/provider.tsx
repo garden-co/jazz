@@ -42,6 +42,9 @@ export function useJazzClient(): JazzClientContextValue {
   return useCoreJazzClient() as JazzClientContextValue;
 }
 
+/**
+ * Get a Jazz {@link Db} instance that can be used to read and write data.
+ */
 export function useDb(): Db {
   return useCoreDb<Db>();
 }
