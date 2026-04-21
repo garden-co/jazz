@@ -1948,11 +1948,38 @@ describe("cli permissions", () => {
 });
 
 describe("cli deploy", () => {
-  it("fails when there's no permissions.ts file", async () => {
+  it("publishes only the structural schema when there's no permissions.ts file", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await expect(
+    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
+    let schemaPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        schemaPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            hash: schemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.includes(`/admin/permissions`)) {
+        throw new Error("deploy() should skip permissions when no permissions.ts is present.");
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
       deploy({
         appId: APP_ID,
         serverUrl: "http://localhost:1625",
@@ -1960,7 +1987,12 @@ describe("cli deploy", () => {
         schemaDir: root,
         migrationsDir: join(root, "migrations"),
       }),
-    ).rejects.toThrow(/no permissions found for this app/i);
+    );
+
+    expect(schemaPublishBody.schema.projects.columns[0].name).toBe("name");
+    expect(logs).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Published the current schema as ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain("No permissions.ts found; skipping permissions publish.");
   });
 
   it("publishes the structural schema and permissions when the server has neither", async () => {
