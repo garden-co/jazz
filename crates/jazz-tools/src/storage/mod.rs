@@ -4862,7 +4862,7 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
         }
 
         Value::Uuid(id) => {
-            // UUID bytes (UUIDv7 is time-ordered)
+            // UUID bytes compare lexicographically by raw value.
             let mut bytes = vec![0x06];
             bytes.extend_from_slice(id.uuid().as_bytes());
             bytes

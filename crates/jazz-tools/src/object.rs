@@ -2,7 +2,7 @@ use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-/// Interned UUIDv7 identifying an object.
+/// Interned UUID identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectId(pub Intern<Uuid>);
@@ -33,6 +33,7 @@ impl std::fmt::Display for ObjectId {
 }
 
 impl ObjectId {
+    /// Generate a new time-ordered UUIDv7 object id.
     pub fn new() -> Self {
         Self(Intern::new(Uuid::now_v7()))
     }

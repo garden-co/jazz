@@ -216,7 +216,7 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 }
 
 #[tokio::test]
-async fn caller_supplied_uuidv7_is_used_for_created_row() {
+async fn caller_supplied_uuid_is_used_for_created_row() {
     let server = TestingServer::start().await;
     let schema = test_schema();
     let client = JazzClient::connect(server.make_client_context(schema.clone()))
@@ -226,7 +226,7 @@ async fn caller_supplied_uuidv7_is_used_for_created_row() {
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     let external_id =
-        Uuid::parse_str("01963f3e-5cbe-7a62-8d7c-123456789abc").expect("parse external uuidv7");
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("parse external uuid");
 
     let (todo_id, expected_values) = client
         .create_with_id(
@@ -265,7 +265,7 @@ async fn caller_supplied_uuidv7_is_used_for_created_row() {
 }
 
 #[tokio::test]
-async fn upsert_uses_external_uuidv7_for_insert_and_updates_existing_row() {
+async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
     let server = TestingServer::start().await;
     let schema = test_schema();
     let client = JazzClient::connect(server.make_client_context(schema.clone()))
@@ -275,7 +275,75 @@ async fn upsert_uses_external_uuidv7_for_insert_and_updates_existing_row() {
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     let external_id =
-        Uuid::parse_str("01963f3e-5cbf-73d1-9f8a-123456789abc").expect("parse external uuidv7");
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440002").expect("parse external uuid");
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([
+                ("title".to_string(), Value::Text("first-title".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("insert row through upsert");
+
+    let provenance_query = QueryBuilder::new("todos")
+        .select(&["$createdAt", "$updatedAt"])
+        .build();
+
+    client
+        .upsert(
+            "todos",
+            external_id,
+            HashMap::from([(
+                "title".to_string(),
+                Value::Text("updated-title".to_string()),
+            )]),
+        )
+        .await
+        .expect("upsert row with external id");
+
+    let updated_rows = wait_for_query(
+        &client,
+        provenance_query,
+        Some(DurabilityTier::Local),
+        Duration::from_secs(25),
+        "updated provenance query returns row",
+        |rows| (rows.len() == 1 && rows[0].0.uuid() == &external_id).then_some(rows),
+    )
+    .await;
+
+    let Value::Timestamp(updated_created_at) = updated_rows[0].1[0] else {
+        panic!("updated $createdAt should decode as timestamp")
+    };
+    let Value::Timestamp(updated_updated_at) = updated_rows[0].1[1] else {
+        panic!("updated $updatedAt should decode as timestamp")
+    };
+
+    assert_eq!(updated_rows[0].0.uuid(), &external_id);
+    assert!(
+        updated_created_at < updated_updated_at,
+        "created_at should remain the original timestamp after an update"
+    );
+
+    client.shutdown().await.expect("shutdown writer");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let client = JazzClient::connect(server.make_client_context(schema.clone()))
+        .await
+        .expect("connect writer");
+
+    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+
+    let external_id =
+        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440001").expect("parse external uuid");
 
     client
         .upsert(

@@ -74,9 +74,9 @@ describe("react/create-jazz-client integration", () => {
     }
   }, 15000);
 
-  it("RC-I02: uses a caller-supplied uuidv7 for inserts", async () => {
+  it("RC-I02: uses a caller-supplied uuid for inserts", async () => {
     let client: JazzClient | null = null;
-    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const externalId = "550e8400-e29b-41d4-a716-446655440000";
 
     try {
       client = await createJazzClient({ appId: makeAppId("external-id") });

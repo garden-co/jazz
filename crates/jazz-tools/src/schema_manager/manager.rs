@@ -1641,19 +1641,7 @@ impl SchemaManager {
         self.insert_with_write_context(storage, table, values, owned.as_ref())
     }
 
-    fn validate_external_upsert_object_id(object_id: ObjectId) -> Result<(), QueryError> {
-        if object_id.uuid().get_version_num() != 7 {
-            return Err(QueryError::EncodingError(format!(
-                "external upsert id must be UUIDv7, got version {} for {}",
-                object_id.uuid().get_version_num(),
-                object_id
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Create or update a row with a caller-supplied UUIDv7.
+    /// Create or update a row with a caller-supplied UUID.
     ///
     /// If a visible row already exists for `object_id`, only the supplied
     /// columns are updated. Otherwise a new row is inserted with that id.
@@ -1665,7 +1653,6 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         write_context: Option<&WriteContext>,
     ) -> Result<crate::row_histories::BatchId, QueryError> {
-        Self::validate_external_upsert_object_id(object_id)?;
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
         let target_context = self.schema_context_for_hash(target_hash)?;
