@@ -810,16 +810,14 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
     const offlineWriteStart = performance.now();
     for (let i = 0; i < offlineWrites; i += 1) {
-      await offlineDb.insertPersisted(
-        commentsTable,
-        {
+      await offlineDb
+        .insert(commentsTable, {
           task_id: targetTaskId,
           author_id: state.users[rng.nextInt(state.users.length)],
           body: `offline_reconnect_marker_${i}`,
           created_at: nowMicros(),
-        },
-        "local",
-      );
+        })
+        .wait({ tier: "local" });
     }
     const offlineWriteMs = performance.now() - offlineWriteStart;
     await offlineDb.shutdown();

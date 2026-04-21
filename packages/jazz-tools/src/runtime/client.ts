@@ -61,26 +61,6 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
-  insertPersistedWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedInsertResult;
-  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
-  updatePersistedWithSession?(
-    object_id: string,
-    values: any,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
-  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
-  deletePersistedWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
   loadLocalBatchRecord(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords(): LocalBatchRecord[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
@@ -286,15 +266,6 @@ interface WriteContextPayload {
   batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
-}
-
-interface PersistedInsertResult {
-  batchId: string;
-  row: Row;
-}
-
-interface PersistedMutationResult {
-  batchId: string;
 }
 
 /**
@@ -762,28 +733,6 @@ export class PersistedWriteRejectedError extends Error {
   }
 }
 
-export class PersistedWrite<T> {
-  constructor(
-    private readonly client: JazzClient,
-    private readonly requestedTier: DurabilityTier,
-    private readonly persistedBatchId: string,
-    private readonly persistedValue: T,
-  ) {}
-
-  batchId(): string {
-    return this.persistedBatchId;
-  }
-
-  value(): T {
-    return this.persistedValue;
-  }
-
-  async wait(): Promise<T> {
-    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
-    return this.persistedValue;
-  }
-}
-
 /**
  * Returned by upsert, update, and delete operations. Allows waiting for the
  * write to be persisted at a given durability tier.
@@ -893,24 +842,6 @@ export class Transaction {
     return handle;
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    this.ensureActive();
-    const pendingWrite = this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(pendingWrite.value().id);
-    return pendingWrite;
-  }
-
   update(objectId: string, updates: Record<string, Value>): WriteHandle {
     this.ensureActive();
     const result = this.client.updateHandleInternal(
@@ -924,24 +855,6 @@ export class Transaction {
     return result;
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    this.ensureActive();
-    const pendingWrite = this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(objectId);
-    return pendingWrite;
-  }
-
   delete(objectId: string): WriteHandle {
     this.ensureActive();
     const result = this.client.deleteHandleInternal(
@@ -952,19 +865,6 @@ export class Transaction {
     );
     this.markTouchedRow(objectId);
     return result;
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    this.ensureActive();
-    const pendingWrite = this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(objectId);
-    return pendingWrite;
   }
 
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
@@ -1008,21 +908,6 @@ export class DirectBatch {
     );
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
   update(objectId: string, updates: Record<string, Value>): WriteHandle {
     return this.client.updateHandleInternal(
       objectId,
@@ -1033,36 +918,11 @@ export class DirectBatch {
     );
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
   delete(objectId: string): WriteHandle {
     return this.client.deleteHandleInternal(
       objectId,
       this.session,
       this.attribution,
-      this.batchContext,
-    );
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
       this.batchContext,
     );
   }
@@ -1126,14 +986,6 @@ export class SessionClient {
     return result.object_id;
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.client.createPersistedInternal(table, values, this.session, undefined, options);
-  }
-
   /**
    * Create or update a row as this session's user using a caller-supplied id.
    */
@@ -1185,14 +1037,6 @@ export class SessionClient {
     }
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.client.updatePersistedInternal(objectId, updates, this.session, undefined, options);
-  }
-
   /**
    * Delete a row as this session's user.
    */
@@ -1214,10 +1058,6 @@ export class SessionClient {
     if (!response.ok) {
       throw new Error(`Delete failed: ${response.statusText}`);
     }
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.client.deletePersistedInternal(objectId, this.session, undefined, options);
   }
 
   /**
@@ -1600,10 +1440,6 @@ export class JazzClient {
     };
   }
 
-  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
-    return options?.tier ?? this.defaultDurabilityTier;
-  }
-
   private encodeWriteContext(
     session?: Session,
     attribution?: string,
@@ -1647,24 +1483,6 @@ export class JazzClient {
 
   private requireSessionWriteMethod<
     T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requirePersistedWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "insertPersisted"
-      | "insertPersistedWithSession"
-      | "updatePersisted"
-      | "updatePersistedWithSession"
-      | "deletePersisted"
-      | "deletePersistedWithSession"
-    >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
@@ -1985,43 +1803,6 @@ export class JazzClient {
     );
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.createPersistedInternal(table, values, undefined, undefined, options);
-  }
-
-  createPersistedInternal(
-    table: string,
-    values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-  ): PersistedWrite<Row> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requirePersistedWriteMethod("insertPersistedWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("insertPersisted")(table, values, tier);
-    return new PersistedWrite(this, tier, result.batchId, {
-      ...result.row,
-      values: this.alignRowValuesToDeclaredSchema(
-        table,
-        result.row.values as Value[],
-        this.getSchema(),
-      ),
-    });
-  }
-
   /**
    * Execute a query and return all matching rows.
    *
@@ -2112,37 +1893,6 @@ export class JazzClient {
     return this.runtime.update(objectId, updates);
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.updatePersistedInternal(objectId, updates, undefined, undefined, options);
-  }
-
-  updatePersistedInternal(
-    objectId: string,
-    updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
-        ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
-            objectId,
-            updates,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
-  }
-
   /**
    * Delete a row by ID without waiting for durability.
    */
@@ -2180,31 +1930,6 @@ export class JazzClient {
       );
     }
     return this.runtime.delete(objectId);
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.deletePersistedInternal(objectId, undefined, undefined, options);
-  }
-
-  deletePersistedInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
-        ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
-            objectId,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
