@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { JazzClient, resolveDefaultDurabilityTier } from "./client.js";
+import { JazzClient, resolveDefaultDurabilityTier, type MutationErrorEvent } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
@@ -250,5 +250,88 @@ describe("JazzClient runtime schema caching", () => {
 
     expect(runtime.getSchemaHash).not.toHaveBeenCalled();
     expect(runtime.getSchema).not.toHaveBeenCalled();
+  });
+});
+
+describe("JazzClient mutation error handling", () => {
+  function makeRejectedBatchRecord(batchId: string) {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: {
+        kind: "rejected" as const,
+        batchId,
+        code: "permission_denied",
+        reason: "write rejected by policy",
+      },
+    };
+  }
+
+  it("replays queued rejected batches to new listeners without scanning all batch records", () => {
+    const runtime = makeFakeRuntime();
+    runtime.drainRejectedBatchIds = vi.fn(() => ["batch-rejected"]);
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadLocalBatchRecords = vi.fn(() => {
+      throw new Error("should not scan all local batch records");
+    });
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "queued-rejection-app",
+      schema: {},
+    });
+
+    const seen: MutationErrorEvent[] = [];
+
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
+    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    expect(seen).toEqual([
+      {
+        code: "permission_denied",
+        reason: "write rejected by policy",
+        batch: makeRejectedBatchRecord("batch-rejected"),
+      },
+    ]);
+  });
+
+  it("checks only runtime-reported rejected batch ids after sync", () => {
+    const runtime = makeFakeRuntime();
+    runtime.drainRejectedBatchIds = vi
+      .fn(() => [])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(["batch-rejected"]);
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadLocalBatchRecords = vi.fn(() => {
+      throw new Error("should not scan all local batch records");
+    });
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "sync-rejection-app",
+      schema: {},
+    });
+
+    const seen: MutationErrorEvent[] = [];
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    client.getRuntime().onSyncMessageReceived("sync-payload");
+
+    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(2);
+    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
+    expect(seen).toEqual([
+      {
+        code: "permission_denied",
+        reason: "write rejected by policy",
+        batch: makeRejectedBatchRecord("batch-rejected"),
+      },
+    ]);
   });
 });

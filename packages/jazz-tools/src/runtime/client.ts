@@ -109,6 +109,7 @@ export interface Runtime {
   ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
+  drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
   query(
@@ -1325,7 +1326,10 @@ export class JazzClient {
             const batchesWithPendingWaiters = new Set(this.pendingBatchWaiters.keys());
             value.call(target, payload, seq);
             this.flushPendingBatchWaiters();
-            this.flushUnhandledMutationErrors(batchesWithPendingWaiters);
+            this.flushUnhandledMutationErrors(
+              this.drainRejectedBatchIds(),
+              batchesWithPendingWaiters,
+            );
           };
         }
         if (typeof value === "function") {
@@ -2597,9 +2601,14 @@ export class JazzClient {
   }
 
   private flushUnhandledMutationErrors(
+    rejectedBatchIds: readonly string[] = this.drainRejectedBatchIds(),
     batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
   ): void {
-    for (const record of this.localBatchRecords()) {
+    for (const batchId of rejectedBatchIds) {
+      const record = this.localBatchRecord(batchId);
+      if (!record) {
+        continue;
+      }
       const settlement = record.latestSettlement;
       if (!settlement || settlement.kind !== "rejected") {
         continue;
@@ -2628,6 +2637,14 @@ export class JazzClient {
 
       this.acknowledgeRejectedBatchInternal(record.batchId);
     }
+  }
+
+  private drainRejectedBatchIds(): string[] {
+    const drainRejectedBatchIds = this.runtime.drainRejectedBatchIds;
+    if (!drainRejectedBatchIds) {
+      return [];
+    }
+    return [...new Set(drainRejectedBatchIds.call(this.runtime))].sort();
   }
 
   waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
