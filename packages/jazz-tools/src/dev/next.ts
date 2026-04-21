@@ -70,10 +70,11 @@ export function withJazz(
     }
 
     const serverOpt = options.server;
-    const backendSecret =
+    const explicitBackendSecret =
       typeof serverOpt === "object" && serverOpt !== null && "backendSecret" in serverOpt
         ? serverOpt.backendSecret
         : undefined;
+    const backendSecret = explicitBackendSecret ?? process.env.BACKEND_SECRET;
 
     const managed = await runtime.initialize({ ...options, backendSecret });
     if (!hasLoggedInspectorLink) {

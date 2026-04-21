@@ -79,7 +79,7 @@ pub fn mint_jazz_self_signed_token_at(
 ) -> Result<String, String> {
     let signing_key = derive_signing_key(seed, SIGN_DOMAIN);
     let verifying_key = signing_key.verifying_key();
-    let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+    let user_id = user_id_from_public_key(verifying_key.as_bytes());
     let user_id_str = user_id.to_string();
 
     let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
@@ -238,7 +238,7 @@ pub fn verify_jazz_self_signed_proof_with_max_ttl_at(
         .map_err(|e| format!("signature verification failed: {e}"))?;
 
     // Re-derive user ID and validate sub
-    let derived_user_id = Uuid::new_v5(&KEY_NAMESPACE, &pub_key_bytes);
+    let derived_user_id = user_id_from_public_key(&pub_key_bytes);
     let sub = claims.sub.as_deref().ok_or("missing sub")?;
     if sub != derived_user_id.to_string() {
         return Err(format!(
@@ -301,7 +301,12 @@ pub fn derive_verifying_key(seed: &[u8; 32]) -> VerifyingKey {
 /// then produces UUIDv5(KEY_NAMESPACE, public_key_bytes).
 pub fn derive_user_id(seed: &[u8; 32]) -> Uuid {
     let verifying_key = derive_verifying_key(seed);
-    Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes())
+    user_id_from_public_key(verifying_key.as_bytes())
+}
+
+/// Deterministically derive a UUIDv5 user id from Ed25519 public key bytes.
+fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
+    Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes)
 }
 
 #[cfg(test)]
@@ -381,7 +386,7 @@ mod tests {
         let seed = alice_seed();
         let signing_key = derive_signing_key(&seed, SIGN_DOMAIN);
         let verifying_key = signing_key.verifying_key();
-        let user_id = Uuid::new_v5(&KEY_NAMESPACE, verifying_key.as_bytes());
+        let user_id = user_id_from_public_key(verifying_key.as_bytes());
         let pub_key_b64 = URL_SAFE_NO_PAD.encode(verifying_key.as_bytes());
 
         let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});

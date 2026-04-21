@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
-import { APP_ORIGIN } from "./constants";
+import dotenv from "dotenv";
+import path from "path";
+// Read from ".env" file.
+dotenv.config({ path: path.resolve(import.meta.dirname, ".env") });
 
 export default defineConfig({
   testDir: "./e2e",
@@ -10,7 +13,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   globalSetup: "./e2e/global-setup.ts",
   use: {
-    baseURL: APP_ORIGIN,
+    baseURL: process.env.NEXT_PUBLIC_APP_ORIGIN!,
     trace: "on-first-retry",
   },
   projects: [
@@ -21,7 +24,7 @@ export default defineConfig({
   ],
   webServer: {
     command: `pnpm dev --hostname 127.0.0.1`,
-    url: APP_ORIGIN,
+    url: process.env.NEXT_PUBLIC_APP_ORIGIN!,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },
