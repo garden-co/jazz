@@ -83,7 +83,7 @@ pub fn parse_schema(json: &str) -> Result<JsValue, JsError> {
 
 /// Generate a new UUID v7 (time-ordered).
 ///
-/// Useful for generating row IDs on the client side.
+/// Useful when a caller wants the default generated row-id shape.
 #[wasm_bindgen(js_name = generateId)]
 pub fn generate_id() -> String {
     uuid::Uuid::now_v7().to_string()
