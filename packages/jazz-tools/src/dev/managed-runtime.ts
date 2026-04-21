@@ -217,7 +217,7 @@ export class ManagedDevRuntime {
 
         if (process.env[this.envKeys.serverUrl]) {
           serverUrl = process.env[this.envKeys.serverUrl]!;
-          adminSecret = options.adminSecret ?? "";
+          adminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? "";
           appId = process.env[this.envKeys.appId] ?? options.appId ?? "";
           if (!adminSecret) {
             throw new Error(

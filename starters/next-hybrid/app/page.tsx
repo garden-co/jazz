@@ -21,7 +21,7 @@ function HeaderActions() {
 
     return (
       <div className="auth-nav">
-        <span className="user-email">{authSession.user.email}</span>
+        <p>Hello, {authSession.user.name}</p>
         <button type="button" className="btn-secondary" onClick={handleSignOut}>
           Sign out
         </button>
@@ -32,7 +32,7 @@ function HeaderActions() {
   return (
     <div className="auth-nav">
       <p>
-        <Link href="/signup" className="btn-secondary">
+        <Link href="/signup" className="link">
           Sign up
         </Link>
         {" or "}

@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/init-env.mjs",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",

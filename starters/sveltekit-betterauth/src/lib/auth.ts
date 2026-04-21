@@ -9,7 +9,7 @@ const APP_ORIGIN = env.APP_ORIGIN ?? "http://localhost:5173";
 
 if (!env.BETTER_AUTH_SECRET) {
   throw new Error(
-    "BETTER_AUTH_SECRET is not set. Run 'pnpm install' to generate .env.local, or set it explicitly in your environment.",
+    "BETTER_AUTH_SECRET is not set. Scaffold via create-jazz, or add it to .env manually (e.g. openssl rand -base64 32).",
   );
 }
 

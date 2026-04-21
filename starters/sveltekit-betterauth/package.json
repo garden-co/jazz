@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/init-env.mjs",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "better-auth": "^1.5.5",

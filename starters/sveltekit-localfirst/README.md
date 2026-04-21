@@ -46,7 +46,7 @@ Every browser gets its own Ed25519 secret, generated and stored by
 `BrowserAuthSecretStore` on first load. That secret becomes the identity
 Jazz uses for all subsequent writes. `src/routes/+layout.svelte` does
 exactly one thing: call `BrowserAuthSecretStore.getOrCreateSecret()` and
-hand the result to `createJazzClient` as `auth.localFirstSecret`.
+hand the result to `createJazzClient` as `secret`.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -70,17 +70,28 @@ session on every row and the permission policy scopes reads/writes to it.
 
 ## Environment variables
 
-None required in development. `PUBLIC_JAZZ_APP_ID` and
-`PUBLIC_JAZZ_SERVER_URL` are injected at runtime by the `jazzSvelteKit`
-Vite plugin on `vite dev`. For production, set them explicitly via your
-hosting provider.
+| Variable                 | When       | Source                                                |
+| ------------------------ | ---------- | ----------------------------------------------------- |
+| `PUBLIC_JAZZ_APP_ID`     | cloud only | scaffolder (`create-jazz --hosting hosted`) or manual |
+| `PUBLIC_JAZZ_SERVER_URL` | cloud only | scaffolder or manual                                  |
+| `JAZZ_ADMIN_SECRET`      | cloud only | scaffolder or manual                                  |
+| `BACKEND_SECRET`         | cloud only | scaffolder or manual                                  |
+
+Leave all four unset for self-hosted mode — the `jazzSvelteKit` plugin
+spawns a local Jazz dev server and injects its own credentials. For cloud
+mode, either scaffold via `create-jazz --hosting hosted` (writes `.env` for
+you) or provision an app at https://v2.dashboard.jazz.tools and paste the
+four values into `.env`.
 
 ## Deploying to production
 
-The Jazz cloud server requires `--allow-local-first-auth` explicitly in
-production. In development this flag is on by default; in production you
-must pass it: `jazz-tools server <APP_ID> --allow-local-first-auth`.
-Without it, anonymous local-first connections will receive auth errors.
+For cloud-hosted deployments, set the four env vars above in your hosting
+provider and your app will sync against Jazz Cloud.
+
+For self-hosted deployments you need to run your own Jazz server. The
+server requires `--allow-local-first-auth` explicitly in production:
+`jazz-tools server <APP_ID> --allow-local-first-auth`. Without it,
+anonymous local-first connections will receive auth errors.
 
 ## Known limitations
 

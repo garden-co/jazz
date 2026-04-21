@@ -170,8 +170,8 @@ button:disabled {
 }
 .dashboard header .auth-nav {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-direction: row;
+  align-items: center;
   gap: 0.25rem;
 }
 

@@ -104,8 +104,8 @@ describe("scaffold() — next-betterauth e2e via JAZZ_STARTER_PATH", () => {
       expect(value).not.toMatch(/^catalog:/);
     }
 
-    // `.env.local` must not be copied from the starter source tree.
-    expect(fs.existsSync(path.join(tmpDir, ".env.local"))).toBe(false);
+    // `.env` must not be copied from the starter source tree.
+    expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(false);
 
     // The initial commit was made (default behaviour).
     expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(true);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
@@ -20,6 +20,17 @@ async function resolveWrappedConfig(
 ): Promise<NextConfigLike> {
   return wrapped(phase, { defaultConfig: {} });
 }
+
+// Managed-runtime writes NEXT_PUBLIC_JAZZ_APP_ID / NEXT_PUBLIC_JAZZ_SERVER_URL
+// to process.env on successful init; that state leaks across vitest workers in
+// the same thread pool and flips later tests onto the env-driven cloud branch.
+// Scrub before each test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
+  delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+  delete process.env.BACKEND_SECRET;
+});
 
 afterEach(async () => {
   await __resetJazzNextPluginForTests();

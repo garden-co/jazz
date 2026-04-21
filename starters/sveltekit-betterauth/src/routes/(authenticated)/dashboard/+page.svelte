@@ -15,8 +15,10 @@
   <main class="dashboard">
     <header>
       <img src="/jazz.svg" alt="Jazz" class="wordmark" />
-      <p>Hello, {$session.data.user.name}</p>
-      <button type="button" onclick={handleSignOut}>Sign out</button>
+      <div class="auth-nav">
+        <p>Hello, {$session.data.user.name}</p>
+        <button type="button" onclick={handleSignOut}>Sign out</button>
+      </div>
     </header>
     <TodoWidget />
   </main>

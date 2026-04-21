@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type {
   JazzServerOptions as BaseJazzServerOptions,
@@ -51,6 +52,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
       if (viteServer.config.command !== "serve" || options.server === false) return;
+
+      // Vite (and SvelteKit-via-Vite) doesn't populate process.env from .env
+      // for unprefixed keys, so the managed runtime's env-driven cloud-mode check
+      // would otherwise never fire. Backfill before reading.
+      loadEnvFileIntoProcessEnv(viteServer.config.root);
 
       const schemaDir = options.schemaDir ?? join(viteServer.config.root, "src", "lib");
       const serverOpt = options.server ?? true;
