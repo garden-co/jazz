@@ -578,6 +578,13 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.DevServer = nativeBinding.DevServer
 module.exports.NapiRuntime = nativeBinding.NapiRuntime
+if (module.exports.NapiRuntime?.prototype) {
+  Object.defineProperty(module.exports.NapiRuntime.prototype, 'returnsDeclaredSchemaRows', {
+    value: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
 module.exports.TestingServer = nativeBinding.TestingServer
 module.exports.currentTimestamp = nativeBinding.currentTimestamp
 module.exports.deriveUserId = nativeBinding.deriveUserId

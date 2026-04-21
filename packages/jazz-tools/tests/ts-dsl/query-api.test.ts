@@ -695,6 +695,72 @@ describe("TS Query API", () => {
       expect("tags" in delta.all[0]).toBe(false);
     });
 
+    it("subscribeAll preserves permission magic columns with the default auth context", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+      const { id: editableId } = insertTodo(db, {
+        title: "Draft docs",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        assigneesIds: [],
+      });
+      const { id: lockedId } = insertTodo(db, {
+        title: "Shipped docs",
+        done: true,
+        tags: ["docs"],
+        projectId,
+        assigneesIds: [],
+      });
+
+      type SubscribedTodo = {
+        id: string;
+        title: string;
+        $canEdit: boolean | null;
+        $canDelete: boolean | null;
+      };
+
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+        timeout = setTimeout(() => {
+          unsubscribe();
+          reject(new Error("Timed out waiting for subscribeAll permission update"));
+        }, 10_000);
+
+        unsubscribe = db.subscribeAll(
+          app.todos.select("title", "$canEdit", "$canDelete").orderBy("title", "asc"),
+          (delta) => {
+            if (delta.all.length !== 2) {
+              return;
+            }
+
+            resolve(delta as { all: SubscribedTodo[] });
+          },
+        );
+      });
+
+      const delta = await deltaPromise;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      unsubscribe();
+
+      expect(delta.all).toEqual([
+        {
+          id: editableId,
+          title: "Draft docs",
+          $canEdit: true,
+          $canDelete: true,
+        },
+        {
+          id: lockedId,
+          title: "Shipped docs",
+          $canEdit: false,
+          $canDelete: false,
+        },
+      ]);
+    });
+
     it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
 

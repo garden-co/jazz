@@ -16,6 +16,7 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
+  readonly returnsDeclaredSchemaRows: true
   insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
   insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
   update(objectId: string, values: any): any
@@ -24,6 +25,7 @@ export declare class NapiRuntime {
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
+  drainRejectedBatchIds(): string[]
   acknowledgeRejectedBatch(batchId: string): boolean
   sealBatch(batchId: string): void
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>

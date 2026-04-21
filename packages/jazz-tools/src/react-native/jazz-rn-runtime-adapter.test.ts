@@ -455,4 +455,63 @@ describe("JazzRnRuntimeAdapter", () => {
     captured!.onFailure("token expired");
     expect(listener).toHaveBeenCalledWith("token expired");
   });
+
+  it("bridges rejected batch helpers", () => {
+    const binding = createBinding({
+      loadLocalBatchRecord: vi.fn(() =>
+        JSON.stringify({
+          batchId: "batch-1",
+          latestSettlement: {
+            kind: "rejected",
+            code: "WriteRejected",
+            reason: "nope",
+          },
+        }),
+      ),
+      loadLocalBatchRecords: vi.fn(() =>
+        JSON.stringify([
+          {
+            batchId: "batch-1",
+            latestSettlement: {
+              kind: "rejected",
+              code: "WriteRejected",
+              reason: "nope",
+            },
+          },
+        ]),
+      ),
+      drainRejectedBatchIds: vi.fn(() => ["batch-1"]),
+      acknowledgeRejectedBatch: vi.fn(() => true),
+      sealBatch: vi.fn(),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    expect(adapter.loadLocalBatchRecord("batch-1")).toEqual({
+      batchId: "batch-1",
+      latestSettlement: {
+        kind: "rejected",
+        code: "WriteRejected",
+        reason: "nope",
+      },
+    });
+    expect(adapter.loadLocalBatchRecords()).toEqual([
+      {
+        batchId: "batch-1",
+        latestSettlement: {
+          kind: "rejected",
+          code: "WriteRejected",
+          reason: "nope",
+        },
+      },
+    ]);
+    expect(adapter.drainRejectedBatchIds()).toEqual(["batch-1"]);
+    expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
+    adapter.sealBatch("batch-1");
+
+    expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
+    expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
+    expect(binding.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
+    expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
+  });
 });

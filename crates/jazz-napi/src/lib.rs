@@ -766,6 +766,19 @@ impl NapiRuntime {
         Ok(serialize_local_batch_records(&records))
     }
 
+    #[napi(js_name = "drainRejectedBatchIds", ts_return_type = "string[]")]
+    pub fn drain_rejected_batch_ids(&self) -> napi::Result<Vec<String>> {
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core
+            .drain_rejected_batch_ids()
+            .into_iter()
+            .map(|batch_id| batch_id.to_string())
+            .collect())
+    }
+
     #[napi(js_name = "acknowledgeRejectedBatch")]
     pub fn acknowledge_rejected_batch(&self, batch_id: String) -> napi::Result<bool> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
