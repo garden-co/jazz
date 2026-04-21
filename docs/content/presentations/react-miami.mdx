@@ -316,7 +316,26 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-starting with the frontend
+The first thing these modern systems usually collapse is the frontend
+sync glue.
+
+Data fetching disappears as a concept.
+
+The websocket client disappears as a concept.
+
+The query cache and the optimistic update layer start getting absorbed
+into one database-shaped client abstraction.
+
+So the first win is not even mostly about infrastructure.
+
+It is that the frontend starts feeling like it is working with
+reactive data again instead of doing orchestration around remote state.
+
+Lines of code go down immediately.
+
+And on the light-milliseconds metric, we get the first huge win:
+optimistic preview goes to zero.
+
 </Notes>
 </Slide>
 
@@ -345,11 +364,21 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-continuing with simplifying the database client in the backend
+Next, the backend's database access story starts simplifying too.
 
-not much LOC saved (ORM -> modern DB client) but fewer thigns to choose
+The ORM or classic DB wrapper stops being the obvious center of the
+world, and a more capable DB client starts showing up on both sides.
 
-we can have a DB client directly in the frontend!
+This does not always save a dramatic amount of code by itself, because
+one abstraction is often replacing another.
+
+But it simplifies the shape of the system.
+
+You stop having one database model on the server and a completely
+different data access model on the client.
+
+And psychologically this is an important step, because it normalizes
+the idea that yes, a database client can live in the frontend too.
 
 </Notes>
 </Slide>
@@ -379,7 +408,18 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-removing scale/perf aiding infra layers
+Then some of the scale and performance barnacles start falling off.
+
+One obvious example is the connection pooler.
+
+In the classic stack we keep adding infrastructure whose job is mostly
+to compensate for the shape of the rest of the stack.
+
+Modern systems start internalizing more of that.
+
+So we may not yet be deleting dramatic amounts of product code here,
+but we are deleting operational surface area, which matters a lot.
+
 </Notes>
 </Slide>
 
@@ -408,7 +448,20 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-subsume queue/stream/pubsub layer into the database
+Then you start seeing the messaging and fanout layer move inward too.
+
+Queues, pubsub, realtime distribution, durable streams:
+different products pick off different pieces here, but the pattern is
+the same.
+
+The database is no longer just passive storage.
+
+It starts becoming the thing that also moves and distributes changes.
+
+That is a meaningful simplification, because every time one of those
+edge systems disappears, both your operational graph and your mental
+graph get smaller.
+
 </Notes>
 </Slide>
 
@@ -437,12 +490,22 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-subsume blob storage
+Some systems go further and also absorb files or blob storage.
+
+Again, not every product does every one of these steps.
+
+I am not trying to claim a perfect consensus feature list.
+
+I am trying to show the direction of travel.
+
+The direction is that more and more of the app's data surface gets
+pulled back under one roof.
+
 </Notes>
 </Slide>
 
 <Slide>
-# Slimming the stack 6
+# Roughly where modern stacks land
 
 Lines of code: ++++
 
@@ -466,9 +529,19 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-make permissions DB concern
+And then permissions start moving inward too.
 
-auth roundtrip disappears
+Instead of auth being something the backend wraps around every query,
+the database itself starts understanding auth policies.
+
+That means a whole chunk of backend auth glue disappears.
+
+It also means one of the weirdest parts of the full request path
+disappears: that extra auth roundtrip between the backend and the
+database.
+
+At this point the stack is already much, much cleaner than the one we
+started with.
 
 </Notes>
 </Slide>
@@ -497,19 +570,31 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-let's pause and see what we're left with
+So let us pause here and look at what is left.
 
-already pretty clean!
+This is already pretty clean.
 
-everything that happens from now on is going to be more jazz-specific
+Not every product in the category lands on exactly this picture.
 
-our ambition: really get as close as possible to useState as your DB
+But I do think this is roughly the zone modern real-time databases and
+sync engines are converging on.
+
+And that alone is already a huge improvement over the traditional stack.
+
+Now comes the interesting part.
+
+Everything from here on is going to be more Jazz-specific.
+
+Because our ambition is not just to make the backend slimmer.
+
+Our ambition is to get as close as possible to the feeling that
+`useState()` is your database.
 
 </Notes>
 </Slide>
 
 <Slide>
-# Slimming the stack 7
+# Jazz pushes further: regional edges
 
 Lines of code: ++++
 
@@ -534,19 +619,31 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-explain built-in regional edges for caching and
-super low latency between collaborators
+The next question is: if we have already made it this far, what else can
+we do?
 
-joke about how other solutions can also do this if you
-happen to live in us-east-1
+One answer is that we can get much more aggressive about latency.
 
-and unlike normal caches, this is fully auth aware!
+So Jazz adds built-in regional edges for caching and for very low-latency
+collaboration between nearby users.
+
+That gives us another mode on the light-milliseconds metric:
+not just full remote and not just optimistic preview, but genuinely
+short regional paths.
+
+And unlike a normal cache bolted onto the side, this thing is aware of
+the data model and the auth model.
+
+That matters, because otherwise these low-latency layers quickly turn
+into yet another source of glue and inconsistency.
+
+TODO: us-east-1 joke
 
 </Notes>
 </Slide>
 
 <Slide>
-# Slimming the stack 8
+# Jazz pushes further: truly local-first
 
 Lines of code: +++
 
@@ -571,11 +668,129 @@ Light milliseconds:
 - **durable local state**: 0ms
 
 <Notes>
-this is where it gets really interesting and we
-introduce a local-first database on the client
-that is truly durable!
+And this is where it gets really interesting.
 
-TODO: argument for why slightly less LOC
+We stop treating the client as just a fancy cache with optimism.
+
+Instead, we introduce a truly durable local-first database on the client.
+
+At that point the dream of `useState()` as your database starts becoming
+real in a much stronger sense.
+
+Not just reactive.
+
+Not just optimistic.
+
+Actually durable.
+
+Actually queryable.
+
+Actually part of the real system.
+
+And that is the moment where the easy story ends and the hard story begins.
+
+Because once the database is truly local-first, a whole new class of
+problems shows up.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Local-first got hands
+
+- How do consistency and transactions work now?
+- How do permissions work when data can exist locally?
+- How do collaboration and history work?
+- How does schema evolution work when old and new clients are all out there
+  at once?
+
+<Notes>
+And these problems point at ways in which durable databases
+that many users read from and write to
+are simply truly different from ephemeral local state
+
+</Notes>
+</Slide>
+
+{/* MIDDLE PART */}
+
+{/* Jazz v2 as the first push to really solve the challenges with the four fresh ideas */}
+
+{/* Announcement of the alpha release *for React Miami* */}
+
+{/* DEMO */}
+
+<Slide>
+# what if `useState()` was your database?
+
+<Notes>
+So we've come pretty far. You've seen all the work that goes into
+getting as close as possible to having a database that looks like useState.
+
+What would it actually feel like if useState was your database?
+Or rather, what would it feel like to use something that came as close as
+possible, while also giving you a framework for distributed data
+to build your next crazy idea around?
+
+</Notes>
+</Slide>
+
+<Slide>
+# what if Jazz was your database?
+
+<Notes>
+What if *jazz* was your database?
+</Notes>
+</Slide>
+
+<Slide>
+# What if jazz v2 alpha was your database?
+
+<Notes>
+Well what is the current v2 alpha like if you're adventorous?
+
+The good news is that it's really easy to try out.
+
+</Notes>
+</Slide>
+
+<Slide>
+# npm create jazz
+
+Docs: jazz.tools
+Join our Discord!
+
+<Notes>
+Simply run npm create jazz.
+
+It'll scaffold an app for you,
+set up a free jazz api key on jazz cloud
+without you having to create an account.
+
+Wires it up for you and you have a running,
+durable, local-first multi-user app.
+
+As easy as starting a new purely-frontend project.
+
+I really can't wait to see what you build with it
+and would love to hear what you think. Especially if
+you've got strong opinions and if you've tried some
+of the alternative and love or hate specific aspects.
+
+And with all the disclaimers about it being alpha,
+let me also say that we're also already onboarding bigger
+adopters to Jazz v2 in close partnership, so if you're
+building something serious we're ready to do pilots
+and show you some of Jazz's unique properties for your
+use case specifically. Just come grab me or shoot me a dm.
+
+Same if you have questions or just wanna chat, I'm around
+all day today and tomorrow and most of Saturday, as are
+Guido, Gio and Nico, who you'll recognize by their Jazz shirts.
+
+Allright, I really hope you learned something new.
+Long live React!
+Thank you!
 
 </Notes>
 </Slide>
