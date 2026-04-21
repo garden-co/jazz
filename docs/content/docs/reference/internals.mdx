@@ -251,14 +251,14 @@ uses that catalogue state to resolve schema context on demand.
 
 Jazz separates two durability questions:
 
-| Signal                  | Gates                    | Question it answers                        |
-| ----------------------- | ------------------------ | ------------------------------------------ |
-| `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
-| Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
+| Signal                  | Gates                                | Question it answers                        |
+| ----------------------- | ------------------------------------ | ------------------------------------------ |
+| `QuerySettled`          | First read delivery                  | "Has the query result settled at tier T?"  |
+| Write tier confirmation | `.wait({ tier })` promise completion | "Has this write been confirmed at tier T?" |
 
 Both use the same tier lattice (`local` < `edge` < `global`), but they answer different
 questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
-durable write promise resolves when the requested tier confirms the write.
+`.wait({ tier })` promise resolves when the requested tier confirms the write.
 
 <Callout type="warn">
   The read durability tier only gates the **first** delivery of a subscription. After the initial

@@ -924,24 +924,6 @@ export class Transaction {
     return handle;
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    this.ensureActive();
-    const pendingWrite = this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(pendingWrite.value().id);
-    return pendingWrite;
-  }
-
   update(objectId: string, updates: Record<string, Value>): WriteHandle {
     this.ensureActive();
     const result = this.client.updateHandleInternal(
@@ -955,24 +937,6 @@ export class Transaction {
     return result;
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    this.ensureActive();
-    const pendingWrite = this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(objectId);
-    return pendingWrite;
-  }
-
   delete(objectId: string): WriteHandle {
     this.ensureActive();
     const result = this.client.deleteHandleInternal(
@@ -983,19 +947,6 @@ export class Transaction {
     );
     this.markTouchedRow(objectId);
     return result;
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    this.ensureActive();
-    const pendingWrite = this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-    this.markTouchedRow(objectId);
-    return pendingWrite;
   }
 
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
@@ -1039,21 +990,6 @@ export class DirectBatch {
     );
   }
 
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.client.createPersistedInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
   update(objectId: string, updates: Record<string, Value>): WriteHandle {
     return this.client.updateHandleInternal(
       objectId,
@@ -1064,36 +1000,11 @@ export class DirectBatch {
     );
   }
 
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.client.updatePersistedInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
   delete(objectId: string): WriteHandle {
     return this.client.deleteHandleInternal(
       objectId,
       this.session,
       this.attribution,
-      this.batchContext,
-    );
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.client.deletePersistedInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      options,
       this.batchContext,
     );
   }
@@ -1666,33 +1577,7 @@ export class JazzClient {
   }
 
   private requireSessionWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "insertWithSession"
-      | "insertDurableWithSession"
-      | "updateWithSession"
-      | "updateDurableWithSession"
-      | "deleteWithSession"
-      | "deleteDurableWithSession"
-    >,
-  >(method: T): NonNullable<Runtime[T]> {
-    const runtimeMethod = this.runtime[method];
-    if (!runtimeMethod) {
-      throw new Error(`${String(method)} is not supported by this runtime`);
-    }
-    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
-  }
-
-  private requirePersistedWriteMethod<
-    T extends keyof Pick<
-      Runtime,
-      | "insertPersisted"
-      | "insertPersistedWithSession"
-      | "updatePersisted"
-      | "updatePersistedWithSession"
-      | "deletePersisted"
-      | "deletePersistedWithSession"
-    >,
+    T extends keyof Pick<Runtime, "insertWithSession" | "updateWithSession" | "deleteWithSession">,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
     if (!runtimeMethod) {
@@ -2034,149 +1919,6 @@ export class JazzClient {
   }
 
   /**
-   * Insert a new row into a table and wait for durability at the requested tier.
-   */
-  async createDurable(
-    table: string,
-    values: InsertValues,
-    options?: CreateDurabilityOptions,
-  ): Promise<Row> {
-    return this.createDurableInternal(table, values, undefined, undefined, options);
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id and wait for durability.
-   */
-  async upsertDurable(
-    table: string,
-    values: InsertValues,
-    options: UpsertDurabilityOptions,
-  ): Promise<void> {
-    await this.upsertDurableInternal(table, values, options.id, undefined, undefined, options);
-  }
-
-  /**
-   * Insert a new row into a table and wait for durability, optionally scoped to a session.
-   * @internal
-   */
-  async createDurableInternal(
-    table: string,
-    values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: CreateDurabilityOptions,
-  ): Promise<Row> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    let row;
-    try {
-      row =
-        effectiveSession || attribution !== undefined || options?.updatedAt !== undefined
-          ? options?.id
-            ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-                table,
-                values,
-                this.encodeWriteContext(
-                  effectiveSession,
-                  attribution,
-                  undefined,
-                  options.updatedAt,
-                ),
-                tier,
-                options.id,
-              )
-            : await this.requireSessionWriteMethod("insertDurableWithSession")(
-                table,
-                values,
-                this.encodeWriteContext(
-                  effectiveSession,
-                  attribution,
-                  undefined,
-                  options?.updatedAt,
-                ),
-                tier,
-              )
-          : options?.id
-            ? await this.runtime.insertDurable(table, values, tier, options.id)
-            : await this.runtime.insertDurable(table, values, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
-    return {
-      ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
-    };
-  }
-
-  createPersisted(
-    table: string,
-    values: InsertValues,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<Row> {
-    return this.createPersistedInternal(table, values, undefined, undefined, options);
-  }
-
-  createPersistedInternal(
-    table: string,
-    values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-  ): PersistedWrite<Row> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext
-        ? this.requirePersistedWriteMethod("insertPersistedWithSession")(
-            table,
-            values,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("insertPersisted")(table, values, tier);
-    return new PersistedWrite(this, tier, result.batchId, {
-      ...result.row,
-      values: this.alignRowValuesToDeclaredSchema(table, result.row.values as Value[]),
-    });
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id and wait for durability,
-   * optionally scoped to a session.
-   * @internal
-   */
-  async upsertDurableInternal(
-    table: string,
-    values: InsertValues,
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: UpsertDurabilityOptions,
-  ): Promise<void> {
-    try {
-      await this.createDurableInternal(table, values, session, attribution, {
-        ...options,
-        id: objectId,
-      });
-      return;
-    } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
-        throw error;
-      }
-    }
-
-    await this.updateDurableInternal(
-      objectId,
-      values as Record<string, Value>,
-      session,
-      attribution,
-      options,
-      options?.updatedAt,
-    );
-  }
-
-  /**
    * Execute a query and return all matching rows.
    *
    * @param query Query builder or JSON-encoded query specification
@@ -2210,78 +1952,6 @@ export class JazzClient {
       optionsJson,
     );
     return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], effectiveRuntimeSchema);
-  }
-
-  async updateDurable(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: UpdateDurabilityOptions,
-  ): Promise<void> {
-    await this.updateDurableInternal(
-      objectId,
-      updates,
-      undefined,
-      undefined,
-      options,
-      options?.updatedAt,
-    );
-  }
-
-  async updateDurableInternal(
-    objectId: string,
-    updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    options?: UpdateDurabilityOptions,
-    updatedAt?: number,
-  ): Promise<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    try {
-      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-        await this.requireSessionWriteMethod("updateDurableWithSession")(
-          objectId,
-          updates,
-          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-          tier,
-        );
-        return;
-      }
-      await this.runtime.updateDurable(objectId, updates, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
-  }
-
-  updatePersisted(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: WriteDurabilityOptions,
-  ): PersistedWrite<void> {
-    return this.updatePersistedInternal(objectId, updates, undefined, undefined, options);
-  }
-
-  updatePersistedInternal(
-    objectId: string,
-    updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
-        ? this.requirePersistedWriteMethod("updatePersistedWithSession")(
-            objectId,
-            updates,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("updatePersisted")(objectId, updates, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
@@ -2377,59 +2047,6 @@ export class JazzClient {
       );
     }
     return this.runtime.delete(objectId);
-  }
-
-  async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
-    await this.deleteDurableInternal(objectId, undefined, undefined, options);
-  }
-
-  async deleteDurableInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    updatedAt?: number,
-  ): Promise<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    try {
-      if (effectiveSession || attribution !== undefined || updatedAt !== undefined) {
-        await this.requireSessionWriteMethod("deleteDurableWithSession")(
-          objectId,
-          this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
-          tier,
-        );
-        return;
-      }
-      await this.runtime.deleteDurable(objectId, tier);
-    } catch (error) {
-      throw normalizeRuntimeWriteError(error);
-    }
-  }
-
-  deletePersisted(objectId: string, options?: WriteDurabilityOptions): PersistedWrite<void> {
-    return this.deletePersistedInternal(objectId, undefined, undefined, options);
-  }
-
-  deletePersistedInternal(
-    objectId: string,
-    session?: Session,
-    attribution?: string,
-    options?: WriteDurabilityOptions,
-    batchContext?: BatchWriteContext,
-    updatedAt?: number,
-  ): PersistedWrite<void> {
-    const tier = this.resolveWriteTier(options);
-    const effectiveSession = this.resolveWriteSession(session, attribution);
-    const result =
-      effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined
-        ? this.requirePersistedWriteMethod("deletePersistedWithSession")(
-            objectId,
-            this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-            tier,
-          )
-        : this.requirePersistedWriteMethod("deletePersisted")(objectId, tier);
-    return new PersistedWrite(this, tier, result.batchId, undefined);
   }
 
   /**
