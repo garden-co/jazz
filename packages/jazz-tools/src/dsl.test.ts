@@ -8,6 +8,7 @@ import {
   table,
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import type { AddOp } from "./schema.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
@@ -24,16 +25,39 @@ describe("enum DSL invariants", () => {
     expect(() => col.enum("todo", "todo")).toThrow("Enum variants must be unique.");
   });
 
-  it("rejects duplicate variants in add enum migration", () => {
-    expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(
-      "Enum variants must be unique.",
-    );
-  });
+  describe("add enum", () => {
+    it("rejects duplicate variants in add enum migration", () => {
+      expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(
+        "Enum variants must be unique.",
+      );
+    });
 
-  it("rejects empty variants in drop enum migration", () => {
-    expect(() => col.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
-      "Enum variants cannot be empty strings.",
-    );
+    it("rejects empty variants in drop enum migration", () => {
+      expect(() => col.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
+        "Enum variants cannot be empty strings.",
+      );
+    });
+
+    it("preserves enum add default's nullability in the returned op type", () => {
+      const requiredStatus = col.add.enum("todo", "done", { default: "todo" });
+      const optionalStatus = col.add.enum("todo", "done", { default: null });
+
+      const requiredOp: AddOp<{ kind: "ENUM"; variants: ["todo", "done"] }, "todo" | "done"> =
+        requiredStatus;
+      const optionalOp: AddOp<
+        { kind: "ENUM"; variants: ["todo", "done"] },
+        "todo" | "done" | null
+      > = optionalStatus;
+
+      expect(requiredOp.default).toBe("todo");
+      expect(optionalOp.default).toBeNull();
+
+      // @ts-expect-error non-nullable added enum defaults cannot be null
+      const _invalidRequiredOp: AddOp<
+        { kind: "ENUM"; variants: ["todo", "done"] },
+        "todo" | "done"
+      > = col.add.enum("todo", "done", { default: null });
+    });
   });
 });
 
