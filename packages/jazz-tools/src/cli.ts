@@ -1718,6 +1718,13 @@ export async function deploy(options: DeployOptions): Promise<void> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   console.log(`Loaded current schema from ${compiled.schemaFile}.`);
 
+  for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
+    compiled.schema.tables.map((table) => table.name),
+    compiled.permissions,
+  )) {
+    console.warn(`\x1b[33m${diagnostic.message}\x1b[0m`);
+  }
+
   let localSchemaHash = await resolveStoredStructuralSchemaHash(
     options.appId,
     options.serverUrl,
