@@ -183,8 +183,28 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+/**
+ * Controls when a write is visible to subscriptions.
+ *
+ * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
+ * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
+ * - With `"deferred"`, all delivery is held until the tier confirms.
+ * Default is `"immediate"`.
+ */
 export type LocalUpdatesMode = "immediate" | "deferred";
+/**
+ * Controls where the subscription reads data from.
+ *
+ * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
+ * - With `"local-only"`, only local storage is queried and no server communication happens.
+ */
 export type QueryPropagation = "full" | "local-only";
+/**
+ * Whether this query should be shown in the inspector.
+ * Useful for helpers and framework internals that create subscriptions
+ * but should stay out of the DB inspector.
+ * Defaults to `"public"`.
+ */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;

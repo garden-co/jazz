@@ -178,12 +178,30 @@ export namespace schema {
   export type SchemaDefinition = TypedSchemaDefinition;
   export type TableIndex<TColumns extends TypedTableDefinition = TypedTableDefinition> =
     TypedTableIndex<TColumns>;
+  /**
+   * Normalized type for a schema definition.
+   */
   export type Schema<TSchema extends TypedSchemaDefinition = TypedSchemaDefinition> =
     TypedSchema<TSchema>;
+  /**
+   * App for a given schema.
+   */
   export type App<TSchema extends TypedSchema<any> | TypedSchemaDefinition> = TypedApp<TSchema>;
+  /**
+   * Row type for a given table (all columns, `id` included)
+   */
   export type RowOf<TTable> = TypedRowOf<TTable>;
+  /**
+   * Input type for new rows inserted into a table (no `id`, respects optionals and defaults)
+   */
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
+  /**
+   * Metadata for a given table.
+   */
   export type TableMetaOf<TTable> = TypedTableMetaOf<TTable>;
+  /**
+   * The `where(...)` input shape for that table
+   */
   export type WhereOf<TQuery> = TypedWhereOf<TQuery>;
 }
 
