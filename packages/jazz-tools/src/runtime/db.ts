@@ -1321,9 +1321,15 @@ export class Db {
     const configRuntimeSources = this.config.runtimeSources;
     const envWasmUrl =
       typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_JAZZ_WASM_URL : undefined;
+    // Any explicit override means the caller is taking control of wasm/worker
+    // resolution — don't second-guess them by injecting a Next-plugin URL.
+    // `workerUrl` counts too: the spawn path at `Db.spawnWorker` already
+    // resolves a wasm URL colocated with the custom worker script via
+    // `appendWorkerRuntimeWasmUrl` + `readWorkerRuntimeWasmUrl`.
     const hasConfiguredSource =
       !!configRuntimeSources?.wasmUrl ||
       !!configRuntimeSources?.baseUrl ||
+      !!configRuntimeSources?.workerUrl ||
       !!resolveRuntimeConfigSyncInitInput(configRuntimeSources);
     const runtimeSources =
       hasConfiguredSource || !envWasmUrl || typeof location === "undefined"
