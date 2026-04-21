@@ -3,56 +3,283 @@ title: React Miami launch
 description: Placeholder deck for the Jazz launch talk at React Miami.
 ---
 
-<Slide slug="intro" title="Jazz at React Miami">
+<Slide>
+# Hello,<br/>React Miami!
 
-# Jazz at React Miami
+Anselm Eickhoff
 
-## Placeholder opening slide
-
-This route is driven by MDX content and rendered in a dedicated presentation shell.
+founder of Garden Computing
+building Jazz
 
 <Notes>
+Hey everyone! My name is Anselm.
 
-Welcome everyone and frame this as a placeholder deck.
+I run a little company called Garden Computing.
 
-Mention that the presentation system is MDX-driven and shares UI primitives with the site.
+And we're building a database called Jazz.
+
+Why are we here?
 
 </Notes>
-
 </Slide>
 
-<Slide slug="why-jazz" title="Why Jazz?">
-
-# Why Jazz?
-
-- Local-first data that still syncs globally
-- Collaboration and permissions as data concerns
-- One MDX-powered deck that can reuse the same components as the site
+<Slide>
+# My experience in the SaaS mines
 
 <Notes>
+Let me explain.
 
-Talk through the trigger conditions that make Jazz click.
+In a time long long ago, when we were still writing
+code by hand.
 
-Emphasize that this is placeholder content and the focus is slide functionality.
+I was churning out one full-stack app after another.
+
+And I kept going through the same motions over and over again.
 
 </Notes>
-
 </Slide>
 
-<Slide slug="launch-shape" title="Launch shape">
+<Slide>
+# My experience in the SaaS mines
 
-# Launch shape
-
-## Placeholder closing slide
-
-The real deck can grow here without changing the routing, keyboard flow, or presenter tools.
+1. map out domain model
 
 <Notes>
-
-Close with launch framing and the next steps after the talk.
-
-Mention the notes panel shortcut once during rehearsal.
+You start by mapping out the domain model - what is this app
+actually about. That's hard and usually most of the conceptual
+work.
 
 </Notes>
+</Slide>
 
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+
+<Notes>
+Then you come up with the user interface and the build the frontend
+
+This is also hard because you have to have empathy with users
+_and_ with the people who invent the CSS standard
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around local state
+      <Notes>
+Then I usually built a quick mostly working demo around local
+UI state, because that's easy to iterate on
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around local state
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+But then of course you have to "make it actually work". But
+it always felt like this was now just busywork.
+
+Even if the
+backend needed some complicated business logic and had to integrate
+with arcane external systems. Everything was already
+mostly determined by the first two steps.
+
+The database schema was clear from the domain model.
+And the backend mostly needed to make the data available
+to the frontend, and do some auth and checks.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Backends: 90% shuffling data around?
+
+<Notes>
+It really felt like all the backend did was shuffle around
+data between the database and the frontend. And seeing this
+again and again really got boring.
+</Notes>
+</Slide>
+
+<Slide>
+# Frontend is harder than backend
+
+<Notes>
+And looking at what I really used my braincells on I became
+convinced that frontend is actually harder than backend.
+I still strongly believe this.
+</Notes>
+</Slide>
+
+<Slide>
+# "LLMs are bad at frontend"
+
+Maybe frontend is just harder than backend???
+
+More accurate:
+
+- frontend is hard
+- backend is merely complicated
+- LLMs are great at complicated things
+
+<Notes>
+In fact when people say "LLMs are bad at frontend" I like
+to ask them: "are they really bad at frontend?"
+"or does this just mean that frontend is harder"
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. **map out domain model**
+2. **build the UI**
+3. **impress everyone with flashy demo around local state**
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+So frontend is the hard part. But suspiciously, for me
+frontend was also the fun part.
+
+And if the fun part solves most of the problems, why is
+the rest such a drag?
+
+So I asked myself - how could one make the entire full-stack
+development process as fun as the first parts, and make sure
+that we only have to think about what's actually important.
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around **local state**
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+And the way I approached this problem was very stategic.
+
+Building the flashy demo around local state felt fun
+and meaningful, right?
+
+So like a toddler I wanted the most immediate unrealistic
+solution that would instantly magically fix everything.
+
+</Notes>
+</Slide>
+
+<Slide>
+# what if `useState()` was your database?
+
+<Notes>
+What if my database "simply" looked like useState()?
+
+And that's what I started building. And that's what became Jazz.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Modern real-time databases and sync engines
+
+- Zero
+- ElectricSQL
+- InstantDB
+- Convex
+- Turso
+- Jazz
+
+<Notes>
+Turns out other people had similar ideas and also really wanted
+to simplify the stack.
+
+This is the now well-established category of real-time databases
+and sync engines.
+
+I'll first describe what these new roughly have in common - because
+the most important idea is what this general new stack looks like.
+
+After that we can dive into some unique Jazz things, but for now
+the main message is: you deserve a better stack.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Metrics to judge a stack by
+
+- Lines of code
+- Layers of infra BS
+- Light-milliseconds
+
+<Notes>
+And the three metrics I want you to keep in mind when
+you judge a stack are
+
+- lines of code, especially those that don't have anything to
+  do with what makes your app unique
+- layers of infra bullshit, so how many things do you have to
+  deploy and integrate with each other
+- light-milliseconds that user edits have to travel before they
+  become visible
+    </Notes>
+</Slide>
+
+<Slide>
+# Putting your backend on ozempic
+
+<Notes>
+I'll now take you on a journey where we start with a traditional
+stack and watch as layer by layer gets subsumed by some or all
+of the more modern alternatives
+</Notes>
+</Slide>
+
+<Slide>
+# Traditional backend
+
+Lines of code: +++++++++++++++
+
+Layers:
+
+- backend/external
+  - Database, ORM, cache, connection pooler
+  - backend framework, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - data fetching, websocket client
+  - query cache w/ optimistic updates, ui state
+  - client/rendering framework
+
+Light milliseconds: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+
+<Notes>
+This is our starting situation, and this is exactly what makes
+the backend part so unfun:
+
+_list everything in the diagram_
+
+point out "durable streams" as newest addition to the stack
+
+</Notes>
 </Slide>
