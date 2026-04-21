@@ -154,10 +154,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       const assertUniqueConstraints = async (
         model: string,
         data: Record<string, unknown>,
-        excludeRowId?: string,
+        excludeRowIds?: ReadonlySet<string>,
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const uniqueFields = getUniqueFields(model);
+        const excluded = excludeRowIds?.size ?? 0;
         for (const { storedFieldName } of uniqueFields) {
           if (!Object.prototype.hasOwnProperty.call(data, storedFieldName)) continue;
           const value = data[storedFieldName];
@@ -165,11 +166,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
           const checkQb = createQueryBuilder(table, wasmSchema, {
             conditions: [{ column: storedFieldName, op: "eq", value }],
-            limit: 2,
+            limit: excluded + 1,
           });
 
           const existing = (await config.db().all(checkQb, { tier: "global" })) as JazzRowRecord[];
-          const conflict = existing.find((row) => row.id !== excludeRowId);
+          const conflict = existing.find((row) => !excludeRowIds?.has(row.id));
           if (conflict) {
             throw new Error(
               `Unique constraint violated: "${table}.${storedFieldName}" already has a row with value "${String(value)}"`,
@@ -230,7 +231,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return null;
           }
 
-          await assertUniqueConstraints(model, update as Record<string, unknown>, match.id);
+          await assertUniqueConstraints(
+            model,
+            update as Record<string, unknown>,
+            new Set([match.id]),
+          );
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
@@ -246,9 +251,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             return 0;
           }
 
-          for (const match of matches) {
-            await assertUniqueConstraints(model, update as Record<string, unknown>, match.id);
-          }
+          await assertUniqueConstraints(
+            model,
+            update as Record<string, unknown>,
+            new Set(matches.map((match) => match.id)),
+          );
 
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
