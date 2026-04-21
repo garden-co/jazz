@@ -691,6 +691,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("scan local batch records: {err}")))
     }
 
+    /// Drain replayable rejected batch ids that should be surfaced by bindings.
+    pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
+        std::mem::take(&mut self.rejected_batch_ids)
+            .into_iter()
+            .collect()
+    }
+
     /// Acknowledge a replayable rejected batch outcome and prune the local
     /// batch record that kept it alive across reconnect and restart.
     pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
@@ -713,6 +720,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.ack_watchers.retain(|key, _| key.batch_id != batch_id);
+        self.rejected_batch_ids.remove(&batch_id);
         self.mark_storage_write_pending_flush();
         Ok(true)
     }

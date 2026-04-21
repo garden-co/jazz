@@ -61,12 +61,15 @@ function createRuntimeMock(): {
     loadLocalBatchRecord: () => null,
     loadLocalBatchRecords: () => [],
     insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
+    insertDurable: async () => ({ id: "id", values: [], batchId: "batch-id" }),
     update: () => ({
       batchId: "batch-id",
     }),
+    updateDurable: async () => {},
     delete: () => ({
       batchId: "batch-id",
     }),
+    deleteDurable: async () => {},
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,

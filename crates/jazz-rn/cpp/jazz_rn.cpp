@@ -95,12 +95,20 @@ typedef struct UniffiForeignFutureResultVoid {
 } UniffiForeignFutureResultVoid;
 typedef void (*UniffiForeignFutureCompleteVoid)(
     uint64_t callback_data, UniffiForeignFutureResultVoid result);
+typedef void (*UniffiCallbackInterfaceAuthFailureCallbackMethod0)(
+    uint64_t uniffi_handle, RustBuffer reason, void *uniffi_out_return,
+    RustCallStatus *rust_call_status);
 typedef void (*UniffiCallbackInterfaceBatchedTickCallbackMethod0)(
     uint64_t uniffi_handle, void *uniffi_out_return,
     RustCallStatus *rust_call_status);
 typedef void (*UniffiCallbackInterfaceSubscriptionCallbackMethod0)(
     uint64_t uniffi_handle, RustBuffer delta_json, void *uniffi_out_return,
     RustCallStatus *rust_call_status);
+typedef struct UniffiVTableCallbackInterfaceAuthFailureCallback {
+  UniffiCallbackInterfaceFree uniffi_free;
+  UniffiCallbackInterfaceClone uniffi_clone;
+  UniffiCallbackInterfaceAuthFailureCallbackMethod0 on_failure;
+} UniffiVTableCallbackInterfaceAuthFailureCallback;
 typedef struct UniffiVTableCallbackInterfaceBatchedTickCallback {
   UniffiCallbackInterfaceFree uniffi_free;
   UniffiCallbackInterfaceClone uniffi_clone;
@@ -119,6 +127,9 @@ void uniffi_jazz_rn_fn_free_rnruntime(
     RustBuffer schema_json, RustBuffer app_id, RustBuffer jazz_env,
     RustBuffer user_branch, RustBuffer tier, RustBuffer data_path,
     RustCallStatus *uniffi_out_err);
+int8_t uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+    /*handle*/ uint64_t ptr, RustBuffer batch_id,
+    RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_add_client(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_add_server(
@@ -133,13 +144,15 @@ void uniffi_jazz_rn_fn_method_rnruntime_connect(
 uint64_t uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
     /*handle*/ uint64_t ptr, RustBuffer query_json, RustBuffer session_json,
     RustBuffer tier, RustCallStatus *uniffi_out_err);
-void uniffi_jazz_rn_fn_method_rnruntime_delete(
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_delete(
     /*handle*/ uint64_t ptr, RustBuffer object_id,
     RustCallStatus *uniffi_out_err);
-void uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
     /*handle*/ uint64_t ptr, RustBuffer object_id,
     RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_disconnect(
+    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
     /*handle*/ uint64_t ptr, uint64_t handle, uint64_t callback,
@@ -150,10 +163,18 @@ RustBuffer uniffi_jazz_rn_fn_method_rnruntime_get_schema_hash(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_insert(
     /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
-    RustCallStatus *uniffi_out_err);
+    RustBuffer object_id, RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
     /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
-    RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
+    RustBuffer write_context_json, RustBuffer object_id,
+    RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+    /*handle*/ uint64_t ptr, RustBuffer batch_id,
+    RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
+void uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+    /*handle*/ uint64_t ptr, uint64_t callback, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
     /*handle*/ uint64_t ptr, RustBuffer callback,
     RustCallStatus *uniffi_out_err);
@@ -168,6 +189,9 @@ RustBuffer uniffi_jazz_rn_fn_method_rnruntime_query(
     RustBuffer tier, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_remove_server(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
+void uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+    /*handle*/ uint64_t ptr, RustBuffer batch_id,
+    RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
     /*handle*/ uint64_t ptr, RustBuffer client_id, RustBuffer role,
     RustCallStatus *uniffi_out_err);
@@ -176,15 +200,17 @@ uint64_t uniffi_jazz_rn_fn_method_rnruntime_subscribe(
     RustBuffer session_json, RustBuffer tier, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_unsubscribe(
     /*handle*/ uint64_t ptr, uint64_t handle, RustCallStatus *uniffi_out_err);
-void uniffi_jazz_rn_fn_method_rnruntime_update(
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update(
     /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
     RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_update_auth(
     /*handle*/ uint64_t ptr, RustBuffer auth_json,
     RustCallStatus *uniffi_out_err);
-void uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
     RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
+void uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+    UniffiVTableCallbackInterfaceAuthFailureCallback *vtable);
 void uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
     UniffiVTableCallbackInterfaceBatchedTickCallback *vtable);
 void uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
@@ -314,6 +340,7 @@ void ffi_jazz_rn_rust_future_complete_void(
 uint16_t uniffi_jazz_rn_checksum_func_current_timestamp_ms();
 uint16_t uniffi_jazz_rn_checksum_func_generate_id();
 uint16_t uniffi_jazz_rn_checksum_func_mint_local_first_token();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_add_client();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_add_server();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_batched_tick();
@@ -323,17 +350,22 @@ uint16_t uniffi_jazz_rn_checksum_method_rnruntime_create_subscription();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_delete();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_disconnect();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_flush();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_insert();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received();
 uint16_t
 uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_query();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_remove_server();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_seal_batch();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_set_client_role();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_subscribe();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe();
@@ -341,6 +373,7 @@ uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_auth();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_with_session();
 uint16_t uniffi_jazz_rn_checksum_constructor_rnruntime_new();
+uint16_t uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure();
 uint16_t
 uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick();
 uint16_t uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update();
@@ -780,6 +813,118 @@ static void cleanup() {
 }
 } // namespace uniffi::jazz_rn::cb::foreignfuturedroppedcallback
   // Implementation of free callback function CallbackInterfaceFree
+
+// Callback function:
+// uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::vtablecallbackinterfaceauthfailurecallback::free::UniffiCallbackInterfaceFree
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::
+    vtablecallbackinterfaceauthfailurecallback::free {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t)> rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue,
+                 uint64_t rs_handle) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_handle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_handle);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_handle);
+
+  } catch (const jsi::JSError &error) {
+    std::cout << "Error in callback UniffiCallbackInterfaceFree: "
+              << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static void callback(uint64_t rs_handle) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return;
+  }
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_handle);
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceFree
+makeCallbackFunction( // uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::vtablecallbackinterfaceauthfailurecallback::free
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](uint64_t rs_handle) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_handle](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_handle);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+
+    callInvoker->invokeNonBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeJazzRn, which only happens
+// when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::vtablecallbackinterfaceauthfailurecallback::free
 
 // Callback function:
 // uniffi::jazz_rn::st::vtablecallbackinterfacebatchedtickcallback::vtablecallbackinterfacebatchedtickcallback::free::UniffiCallbackInterfaceFree
@@ -1827,6 +1972,302 @@ template <> struct Bridging<UniffiForeignFutureCompleteVoid> {
 };
 } // namespace uniffi::jazz_rn
   // Implementation of CallbackInterfaceClone for vtable field uniffi_clone in
+  // VTableCallbackInterfaceAuthFailureCallback
+
+// Callback function:
+// uniffi::jazz_rn::cb::callbackinterfaceclone::vtablecallbackinterfaceauthfailurecallback::UniffiCallbackInterfaceClone
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::jazz_rn::cb::callbackinterfaceclone::
+    vtablecallbackinterfaceauthfailurecallback {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t, uint64_t *)> rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue, uint64_t rs_handle,
+                 uint64_t *uniffi_direct_return) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_handle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_handle);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_handle);
+
+    // Write the direct return value back to the caller.
+    if (uniffi_direct_return != nullptr) {
+      *uniffi_direct_return =
+          uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, uniffiResult);
+    }
+  } catch (const jsi::JSError &error) {
+    std::cout << "Error in callback UniffiCallbackInterfaceClone: "
+              << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static uint64_t callback(uint64_t rs_handle) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return 0;
+  }
+  uint64_t uniffi_result = 0;
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_handle, &uniffi_result);
+  return uniffi_result;
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceClone
+makeCallbackFunction( // uniffi::jazz_rn::cb::callbackinterfaceclone::vtablecallbackinterfaceauthfailurecallback
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](uint64_t rs_handle,
+                                               uint64_t *uniffi_direct_return) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_handle,
+         uniffi_direct_return](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_handle, uniffi_direct_return);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+    callInvoker->invokeBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeJazzRn, which only happens
+// when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::jazz_rn::cb::callbackinterfaceclone::vtablecallbackinterfaceauthfailurecallback
+  // Implementation of CallbackInterfaceAuthFailureCallbackMethod0 for vtable
+  // field on_failure in VTableCallbackInterfaceAuthFailureCallback
+
+// Callback function:
+// uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::vtablecallbackinterfaceauthfailurecallback::UniffiCallbackInterfaceAuthFailureCallbackMethod0
+//
+// We have the following constraints:
+// - we need to pass a function pointer to Rust.
+// - we need a jsi::Runtime and jsi::Function to call into JS.
+// - function pointers can't store state, so we can't use a lamda.
+//
+// For this, we store a lambda as a global, as `rsLambda`. The `callback`
+// function calls the lambda, which itself calls the `body` which then calls
+// into JS.
+//
+// We then give the `callback` function pointer to Rust which will call the
+// lambda sometime in the future.
+namespace uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::
+    vtablecallbackinterfaceauthfailurecallback {
+using namespace facebook;
+
+// We need to store a lambda in a global so we can call it from
+// a function pointer. The function pointer is passed to Rust.
+static std::function<void(uint64_t, RustBuffer, void *, RustCallStatus *)>
+    rsLambda = nullptr;
+
+// This is the main body of the callback. It's called from the lambda,
+// which itself is called from the callback function which is passed to Rust.
+static void body(jsi::Runtime &rt,
+                 std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+                 std::shared_ptr<jsi::Value> callbackValue,
+                 uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+
+  // Convert the arguments from Rust, into jsi::Values.
+  // We'll use the Bridging class to do this…
+  auto js_uniffiHandle =
+      uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, rs_uniffiHandle);
+  auto js_reason =
+      uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, rs_reason);
+
+  // Now we are ready to call the callback.
+  // We are already on the JS thread, because this `body` function was
+  // invoked from the CallInvoker.
+  try {
+    // Getting the callback function
+    auto cb = callbackValue->asObject(rt).asFunction(rt);
+    auto uniffiResult = cb.call(rt, js_uniffiHandle, js_reason);
+
+    // Now copy the result back from JS into the RustCallStatus object.
+    uniffi::jazz_rn::Bridging<RustCallStatus>::copyFromJs(
+        rt, callInvoker, uniffiResult, uniffi_call_status);
+
+    if (uniffi_call_status->code != UNIFFI_CALL_STATUS_OK) {
+      // The JS callback finished abnormally, so we cannot retrieve the return
+      // value.
+      return;
+    }
+
+  } catch (const jsi::JSError &error) {
+    std::cout << "Error in callback "
+                 "UniffiCallbackInterfaceAuthFailureCallbackMethod0: "
+              << error.what() << std::endl;
+    throw error;
+  }
+}
+
+static void callback(uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                     void *rs_uniffiOutReturn,
+                     RustCallStatus *uniffi_call_status) {
+  // If the runtime has shutdown, then there is no point in trying to
+  // call into Javascript. BUT how do we tell if the runtime has shutdown?
+  //
+  // Answer: the module destructor calls into callback `cleanup` method,
+  // which nulls out the rsLamda.
+  //
+  // If rsLamda is null, then there is no runtime to call into.
+  if (rsLambda == nullptr) {
+    // This only occurs when destructors are calling into Rust free/drop,
+    // which causes the JS callback to be dropped.
+    return;
+  }
+
+  // The runtime, the actual callback jsi::funtion, and the callInvoker
+  // are all in the lambda.
+  rsLambda(rs_uniffiHandle, rs_reason, rs_uniffiOutReturn, uniffi_call_status);
+}
+
+[[maybe_unused]] static UniffiCallbackInterfaceAuthFailureCallbackMethod0
+makeCallbackFunction( // uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::vtablecallbackinterfaceauthfailurecallback
+    jsi::Runtime &rt,
+    std::shared_ptr<uniffi_runtime::UniffiCallInvoker> callInvoker,
+    const jsi::Value &value) {
+  if (rsLambda != nullptr) {
+    // `makeCallbackFunction` is called in two circumstances:
+    //
+    // 1. at startup, when initializing callback interface vtables.
+    // 2. when polling futures. This happens at least once per future that is
+    //    exposed to Javascript. We know that this is always the same function,
+    //    `uniffiFutureContinuationCallback` in `async-rust-calls.ts`.
+    //
+    // We can therefore return the callback function without making anything
+    // new if we've been initialized already.
+    return callback;
+  }
+  auto callbackFunction = value.asObject(rt).asFunction(rt);
+  auto callbackValue = std::make_shared<jsi::Value>(rt, callbackFunction);
+  rsLambda = [&rt, callInvoker, callbackValue](
+                 uint64_t rs_uniffiHandle, RustBuffer rs_reason,
+                 void *rs_uniffiOutReturn, RustCallStatus *uniffi_call_status) {
+    // We immediately make a lambda which will do the work of transforming the
+    // arguments into JSI values and calling the callback.
+    uniffi_runtime::UniffiCallFunc jsLambda =
+        [callInvoker, callbackValue, rs_uniffiHandle, rs_reason,
+         rs_uniffiOutReturn, uniffi_call_status](jsi::Runtime &rt) mutable {
+          body(rt, callInvoker, callbackValue, rs_uniffiHandle, rs_reason,
+               rs_uniffiOutReturn, uniffi_call_status);
+        };
+    // We'll then call that lambda from the callInvoker which will
+    // look after calling it on the correct thread.
+    callInvoker->invokeBlocking(rt, jsLambda);
+  };
+  return callback;
+}
+
+// This method is called from the destructor of NativeJazzRn, which only happens
+// when the jsi::Runtime is being destroyed.
+static void cleanup() {
+  // The lambda holds a reference to the the Runtime, so when this is nulled
+  // out, then the pointer will no longer be left dangling.
+  rsLambda = nullptr;
+}
+} // namespace
+  // uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::vtablecallbackinterfaceauthfailurecallback
+namespace uniffi::jazz_rn {
+using namespace facebook;
+using CallInvoker = uniffi_runtime::UniffiCallInvoker;
+
+template <> struct Bridging<UniffiVTableCallbackInterfaceAuthFailureCallback> {
+  static UniffiVTableCallbackInterfaceAuthFailureCallback
+  fromJs(jsi::Runtime &rt, std::shared_ptr<CallInvoker> callInvoker,
+         const jsi::Value &jsValue) {
+    // Check if the input is an object
+    if (!jsValue.isObject()) {
+      throw jsi::JSError(rt,
+                         "Expected an object for "
+                         "UniffiVTableCallbackInterfaceAuthFailureCallback");
+    }
+
+    // Get the object from the jsi::Value
+    auto jsObject = jsValue.getObject(rt);
+
+    // Create the vtable struct
+    UniffiVTableCallbackInterfaceAuthFailureCallback rsObject;
+
+    // Create the vtable from the js callbacks.
+    rsObject.uniffi_free =
+        uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::
+            vtablecallbackinterfaceauthfailurecallback::free::
+                makeCallbackFunction(rt, callInvoker,
+                                     jsObject.getProperty(rt, "uniffiFree"));
+    rsObject.uniffi_clone = uniffi::jazz_rn::cb::callbackinterfaceclone::
+        vtablecallbackinterfaceauthfailurecallback::makeCallbackFunction(
+            rt, callInvoker, jsObject.getProperty(rt, "uniffiClone"));
+    rsObject.on_failure =
+        uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::
+            vtablecallbackinterfaceauthfailurecallback::makeCallbackFunction(
+                rt, callInvoker, jsObject.getProperty(rt, "onFailure"));
+
+    return rsObject;
+  }
+};
+
+} // namespace uniffi::jazz_rn
+  // Implementation of CallbackInterfaceClone for vtable field uniffi_clone in
   // VTableCallbackInterfaceBatchedTickCallback
 
 // Callback function:
@@ -2508,6 +2949,18 @@ NativeJazzRn::NativeJazzRn(
             return this->cpp_uniffi_jazz_rn_fn_constructor_rnruntime_new(
                 rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_method_"
+                                        "rnruntime_acknowledge_rejected_batch"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_add_client"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -2610,6 +3063,18 @@ NativeJazzRn::NativeJazzRn(
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
                 rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_method_"
+                                        "rnruntime_drain_rejected_batch_ids"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -2650,7 +3115,7 @@ NativeJazzRn::NativeJazzRn(
           rt,
           jsi::PropNameID::forAscii(
               rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert"),
-          3,
+          4,
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_insert(
@@ -2662,12 +3127,47 @@ NativeJazzRn::NativeJazzRn(
           jsi::PropNameID::forAscii(
               rt,
               "ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session"),
-          4,
+          5,
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
                     rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_method_"
+                                        "rnruntime_load_local_batch_record"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_method_"
+                                        "rnruntime_load_local_batch_records"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+                rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed"] =
       jsi::Function::createFromHostFunction(
@@ -2726,6 +3226,17 @@ NativeJazzRn::NativeJazzRn(
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
                 rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_set_client_role"] =
@@ -2794,6 +3305,18 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_init_callback_"
+                                        "vtable_authfailurecallback"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback"] =
@@ -2887,6 +3410,18 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_"
+        "batch"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                    "rnruntime_acknowledge_rejected_batch"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(
+                rt, thisVal, args, count);
+      });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -2992,6 +3527,18 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_"
+        "ids"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                    "rnruntime_drain_rejected_batch_ids"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(
+                rt, thisVal, args, count);
+      });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3049,6 +3596,43 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_"
+        "record"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                    "rnruntime_load_local_batch_record"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_"
+        "records"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                    "rnruntime_load_local_batch_records"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(
+                rt, thisVal, args, count);
+      });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_"
@@ -3110,6 +3694,18 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role"] =
@@ -3193,6 +3789,18 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_checksum_constructor_rnruntime_new(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                        "authfailurecallback_on_failure"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_"
         "batched_tick"] = jsi::Function::createFromHostFunction(
@@ -3284,10 +3892,16 @@ NativeJazzRn::~NativeJazzRn() {
   // Cleanup for callback function ForeignFutureDroppedCallback
   uniffi::jazz_rn::cb::foreignfuturedroppedcallback::cleanup();
   // Cleanup for "free" callback function CallbackInterfaceFree
+  uniffi::jazz_rn::st::vtablecallbackinterfaceauthfailurecallback::
+      vtablecallbackinterfaceauthfailurecallback::free::cleanup();
   uniffi::jazz_rn::st::vtablecallbackinterfacebatchedtickcallback::
       vtablecallbackinterfacebatchedtickcallback::free::cleanup();
   uniffi::jazz_rn::st::vtablecallbackinterfacesubscriptioncallback::
       vtablecallbackinterfacesubscriptioncallback::free::cleanup();
+  uniffi::jazz_rn::cb::callbackinterfaceclone::
+      vtablecallbackinterfaceauthfailurecallback::cleanup();
+  uniffi::jazz_rn::cb::callbackinterfaceauthfailurecallbackmethod0::
+      vtablecallbackinterfaceauthfailurecallback::cleanup();
   uniffi::jazz_rn::cb::callbackinterfaceclone::
       vtablecallbackinterfacebatchedtickcallback::cleanup();
   uniffi::jazz_rn::cb::callbackinterfacebatchedtickcallbackmethod0::
@@ -3380,6 +3994,22 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_constructor_rnruntime_new(
 
   return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
                                                          value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_acknowledge_rejected_batch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<int8_t>::toJs(rt, callInvoker, value);
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_add_client(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -3476,7 +4106,7 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_delete(
     size_t count) {
   RustCallStatus status =
       uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  uniffi_jazz_rn_fn_method_rnruntime_delete(
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_delete(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
@@ -3484,7 +4114,7 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_delete(
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
 
-  return jsi::Value::undefined();
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
@@ -3492,7 +4122,7 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
     size_t count) {
   RustCallStatus status =
       uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
@@ -3501,7 +4131,7 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
 
-  return jsi::Value::undefined();
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -3516,6 +4146,21 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
                                                         args[count - 1]);
 
   return jsi::Value::undefined();
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
@@ -3572,6 +4217,7 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_insert(
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
       &status);
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
@@ -3590,11 +4236,58 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[4]),
       &status);
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
 
   return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_record(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_load_local_batch_records(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  uniffi_jazz_rn_fn_method_rnruntime_on_auth_failure(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return jsi::Value::undefined();
 }
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
@@ -3676,6 +4369,21 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
 
   return jsi::Value::undefined();
 }
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return jsi::Value::undefined();
+}
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_set_client_role(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -3730,7 +4438,7 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update(
     size_t count) {
   RustCallStatus status =
       uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  uniffi_jazz_rn_fn_method_rnruntime_update(
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_update(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
@@ -3739,7 +4447,7 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update(
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
 
-  return jsi::Value::undefined();
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -3762,7 +4470,7 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     size_t count) {
   RustCallStatus status =
       uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
@@ -3772,6 +4480,20 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
 
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto vtableInstance = uniffi::jazz_rn::Bridging<
+      UniffiVTableCallbackInterfaceAuthFailureCallback>::fromJs(rt, callInvoker,
+                                                                args[0]);
+
+  std::lock_guard<std::mutex> lock(uniffi::jazz_rn::registry::vtableMutex);
+  uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
+      uniffi::jazz_rn::registry::putTable(
+          "UniffiVTableCallbackInterfaceAuthFailureCallback", vtableInstance));
   return jsi::Value::undefined();
 }
 jsi::Value
@@ -3861,6 +4583,15 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
+jsi::Value NativeJazzRn::
+    cpp_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_add_client(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -3930,6 +4661,15 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
+jsi::Value NativeJazzRn::
+    cpp_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -3965,6 +4705,32 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::
+    cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::
+    cpp_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_on_auth_failure();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -4007,6 +4773,14 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_remove_server();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_seal_batch();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -4060,6 +4834,14 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_constructor_rnruntime_new(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_constructor_rnruntime_new();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

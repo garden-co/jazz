@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -316,6 +316,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Local).
     ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
 
+    /// Rejected replayable batch ids that should be surfaced once to bindings.
+    rejected_batch_ids: BTreeSet<crate::row_histories::BatchId>,
+
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
 
@@ -332,6 +335,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
+        let rejected_batch_ids = storage
+            .scan_local_batch_records()
+            .map(|records| {
+                records
+                    .into_iter()
+                    .filter_map(|record| {
+                        matches!(
+                            record.latest_settlement,
+                            Some(crate::batch_fate::BatchSettlement::Rejected { .. })
+                        )
+                        .then_some(record.batch_id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Self {
             schema_manager,
@@ -350,6 +368,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
+            rejected_batch_ids,
             tier_label: "unknown",
             sync_tracer: None,
             auth_failure_callback: None,

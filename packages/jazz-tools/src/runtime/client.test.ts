@@ -1,11 +1,17 @@
 import { describe, it, expect, vi } from "vitest";
-import { JazzClient, resolveDefaultDurabilityTier } from "./client.js";
+import {
+  JazzClient,
+  resolveDefaultDurabilityTier,
+  type MutationErrorEvent,
+  type Runtime,
+} from "./client.js";
 import type { AppContext } from "./context.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
-  return {
-    updateAuth: vi.fn(),
-    onAuthFailure: vi.fn(),
+  const runtime = {
+    updateAuth: vi.fn<(auth_json: string) => void>(),
+    onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(),
     insertDurable: vi.fn(),
@@ -13,19 +19,55 @@ function makeFakeRuntime() {
     updateDurable: vi.fn(),
     delete: vi.fn(),
     deleteDurable: vi.fn(),
-    query: vi.fn(),
-    subscribe: vi.fn(),
-    createSubscription: vi.fn(),
-    executeSubscription: vi.fn(),
-    unsubscribe: vi.fn(),
+    query:
+      vi.fn<
+        (
+          query_json: string,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => Promise<any>
+      >(),
+    subscribe:
+      vi.fn<
+        (
+          query_json: string,
+          on_update: Function,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => number
+      >(),
+    createSubscription:
+      vi.fn<
+        (
+          query_json: string,
+          session_json?: string | null,
+          tier?: string | null,
+          options_json?: string | null,
+        ) => number
+      >(),
+    executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
+    unsubscribe: vi.fn<(handle: number) => void>(),
+    loadLocalBatchRecord: vi.fn<
+      (batch_id: string) => ReturnType<NonNullable<Runtime["loadLocalBatchRecord"]>>
+    >(() => null),
+    loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
+      () => [],
+    ),
+    drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
+    acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
     addClient: vi.fn().mockReturnValue("client-id"),
+    returnsDeclaredSchemaRows: false as boolean,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
-  };
+  } satisfies Runtime;
+
+  return runtime;
 }
 
 function makeContext(): AppContext {
@@ -158,5 +200,178 @@ describe("resolveDefaultDurabilityTier", () => {
 
   it("still prefers edge when a server is configured outside the browser runtime", () => {
     expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
+  });
+});
+
+describe("JazzClient runtime schema caching", () => {
+  it("reuses the normalized runtime schema while the schema hash is unchanged", () => {
+    const schema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.getSchema.mockReturnValue(schema);
+    runtime.getSchemaHash.mockReturnValue("schema-hash-1");
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "schema-cache-app",
+      schema,
+    });
+
+    expect(client.getSchema()).toBe(schema);
+    expect(client.getSchema()).toBe(schema);
+
+    expect(runtime.getSchema).toHaveBeenCalledTimes(1);
+    expect(runtime.getSchemaHash).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the cached schema when the runtime schema hash changes", () => {
+    const firstSchema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const secondSchema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+        policies: {},
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.getSchema.mockReturnValueOnce(firstSchema).mockReturnValueOnce(secondSchema);
+    runtime.getSchemaHash.mockReturnValueOnce("schema-hash-1").mockReturnValueOnce("schema-hash-2");
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "schema-cache-refresh-app",
+      schema: firstSchema,
+    });
+
+    expect(client.getSchema()).toBe(firstSchema);
+    expect(client.getSchema()).toBe(secondSchema);
+
+    expect(runtime.getSchema).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips schema fetches for runtimes that already return declared-schema rows", async () => {
+    const schema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.returnsDeclaredSchemaRows = true;
+    runtime.query.mockResolvedValue([
+      {
+        id: "todo-1",
+        values: [{ type: "Text", value: "already aligned" }],
+      },
+    ]);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "declared-row-runtime",
+      schema,
+    });
+
+    await expect(
+      client.query({
+        _schema: schema,
+        _build: () =>
+          JSON.stringify({
+            table: "todos",
+            conditions: [],
+            includes: {},
+            orderBy: [],
+          }),
+      }),
+    ).resolves.toEqual([
+      {
+        id: "todo-1",
+        values: [{ type: "Text", value: "already aligned" }],
+      },
+    ]);
+
+    expect(runtime.getSchemaHash).not.toHaveBeenCalled();
+    expect(runtime.getSchema).not.toHaveBeenCalled();
+  });
+});
+
+describe("JazzClient mutation error handling", () => {
+  function makeRejectedBatchRecord(batchId: string) {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: {
+        kind: "rejected" as const,
+        batchId,
+        code: "permission_denied",
+        reason: "write rejected by policy",
+      },
+    };
+  }
+
+  it("replays queued rejected batches to new listeners without scanning all batch records", () => {
+    const runtime = makeFakeRuntime();
+    runtime.drainRejectedBatchIds = vi.fn(() => ["batch-rejected"]);
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadLocalBatchRecords = vi.fn(() => {
+      throw new Error("should not scan all local batch records");
+    });
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "queued-rejection-app",
+      schema: {},
+    });
+
+    const seen: MutationErrorEvent[] = [];
+
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
+    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    expect(seen).toEqual([
+      {
+        code: "permission_denied",
+        reason: "write rejected by policy",
+        batch: makeRejectedBatchRecord("batch-rejected"),
+      },
+    ]);
+  });
+
+  it("checks only runtime-reported rejected batch ids after sync", () => {
+    const runtime = makeFakeRuntime();
+    runtime.drainRejectedBatchIds = vi
+      .fn<() => string[]>(() => [])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce(["batch-rejected"]);
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadLocalBatchRecords = vi.fn(() => {
+      throw new Error("should not scan all local batch records");
+    });
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "sync-rejection-app",
+      schema: {},
+    });
+
+    const seen: MutationErrorEvent[] = [];
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    client.getRuntime().onSyncMessageReceived("sync-payload");
+
+    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(2);
+    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
+    expect(seen).toEqual([
+      {
+        code: "permission_denied",
+        reason: "write rejected by policy",
+        batch: makeRejectedBatchRecord("batch-rejected"),
+      },
+    ]);
   });
 });
