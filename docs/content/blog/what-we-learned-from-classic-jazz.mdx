@@ -1,0 +1,70 @@
+---
+title: What we learned from classic Jazz
+description: The main lessons from Jazz v0.x, why Jazz v2 changed so much, and how migration works
+author: Anselm Eickhoff
+date: "2026-04-18"
+---
+
+This post expands the migration and redesign section from [What is Jazz?](/blog/what-is-jazz).
+Jazz v2 is a fairly radical departure from Jazz v0.x, which we now call classic Jazz, and that
+deserves a fuller explanation.
+
+Several years of building, hosting, and watching people use classic Jazz taught us which ideas were
+essential and which ones were making the system harder than they needed to be.
+
+# Permissions
+
+The biggest design choice that defined classic Jazz from the beginning was the use of cryptography
+to implement permissions. This enabled a true local-first notion of permissions to govern
+local-first data, in the extreme letting you build end-to-end encrypted apps that don't have to
+trust its syncing infrastructure at all.
+
+What we learned, though, was that most adopters cared more about the experience this design enabled
+than about the cryptographic machinery itself. They loved the feel of local-first state plus
+local-first permissions. But even teams for whom encryption was genuinely important did not love
+the public-key complexity, the unusual permission APIs, or the fact that permission mistakes were
+hard to evolve once baked into the system. And in practice, some useful permission rules still
+wanted at least a semi-trusted authority somewhere.
+
+That is why Jazz v2's biggest departure is around permissions. We now lean into the Jazz server as
+a trusted authority responsible for enforcing usefully complex permission policies that can evolve
+over time. The key unlock was to apply permissions at sync time while still giving local-first data
+accurate local previews of its likely fate.
+
+# End-To-End Encryption
+
+There will still be an end-to-end encryption story in Jazz v2, but it is framed differently.
+Instead of making the whole system revolve around cryptographic permissions, Jazz v2 treats the
+server as trusted for access control while still allowing especially sensitive fields to be hidden
+from it via encrypted columns and keys shared between end-user devices directly.
+
+# History Model
+
+The second biggest change is how we represent concurrent and branching edit histories. Classic Jazz
+was all-in on CRDTs. CRDTs naturally provide local-first, eventually consistent semantics, but they
+also rely on substantial history replay to materialize current values.
+
+We pushed that surprisingly far, even for large datasets, but eventually concluded that a more
+git-like model of snapshot DAGs could preserve the same fidelity of history while making
+current-state and historical reads much more efficient by pushing more of the work to the rarer
+merge points.
+
+# API Shape
+
+The API changed for similar reasons. After permissions, the biggest source of confusion for
+adopters was that we were trying to make Jazz feel like local JSON state while also supporting
+granular loading. That produced a brittle model of partially available data and turned "local JSON
+state" into a leaky abstraction with lots of custom caveats. The relational model and ORM-like
+query shape in Jazz v2 are much more familiar and well-defined.
+
+# Migration Promise
+
+Finally, we want to make a clear promise to existing adopters. While we do recommend migrating to
+Jazz v2 as soon as practical, and we are actively working on better automation to help with that,
+we are not abandoning classic Jazz in the meantime. We will keep maintaining it with security
+patches, blocking bug fixes and smaller missing features. Most importantly, we will keep classic
+Jazz Cloud running until everyone has had a fair chance to migrate.
+
+For teams already on classic Jazz, we are happy to help directly with migration planning. And if
+your classic app suddenly grows into a scale where Jazz v2 would serve it much better, we may
+proactively reach out to help with that transition too.
