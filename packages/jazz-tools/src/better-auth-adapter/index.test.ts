@@ -1,6 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
@@ -13,26 +10,36 @@ describe("jazzAdapter", () => {
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
-    let dataPath: string;
+    let server: Awaited<ReturnType<typeof TestingServer.start>>;
 
     beforeEach(async () => {
-      const root = await mkdtemp(join(tmpdir(), "jazz-better-auth-adapter-"));
-      dataPath = join(root, "runtime.skv");
+      server = await TestingServer.start({
+        backendSecret: "backend-secret-for-adapter-methods",
+      });
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+      });
 
       context = createJazzContext({
-        appId: `jazz-better-auth-${randomUUID()}`,
-        driver: { type: "persistent", dataPath },
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
       });
 
       adapter = jazzAdapter({
-        db: () => context.db(wasmSchemaExample),
+        db: () => context.asBackend(wasmSchemaExample),
         schema: wasmSchemaExample,
       })({});
     });
 
     afterEach(async () => {
       await context.shutdown();
-      await rm(dataPath, { recursive: true, force: true });
+      await server.stop();
     });
 
     it("creates records with Jazz ids", async () => {
@@ -403,13 +410,8 @@ describe("jazzAdapter", () => {
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
       expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
-      expect(generated.code).toContain(
-        "export const permissions = s.definePermissions(app, ({ policy }) => {",
-      );
-      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
+      expect(generated.code).not.toContain("definePermissions");
+      expect(generated.code).not.toContain("allowRead");
     });
   });
 
@@ -419,26 +421,36 @@ describe("jazzAdapter", () => {
   describe("common user flows", async () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
-    let dataPath: string;
+    let server: Awaited<ReturnType<typeof TestingServer.start>>;
 
     beforeEach(async () => {
-      const root = await mkdtemp(join(tmpdir(), "jazz-better-auth-adapter-"));
-      dataPath = join(root, "runtime.skv");
+      server = await TestingServer.start({
+        backendSecret: "backend-secret-for-common-user-flows",
+      });
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+      });
 
       context = createJazzContext({
-        appId: `jazz-better-auth-${randomUUID()}`,
-        driver: { type: "persistent", dataPath },
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
       });
 
       adapter = jazzAdapter({
-        db: () => context.db(wasmSchemaExample),
+        db: () => context.asBackend(wasmSchemaExample),
         schema: wasmSchemaExample,
       })({});
     });
 
     afterEach(async () => {
       await context.shutdown();
-      await rm(dataPath, { recursive: true, force: true });
+      await server.stop();
     });
 
     test("Email and Password: signup + signin + logout", async () => {
@@ -778,22 +790,32 @@ describe("jazzAdapter", () => {
   describe("better-auth usage", () => {
     let context: JazzContext;
     let auth: ReturnType<typeof betterAuth>;
-    let dataPath: string;
+    let server: Awaited<ReturnType<typeof TestingServer.start>>;
 
     beforeEach(async () => {
-      const root = await mkdtemp(join(tmpdir(), "jazz-better-auth-adapter-"));
-      dataPath = join(root, "runtime.skv");
+      server = await TestingServer.start({
+        backendSecret: "backend-secret-for-better-auth-usage",
+      });
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures"),
+      });
 
       context = createJazzContext({
-        appId: `jazz-better-auth-${randomUUID()}`,
-        driver: { type: "persistent", dataPath },
+        appId: server.appId,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
       });
 
       // @ts-expect-error - better-auth + plugins
       auth = betterAuth({
         baseURL: "http://localhost:3000",
         database: jazzAdapter({
-          db: () => context.db(wasmSchemaExample),
+          db: () => context.asBackend(wasmSchemaExample),
           schema: wasmSchemaExample,
         }),
         emailAndPassword: {
@@ -804,7 +826,7 @@ describe("jazzAdapter", () => {
 
     afterEach(async () => {
       await context.shutdown();
-      await rm(dataPath, { recursive: true, force: true });
+      await server.stop();
     });
 
     test("Email and Password: signup + signin + logout", async () => {
