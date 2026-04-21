@@ -156,38 +156,67 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     fakeSelf().postMessage.mockClear();
   });
 
-  it("falls back to openEphemeral and posts init-ok when openPersistent throws SecurityError", async () => {
-    openPersistentMock.mockRejectedValue(
-      new DOMException("The operation is insecure.", "SecurityError"),
-    );
-    openEphemeralMock.mockResolvedValue(fakeRuntime());
-
+  function sendInit(appId = "opfs-blocked-test") {
     fakeSelf().onmessage(
       new MessageEvent("message", {
         data: {
           type: "init",
           schemaJson: "{}",
-          appId: "opfs-blocked-test",
+          appId,
           env: "development",
           userBranch: "main",
-          dbName: "opfs-blocked-db",
+          dbName: "test-db",
           clientId: "",
         },
       }),
     );
+  }
 
+  async function waitForMessage(type: string) {
     await vi.waitUntil(
-      () =>
-        (fakeSelf().postMessage.mock.calls as [any][]).some(
-          ([msg]) => msg.type === "init-ok" || msg.type === "error",
-        ),
+      () => (fakeSelf().postMessage.mock.calls as [any][]).some(([msg]) => msg.type === type),
       { timeout: 2000 },
     );
-
-    const result: any = (fakeSelf().postMessage.mock.calls as [any][])
+    return (fakeSelf().postMessage.mock.calls as [any][])
       .map(([msg]) => msg)
-      .find((msg: any) => msg.type === "init-ok" || msg.type === "error");
+      .find((msg: any) => msg.type === type);
+  }
 
-    expect(result.type).toBe("init-ok");
+  it("falls back to openEphemeral and posts init-ok when openPersistent throws SecurityError", async () => {
+    openPersistentMock.mockRejectedValue(
+      new DOMException("The operation is insecure.", "SecurityError"),
+    );
+    openEphemeralMock.mockReturnValue(fakeRuntime());
+
+    sendInit();
+
+    const result = await waitForMessage("init-ok");
+    expect(result).toBeDefined();
+    expect(openEphemeralMock).toHaveBeenCalledOnce();
+  });
+
+  it("re-throws and posts error when openPersistent throws a non-SecurityError", async () => {
+    openPersistentMock.mockRejectedValue(new Error("disk full"));
+
+    sendInit("non-security-test");
+
+    const result = await waitForMessage("error");
+    expect(result).toBeDefined();
+    expect(openEphemeralMock).not.toHaveBeenCalled();
+  });
+
+  it("posts error when openEphemeral itself throws after SecurityError fallback", async () => {
+    openPersistentMock.mockRejectedValue(
+      new DOMException("The operation is insecure.", "SecurityError"),
+    );
+    openEphemeralMock.mockImplementation(() => {
+      throw new Error("out of memory");
+    });
+
+    sendInit("ephemeral-fail-test");
+
+    const result = await waitForMessage("error");
+    expect(result).toBeDefined();
+    expect(openEphemeralMock).toHaveBeenCalledOnce();
   });
 });

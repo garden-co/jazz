@@ -465,11 +465,15 @@ async fn sleep_ms(ms: u32) {
     let _ = JsFuture::from(promise).await;
 }
 
-/// Returns true if the JS error is a `DOMException`, which indicates a
-/// retryable handle conflict. Plain `Error`/`TypeError`/etc. fail immediately.
+/// Returns true if the JS error is a retryable handle conflict DOMException.
+/// `SecurityError` is excluded — it signals a blocked API, not a transient conflict.
 #[cfg(target_arch = "wasm32")]
 fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
-    value.is_instance_of::<web_sys::DomException>()
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: &web_sys::DomException = value.unchecked_ref();
+        return ex.name() != "SecurityError";
+    }
+    false
 }
 
 #[cfg(target_arch = "wasm32")]
