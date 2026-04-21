@@ -3,6 +3,7 @@ import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { createDbFromInspectedPage } from "../dev-tools/index.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { registerWindowJazzStorageClient } from "../window-client-storage.js";
 
 export interface JazzClient {
   db: Db;
@@ -20,6 +21,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     session = nextSession ?? null;
     manager.setSession(nextSession ?? null);
   });
+  const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
   return {
     db,
@@ -29,6 +31,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     manager,
     async shutdown() {
       stopSessionSync?.();
+      unregisterWindowJazzStorageClient();
       await manager.shutdown();
       await db.shutdown();
     },
