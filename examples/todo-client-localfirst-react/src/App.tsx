@@ -6,8 +6,8 @@ import { app } from "../schema.js";
 
 const devToolsAttachedClients = new WeakSet<object>();
 
-const appId = import.meta.env.JAZZ_APP_ID;
-const serverUrl = import.meta.env.JAZZ_SERVER_URL;
+const appId = import.meta.env.VITE_JAZZ_APP_ID;
+const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
 // #region context-setup-react
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
