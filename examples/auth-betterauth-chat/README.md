@@ -35,7 +35,7 @@ The example reads these values from `.env`:
 - `NEXT_PUBLIC_CHAT_ID` — general chat room id
 - `NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID` — announcements chat room id
 
-`pnpm dev`, `pnpm sync-server`, and `pnpm test:e2e` all read the same `.env`.
+`pnpm dev` and `pnpm test:e2e` both read the same `.env`.
 
 ### 2. Start the Next app
 
@@ -44,7 +44,7 @@ pnpm dev
 ```
 
 Starts Next.js at `NEXT_PUBLIC_APP_ORIGIN`. Better Auth is mounted under `/api/auth/*` via a Next
-route handler. This example expects the Jazz sync server to run as a separate process.
+route handler.
 
 Key routes exposed by Better Auth:
 
@@ -52,15 +52,6 @@ Key routes exposed by Better Auth:
 - `POST /api/auth/sign-up/email` — create account, set session cookie
 - `GET  /api/auth/token` — exchange active session cookie for a JWT (bearer plugin)
 - `GET  /api/auth/jwks` — public key set used by the Jazz sync server
-
-### 3. Start the Jazz sync server
-
-```bash
-pnpm sync-server
-```
-
-Builds the `jazz-tools` binary if needed, waits for the Better Auth JWKS endpoint from the Next
-app, starts a local sync server on port 1625, and pushes the schema catalogue in one step.
 
 Open `NEXT_PUBLIC_APP_ORIGIN`.
 
@@ -77,7 +68,7 @@ import { app as authSchema } from "../../schema-better-auth/schema";
 
 betterAuth({
   database: jazzAdapter({
-    db: () => authJazzContext.asBackend(authSchema),
+    db: () => authJazzContext().asBackend(authSchema),
     schema: authSchema,
   }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
@@ -102,9 +93,11 @@ betterAuth({
 ```
 
 `schema-better-auth/schema.ts` is the Better Auth schema source file that the Jazz adapter now
-generates for the new root-schema workflow. `authJazzContext` is a server-side Jazz context
-configured with `driver: { type: "memory" }`, the same `serverUrl`, and the same backend secret
-as the local sync server. That keeps Better Auth state out of Better Auth's in-process memory
+generates for the new root-schema workflow. `authJazzContext()` is a lazy accessor that returns
+a server-side Jazz context configured with `driver: { type: "memory" }`, the same `serverUrl`,
+and the same backend secret as the local sync server. It caches the context on `globalThis` so
+route modules don't instantiate it at import time (which would fail during Next's build-time
+page data collection before env vars are available). That keeps Better Auth state out of Better Auth's in-process memory
 adapter while still avoiding local on-disk storage in the Next app.
 
 - **`nextCookies` integration** — lets Better Auth session cookies participate in Next.js route

@@ -22,13 +22,6 @@ async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
     serverUrl: server.url,
     appId: APP_ID,
     adminSecret: server.adminSecret,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../schema-better-auth"),
-  });
-
-  await pushSchemaCatalogue({
-    serverUrl: server.url,
-    appId: APP_ID,
-    adminSecret: server.adminSecret,
     schemaDir: join(import.meta.dirname ?? __dirname, "../"),
   });
 

@@ -55,7 +55,3 @@ export const schema = {
     expiresAt: s.timestamp().optional(),
   }),
 };
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
-export const wasmSchema = app.wasmSchema;

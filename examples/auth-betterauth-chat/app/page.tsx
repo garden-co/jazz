@@ -3,8 +3,8 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
 import { JazzProvider, useDb, useLocalFirstAuth, useAuthState } from "jazz-tools/react";
-import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
-import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
+import { ChatPanel } from "../src/ChatPanel";
+import { AuthCard } from "../src/AuthCard";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
 function ChatShell(): React.JSX.Element {
@@ -81,7 +81,7 @@ function ChatShell(): React.JSX.Element {
         <ChatPanel
           chatId={process.env.NEXT_PUBLIC_CHAT_ID!}
           title={process.env.NEXT_PUBLIC_CHAT_ID!}
-          canSend={canPostGeneric}
+          canSend
           authorName={userId}
           readOnlyNotice="Sign in as admin or member to participate."
         />

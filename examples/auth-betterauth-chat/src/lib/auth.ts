@@ -13,7 +13,7 @@ async function createBetterAuth(issuer: string = APP_ORIGIN) {
   const auth = betterAuth({
     baseURL: issuer,
     database: jazzAdapter({
-      db: () => authJazzContext.asBackend(app),
+      db: () => authJazzContext().asBackend(app),
       schema: app.wasmSchema,
     }),
     secret: BETTER_AUTH_SECRET,
