@@ -28,6 +28,7 @@ type NextConfigInput = NextConfigLike | NextConfigFactory;
 
 export interface NextJazzPluginOptions extends JazzPluginOptions {
   server?: boolean | string | NextJazzServerOptions;
+  appRoot?: string;
 }
 
 const DEVELOPMENT_PHASE = "phase-development-server";
@@ -51,11 +52,11 @@ const runtime = new ManagedDevRuntime({
   serverUrl: PUBLIC_SERVER_URL_ENV,
 });
 
-async function copyWasmToPublic(projectRoot: string): Promise<void> {
+async function copyWasmToPublic(appRoot: string): Promise<void> {
   const require = createRequire(import.meta.url);
   const pkgJsonPath = require.resolve("jazz-wasm/package.json");
   const wasmSource = join(dirname(pkgJsonPath), "pkg", "jazz_wasm_bg.wasm");
-  const wasmDest = join(projectRoot, "public", PUBLIC_WASM_SUBPATH);
+  const wasmDest = join(appRoot, "public", PUBLIC_WASM_SUBPATH);
   await mkdir(dirname(wasmDest), { recursive: true });
   await copyFile(wasmSource, wasmDest);
 }
@@ -96,7 +97,7 @@ export function withJazz(
     // asset is present in the built output.
     const copyAndAdvertiseWasm = phase === DEVELOPMENT_PHASE || phase === PRODUCTION_BUILD_PHASE;
     if (copyAndAdvertiseWasm) {
-      await copyWasmToPublic(options.schemaDir ?? process.cwd());
+      await copyWasmToPublic(options.appRoot ?? process.cwd());
     }
     const mergedWithWasmEnv: NextConfigLike = copyAndAdvertiseWasm
       ? {
