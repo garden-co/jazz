@@ -860,7 +860,7 @@ export class InsertHandle<T> extends WriteHandle<T> {
 }
 
 export class Transaction {
-  private committed = false;
+  private committedHandle: WriteHandle | null = null;
   private readonly touchedRowIds = new Set<string>();
 
   constructor(
@@ -869,6 +869,10 @@ export class Transaction {
     private readonly session?: Session,
     private readonly attribution?: string,
   ) {}
+
+  private get committed(): boolean {
+    return this.committedHandle !== null;
+  }
 
   private ensureActive(): void {
     if (this.committed) {
@@ -896,13 +900,13 @@ export class Transaction {
     return this.batchContext.batchId;
   }
 
-  commit(): string {
-    if (this.committed) {
-      return this.batchId();
+  commit(): WriteHandle {
+    if (this.committedHandle) {
+      return this.committedHandle;
     }
-    const batchId = this.client.sealBatch(this.batchId());
-    this.committed = true;
-    return batchId;
+    const handle = this.client.sealBatch(this.batchId());
+    this.committedHandle = handle;
+    return handle;
   }
 
   create(table: string, values: InsertValues): InsertHandle<Row> {
@@ -1471,9 +1475,9 @@ export class JazzClient {
     return acknowledged;
   }
 
-  sealBatch(batchId: string): string {
+  sealBatch(batchId: string): WriteHandle {
     this.requireBatchRecordMethod("sealBatch")(batchId);
-    return batchId;
+    return new WriteHandle(batchId, this);
   }
 
   /**

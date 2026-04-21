@@ -4,6 +4,7 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
+  WriteHandle,
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -57,6 +58,7 @@ function makeFakeRuntime() {
     ),
     drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
     acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
+    sealBatch: vi.fn<(batch_id: string) => void>(),
     onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
@@ -290,6 +292,24 @@ describe("JazzClient runtime schema caching", () => {
 
     expect(runtime.getSchemaHash).not.toHaveBeenCalled();
     expect(runtime.getSchema).not.toHaveBeenCalled();
+  });
+});
+
+describe("JazzClient transactions", () => {
+  it("returns a write handle from commit so callers can wait on the batch", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const committed = client.beginTransaction().commit();
+
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBeDefined();
+    await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 });
 
