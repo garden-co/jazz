@@ -3932,6 +3932,15 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         "replayed direct-batch rejections should resolve persisted waits"
     );
     assert_eq!(
+        core.drain_rejected_batch_ids(),
+        vec![batch_id],
+        "rejected batch ids should be surfaced once for bindings"
+    );
+    assert!(
+        core.drain_rejected_batch_ids().is_empty(),
+        "draining rejected batch ids should clear the queue"
+    );
+    assert_eq!(
         core.storage()
             .load_local_batch_record(batch_id)
             .unwrap()
@@ -5542,6 +5551,15 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
         Some(crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. })
             if settled_batch_id == batch_id
     ));
+    assert_eq!(
+        restarted.drain_rejected_batch_ids(),
+        vec![batch_id],
+        "restart should seed rejected batch ids from persisted rejected batch records"
+    );
+    assert!(
+        restarted.drain_rejected_batch_ids().is_empty(),
+        "draining rejected batch ids after restart should clear the seeded queue"
+    );
 
     assert!(
         restarted.acknowledge_rejected_batch(batch_id).unwrap(),

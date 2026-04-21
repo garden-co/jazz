@@ -135,6 +135,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             settlement,
             crate::batch_fate::BatchSettlement::Rejected { .. }
         ) {
+            self.rejected_batch_ids.insert(batch_id);
             self.mark_local_batch_rows_rejected(batch_id);
             if let crate::batch_fate::BatchSettlement::Rejected { code, reason, .. } = &settlement {
                 self.reject_ack_watchers_for_batch(batch_id, code, reason);
