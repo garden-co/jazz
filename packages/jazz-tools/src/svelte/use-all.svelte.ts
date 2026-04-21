@@ -8,6 +8,9 @@ import { getJazzContext } from "./context.svelte.js";
  * Reactive query subscription. Instantiate in a component script block,
  * access results via `.current`.
  *
+ * @param query - the database query (e.g. `app.todos.where({ done: false })`)
+ * @param options - optional query execution options, including durability tier
+ *
  * ```svelte
  * <script lang="ts">
  *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "edge" });

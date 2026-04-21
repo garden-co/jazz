@@ -5491,7 +5491,13 @@ const batchId = tx.commit();
 console.log(batchId);
 ```
 
-Use a direct batch when you want to group several ordinary writes under one batch id without sealing:
+The changes made as part of the transaction are scoped to it, and will only be
+globally visible once it's committed and accepted by the authority.
+
+`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
+
+Use a direct batch when you want to group several ordinary writes under one batch id, but still want them
+to be globally visible immediately:
 
 ```ts
 const batch = db.beginDirectBatch(app.todos);
@@ -5501,5 +5507,3 @@ batch.update(app.todos, todoId, { done: true });
 
 console.log(batch.batchId());
 ```
-
-`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.

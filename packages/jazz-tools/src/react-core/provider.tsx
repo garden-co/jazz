@@ -228,10 +228,16 @@ export function useJazzClient(): CoreJazzClient {
   return ctx.client;
 }
 
+/**
+ * Get a Jazz {@link Db} instance that can be used to read and write data.
+ */
 export function useDb<TDb = unknown>(): TDb {
   return useJazzClient().db as TDb;
 }
 
+/**
+ * Get the current Jazz {@link Session}, including the user's id, claims and auth mode.
+ */
 export function useSession(): Session | null {
   return useJazzClient().session ?? null;
 }
