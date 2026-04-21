@@ -1186,12 +1186,48 @@ export class Db {
       throw new Error("Worker bridge is only available for driver.type='persistent'");
     }
 
+    const locationHref = typeof location !== "undefined" ? location.href : undefined;
+
+    // Opt-in default: when a bundler plugin (e.g. `withJazz` for Next) copies
+    // the wasm into the host app and advertises the URL via
+    // NEXT_PUBLIC_JAZZ_WASM_URL, pick it up so the worker receives an
+    // absolute URL and skips the (Turbopack-unreliable) bundler default.
+    //
+    // Precedence follows RuntimeSourcesConfig: any of wasmModule / wasmSource /
+    // wasmUrl / baseUrl already supplied by the caller wins — we only fill in
+    // when none of those is set, preserving the documented resolution order
+    // for Vite/webpack/Svelte/etc. callers.
+    const configRuntimeSources = this.config.runtimeSources;
+    // Use the literal `process.env.NEXT_PUBLIC_JAZZ_WASM_URL` form: Next's
+    // build-time replacement only rewrites that exact property access. Optional
+    // chaining on `process.env` can bypass the replacement in Turbopack and
+    // leave this as `undefined` in client bundles, defeating the fallback.
+    const envWasmUrl =
+      typeof process !== "undefined" && process.env
+        ? process.env.NEXT_PUBLIC_JAZZ_WASM_URL
+        : undefined;
+    // Any explicit override means the caller is taking control of wasm/worker
+    // resolution — don't second-guess them by injecting a Next-plugin URL.
+    // `workerUrl` counts too: the spawn path at `Db.spawnWorker` already
+    // resolves a wasm URL colocated with the custom worker script via
+    // `appendWorkerRuntimeWasmUrl` + `readWorkerRuntimeWasmUrl`.
+    const hasConfiguredSource =
+      !!configRuntimeSources?.wasmUrl ||
+      !!configRuntimeSources?.baseUrl ||
+      !!configRuntimeSources?.workerUrl ||
+      !!resolveRuntimeConfigSyncInitInput(configRuntimeSources);
+    const runtimeSources =
+      hasConfiguredSource || !envWasmUrl || typeof location === "undefined"
+        ? configRuntimeSources
+        : {
+            ...configRuntimeSources,
+            wasmUrl: new URL(envWasmUrl, location.href).href,
+          };
+
     // For the static-URL spawn path (no explicit workerUrl/baseUrl), compute a
     // fallback WASM URL for non-bundled contexts where wasmModule.default() may fail.
-    const runtimeSources = this.config.runtimeSources;
     let fallbackWasmUrl: string | undefined;
     if (!runtimeSources?.workerUrl && !runtimeSources?.baseUrl && !runtimeSources?.wasmUrl) {
-      const locationHref = typeof location !== "undefined" ? location.href : undefined;
       if (!resolveRuntimeConfigSyncInitInput(runtimeSources)) {
         fallbackWasmUrl =
           resolveWorkerBootstrapWasmUrl(import.meta.url, locationHref, runtimeSources) ?? undefined;
@@ -1207,7 +1243,7 @@ export class Db {
       serverUrl: this.config.serverUrl,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
-      runtimeSources: this.config.runtimeSources,
+      runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
     };

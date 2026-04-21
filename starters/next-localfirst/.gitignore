@@ -3,3 +3,4 @@ node_modules/
 .env
 .jazz/
 next-env.d.ts
+public/_jazz/

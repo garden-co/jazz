@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
@@ -25,11 +25,18 @@ async function resolveWrappedConfig(
 // to process.env on successful init; that state leaks across vitest workers in
 // the same thread pool and flips later tests onto the env-driven cloud branch.
 // Scrub before each test so every case starts from the same baseline.
-beforeEach(() => {
+beforeEach(async () => {
   delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
+
+  // withJazz copies jazz_wasm_bg.wasm into the host app's public/ dir
+  // (derived from process.cwd() when no appRoot is provided). Redirect cwd to a
+  // per-test temp dir so tests that don't pass appRoot don't pollute the
+  // package directory.
+  const fakeCwd = await tempRoots.create("jazz-next-test-cwd-");
+  vi.spyOn(process, "cwd").mockReturnValue(fakeCwd);
 });
 
 afterEach(async () => {
@@ -62,7 +69,10 @@ describe("withJazz", () => {
     );
 
     expect(resolved.reactStrictMode).toBe(true);
-    expect(resolved.env).toEqual({ EXISTING_ENV: "1" });
+    expect(resolved.env).toEqual({
+      EXISTING_ENV: "1",
+      NEXT_PUBLIC_JAZZ_WASM_URL: "/_jazz/jazz_wasm_bg.wasm",
+    });
     expect(resolved.serverExternalPackages).toEqual(
       expect.arrayContaining(["sharp", "jazz-tools", "jazz-napi"]),
     );
@@ -93,6 +103,43 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+  });
+
+  it("prefixes NEXT_PUBLIC_JAZZ_WASM_URL with basePath", async () => {
+    const resolved = await resolveWrappedConfig(
+      withJazz({ basePath: "/myapp" }),
+      PRODUCTION_BUILD_PHASE,
+    );
+
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_WASM_URL).toBe("/myapp/_jazz/jazz_wasm_bg.wasm");
+  });
+
+  it("omits basePath when not configured", async () => {
+    const resolved = await resolveWrappedConfig(withJazz({}), PRODUCTION_BUILD_PHASE);
+
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_WASM_URL).toBe("/_jazz/jazz_wasm_bg.wasm");
+  });
+
+  it("copies wasm into appRoot instead of schemaDir when both differ", async () => {
+    const appRoot = await tempRoots.create("jazz-next-app-root-");
+    const schemaDir = await tempRoots.create("jazz-next-schema-dir-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    await resolveWrappedConfig(
+      withJazz(
+        {},
+        {
+          appRoot,
+          schemaDir,
+        },
+      ),
+      PRODUCTION_BUILD_PHASE,
+    );
+
+    await expect(
+      access(join(appRoot, "public", "_jazz", "jazz_wasm_bg.wasm")),
+    ).resolves.toBeUndefined();
+    await expect(access(join(schemaDir, "public", "_jazz", "jazz_wasm_bg.wasm"))).rejects.toThrow();
   });
 
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
