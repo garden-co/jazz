@@ -407,6 +407,35 @@ function backendScopedAuthState(session?: Session | null): AuthState {
   };
 }
 
+export class DbPersistedWrite<T> {
+  constructor(
+    private readonly pendingWrite: RuntimePersistedWrite<Row | void>,
+    private readonly transformValue: (value: Row | void) => T,
+    private readonly loadBatchRecord: () => LocalBatchRecord | null,
+    private readonly acknowledgeRejected: () => boolean,
+  ) {}
+
+  batchId(): string {
+    return this.pendingWrite.batchId();
+  }
+
+  value(): T {
+    return this.transformValue(this.pendingWrite.value());
+  }
+
+  async wait(): Promise<T> {
+    return this.transformValue(await this.pendingWrite.wait());
+  }
+
+  localBatchRecord(): LocalBatchRecord | null {
+    return this.loadBatchRecord();
+  }
+
+  acknowledgeRejectedBatch(): boolean {
+    return this.acknowledgeRejected();
+  }
+}
+
 export class DbTransaction {
   private committed = false;
 
@@ -438,6 +467,18 @@ export class DbTransaction {
     this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
   }
 
+  private wrapPersistedWrite<T>(
+    pendingWrite: RuntimePersistedWrite<Row | void>,
+    transformValue: (value: Row | void) => T,
+  ): DbPersistedWrite<T> {
+    return new DbPersistedWrite(
+      pendingWrite,
+      transformValue,
+      () => this.client.localBatchRecord(pendingWrite.batchId()),
+      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
+    );
+  }
+
   batchId(): string {
     return this.runtimeTransaction.batchId();
   }
@@ -463,6 +504,23 @@ export class DbTransaction {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
+  insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<T> {
+    this.ensureActive();
+    const values = toInsertRecord(
+      data as Record<string, unknown>,
+      this.resolveInputSchema(table),
+      table._table,
+    );
+    const pendingWrite = this.runtimeTransaction.createPersisted(table._table, values, options);
+    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
+      transformRow(row as Row, table._schema, table._table),
+    );
+  }
+
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     this.ensureActive();
     const updates = toUpdateRecord(
@@ -473,10 +531,43 @@ export class DbTransaction {
     return this.runtimeTransaction.update(id, updates);
   }
 
+  updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    this.ensureActive();
+    const updates = toUpdateRecord(
+      data as Record<string, unknown>,
+      this.resolveInputSchema(table),
+      table._table,
+    );
+    const pendingWrite = this.runtimeTransaction.updatePersisted(id, updates, options);
+    return this.wrapPersistedWrite(
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
+  }
+
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     return this.runtimeTransaction.delete(id);
+  }
+
+  deletePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    this.ensureActive();
+    this.assertOwnsTable(table, "DbTransaction");
+    const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
+    return this.wrapPersistedWrite(
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
   }
 
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
@@ -533,6 +624,18 @@ export class DbDirectBatch {
     );
   }
 
+  private wrapPersistedWrite<T>(
+    pendingWrite: RuntimePersistedWrite<Row | void>,
+    transformValue: (value: Row | void) => T,
+  ): DbPersistedWrite<T> {
+    return new DbPersistedWrite(
+      pendingWrite,
+      transformValue,
+      () => this.client.localBatchRecord(pendingWrite.batchId()),
+      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
+    );
+  }
+
   batchId(): string {
     return this.runtimeBatch.batchId();
   }
@@ -548,6 +651,22 @@ export class DbDirectBatch {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
+  insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<T> {
+    const values = toInsertRecord(
+      data as Record<string, unknown>,
+      this.resolveInputSchema(table),
+      table._table,
+    );
+    const pendingWrite = this.runtimeBatch.createPersisted(table._table, values, options);
+    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
+      transformRow(row as Row, table._schema, table._table),
+    );
+  }
+
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
@@ -557,9 +676,40 @@ export class DbDirectBatch {
     return this.runtimeBatch.update(id, updates);
   }
 
+  updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    const updates = toUpdateRecord(
+      data as Record<string, unknown>,
+      this.resolveInputSchema(table),
+      table._table,
+    );
+    const pendingWrite = this.runtimeBatch.updatePersisted(id, updates, options);
+    return this.wrapPersistedWrite(
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
+  }
+
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.assertOwnsTable(table, "DbDirectBatch");
     return this.runtimeBatch.delete(id);
+  }
+
+  deletePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
+  ): DbPersistedWrite<void> {
+    this.assertOwnsTable(table, "DbDirectBatch");
+    const pendingWrite = this.runtimeBatch.deletePersisted(id, options);
+    return this.wrapPersistedWrite(
+      pendingWrite as RuntimePersistedWrite<Row | void>,
+      () => undefined,
+    );
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -2561,6 +2711,19 @@ export class Db {
     }
     this.activeQuerySubscriptionTraces.clear();
     this.notifyActiveQuerySubscriptionTraceListeners();
+  }
+
+  protected wrapPersistedWrite<T>(
+    client: JazzClient,
+    pendingWrite: RuntimePersistedWrite<Row | void>,
+    transformValue: (value: Row | void) => T,
+  ): DbPersistedWrite<T> {
+    return new DbPersistedWrite(
+      pendingWrite,
+      transformValue,
+      () => client.localBatchRecord(pendingWrite.batchId()),
+      () => client.acknowledgeRejectedBatch(pendingWrite.batchId()),
+    );
   }
 
   private parseRuntimeQueryTracePayload(
