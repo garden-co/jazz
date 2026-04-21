@@ -29,15 +29,10 @@ export const blogPosts = defineCollections({
   }),
 });
 
-export const presentationSlides = defineCollections({
+export const presentationDecks = defineCollections({
   type: "doc",
   dir: "content/presentations",
-  schema: pageSchema.extend({
-    deck: z.string(),
-    deckTitle: z.string(),
-    order: z.number().int().nonnegative(),
-    notes: z.string().or(z.array(z.string())).optional(),
-  }),
+  schema: pageSchema,
 });
 
 export default defineConfig({

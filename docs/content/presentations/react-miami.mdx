@@ -1,0 +1,796 @@
+---
+title: React Miami launch
+description: Placeholder deck for the Jazz launch talk at React Miami.
+---
+
+<Slide>
+# Hello,<br/>React Miami!
+
+Anselm Eickhoff
+
+founder of Garden Computing
+building Jazz
+
+<Notes>
+Hey everyone! My name is Anselm.
+
+I run a little company called Garden Computing.
+
+And we're building a database called Jazz.
+
+Why are we here?
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+<Notes>
+Let me explain.
+
+In a time long long ago, when we were still writing
+code by hand.
+
+I was churning out one full-stack app after another.
+
+And I kept going through the same motions over and over again.
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+
+<Notes>
+You start by mapping out the domain model - what is this app
+actually about. That's hard and usually most of the conceptual
+work.
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+
+<Notes>
+Then you come up with the user interface and the build the frontend
+
+This is also hard because you have to have empathy with users
+_and_ with the people who invent the CSS standard
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around local state
+
+<Notes>
+Then I usually built a quick mostly working demo around local
+UI state, because that's easy to iterate on
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around local state
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+But then of course you have to "make it actually work". But
+it always felt like this was now just busywork.
+
+Even if the
+backend needed some complicated business logic and had to integrate
+with arcane external systems. Everything was already
+mostly determined by the first two steps.
+
+The database schema was clear from the domain model.
+And the backend mostly needed to make the data available
+to the frontend, and do some auth and checks.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Backends: 90% shuffling data around?
+
+<Notes>
+It really felt like all the backend did was shuffle around
+data between the database and the frontend. And seeing this
+again and again really got boring.
+</Notes>
+</Slide>
+
+<Slide>
+# Frontend is harder than backend
+
+<Notes>
+And looking at what I really used my braincells on I became
+convinced that frontend is actually harder than backend.
+I still strongly believe this.
+</Notes>
+</Slide>
+
+<Slide>
+# "LLMs are bad at frontend"
+
+Maybe frontend is just harder than backend???
+
+More accurate:
+
+- frontend is hard
+- backend is merely complicated
+- LLMs are great at complicated things
+
+<Notes>
+In fact when people say "LLMs are bad at frontend" I like
+to ask them: "are they really bad at frontend?"
+"or does this just mean that frontend is harder"
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. **map out domain model**
+2. **build the UI**
+3. **impress everyone with flashy demo around local state**
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+So frontend is the hard part. But suspiciously, for me
+frontend was also the fun part.
+
+And if the fun part solves most of the problems, why is
+the rest such a drag?
+
+So I asked myself - how could one make the entire full-stack
+development process as fun as the first parts, and make sure
+that we only have to think about what's actually important.
+
+</Notes>
+</Slide>
+
+<Slide>
+# My experience in the SaaS mines
+
+1. map out domain model
+2. build the UI
+3. impress everyone with flashy demo around **local state**
+4. grueling work of building a backend
+5. deploy a database
+
+<Notes>
+And the way I approached this problem was very stategic.
+
+Building the flashy demo around local state felt fun
+and meaningful, right?
+
+So like a toddler I wanted the most immediate unrealistic
+solution that would instantly magically fix everything.
+
+</Notes>
+</Slide>
+
+<Slide>
+# what if `useState()` was your database?
+
+<Notes>
+What if my database "simply" looked like useState()?
+
+And that's what I started building. And that's what became Jazz.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Modern real-time databases and sync engines
+
+- Zero
+- ElectricSQL
+- InstantDB
+- Convex
+- Turso
+- Jazz
+
+<Notes>
+Turns out other people had similar ideas and also really wanted
+to simplify the stack.
+
+This is the now well-established category of real-time databases
+and sync engines.
+
+I'll first describe what these new roughly have in common - because
+the most important idea is what this general new stack looks like.
+
+After that we can dive into some unique Jazz things, but for now
+the main message is: you deserve a better stack.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Metrics to judge a stack by
+
+- Lines of code
+- Layers of infra BS
+- Light-milliseconds
+
+<Notes>
+And the three metrics I want you to keep in mind when
+you judge a stack are
+
+Lines of code, especially the ones that don't have anything to
+do with what makes your app unique.
+
+Layers of infra bullshit, meaning how many things you have to
+deploy and integrate with each other.
+
+Light-milliseconds that user edits have to travel before they
+become visible.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Putting your backend on ozempic
+
+<Notes>
+I'll now take you on a journey where we start with a traditional
+stack and watch as layer by layer gets subsumed by some or all
+of the more modern alternatives
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 0
+
+Lines of code: +++++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ORM, cache, connection pooler
+  - backend framework, CRUD API boilerplate, API layer, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - data fetching, websocket client
+  - query cache w/ optimistic updates, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+
+<Notes>
+This is our starting situation, and this is exactly what makes
+the backend part so unfun:
+
+_list everything in the diagram_
+
+point out "durable streams" as newest addition to the stack
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 1
+
+Lines of code: ++++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ORM, cache, connection pooler
+  - backend framework, CRUD API boilerplate, API layer, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+The first thing these modern systems usually collapse is the frontend
+sync glue.
+
+Data fetching disappears as a concept.
+
+The websocket client disappears as a concept.
+
+The query cache and the optimistic update layer start getting absorbed
+into one database-shaped client abstraction.
+
+So the first win is not even mostly about infrastructure.
+
+It is that the frontend starts feeling like it is working with
+reactive data again instead of doing orchestration around remote state.
+
+Lines of code go down immediately.
+
+And on the light-milliseconds metric, we get the first huge win:
+optimistic preview goes to zero.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 2
+
+Lines of code: +++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, connection pooler
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+Next, the backend's database access story starts simplifying too.
+
+The ORM or classic DB wrapper stops being the obvious center of the
+world, and a more capable DB client starts showing up on both sides.
+
+This does not always save a dramatic amount of code by itself, because
+one abstraction is often replacing another.
+
+But it simplifies the shape of the system.
+
+You stop having one database model on the server and a completely
+different data access model on the client.
+
+And psychologically this is an important step, because it normalizes
+the idea that yes, a database client can live in the frontend too.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 3
+
+Lines of code: +++++++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - queues, pubsub, workers, durable streams
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+Then some of the scale and performance barnacles start falling off.
+
+One obvious example is the connection pooler.
+
+In the classic stack we keep adding infrastructure whose job is mostly
+to compensate for the shape of the rest of the stack.
+
+Modern systems start internalizing more of that.
+
+So we may not yet be deleting dramatic amounts of product code here,
+but we are deleting operational surface area, which matters a lot.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 4
+
+Lines of code: +++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, blob storage
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+Then you start seeing the messaging and fanout layer move inward too.
+
+Queues, pubsub, realtime distribution, durable streams:
+different products pick off different pieces here, but the pattern is
+the same.
+
+The database is no longer just passive storage.
+
+It starts becoming the thing that also moves and distributes changes.
+
+That is a meaningful simplification, because every time one of those
+edge systems disappears, both your operational graph and your mental
+graph get smaller.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 5
+
+Lines of code: ++++++++
+
+Layers:
+
+- backend/external
+  - Database
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, auth logic
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, ~~blob storage~~
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
+- optimistic preview: 0ms
+
+<Notes>
+Some systems go further and also absorb files or blob storage.
+
+Again, not every product does every one of these steps.
+
+I am not trying to claim a perfect consensus feature list.
+
+I am trying to show the direction of travel.
+
+The direction is that more and more of the app's data surface gets
+pulled back under one roof.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Roughly where modern stacks land
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~ORM,~~ cache, ~~connection pooler~~
+  - backend framework, DB client, ~~CRUD API boilerplate,~~ ~~API layer~~, ~~auth logic~~
+  - ~~queues, pubsub,~~ workers, ~~durable streams~~
+  - auth provider, ~~blob storage~~
+- frontend
+  - DB client
+  - ~~data fetching~~, ~~websocket client~~
+  - ~~query cache w/ optimistic updates~~, ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- optimistic preview: 0ms
+
+<Notes>
+And then permissions start moving inward too.
+
+Instead of auth being something the backend wraps around every query,
+the database itself starts understanding auth policies.
+
+That means a whole chunk of backend auth glue disappears.
+
+It also means one of the weirdest parts of the full request path
+disappears: that extra auth roundtrip between the backend and the
+database.
+
+At this point the stack is already much, much cleaner than the one we
+started with.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Slimming the stack 6
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - cache
+  - backend framework
+  - workers
+  - auth provider
+- frontend
+  - DB client
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- optimistic preview: 0ms
+
+<Notes>
+So let us pause here and look at what is left.
+
+This is already pretty clean.
+
+Not every product in the category lands on exactly this picture.
+
+But I do think this is roughly the zone modern real-time databases and
+sync engines are converging on.
+
+And that alone is already a huge improvement over the traditional stack.
+
+Now comes the interesting part.
+
+Everything from here on is going to be more Jazz-specific.
+
+Because our ambition is not just to make the backend slimmer.
+
+Our ambition is to get as close as possible to the feeling that
+`useState()` is your database.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Jazz pushes further: regional edges
+
+Lines of code: ++++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~cache~~
+  - backend framework
+  - workers
+  - auth provider
+- regional database edge
+- frontend
+  - DB client
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- via same regional cache: 10ms -> edge -> 10ms
+- optimistic preview: 0ms
+
+<Notes>
+The next question is: if we have already made it this far, what else can
+we do?
+
+One answer is that we can get much more aggressive about latency.
+
+So Jazz adds built-in regional edges for caching and for very low-latency
+collaboration between nearby users.
+
+That gives us another mode on the light-milliseconds metric:
+not just full remote and not just optimistic preview, but genuinely
+short regional paths.
+
+And unlike a normal cache bolted onto the side, this thing is aware of
+the data model and the auth model.
+
+That matters, because otherwise these low-latency layers quickly turn
+into yet another source of glue and inconsistency.
+
+TODO: us-east-1 joke
+
+</Notes>
+</Slide>
+
+<Slide>
+# Jazz pushes further: truly local-first
+
+Lines of code: +++
+
+Layers:
+
+- backend/external
+  - Database with auth policies
+  - ~~cache~~
+  - backend framework
+  - workers
+  - auth provider
+- regional database edge
+- frontend
+  - **Local-first database**
+  - ui state
+  - client/rendering framework
+
+Light milliseconds:
+
+- full: 100ms -> backend -> 100ms client (no auth roundtrip!)
+- via same regional cache: 10ms -> edge -> 10ms
+- **durable local state**: 0ms
+
+<Notes>
+And this is where it gets really interesting.
+
+We stop treating the client as just a fancy cache with optimism.
+
+Instead, we introduce a truly durable local-first database on the client.
+
+At that point the dream of `useState()` as your database starts becoming
+real in a much stronger sense.
+
+Not just reactive.
+
+Not just optimistic.
+
+Actually durable.
+
+Actually queryable.
+
+Actually part of the real system.
+
+And that is the moment where the easy story ends and the hard story begins.
+
+Because once the database is truly local-first, a whole new class of
+problems shows up.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Local-first got hands
+
+- How do consistency and transactions work now?
+- How do permissions work when data can exist locally?
+- How do collaboration and history work?
+- How does schema evolution work when old and new clients are all out there
+  at once?
+
+<Notes>
+And these problems point at ways in which durable databases
+that many users read from and write to
+are simply truly different from ephemeral local state
+
+</Notes>
+</Slide>
+
+{/* MIDDLE PART */}
+
+{/* Jazz v2 as the first push to really solve the challenges with the four fresh ideas */}
+
+{/* Announcement of the alpha release *for React Miami* */}
+
+{/* DEMO */}
+
+<Slide>
+# what if `useState()` was your database?
+
+<Notes>
+So we've come pretty far. You've seen all the work that goes into
+getting as close as possible to having a database that looks like useState.
+
+What would it actually feel like if useState was your database?
+Or rather, what would it feel like to use something that came as close as
+possible, while also giving you a framework for distributed data
+to build your next crazy idea around?
+
+</Notes>
+</Slide>
+
+<Slide>
+# what if Jazz was your database?
+
+<Notes>
+What if *jazz* was your database?
+</Notes>
+</Slide>
+
+<Slide>
+# What if jazz v2 alpha was your database?
+
+<Notes>
+Well what is the current v2 alpha like if you're adventorous?
+
+The good news is that it's really easy to try out.
+
+</Notes>
+</Slide>
+
+<Slide>
+# npm create jazz
+
+Docs: jazz.tools
+Join our Discord!
+
+<Notes>
+Simply run npm create jazz.
+
+It'll scaffold an app for you,
+set up a free jazz api key on jazz cloud
+without you having to create an account.
+
+Wires it up for you and you have a running,
+durable, local-first multi-user app.
+
+As easy as starting a new purely-frontend project.
+
+I really can't wait to see what you build with it
+and would love to hear what you think. Especially if
+you've got strong opinions and if you've tried some
+of the alternative and love or hate specific aspects.
+
+And with all the disclaimers about it being alpha,
+let me also say that we're also already onboarding bigger
+adopters to Jazz v2 in close partnership, so if you're
+building something serious we're ready to do pilots
+and show you some of Jazz's unique properties for your
+use case specifically. Just come grab me or shoot me a dm.
+
+Same if you have questions or just wanna chat, I'm around
+all day today and tomorrow and most of Saturday, as are
+Guido, Gio and Nico, who you'll recognize by their Jazz shirts.
+
+Allright, I really hope you learned something new.
+Long live React!
+Thank you!
+
+</Notes>
+</Slide>
