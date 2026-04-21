@@ -1,4 +1,4 @@
-import { col, defineApp, type Schema, type App } from "jazz-tools";
+import { col, defineApp, definePermissions, type Schema, type App } from "jazz-tools";
 
 const schema = {
   todos: {
@@ -10,3 +10,10 @@ const schema = {
 type AppSchema = Schema<typeof schema>;
 
 export const app: App<AppSchema> = defineApp(schema);
+
+export const permissions = definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.where({});
+  policy.todos.allowInsert.never();
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
