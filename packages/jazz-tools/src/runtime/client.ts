@@ -138,6 +138,10 @@ export interface Runtime {
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
+  /**
+   * When true, runtime row outputs are already aligned to the declared schema order.
+   */
+  returnsDeclaredSchemaRows?: boolean;
   getSchema(): any;
   getSchemaHash(): string;
   close?(): void | Promise<void>;
@@ -1258,6 +1262,8 @@ export class JazzClient {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private shutdownPromise: Promise<void> | null = null;
+  private cachedRuntimeSchemaHash: string | null = null;
+  private cachedRuntimeSchema: WasmSchema | null = null;
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -1284,6 +1290,10 @@ export class JazzClient {
       payload.backend_secret = this.context.backendSecret;
     }
     return payload;
+  }
+
+  private returnsDeclaredSchemaRows(): boolean {
+    return this.runtime.returnsDeclaredSchemaRows === true;
   }
 
   private constructor(
@@ -1668,12 +1678,17 @@ export class JazzClient {
   private alignRowValuesToDeclaredSchema(
     table: string,
     values: Value[],
-    runtimeSchema = this.getSchema(),
+    runtimeSchema?: WasmSchema,
     arraySubqueries: ArraySubqueryPlan[] = [],
     selectColumns: string[] = [],
   ): Value[] {
+    if (this.returnsDeclaredSchemaRows()) {
+      return values;
+    }
+
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const declaredTable = this.context.schema[table];
-    const runtimeTable = runtimeSchema[table];
+    const runtimeTable = effectiveRuntimeSchema[table];
 
     if (!declaredTable || !runtimeTable) {
       return values;
@@ -1702,7 +1717,7 @@ export class JazzClient {
         if (!plan) {
           return value;
         }
-        return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+        return this.alignIncludedValueToDeclaredSchema(value, plan, effectiveRuntimeSchema);
       });
 
       return projectedValues.concat(alignedTrailingValues);
@@ -1744,7 +1759,7 @@ export class JazzClient {
       if (!plan) {
         return value;
       }
-      return this.alignIncludedValueToDeclaredSchema(value, plan, runtimeSchema);
+      return this.alignIncludedValueToDeclaredSchema(value, plan, effectiveRuntimeSchema);
     });
 
     return reorderedValues.concat(alignedTrailingValues);
@@ -1753,8 +1768,13 @@ export class JazzClient {
   private alignIncludedValueToDeclaredSchema(
     value: Value,
     plan: ArraySubqueryPlan,
-    runtimeSchema = this.getSchema(),
+    runtimeSchema?: WasmSchema,
   ): Value {
+    if (this.returnsDeclaredSchemaRows()) {
+      return value;
+    }
+
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     if (value.type !== "Array") {
       return value;
     }
@@ -1773,7 +1793,7 @@ export class JazzClient {
             values: this.alignRowValuesToDeclaredSchema(
               plan.table,
               entry.value.values,
-              runtimeSchema,
+              effectiveRuntimeSchema,
               plan.nested,
               plan.selectColumns,
             ),
@@ -1786,8 +1806,13 @@ export class JazzClient {
   private alignQueryRowsToDeclaredSchema(
     queryJson: string,
     rows: Row[],
-    runtimeSchema = this.getSchema(),
+    runtimeSchema?: WasmSchema,
   ): Row[] {
+    if (this.returnsDeclaredSchemaRows()) {
+      return rows;
+    }
+
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable) {
       return rows;
@@ -1798,7 +1823,7 @@ export class JazzClient {
       values: this.alignRowValuesToDeclaredSchema(
         outputTable,
         row.values,
-        runtimeSchema,
+        effectiveRuntimeSchema,
         arraySubqueries,
         selectColumns,
       ),
@@ -1808,8 +1833,13 @@ export class JazzClient {
   private alignSubscriptionDeltaToDeclaredSchema(
     queryJson: string,
     delta: RowDelta,
-    runtimeSchema = this.getSchema(),
+    runtimeSchema?: WasmSchema,
   ): RowDelta {
+    if (this.returnsDeclaredSchemaRows()) {
+      return delta;
+    }
+
+    const effectiveRuntimeSchema = runtimeSchema ?? this.getSchema();
     const { outputTable, arraySubqueries, selectColumns } = resolveQueryAlignmentPlan(queryJson);
     if (!outputTable || !Array.isArray(delta)) {
       return delta;
@@ -1824,7 +1854,7 @@ export class JazzClient {
             values: this.alignRowValuesToDeclaredSchema(
               outputTable,
               change.row.values as Value[],
-              runtimeSchema,
+              effectiveRuntimeSchema,
               arraySubqueries,
               selectColumns,
             ),
@@ -1895,7 +1925,7 @@ export class JazzClient {
           : this.runtime.insert(table, values);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
     };
   }
 
@@ -2004,7 +2034,7 @@ export class JazzClient {
     }
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
     };
   }
 
@@ -2037,11 +2067,7 @@ export class JazzClient {
         : this.requirePersistedWriteMethod("insertPersisted")(table, values, tier);
     return new PersistedWrite(this, tier, result.batchId, {
       ...result.row,
-      values: this.alignRowValuesToDeclaredSchema(
-        table,
-        result.row.values as Value[],
-        this.getSchema(),
-      ),
+      values: this.alignRowValuesToDeclaredSchema(table, result.row.values as Value[]),
     });
   }
 
@@ -2099,19 +2125,21 @@ export class JazzClient {
     query: string | QueryInput,
     session?: Session,
     options?: InternalQueryExecutionOptions,
+    runtimeSchema?: WasmSchema,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const queryJson = resolveQueryJson(query);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const runtimeSchema = this.getSchema();
+    const effectiveRuntimeSchema =
+      runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
     );
-    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
+    return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], effectiveRuntimeSchema);
   }
 
   /**
@@ -2353,12 +2381,14 @@ export class JazzClient {
     callback: SubscriptionCallback,
     session?: Session,
     options?: QueryExecutionOptions,
+    runtimeSchema?: WasmSchema,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
-    const runtimeSchema = this.getSchema();
+    const effectiveRuntimeSchema =
+      runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
 
     const handle = this.runtime.createSubscription(
       queryJson,
@@ -2376,7 +2406,9 @@ export class JazzClient {
 
         const delta: RowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+        callback(
+          this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
+        );
       });
     });
 
@@ -2423,7 +2455,15 @@ export class JazzClient {
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    return normalizeRuntimeSchema(this.runtime.getSchema());
+    const schemaHash = this.runtime.getSchemaHash();
+    if (this.cachedRuntimeSchemaHash === schemaHash && this.cachedRuntimeSchema) {
+      return this.cachedRuntimeSchema;
+    }
+
+    const schema = normalizeRuntimeSchema(this.runtime.getSchema());
+    this.cachedRuntimeSchemaHash = schemaHash;
+    this.cachedRuntimeSchema = schema;
+    return schema;
   }
 
   /**
