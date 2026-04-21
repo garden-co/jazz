@@ -29,7 +29,6 @@ const schema = {
   }),
   participants: s.table({
     jamId: s.ref("jams"),
-    userId: s.string(),
     display_name: s.string(),
   }),
 };
