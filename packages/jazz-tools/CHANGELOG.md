@@ -1,5 +1,21 @@
 # jazz-tools
 
+## 2.0.0-alpha.36
+
+### Patch Changes
+
+- Cache runtime schema lookups across query paths and surface unhandled rejected mutations through targeted batch-id queues instead of rescanning every retained local batch record. This also brings the React Native runtime onto the same rejected-batch helper surface as WASM and N-API.
+- 8bb9fbc: Allow caller-supplied row ids to use any valid UUID and rely on explicit row metadata for created-at semantics.
+- 3578b10: Stop persisting and rehydrating a bogus empty schema on dynamic-schema servers.
+
+  `SchemaManager::new_server` leaves the context uninitialized with a sentinel hash. Runtime construction then called `ensure_current_schema_persisted`, writing a placeholder `catalogue_schema` row whose content hashed to the empty-schema digest. On rehydrate that hash surfaced as an "unreachable schema hash" in every connection diagnostics call. The persist path now no-ops while uninitialized, and `process_catalogue_update` ignores empty schemas for forward-compatibility with sqlite files written by the pre-fix server.
+
+- 34e9ca4: Add a browser `window.__jazz.clearStorage()` helper for framework clients, and move the FAQ to a top-level docs page with updated storage-reset guidance.
+- Updated dependencies
+- Updated dependencies [8bb9fbc]
+  - jazz-wasm@2.0.0-alpha.36
+  - jazz-rn@2.0.0-alpha.36
+
 ## 2.0.0-alpha.35
 
 ### Minor Changes
