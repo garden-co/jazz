@@ -80,9 +80,12 @@ describe("jazzPlugin", () => {
       `health ${healthResponse.status}: ${await healthResponse.text()}`,
     ).toBe(true);
 
-    const schemasResponse = await fetch(`http://127.0.0.1:${port}/schemas`, {
-      headers: { "X-Jazz-Admin-Secret": "vite-test-admin" },
-    });
+    const schemasResponse = await fetch(
+      `http://127.0.0.1:${port}/apps/${fakeViteServer.config.env.VITE_JAZZ_APP_ID}/schemas`,
+      {
+        headers: { "X-Jazz-Admin-Secret": "vite-test-admin" },
+      },
+    );
     const schemasRaw = await schemasResponse.text();
     expect(schemasResponse.ok, `schemas ${schemasResponse.status}: ${schemasRaw}`).toBe(true);
     const body = JSON.parse(schemasRaw) as { hashes?: string[] };

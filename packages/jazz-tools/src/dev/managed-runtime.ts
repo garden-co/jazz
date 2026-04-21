@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
@@ -9,6 +9,46 @@ function defaultPersistentDataDir(projectRoot: string): string {
 }
 
 const LOG_PREFIX = "[jazz]";
+
+function toRelativePath(absPath: string): string {
+  const rel = relative(process.cwd(), absPath);
+  if (!rel) return ".";
+  // fall back to absolute if path escapes cwd
+  if (rel.startsWith("..")) return absPath;
+  return rel;
+}
+
+function printServerStartedBanner(opts: {
+  serverUrl: string;
+  appId: string;
+  dataDir?: string;
+}): void {
+  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined;
+  const bold = useColor ? "\x1b[1m" : "";
+  const brand = useColor ? "\x1b[38;2;20;106;255m" : ""; // #146aff
+  const reset = useColor ? "\x1b[0m" : "";
+  const art = [
+    "     ██╗ █████╗ ███████╗███████╗",
+    "     ██║██╔══██╗╚══███╔╝╚══███╔╝",
+    "     ██║███████║  ███╔╝   ███╔╝ ",
+    "██   ██║██╔══██║ ███╔╝   ███╔╝  ",
+    "╚█████╔╝██║  ██║███████╗███████╗",
+    " ╚════╝ ╚═╝  ╚═╝╚══════╝╚══════╝",
+  ];
+  console.log("");
+  for (const line of art) {
+    console.log(`${bold}${brand}${line}${reset}`);
+  }
+  console.log("");
+  console.log(
+    `${bold}Running a local jazz server on ${reset}${bold}${brand}${opts.serverUrl}${reset}`,
+  );
+  if (opts.dataDir) {
+    console.log(`${bold}Data dir:${reset} ${bold}${brand}${toRelativePath(opts.dataDir)}${reset}`);
+  }
+  console.log(`${bold}App id:${reset}   ${bold}${brand}${opts.appId}${reset}`);
+  console.log("");
+}
 
 export type ManagedRuntime = {
   appId: string;
@@ -190,6 +230,7 @@ export class ManagedDevRuntime {
             );
           }
           console.log(`${LOG_PREFIX} using server from env: ${serverUrl}`);
+          console.log(`${LOG_PREFIX} app id: ${appId}`);
         } else if (typeof serverOpt === "string") {
           serverUrl = serverOpt;
           adminSecret = options.adminSecret ?? "";
@@ -204,6 +245,7 @@ export class ManagedDevRuntime {
               `${LOG_PREFIX} appId is required when connecting to an existing server`,
             );
           }
+          console.log(`${LOG_PREFIX} app id: ${appId}`);
         } else {
           const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
           adminSecret = serverConfig.adminSecret ?? `jazz-dev-${randomUUID().slice(0, 8)}`;
@@ -238,13 +280,12 @@ export class ManagedDevRuntime {
           });
 
           serverUrl = this.serverHandle.url;
-          console.log(`${LOG_PREFIX} server started on ${serverUrl}`);
-          if (this.serverHandle.dataDir) {
-            console.log(`${LOG_PREFIX} data dir: ${this.serverHandle.dataDir}`);
-          }
+          printServerStartedBanner({
+            serverUrl,
+            appId,
+            dataDir: this.serverHandle.dataDir,
+          });
         }
-
-        console.log(`${LOG_PREFIX} app id: ${appId}`);
 
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
 

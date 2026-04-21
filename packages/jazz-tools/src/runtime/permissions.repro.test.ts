@@ -168,6 +168,7 @@ async function createServerBackedReproContext(
     adminSecret,
   });
   await publishStoredSchema(server.url, {
+    appId,
     adminSecret,
     schema: reproApp.wasmSchema,
   });

@@ -44,7 +44,7 @@ These docs describe the system as it works today.
 
 ### 5. Transport and Adapters
 
-**[HTTP Transport](status-quo/http_transport.md)** — The concrete `/sync` + `/events` protocol used by clients and servers.
+**[HTTP Transport](status-quo/http_transport.md)** — The concrete app-scoped WebSocket + HTTP route surface used by clients and servers.
 
 **[Browser Adapters](status-quo/browser_adapters.md)** — How browser apps are split between an in-memory main-thread runtime and a persistent worker runtime backed by OPFS.
 

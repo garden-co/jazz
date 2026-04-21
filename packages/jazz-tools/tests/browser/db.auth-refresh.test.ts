@@ -90,6 +90,7 @@ describe("Db auth refresh browser integration", () => {
     );
 
     const { hash: publishedSchemaHash } = await publishStoredSchema(serverUrl, {
+      appId,
       adminSecret,
       schema,
     });
@@ -97,7 +98,7 @@ describe("Db auth refresh browser integration", () => {
     let latestSchemaHash: string | null = publishedSchemaHash;
     await waitForCondition(
       async () => {
-        const { hashes } = await fetchSchemaHashes(serverUrl, { adminSecret });
+        const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
         latestSchemaHash = hashes.at(-1) ?? publishedSchemaHash;
         return latestSchemaHash !== null;
       },
@@ -105,9 +106,10 @@ describe("Db auth refresh browser integration", () => {
       "expected at least one published schema hash before publishing test permissions",
     );
 
-    const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
 
     await publishStoredPermissions(serverUrl, {
+      appId,
       adminSecret,
       schemaHash: latestSchemaHash!,
       permissions: {

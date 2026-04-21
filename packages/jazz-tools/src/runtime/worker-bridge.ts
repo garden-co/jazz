@@ -26,7 +26,6 @@ export interface WorkerBridgeOptions {
   userBranch: string;
   dbName: string;
   serverUrl?: string;
-  serverPathPrefix?: string;
   jwtToken?: string;
   adminSecret?: string;
   runtimeSources?: RuntimeSourcesConfig;
@@ -173,7 +172,6 @@ export class WorkerBridge {
       userBranch: options.userBranch,
       dbName: options.dbName,
       serverUrl: options.serverUrl,
-      serverPathPrefix: options.serverPathPrefix,
       jwtToken: options.jwtToken,
       adminSecret: options.adminSecret,
       runtimeSources: options.runtimeSources,

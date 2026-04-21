@@ -28,7 +28,11 @@ use crate::sync_manager::ClientId;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
+    // TODO: Accept app-name aliases in app-scoped route matching
+    // Nesting all non-health routes under a fixed "/apps/{state.app_id}" path makes the server only match the canonical UUID string, but JavaScript callers frequently propagate human-readable app IDs (e.g. "test-app") that are valid elsewhere via AppId::from_name(...). In that non-UUID case, the client now builds /apps/test-app/... URLs while the server only serves /apps/<derived-uuid>/..., so websocket and admin/schema requests return 404 for otherwise valid app IDs.
+    let app_route_prefix = format!("/apps/{}", state.app_id);
     let traced_routes = Router::new()
+        .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .route("/admin/schemas", post(publish_schema_handler))
@@ -46,13 +50,11 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
-        // Health check
-        .route("/health", get(health_handler))
         .layer(TraceLayer::new_for_http());
 
     Router::new()
-        .route("/ws", axum::routing::any(ws_handler))
-        .merge(traced_routes)
+        .route("/health", get(health_handler))
+        .nest(&app_route_prefix, traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -206,7 +208,8 @@ async fn forward_catalogue_request(
         } => (base_url.as_str(), admin_secret.as_str()),
     };
 
-    let authority_url = authority_endpoint_url(base_url, path).map_err(|message| {
+    let app_scoped_path = format!("/apps/{}/{}", state.app_id, path.trim_start_matches('/'));
+    let authority_url = authority_endpoint_url(base_url, &app_scoped_path).map_err(|message| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(message)),
@@ -1352,7 +1355,7 @@ async fn authenticate_ws_handshake(
         &headers,
         state.app_id,
         &state.auth_config,
-        state.jwks_cache.as_deref(),
+        state.jwt_verifier.as_deref(),
     )
     .await
     .map_err(|e| serde_json::to_string(&e).unwrap_or_else(|_| "authentication failed".into()))?;
@@ -1752,6 +1755,18 @@ mod tests {
         create_router(state)
     }
 
+    fn test_app_id_text() -> String {
+        AppId::from_name("test-app").to_string()
+    }
+
+    fn test_app_route(path: &str) -> String {
+        format!(
+            "/apps/{}/{}",
+            test_app_id_text(),
+            path.trim_start_matches('/')
+        )
+    }
+
     /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
     fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
@@ -2041,17 +2056,14 @@ mod tests {
             .expect("build server state")
             .state;
 
-        let app = axum::Router::new()
-            .route("/schema/:hash", get(schema_handler))
-            .route("/schemas", get(schema_hashes_handler))
-            .with_state(state);
+        let app = create_router(state);
 
         let placeholder_hash = "0000000000000000000000000000000000000000000000000000000000000000";
         let response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/schema/{placeholder_hash}"))
+                    .uri(test_app_route(&format!("/schema/{placeholder_hash}")))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2064,7 +2076,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/schema/{placeholder_hash}"))
+                    .uri(test_app_route(&format!("/schema/{placeholder_hash}")))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2075,15 +2087,27 @@ mod tests {
         assert_eq!(response_with_admin.status(), StatusCode::NOT_FOUND);
 
         let hashes_without_admin = app
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/schemas")
+                    .uri(test_app_route("/schemas"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(hashes_without_admin.status(), StatusCode::UNAUTHORIZED);
+
+        let root_schema = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schema/{placeholder_hash}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(root_schema.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2104,7 +2128,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/schemas")
+                    .uri(test_app_route("/schemas"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2126,7 +2150,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/schema/{}", schema_hash))
+                    .uri(test_app_route(&format!("/schema/{}", schema_hash)))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2145,7 +2169,7 @@ mod tests {
         let bad_hash_response = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/schema/invalid")
+                    .uri(test_app_route("/schema/invalid"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2165,7 +2189,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         let authority_routes = axum::Router::new()
             .route(
-                "/schemas",
+                &test_app_route("/schemas"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     let expected_hash = expected_hash.clone();
@@ -2175,7 +2199,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "GET".to_string(),
-                                path: "/schemas".to_string(),
+                                path: test_app_route("/schemas"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2188,7 +2212,7 @@ mod tests {
                 }),
             )
             .route(
-                "/schema/:hash",
+                &test_app_route("/schema/:hash"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     move |Path(hash): Path<String>, headers: HeaderMap| {
@@ -2196,7 +2220,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "GET".to_string(),
-                                path: format!("/schema/{hash}"),
+                                path: test_app_route(&format!("/schema/{hash}")),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2216,7 +2240,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/schemas",
+                &test_app_route("/admin/schemas"),
                 post({
                     let forwarded = forwarded_for_router.clone();
                     let expected_hash = expected_hash.clone();
@@ -2226,7 +2250,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "POST".to_string(),
-                                path: "/admin/schemas".to_string(),
+                                path: test_app_route("/admin/schemas"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2245,7 +2269,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/migrations",
+                &test_app_route("/admin/migrations"),
                 post({
                     let forwarded = forwarded_for_router.clone();
                     move |headers: HeaderMap, body: Json<Value>| {
@@ -2253,7 +2277,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "POST".to_string(),
-                                path: "/admin/migrations".to_string(),
+                                path: test_app_route("/admin/migrations"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2273,7 +2297,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/schema-connectivity",
+                &test_app_route("/admin/schema-connectivity"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     move |Query(params): Query<SchemaConnectivityParams>, headers: HeaderMap| {
@@ -2282,7 +2306,8 @@ mod tests {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "GET".to_string(),
                                 path: format!(
-                                    "/admin/schema-connectivity?fromHash={}&toHash={}",
+                                    "{}?fromHash={}&toHash={}",
+                                    test_app_route("/admin/schema-connectivity"),
                                     params.from_hash, params.to_hash
                                 ),
                                 admin_secret: headers
@@ -2299,7 +2324,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/permissions/head",
+                &test_app_route("/admin/permissions/head"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     move |headers: HeaderMap| {
@@ -2307,7 +2332,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "GET".to_string(),
-                                path: "/admin/permissions/head".to_string(),
+                                path: test_app_route("/admin/permissions/head"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2327,7 +2352,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/permissions",
+                &test_app_route("/admin/permissions"),
                 get({
                     let forwarded = forwarded_for_router.clone();
                     move |headers: HeaderMap| {
@@ -2335,7 +2360,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "GET".to_string(),
-                                path: "/admin/permissions".to_string(),
+                                path: test_app_route("/admin/permissions"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2360,7 +2385,7 @@ mod tests {
                 }),
             )
             .route(
-                "/admin/permissions",
+                &test_app_route("/admin/permissions"),
                 post({
                     let forwarded = forwarded_for_router.clone();
                     move |headers: HeaderMap, body: Json<Value>| {
@@ -2368,7 +2393,7 @@ mod tests {
                         async move {
                             forwarded.lock().unwrap().push(ForwardedAdminRequest {
                                 method: "POST".to_string(),
-                                path: "/admin/permissions".to_string(),
+                                path: test_app_route("/admin/permissions"),
                                 admin_secret: headers
                                     .get("X-Jazz-Admin-Secret")
                                     .and_then(|value| value.to_str().ok())
@@ -2421,7 +2446,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/schemas")
+                    .uri(test_app_route("/schemas"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2434,7 +2459,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri(format!("/schema/{expected_hash}"))
+                    .uri(test_app_route(&format!("/schema/{expected_hash}")))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2448,7 +2473,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/schemas")
+                    .uri(test_app_route("/admin/schemas"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -2465,7 +2490,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -2493,7 +2518,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions/head")
+                    .uri(test_app_route("/admin/permissions/head"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2506,7 +2531,10 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    .uri(format!(
+                        "{}?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        test_app_route("/admin/schema-connectivity")
+                    ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2519,7 +2547,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2532,7 +2560,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -2560,17 +2588,23 @@ mod tests {
                 .iter()
                 .all(|request| request.admin_secret.as_deref() == Some("authority-secret"))
         );
-        assert_eq!(forwarded[0].path, "/schemas");
-        assert_eq!(forwarded[1].path, format!("/schema/{expected_hash}"));
-        assert_eq!(forwarded[2].path, "/admin/schemas");
-        assert_eq!(forwarded[3].path, "/admin/migrations");
-        assert_eq!(forwarded[4].path, "/admin/permissions/head");
+        assert_eq!(forwarded[0].path, test_app_route("/schemas"));
+        assert_eq!(
+            forwarded[1].path,
+            test_app_route(&format!("/schema/{expected_hash}"))
+        );
+        assert_eq!(forwarded[2].path, test_app_route("/admin/schemas"));
+        assert_eq!(forwarded[3].path, test_app_route("/admin/migrations"));
+        assert_eq!(forwarded[4].path, test_app_route("/admin/permissions/head"));
         assert_eq!(
             forwarded[5].path,
-            "/admin/schema-connectivity?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            format!(
+                "{}?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                test_app_route("/admin/schema-connectivity")
+            )
         );
-        assert_eq!(forwarded[6].path, "/admin/permissions");
-        assert_eq!(forwarded[7].path, "/admin/permissions");
+        assert_eq!(forwarded[6].path, test_app_route("/admin/permissions"));
+        assert_eq!(forwarded[7].path, test_app_route("/admin/permissions"));
         assert_eq!(
             forwarded[7]
                 .body
@@ -2600,7 +2634,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions/head")
+                    .uri(test_app_route("/admin/permissions/head"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2628,7 +2662,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(first_request_body.to_string()))
@@ -2662,7 +2696,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(second_request_body.to_string()))
@@ -2699,7 +2733,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(stale_request_body.to_string()))
@@ -2713,7 +2747,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions/head")
+                    .uri(test_app_route("/admin/permissions/head"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2736,7 +2770,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2771,7 +2805,7 @@ mod tests {
         let response = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/permissions")
+                    .uri(test_app_route("/admin/permissions"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -2819,8 +2853,10 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!(
-                        "/admin/schema-connectivity?fromHash={}&toHash={}",
-                        v1_hash, v2_hash
+                        "{}?fromHash={}&toHash={}",
+                        test_app_route("/admin/schema-connectivity"),
+                        v1_hash,
+                        v2_hash
                     ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
@@ -2841,7 +2877,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -2869,8 +2905,10 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!(
-                        "/admin/schema-connectivity?fromHash={}&toHash={}",
-                        v1_hash, v2_hash
+                        "{}?fromHash={}&toHash={}",
+                        test_app_route("/admin/schema-connectivity"),
+                        v1_hash,
+                        v2_hash
                     ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
@@ -2912,7 +2950,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/schemas")
+                    .uri(test_app_route("/admin/schemas"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -2968,7 +3006,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(request_body.to_string()))
                     .unwrap(),
@@ -2981,7 +3019,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -3048,7 +3086,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -3142,7 +3180,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/admin/migrations")
+                    .uri(test_app_route("/admin/migrations"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -3205,7 +3243,9 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .uri(test_app_route(
+                        "/admin/introspection/subscriptions?appId=test-app",
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -3217,7 +3257,9 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .uri(test_app_route(
+                        "/admin/introspection/subscriptions?appId=test-app",
+                    ))
                     .header("X-Jazz-Admin-Secret", "wrong-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -3230,7 +3272,7 @@ mod tests {
             .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions")
+                    .uri(test_app_route("/admin/introspection/subscriptions"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -3242,7 +3284,9 @@ mod tests {
         let invalid_app_id = app
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions?appId=bad/id")
+                    .uri(test_app_route(
+                        "/admin/introspection/subscriptions?appId=bad/id",
+                    ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -3254,7 +3298,9 @@ mod tests {
         let mismatched_app_id = make_test_router(state)
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions?appId=other-app")
+                    .uri(test_app_route(
+                        "/admin/introspection/subscriptions?appId=other-app",
+                    ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -3307,7 +3353,9 @@ mod tests {
         let response = make_test_router(state.clone())
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/admin/introspection/subscriptions?appId=test-app")
+                    .uri(test_app_route(
+                        "/admin/introspection/subscriptions?appId=test-app",
+                    ))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::empty())
                     .unwrap(),
@@ -3440,7 +3488,7 @@ mod tests {
         });
 
         let client_id = ClientId::new().to_string();
-        let ws_url = format!("ws://{addr}/ws");
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
 
         let handshake = crate::transport_manager::AuthHandshake {

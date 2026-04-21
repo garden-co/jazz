@@ -19,7 +19,9 @@ Then open `http://localhost:5173` in your browser (Vite’s default dev server p
   - **adminSecret**: admin secret for that app.
   - **env**: environment name (for example `dev`, `staging`, `prod`). Defaults to `dev` if left empty.
   - **branch**: logical branch name (defaults to `main`).
-  - **serverPathPrefix** (optional): path prefix if your server is not mounted at `/`.
+
+The inspector derives app-scoped endpoints automatically from `serverUrl` and `appId`, so there is
+no separate path-prefix setting.
 
 ## Building the DevTools extension
 

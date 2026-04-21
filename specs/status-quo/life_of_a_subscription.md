@@ -75,7 +75,7 @@ The worker runtime owns:
 
 - OPFS-backed storage
 - durable row histories and visible entries
-- upstream `/sync` and `/events`
+- upstream app-scoped `/apps/<appId>/ws`
 - query replay beyond the main-thread cache
 
 So if the main thread subscribes to a query whose answer depends on worker or server state, the worker is the place that settles and relays that answer back.

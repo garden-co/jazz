@@ -8,7 +8,6 @@ export interface DbConfigFormValues {
   adminSecret: string;
   env: string;
   branch: string;
-  serverPathPrefix?: string;
 }
 
 interface DbConfigFormProps {
@@ -29,7 +28,6 @@ export function DbConfigForm({
   const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
   const [env, setEnv] = useState(initialValues?.env ?? "dev");
   const [branch, setBranch] = useState(initialValues?.branch ?? "main");
-  const [serverPathPrefix, setServerPathPrefix] = useState(initialValues?.serverPathPrefix ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -39,7 +37,6 @@ export function DbConfigForm({
     setAdminSecret(initialValues?.adminSecret ?? "");
     setEnv(initialValues?.env ?? "dev");
     setBranch(initialValues?.branch ?? "main");
-    setServerPathPrefix(initialValues?.serverPathPrefix ?? "");
     setIsSubmitting(false);
     setErrorMessage(null);
   }, [initialValues]);
@@ -55,13 +52,12 @@ export function DbConfigForm({
       adminSecret: adminSecret.trim(),
       env: env.trim() || "dev",
       branch: branch.trim() || "main",
-      serverPathPrefix: serverPathPrefix.trim() || undefined,
     };
 
     try {
       const { hashes } = await fetchSchemaHashes(values.serverUrl, {
+        appId: values.appId,
         adminSecret: values.adminSecret,
-        pathPrefix: values.serverPathPrefix,
       });
       onSubmit(values, hashes);
     } catch (error) {
@@ -125,16 +121,6 @@ export function DbConfigForm({
           value={branch}
           onChange={(e) => setBranch(e.target.value)}
           placeholder="main"
-          className={styles.input}
-        />
-      </label>
-      <label className={styles.field}>
-        Path prefix <span className={styles.optionalText}>(optional)</span>
-        <input
-          type="text"
-          value={serverPathPrefix}
-          onChange={(e) => setServerPathPrefix(e.target.value)}
-          placeholder="/apps/&lt;appId&gt;"
           className={styles.input}
         />
       </label>

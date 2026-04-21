@@ -1837,13 +1837,15 @@ async function waitForTodos(
 
 async function publishSyncServerSchemaAndPermissions(scope: string): Promise<TestingServerInfo> {
   const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
-  const { serverUrl, adminSecret } = testingServer;
+  const { appId, serverUrl, adminSecret } = testingServer;
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
+    appId,
     adminSecret,
     schema: app.wasmSchema,
   });
-  const { head } = await fetchPermissionsHead(serverUrl, { adminSecret });
+  const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
   await publishStoredPermissions(serverUrl, {
+    appId,
     adminSecret,
     schemaHash,
     permissions: {

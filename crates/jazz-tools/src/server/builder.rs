@@ -8,7 +8,9 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
+use crate::middleware::auth::{
+    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
+};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
@@ -146,7 +148,7 @@ impl ServerBuilder {
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
         validate_catalogue_authority(&auth_config, &self.catalogue_authority)?;
-        let jwks_cache = build_jwks_cache(&auth_config).await?;
+        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
@@ -162,7 +164,7 @@ impl ServerBuilder {
             connection_event_hub,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
-            jwks_cache,
+            jwt_verifier,
             http_client,
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
@@ -307,51 +309,65 @@ fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
     )
 }
 
-async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<Arc<JwksCache>>, String> {
-    let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
-        return Ok(None);
-    };
+async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
+    match (
+        auth_config.jwks_url.as_ref(),
+        auth_config.jwt_public_key.as_ref(),
+    ) {
+        (Some(_), Some(_)) => Err(
+            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
+                .to_string(),
+        ),
+        (None, None) => Ok(None),
+        (None, Some(public_key)) => {
+            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
+            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
+        }
+        (Some(jwks_url), None) => {
+            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(JWKS_CACHE_TTL);
+            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(JWKS_MAX_STALE);
 
-    let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(JWKS_CACHE_TTL);
-    let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(JWKS_MAX_STALE);
+            let http_client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
 
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
+            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
+                jwks_url.clone(),
+                http_client,
+                jwks_ttl,
+                jwks_max_stale,
+            )));
 
-    let cache = Arc::new(JwksCache::new(
-        jwks_url.clone(),
-        http_client,
-        jwks_ttl,
-        jwks_max_stale,
-    ));
-
-    // Warm the cache in the background. The JWKS endpoint may not be
-    // available yet (e.g. Jazz server starts during Next.js config resolution,
-    // before the app is listening). First auth request will block on fetch
-    // if the background warm hasn't completed.
-    {
-        let cache = Arc::clone(&cache);
-        tokio::spawn(async move {
-            if let Err(e) = cache.load(false).await {
-                tracing::warn!(
-                    "Background JWKS warm failed (will retry on first auth request): {e}"
-                );
+            // Warm the cache in the background. The JWKS endpoint may not be
+            // available yet (e.g. Jazz server starts during Next.js config resolution,
+            // before the app is listening). First auth request will block on fetch
+            // if the background warm hasn't completed.
+            {
+                let verifier = Arc::clone(&verifier);
+                tokio::spawn(async move {
+                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
+                        && let Err(e) = cache.load(false).await
+                    {
+                        tracing::warn!(
+                            "Background JWKS warm failed (will retry on first auth request): {e}"
+                        );
+                    }
+                });
             }
-        });
-    }
 
-    Ok(Some(cache))
+            Ok(Some(verifier))
+        }
+    }
 }
 
 fn validate_catalogue_authority(
@@ -380,9 +396,10 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         }
     };
     info!(
-        "Auth configured: local_first={}, jwks={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
+        auth_config.jwt_public_key.is_some(),
         auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
