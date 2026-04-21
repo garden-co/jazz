@@ -75,13 +75,17 @@ describe("jazzPlugin", () => {
     await configureServer(fakeViteServer);
 
     const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
-    expect(healthResponse.ok).toBe(true);
+    expect(
+      healthResponse.ok,
+      `health ${healthResponse.status}: ${await healthResponse.text()}`,
+    ).toBe(true);
 
     const schemasResponse = await fetch(`http://127.0.0.1:${port}/schemas`, {
       headers: { "X-Jazz-Admin-Secret": "vite-test-admin" },
     });
-    expect(schemasResponse.ok).toBe(true);
-    const body = (await schemasResponse.json()) as { hashes?: string[] };
+    const schemasRaw = await schemasResponse.text();
+    expect(schemasResponse.ok, `schemas ${schemasResponse.status}: ${schemasRaw}`).toBe(true);
+    const body = JSON.parse(schemasRaw) as { hashes?: string[] };
     expect(body.hashes?.length).toBeGreaterThan(0);
     expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeTruthy();
     expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
