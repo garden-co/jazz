@@ -1,18 +1,14 @@
 /**
- * Unit tests for jazz-worker URL normalization and auth-merge helpers.
+ * Unit tests for jazz-worker URL normalization, auth-merge helpers, and
+ * handleInit fallback behaviour.
  *
- * These tests target the exported pure helpers `composeConnectUrl` and
- * `mergeAuth`, which encapsulate the two behaviours that T22 validates:
- *
- *   1. serverUrl + appId → correct WebSocket URL via httpUrlToWs
- *   2. update-auth merges / clears jwt_token while preserving other fields
- *
- * The helpers are pure functions — no WASM, no worker globals needed.
- * We must still stub `self` and `jazz-wasm` because jazz-worker.ts installs
- * `self.onmessage` and calls `startup()` at module top level.
+ * Pure helper tests (composeConnectUrl, mergeAuth, etc.) need no WASM.
+ * The handleInit test drives the full init flow via self.onmessage and a
+ * mocked WasmRuntime so we can exercise the SecurityError fallback path
+ * without a real browser or OPFS.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Stub the worker global `self` before the module is loaded ────────────────
 // jazz-worker.ts does `self.onmessage = ...` at module scope.
@@ -27,10 +23,25 @@ vi.hoisted(() => {
   (globalThis as Record<string, unknown>).self = fakeSelf;
 });
 
+// ── WasmRuntime mocks (hoisted so vi.mock factory can close over them) ────────
+const { openPersistentMock, openEphemeralMock } = vi.hoisted(() => ({
+  openPersistentMock: vi.fn(),
+  openEphemeralMock: vi.fn(),
+}));
+
 // ── Stub jazz-wasm so startup() doesn't reject ───────────────────────────────
 vi.mock("jazz-wasm", () => ({
   default: vi.fn().mockResolvedValue(undefined),
   initSync: vi.fn(),
+  WasmRuntime: {
+    openPersistent: openPersistentMock,
+    openEphemeral: openEphemeralMock,
+  },
+}));
+
+// ── Stub schema-wire so handleInit doesn't fail on schema validation ──────────
+vi.mock("../drivers/schema-wire.js", () => ({
+  normalizeRuntimeSchemaJson: vi.fn((s: string) => s),
 }));
 
 import {
@@ -115,5 +126,68 @@ describe("performUpstreamConnect", () => {
 
     expect(posted).toEqual([{ type: "upstream-disconnected" }]);
     errorSpy.mockRestore();
+  });
+});
+
+// ── Firefox private browsing: OPFS unavailable ────────────────────────────────
+//
+// navigator.storage.getDirectory() is blocked in Firefox private browsing,
+// causing WasmRuntime.openPersistent to throw a SecurityError. The worker
+// should detect this and fall back to WasmRuntime.openEphemeral so that Jazz
+// still initialises (with ephemeral, non-persisted storage) instead of failing.
+//
+// This test will fail until the fallback is implemented in handleInit.
+
+describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
+  const fakeSelf = () => (globalThis as any).self;
+
+  const fakeRuntime = () => ({
+    addClient: vi.fn().mockReturnValue("client-ephemeral"),
+    setClientRole: vi.fn(),
+    onAuthFailure: null,
+    onSyncMessageToSend: vi.fn(),
+    addServer: vi.fn(),
+    removeServer: vi.fn(),
+  });
+
+  beforeEach(() => {
+    openPersistentMock.mockReset();
+    openEphemeralMock.mockReset();
+    fakeSelf().postMessage.mockClear();
+  });
+
+  it("falls back to openEphemeral and posts init-ok when openPersistent throws SecurityError", async () => {
+    openPersistentMock.mockRejectedValue(
+      new DOMException("The operation is insecure.", "SecurityError"),
+    );
+    openEphemeralMock.mockResolvedValue(fakeRuntime());
+
+    fakeSelf().onmessage(
+      new MessageEvent("message", {
+        data: {
+          type: "init",
+          schemaJson: "{}",
+          appId: "opfs-blocked-test",
+          env: "development",
+          userBranch: "main",
+          dbName: "opfs-blocked-db",
+          clientId: "",
+        },
+      }),
+    );
+
+    await vi.waitUntil(
+      () =>
+        (fakeSelf().postMessage.mock.calls as [any][]).some(
+          ([msg]) => msg.type === "init-ok" || msg.type === "error",
+        ),
+      { timeout: 2000 },
+    );
+
+    const result: any = (fakeSelf().postMessage.mock.calls as [any][])
+      .map(([msg]) => msg)
+      .find((msg: any) => msg.type === "init-ok" || msg.type === "error");
+
+    expect(result.type).toBe("init-ok");
   });
 });
