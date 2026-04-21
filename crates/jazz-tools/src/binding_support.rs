@@ -456,13 +456,6 @@ pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<Object
     };
 
     let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
-    if uuid.get_version_num() != 7 {
-        return Err(format!(
-            "Invalid ObjectId: expected UUIDv7, got version {}",
-            uuid.get_version_num()
-        ));
-    }
-
     Ok(Some(ObjectId::from_uuid(uuid)))
 }
 
@@ -538,6 +531,17 @@ mod tests {
                 Value::Boolean(false),
                 Value::Text("note".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_external_object_id_accepts_any_valid_uuid() {
+        let parsed = super::parse_external_object_id(Some("550e8400-e29b-41d4-a716-446655440000"))
+            .expect("parse valid uuid");
+
+        assert_eq!(
+            parsed.expect("object id").uuid().to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
         );
     }
 
