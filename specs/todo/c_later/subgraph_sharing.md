@@ -20,7 +20,7 @@ inner_rows: HashMap<CorrelationValue, Vec<Row>>
 - Matches what JoinNode already does
 - Keep current approach as fallback for complex subqueries (filters, joins, nested arrays)
 
-> `crates/groove/src/query_manager/graph_nodes/array_subquery.rs:305-351` (current reevaluate_all)
+> Current reevaluation logic lives in `crates/jazz-tools/src/query_manager/graph_nodes/array_subquery.rs`.
 
 ## Memoized Subgraph Results
 

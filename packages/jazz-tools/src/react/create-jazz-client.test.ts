@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { createJazzClient } from "./create-jazz-client.js";
@@ -58,11 +58,14 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: mocks.trackPromise,
 }));
 
-function createMockDb(session: Session | null = null) {
+const originalWindow = (globalThis as { window?: unknown }).window;
+
+function createMockDb(session: Session | null = null, config: DbConfig = { appId: "test-app" }) {
   let authSession = session;
   const listeners = new Set<(state: { session: Session | null }) => void>();
 
   return {
+    getConfig: vi.fn(() => config),
     getAuthState: vi.fn(() => ({
       status: authSession ? "authenticated" : "unauthenticated",
       session: authSession,
@@ -79,6 +82,7 @@ function createMockDb(session: Session | null = null) {
         listener({ session: authSession });
       }
     },
+    deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
   };
 }
@@ -87,6 +91,14 @@ describe("react/create-jazz-client unit", () => {
   beforeEach(() => {
     mocks.reset();
     mocks.trackPromise.mockImplementation((promise) => promise);
+  });
+
+  afterEach(() => {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = originalWindow;
+    }
   });
 
   it("RC-U01: initializes and shuts down cleanly", async () => {
@@ -193,5 +205,77 @@ describe("react/create-jazz-client unit", () => {
     await createJazzClient(config);
 
     expect(mocks.createDb).toHaveBeenCalledWith(config);
+  });
+
+  it("RC-U06: exposes window.__jazz.clearStorage for the only live namespace", async () => {
+    (globalThis as { window?: unknown }).window = {} as unknown;
+
+    const config: DbConfig = {
+      appId: "react-client-unit-6",
+      driver: { type: "persistent", dbName: "alice-cache" },
+    };
+    const db = createMockDb(null, config);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient(config);
+
+    const api = (
+      window as {
+        __jazz?: {
+          clearStorage(namespace?: string): Promise<void>;
+          listLiveStorageNamespaces(): string[];
+        };
+      }
+    ).__jazz;
+
+    expect(api?.listLiveStorageNamespaces()).toEqual(["alice-cache"]);
+
+    await api?.clearStorage();
+
+    expect(db.deleteClientStorage).toHaveBeenCalledTimes(1);
+
+    await client.shutdown();
+    expect(api?.listLiveStorageNamespaces()).toEqual([]);
+  });
+
+  it("RC-U07: requires a namespace when multiple live contexts exist", async () => {
+    (globalThis as { window?: unknown }).window = {} as unknown;
+
+    const aliceConfig: DbConfig = {
+      appId: "react-client-unit-7-alice",
+      driver: { type: "persistent", dbName: "alice-cache" },
+    };
+    const bobConfig: DbConfig = {
+      appId: "react-client-unit-7-bob",
+      driver: { type: "persistent", dbName: "bob-cache" },
+    };
+    const aliceDb = createMockDb(null, aliceConfig);
+    const bobDb = createMockDb(null, bobConfig);
+    mocks.createDb.mockResolvedValueOnce(aliceDb).mockResolvedValueOnce(bobDb);
+
+    const aliceClient = await createJazzClient(aliceConfig);
+    const bobClient = await createJazzClient(bobConfig);
+
+    const api = (
+      window as {
+        __jazz?: {
+          clearStorage(namespace?: string): Promise<void>;
+          listLiveStorageNamespaces(): string[];
+        };
+      }
+    ).__jazz;
+
+    await expect(api?.clearStorage()).rejects.toThrow(
+      /Multiple live Jazz storage contexts.*alice-cache, bob-cache/u,
+    );
+
+    await api?.clearStorage("bob-cache");
+
+    expect(aliceDb.deleteClientStorage).not.toHaveBeenCalled();
+    expect(bobDb.deleteClientStorage).toHaveBeenCalledTimes(1);
+    expect(api?.listLiveStorageNamespaces()).toEqual(["alice-cache", "bob-cache"]);
+
+    await aliceClient.shutdown();
+    await bobClient.shutdown();
   });
 });

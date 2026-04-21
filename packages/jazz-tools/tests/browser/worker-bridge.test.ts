@@ -649,14 +649,12 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = await db.insertDurable(
-      todos,
-      { title: "Original", done: false },
-      { tier: "local" },
-    );
-    const pending = db.updateDurable(todos, id, { done: true }, { tier: "local" });
-    expect(pending).toBeInstanceOf(Promise);
-    await pending;
+    const { id } = await db
+      .insert(todos, { title: "Original", done: false })
+      .wait({ tier: "local" });
+
+    const updateHandle = db.update(todos, id, { done: true });
+    await updateHandle.wait({ tier: "local" });
 
     const results = await db.all(allTodos, { tier: "local" });
     expect(results.length).toBe(1);
@@ -691,16 +689,13 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    const { id } = await db.insertDurable(
-      todos,
-      { title: "Ephemeral", done: false },
-      { tier: "local" },
-    );
+    const { id } = await db
+      .insert(todos, { title: "Ephemeral", done: false })
+      .wait({ tier: "local" });
     expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
 
-    const pending = db.deleteDurable(todos, id, { tier: "local" });
-    expect(pending).toBeInstanceOf(Promise);
-    await pending;
+    const deleteHandle = db.delete(todos, id);
+    await deleteHandle.wait({ tier: "local" });
 
     const results = await db.all(allTodos, { tier: "local" });
     expect(results.length).toBe(0);
@@ -738,9 +733,9 @@ describe("Worker Bridge with OPFS", () => {
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
     );
 
-    // insert({ tier: "local" }) ensures data is in OPFS WAL before we crash
-    await db1.insertDurable(todos, { title: "Crash-proof", done: false }, { tier: "local" });
-    await db1.insertDurable(todos, { title: "Also survives", done: true }, { tier: "local" });
+    // wait({ tier: "local" }) ensures data is in OPFS WAL before we crash
+    await db1.insert(todos, { title: "Crash-proof", done: false }).wait({ tier: "local" });
+    await db1.insert(todos, { title: "Also survives", done: true }).wait({ tier: "local" });
 
     // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
     // WAL has the data, but snapshot is stale. Recovery must replay WAL.
@@ -803,7 +798,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insertDurable(todos, { title: "Should be deleted", done: false }, { tier: "local" });
+    await db.insert(todos, { title: "Should be deleted", done: false }).wait({ tier: "local" });
     const before = await db.all(allTodos, { tier: "local" });
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
@@ -833,16 +828,12 @@ describe("Worker Bridge with OPFS", () => {
     );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
 
-    await leader.insertDurable(
-      todos,
-      { title: "Leader data before follower wipe", done: false },
-      { tier: "local" },
-    );
-    await follower.insertDurable(
-      todos,
-      { title: "Follower data before follower wipe", done: true },
-      { tier: "local" },
-    );
+    await leader
+      .insert(todos, { title: "Leader data before follower wipe", done: false })
+      .wait({ tier: "local" });
+    await follower
+      .insert(todos, { title: "Follower data before follower wipe", done: true })
+      .wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
@@ -867,7 +858,7 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     const marker = `fresh-after-follower-wipe-${Date.now()}`;
-    await leader.insertDurable(todos, { title: marker, done: false }, { tier: "local" });
+    await leader.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
@@ -891,13 +882,9 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    await db.insertDurable(
-      todos,
-      { title: "Should be wiped on logout", done: false },
-      {
-        tier: "local",
-      },
-    );
+    await db
+      .insert(todos, { title: "Should be wiped on logout", done: false })
+      .wait({ tier: "local" });
     expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
 
     await db.logout({ wipeData: true });
@@ -975,18 +962,8 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // insert("local") should resolve once the worker's OPFS has it
-    const { id } = await db.insertDurable(
-      todos,
-      { title: "Durable", done: false },
-      { tier: "local" },
-    );
-    expect(id).toBeTruthy();
-    expect(typeof id).toBe("string");
-
-    // Data should be visible locally
-    const results = await db.all(allTodos);
-    expect(results.length).toBe(1);
-    expect(results[0].id).toBe(id);
+    const insertHandle = db.insert(todos, { title: "Durable", done: false });
+    await insertHandle.wait({ tier: "local" });
   });
 
   // -------------------------------------------------------------------------
@@ -1076,11 +1053,9 @@ describe("Worker Bridge with OPFS", () => {
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
-      const { id } = await db.insertDurable(
-        todos,
-        { title: `seeded-${i}`, done: i % 2 === 0 },
-        { tier: "local" },
-      );
+      const { id } = await db
+        .insert(todos, { title: `seeded-${i}`, done: i % 2 === 0 })
+        .wait({ tier: "local" });
       insertedIds.push(id);
     }
 
@@ -1122,11 +1097,9 @@ describe("Worker Bridge with OPFS", () => {
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
-      const { id } = await db.insertDurable(
-        todos,
-        { title: `seeded-jwt-${i}`, done: i % 2 === 0 },
-        { tier: "local" },
-      );
+      const { id } = await db
+        .insert(todos, { title: `seeded-jwt-${i}`, done: i % 2 === 0 })
+        .wait({ tier: "local" });
       insertedIds.push(id);
     }
 
@@ -1193,7 +1166,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title, done: false }).wait({ tier: "local" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -1215,7 +1188,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbB.insertDurable(todos, { title, done: true }, { tier: "local" }),
+      dbB.insert(todos, { title, done: true }).wait({ tier: "local" }),
       10000,
       "B insert(worker) did not resolve",
     );
@@ -1326,7 +1299,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const baselineTitle = `baseline-network-recover-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title: baselineTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Baseline insert(worker) did not resolve",
     );
@@ -1350,7 +1323,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const recoveredTitle = `network-recovered-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: recoveredTitle, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title: recoveredTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Recovered insert(worker) did not resolve",
     );
@@ -1387,7 +1360,7 @@ describe("Worker Bridge with OPFS", () => {
     try {
       const baselineTitle = `edge-late-baseline-${Date.now()}`;
       await withTimeout(
-        dbWriter.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
+        dbWriter.insert(todos, { title: baselineTitle, done: false }).wait({ tier: "local" }),
         10000,
         "Baseline insert(worker) did not resolve",
       );
@@ -1475,7 +1448,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const baselineTitle = `baseline-before-offline-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title: baselineTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Baseline insert(worker) did not resolve",
     );
@@ -1496,7 +1469,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const offlineTitle = `offline-worker-row-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: offlineTitle, done: true }, { tier: "local" }),
+      dbA.insert(todos, { title: offlineTitle, done: true }).wait({ tier: "local" }),
       10000,
       "Offline insert(worker) did not resolve",
     );
@@ -1530,7 +1503,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const postReconnectTitle = `post-reconnect-control-${Date.now()}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: postReconnectTitle, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title: postReconnectTitle, done: false }).wait({ tier: "local" }),
       10000,
       "Post-reconnect control insert(worker) did not resolve",
     );
@@ -1607,7 +1580,7 @@ describe("Worker Bridge with OPFS", () => {
       ),
     );
 
-    await dbA.insertDurable(todos, { title: "local-only-local-1", done: true }, { tier: "local" });
+    await dbA.insert(todos, { title: "local-only-local-1", done: true }).wait({ tier: "local" });
 
     // Wait for initial local-only snapshot.
     await waitForCondition(
@@ -1666,7 +1639,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const remoteTitle = `remote-for-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
-      dbA.insertDurable(todos, { title: remoteTitle, done: false }, { tier: "local" }),
+      dbA.insert(todos, { title: remoteTitle, done: false }).wait({ tier: "local" }),
       10000,
       "A insert(worker) did not resolve",
     );
@@ -1802,7 +1775,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const marker = `reopen-${Date.now()}`;
     await withTimeout(
-      currentFollower.insertDurable(todos, { title: marker, done: false }, { tier: "local" }),
+      currentFollower.insert(todos, { title: marker, done: false }).wait({ tier: "local" }),
       10000,
       "Follower insert during reopen re-election did not resolve",
     );

@@ -158,13 +158,25 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         .await;
 
     let queued_user_id = jazz_tools::ObjectId::new();
-    let (queued_row_id, _) = writer
-        .create(
+    let queued_row_id = jazz_tools::ObjectId::new();
+    let queued_write_error = writer
+        .create_persisted_with_id(
             "users",
+            *queued_row_id.uuid(),
             user_values_v1(queued_user_id, "queued before permissions"),
+            DurabilityTier::EdgeServer,
         )
         .await
-        .expect("optimistic local create before permissions");
+        .expect_err("pre-permissions persisted create should be rejected");
+    let queued_write_error = queued_write_error.to_string();
+    assert!(
+        queued_write_error.contains("permissions_head_missing"),
+        "expected permissions-head rejection, got: {queued_write_error}"
+    );
+    assert!(
+        queued_write_error.contains("no published permissions head"),
+        "expected missing permissions-head reason, got: {queued_write_error}"
+    );
 
     let rows_before_permissions = wait_for_query(
         &observer,

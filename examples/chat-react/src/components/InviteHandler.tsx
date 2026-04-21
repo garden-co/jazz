@@ -3,6 +3,7 @@ import { useDb, useSession } from "jazz-tools/react";
 import { navigate } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { app } from "../../schema.js";
+import { DurabilityTier } from "jazz-tools";
 
 interface InviteHandlerProps {
   chatId: string;
@@ -14,7 +15,9 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const session = useSession();
   const handled = useRef(false);
   const [chatLoaded, setChatLoaded] = useState(false);
-  const sharedWriteOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
+  const sharedWriteOptions: { tier: DurabilityTier } = {
+    tier: db.getConfig().serverUrl ? "edge" : "local",
+  };
 
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
@@ -27,7 +30,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
         if (delta.all.length > 0) setChatLoaded(true);
       },
       undefined,
-      { user_id: userId, claims: { join_code: code } },
+      { user_id: userId, claims: { join_code: code }, authMode: "external" },
     );
     return unsubscribe;
   }, [db, userId, chatId, code]);
@@ -37,15 +40,12 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     handled.current = true;
 
     void db
-      .insertDurable(
-        app.chatMembers,
-        {
-          chatId,
-          userId,
-          joinCode: code,
-        },
-        sharedWriteOptions,
-      )
+      .insert(app.chatMembers, {
+        chatId,
+        userId,
+        joinCode: code,
+      })
+      .wait(sharedWriteOptions)
       .then(() => {
         navigate(`/#/chat/${chatId}`);
       })

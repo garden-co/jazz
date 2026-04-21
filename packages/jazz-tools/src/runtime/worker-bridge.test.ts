@@ -58,6 +58,8 @@ function createRuntimeMock(): {
   const removeServerCalls = { count: 0 };
 
   const runtime: Runtime = {
+    loadLocalBatchRecord: () => null,
+    loadLocalBatchRecords: () => [],
     insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
     update: () => ({
       batchId: "batch-id",
@@ -68,9 +70,6 @@ function createRuntimeMock(): {
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,
-    insertDurable: async () => ({ id: "id", values: [] }),
-    updateDurable: async () => undefined,
-    deleteDurable: async () => undefined,
     createSubscription: () => 1,
     executeSubscription: () => undefined,
     onSyncMessageReceived: (payload: Uint8Array | string) => {

@@ -120,16 +120,14 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const todo = await db.insertDurable(
-        schemaApp.todos,
-        {
+      const todo = await db
+        .insert(schemaApp.todos, {
           title: body.title,
           done: false,
           description: body.description?.trim(),
           owner_id: body.owner_id ?? "unknown",
-        },
-        { tier: "edge" },
-      );
+        })
+        .wait({ tier: "edge" });
 
       res.status(201).json(todo);
 
@@ -216,7 +214,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      await db.updateDurable(schemaApp.todos, id, updates);
+      await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
 
       // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
@@ -238,7 +236,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      await db.deleteDurable(schemaApp.todos, id);
+      await db.delete(schemaApp.todos, id).wait({ tier: "local" });
       res.status(204).send();
 
       // Notify SSE connections

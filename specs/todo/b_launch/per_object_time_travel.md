@@ -8,7 +8,7 @@ Every object has a commit graph. Per-object time travel lets users:
 
 - View the full edit history of a single row
 - Read the state of a row at any previous commit
-- See who made each change and when (pairs with `../a_mvp/magic_columns_edit_metadata.md`)
+- See who made each change and when, building on the current row provenance fields and magic columns
 
 This is straightforward because the commit graph can be navigated directly — no need to reconstruct state by replaying history.
 

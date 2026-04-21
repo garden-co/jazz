@@ -1,5 +1,11 @@
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
-import type { DirectInsertResult, DirectMutationResult, Row, Runtime } from "../runtime/client.js";
+import type {
+  DirectInsertResult,
+  DirectMutationResult,
+  LocalBatchRecord,
+  Row,
+  Runtime,
+} from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 export type JazzRnErrorTag =
@@ -35,6 +41,8 @@ export interface JazzRnRuntimeBinding {
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
+  loadLocalBatchRecord?(batchId: string): string | null;
+  loadLocalBatchRecords?(): string;
   onBatchedTickNeeded(
     callback:
       | {
@@ -66,6 +74,8 @@ export interface JazzRnRuntimeBinding {
     valuesJson: string,
     writeContextJson: string | undefined,
   ): string;
+  acknowledgeRejectedBatch?(batchId: string): boolean;
+  sealBatch?(batchId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -168,6 +178,20 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
+  private requireBatchRecordMethod<
+    T extends
+      | "loadLocalBatchRecord"
+      | "loadLocalBatchRecords"
+      | "acknowledgeRejectedBatch"
+      | "sealBatch",
+  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
+    const runtimeMethod = this.binding[method];
+    if (!runtimeMethod) {
+      throw new Error(`${method} is not supported by this RN runtime binding`);
+    }
+    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
+  }
+
   insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
     try {
       const rowJson = this.binding.insert(
@@ -242,6 +266,24 @@ export class JazzRnRuntimeAdapter implements Runtime {
         write_context_json ?? undefined,
       );
       return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  loadLocalBatchRecord(batch_id: string): LocalBatchRecord | null {
+    try {
+      const recordJson = this.requireBatchRecordMethod("loadLocalBatchRecord")(batch_id);
+      return recordJson ? (JSON.parse(recordJson) as LocalBatchRecord) : null;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  loadLocalBatchRecords(): LocalBatchRecord[] {
+    try {
+      const recordsJson = this.requireBatchRecordMethod("loadLocalBatchRecords")();
+      return JSON.parse(recordsJson) as LocalBatchRecord[];
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -329,62 +371,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row> {
-    assertWorkerTier(tier);
-    const row = this.insert(table, values);
-    this.binding.flush();
-    return Promise.resolve(row);
-  }
-
-  insertDurableWithSession(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<Row> {
-    assertWorkerTier(tier);
-    const row = this.insertWithSession(table, values, write_context_json);
-    this.binding.flush();
-    return Promise.resolve(row);
-  }
-
-  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void> {
-    assertWorkerTier(tier);
-    this.update(object_id, values);
-    this.binding.flush();
-    return Promise.resolve();
-  }
-
-  updateDurableWithSession(
-    object_id: string,
-    values: Record<string, Value>,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void> {
-    assertWorkerTier(tier);
-    this.updateWithSession(object_id, values, write_context_json);
-    this.binding.flush();
-    return Promise.resolve();
-  }
-
-  deleteDurable(object_id: string, tier: string): Promise<void> {
-    assertWorkerTier(tier);
-    this.delete(object_id);
-    this.binding.flush();
-    return Promise.resolve();
-  }
-
-  deleteDurableWithSession(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void> {
-    assertWorkerTier(tier);
-    this.deleteWithSession(object_id, write_context_json);
-    this.binding.flush();
-    return Promise.resolve();
-  }
-
   onSyncMessageReceived(message_json: string, seq?: number | null): void {
     if (this.closed) return;
     this.binding.onSyncMessageReceived(message_json, seq);
@@ -421,6 +407,22 @@ export class JazzRnRuntimeAdapter implements Runtime {
         }
       },
     });
+  }
+
+  acknowledgeRejectedBatch(batch_id: string): boolean {
+    try {
+      return this.requireBatchRecordMethod("acknowledgeRejectedBatch")(batch_id);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  sealBatch(batch_id: string): void {
+    try {
+      this.requireBatchRecordMethod("sealBatch")(batch_id);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   addServer(_serverCatalogueStateHash?: string | null, _nextSyncSeq?: number | null): void {
