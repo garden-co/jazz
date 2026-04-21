@@ -255,10 +255,19 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     await openSettings(el);
 
+    await waitFor(
+      () =>
+        [...document.querySelectorAll<HTMLElement>('[data-slot="sheet-content"] button')].some(
+          (b) => b.textContent?.toLowerCase().includes("leave chat"),
+        ),
+      5000,
+      "Leave chat button should appear",
+    );
+
     // Click the "Leave chat" button
-    const leaveButton = [...document.querySelectorAll("button")].find((b) =>
-      b.textContent?.toLowerCase().includes("leave"),
-    ) as HTMLElement | undefined;
+    const leaveButton = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="sheet-content"] button'),
+    ].find((b) => b.textContent?.toLowerCase().includes("leave chat"));
     expect(leaveButton).toBeTruthy();
     await act(async () => simulateClick(leaveButton!));
 
