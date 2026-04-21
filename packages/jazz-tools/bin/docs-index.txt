@@ -3785,7 +3785,7 @@ See [Queries](/docs/reading/queries) for subscriptions, one-shot queries, and du
 }
 ```
 
-Use `insertDurable` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
+Use `db.insert(...).wait({ tier: "..." })` if you need confirmation that the write reached a specific [durability tier](/docs/reference/durability-tiers).
 
 If ownership can be transferred after creation, use an explicit `owner_id` column instead of `$createdBy`.
 
@@ -3825,13 +3825,7 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 ## Write tiers
 
-`insert`, `update`, and `delete` apply locally with no durability guarantee. Their `Durable` counterparts return promises that resolve when the requested tier acknowledges.
-
-Options:
-
-- `options.tier`: `"local"` \| `"edge"` \| `"global"`
-- Browser/client default: `"local"`
-- Backend/server default: `"edge"`
+`insert`, `update`, and `delete` apply locally with no durability guarantee, and return a write handle. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific durability tier.
 
 See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
 
@@ -4164,7 +4158,7 @@ fall back to surprise table scans.
 
 ### Deletion
 
-The user-facing `delete` and `deleteDurable` APIs perform a **soft delete**. The row is preserved in
+The user-facing `delete` API performs a **soft delete**. The row is preserved in
 history, but it disappears from ordinary live queries.
 
 Internally, the current visible state leaves the live `_id` index and can still be addressed
@@ -5412,7 +5406,7 @@ pub async fn clear_nullable_fields(
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
+When using `insert(...).wait({ tier })`, `update(...).wait({ tier })`, or `delete(...).wait({ tier })`, the tier controls how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
 
 | Tier     | Resolves when                       | 
 | -------- | ----------------------------------- | 

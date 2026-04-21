@@ -12,13 +12,7 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 ## Write tiers
 
-`insert`, `update`, and `delete` apply locally with no durability guarantee. Their `Durable` counterparts return promises that resolve when the requested tier acknowledges.
-
-Options:
-
-- `options.tier`: `"local"` \| `"edge"` \| `"global"`
-- Browser/client default: `"local"`
-- Backend/server default: `"edge"`
+`insert`, `update`, and `delete` apply locally with no durability guarantee, and return a write handle. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific durability tier.
 
 See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
 
@@ -26,11 +20,11 @@ See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detail
 
 Read durability controls when the **first result** of a query or subscription is delivered.
 
-| Option         | Values                              | Default        | What it does                                                                                                                                                                                                                                                                     |
-| -------------- | ----------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"local"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
-| `localUpdates` | `"immediate"` \| `"deferred"`       | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
-| `propagation`  | `"full"` \| `"local-only"`          | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
+| Option         | Values                              | Default                                                | What it does                                                                                                                                                                                                                                                                     |
+| -------------- | ----------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tier`         | `"local"` \| `"edge"` \| `"global"` | `"local"` (browser/client) / `"edge"` (backend/server) | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
+| `localUpdates` | `"immediate"` \| `"deferred"`       | `"immediate"`                                          | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
+| `propagation`  | `"full"` \| `"local-only"`          | `"full"`                                               | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
 These options apply to:
 

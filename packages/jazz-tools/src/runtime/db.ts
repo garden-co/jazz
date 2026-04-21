@@ -483,18 +483,6 @@ export class DbTransaction {
     this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
   }
 
-  private wrapPersistedWrite<T>(
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => this.client.localBatchRecord(pendingWrite.batchId()),
-      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   batchId(): string {
     return this.runtimeTransaction.batchId();
   }
@@ -520,23 +508,6 @@ export class DbTransaction {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
-  insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    this.ensureActive();
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeTransaction.createPersisted(table._table, values, options);
-    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
-      transformRow(row as Row, table._schema, table._table),
-    );
-  }
-
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     this.ensureActive();
     const updates = toUpdateRecord(
@@ -547,43 +518,10 @@ export class DbTransaction {
     return this.runtimeTransaction.update(id, updates);
   }
 
-  updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.ensureActive();
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeTransaction.updatePersisted(id, updates, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
-  }
-
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     return this.runtimeTransaction.delete(id);
-  }
-
-  deletePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.ensureActive();
-    this.assertOwnsTable(table, "DbTransaction");
-    const pendingWrite = this.runtimeTransaction.deletePersisted(id, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
   }
 
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
@@ -640,18 +578,6 @@ export class DbDirectBatch {
     );
   }
 
-  private wrapPersistedWrite<T>(
-    pendingWrite: RuntimePersistedWrite<Row | void>,
-    transformValue: (value: Row | void) => T,
-  ): DbPersistedWrite<T> {
-    return new DbPersistedWrite(
-      pendingWrite,
-      transformValue,
-      () => this.client.localBatchRecord(pendingWrite.batchId()),
-      () => this.client.acknowledgeRejectedBatch(pendingWrite.batchId()),
-    );
-  }
-
   batchId(): string {
     return this.runtimeBatch.batchId();
   }
@@ -667,22 +593,6 @@ export class DbDirectBatch {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
-  insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeBatch.createPersisted(table._table, values, options);
-    return this.wrapPersistedWrite(pendingWrite as RuntimePersistedWrite<Row | void>, (row) =>
-      transformRow(row as Row, table._schema, table._table),
-    );
-  }
-
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
@@ -692,40 +602,9 @@ export class DbDirectBatch {
     return this.runtimeBatch.update(id, updates);
   }
 
-  updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
-    const pendingWrite = this.runtimeBatch.updatePersisted(id, updates, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
-  }
-
   delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
     this.assertOwnsTable(table, "DbDirectBatch");
     return this.runtimeBatch.delete(id);
-  }
-
-  deletePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<void> {
-    this.assertOwnsTable(table, "DbDirectBatch");
-    const pendingWrite = this.runtimeBatch.deletePersisted(id, options);
-    return this.wrapPersistedWrite(
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -2247,45 +2126,6 @@ export class Db {
   }
 
   /**
-   * Insert a new row into a table and wait for durability at the requested tier.
-   *
-   * @param table Table proxy from generated app module
-   * @param data Init object with column values
-   * @param options Durability tier
-   * @returns Promise resolving to the inserted row
-   */
-  async insertDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options: CreateDurabilityOptions,
-  ): Promise<T> {
-    const client = this.getClient(table._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    await this.ensureBridgeReady();
-    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const row = await client.createDurable(table._table, values, options);
-    return transformRow(row, table._schema, table._table);
-  }
-
-  insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    const client = this.getClient(table._schema);
-    const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
-    const pendingWrite = client.createPersisted(table._table, values, options);
-    return this.wrapPersistedWrite(
-      client,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      (row) => transformRow(row as Row, table._schema, table._table),
-    );
-  }
-
-  /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    */
   upsert<T, Init>(
@@ -2296,24 +2136,6 @@ export class Db {
     const client = this.getClient(table._schema);
     const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     return client.upsert(table._table, values, options);
-  }
-
-  /**
-   * Create or update a row with a caller-supplied id and wait for durability.
-   */
-  async upsertDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Partial<Init>,
-    options: UpsertDurabilityOptions,
-  ): Promise<void> {
-    const client = this.getClient(table._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    await this.ensureBridgeReady();
-    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await client.upsertDurable(table._table, values, options);
   }
 
   /**
@@ -2328,41 +2150,6 @@ export class Db {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     return client.update(id, updates, options);
-  }
-
-  /**
-   * Update an existing row and wait for durability at the requested tier.
-   */
-  async updateDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: UpdateDurabilityOptions,
-  ): Promise<void> {
-    const client = this.getClient(table._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    await this.ensureBridgeReady();
-    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await client.updateDurable(id, updates, options);
-  }
-
-  updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: UpdateDurabilityOptions,
-  ): DbPersistedWrite<void> {
-    const client = this.getClient(table._schema);
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
-    const pendingWrite = client.updatePersisted(id, updates, options);
-    return this.wrapPersistedWrite(
-      client,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
-    );
   }
 
   /**
@@ -2835,26 +2622,6 @@ class ClientBackedDb extends Db {
       .mapValue((row) => transformRow(row, table._schema, table._table));
   }
 
-  override async insertDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options: CreateDurabilityOptions,
-  ): Promise<T> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const row = await this.runtimeClient.createDurableInternal(
-      table._table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-    );
-    return transformRow(row, table._schema, table._table);
-  }
-
   override upsert<T, Init>(
     table: TableProxy<T, Init>,
     data: Partial<Init>,
@@ -2872,50 +2639,6 @@ class ClientBackedDb extends Db {
       this.session,
       this.attribution,
       options.updatedAt,
-    );
-  }
-
-  override async upsertDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Partial<Init>,
-    options: UpsertDurabilityOptions,
-  ): Promise<void> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await this.runtimeClient.upsertDurableInternal(
-      table._table,
-      values,
-      options.id,
-      this.session,
-      this.attribution,
-      options,
-    );
-  }
-
-  override insertPersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: { tier?: DurabilityTier },
-  ): DbPersistedWrite<T> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const pendingWrite = this.runtimeClient.createPersistedInternal(
-      table._table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-    );
-    return this.wrapPersistedWrite(
-      this.runtimeClient,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      (row) => transformRow(row as Row, table._schema, table._table),
     );
   }
 
@@ -2937,54 +2660,6 @@ class ClientBackedDb extends Db {
       this.attribution,
       undefined,
       options?.updatedAt,
-    );
-  }
-
-  override async updateDurable<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: UpdateDurabilityOptions,
-  ): Promise<void> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await this.runtimeClient.updateDurableInternal(
-      id,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      options?.updatedAt,
-    );
-  }
-
-  override updatePersisted<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: Partial<Init>,
-    options?: UpdateDurabilityOptions,
-  ): DbPersistedWrite<void> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const pendingWrite = this.runtimeClient.updatePersistedInternal(
-      id,
-      updates,
-      this.session,
-      this.attribution,
-      options,
-      undefined,
-      options?.updatedAt,
-    );
-    return this.wrapPersistedWrite(
-      this.runtimeClient,
-      pendingWrite as RuntimePersistedWrite<Row | void>,
-      () => undefined,
     );
   }
 
