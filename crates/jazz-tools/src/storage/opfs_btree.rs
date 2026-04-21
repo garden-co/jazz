@@ -463,7 +463,10 @@ impl Storage for OpfsBTreeStorage {
 }
 
 fn map_storage_err(error: BTreeError) -> StorageError {
-    StorageError::IoError(format!("opfs-btree: {}", error))
+    match error {
+        BTreeError::SecurityError(msg) => StorageError::SecurityError(msg),
+        other => StorageError::IoError(format!("opfs-btree: {}", other)),
+    }
 }
 
 #[cfg(test)]
