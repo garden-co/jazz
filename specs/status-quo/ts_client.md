@@ -96,20 +96,66 @@ The current `Db` API centers around a small set of predictable operations:
 - `update(...)`
 - `delete(...)`
 - `subscribeAll(...)`
+- `beginDirectBatch(...)`
+- `beginTransaction(...)`
 
 There are also durable variants for callers that want to wait for a specific durability tier instead of stopping at local application.
+
+Simple write calls are just one-member direct batches under the hood.
+
+## Explicit Batch APIs
+
+For callers that want to group writes or opt into authority-decided transactions, the app surface
+now exposes explicit batch handles.
+
+At the runtime-client layer:
+
+- `client.beginDirectBatch()`
+- `client.beginTransaction()`
+- `client.localBatchRecord(batchId)`
+- `client.localBatchRecords()`
+- `client.acknowledgeRejectedBatch(batchId)`
+
+At the typed `Db` layer:
+
+- `db.beginDirectBatch(table)`
+- `db.beginTransaction(table)`
+
+The returned handles (`DirectBatch`, `Transaction`, `DbDirectBatch`, `DbTransaction`) reuse the
+same CRUD surface as normal writes, but with one shared logical `BatchId`.
+For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
+client/schema owns that handle.
+
+Transactional handles also expose transaction-scoped reads over their own staged rows:
+
+- `Transaction.query(...)`
+- `DbTransaction.all(...)`
+- `DbTransaction.one(...)`
+
+Transactional handles add the explicit completion step:
+
+- `tx.commit()` in TypeScript
+
+Persisted writes are batch-shaped too:
+
+- the handle exposes `batchId()`
+- `wait()` resolves when the requested replayable durability outcome is satisfied, or rejects if the batch is rejected
+- `localBatchRecord()` reloads retained local state
+- `acknowledgeRejectedBatch()` prunes retained rejected records once the app has handled them
 
 ## What App Code Does _Not_ Need to Care About
 
 The runtime still tracks engine-owned row information such as:
 
 - row ids
-- version ids
+- batch ids
 - branches
 - visibility state
 - durability tiers
 
 But those fields are not the normal surface application authors work with. The app-facing API stays table-first, while the runtime uses those engine fields to make local-first behavior reliable.
+
+For the lower-level runtime/storage story underneath these APIs, see [Batches](batches.md).
 
 ## Framework Bindings
 

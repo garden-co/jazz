@@ -84,15 +84,43 @@ That means:
 
 This separation keeps schema discovery explicit and prevents system metadata from pretending to be user table data.
 
+Permissions ride alongside that catalogue state instead of being baked into the
+structural schema snapshot. The runtime keeps:
+
+- structural schemas for branch/lens resolution
+- immutable permissions bundles keyed by object id
+- a current permissions head that selects the active bundle for a schema hash
+
+When the Schema Manager can resolve both the structural schema and the current
+permissions bundle, it merges them into an authorization schema and installs
+that into `QueryManager`.
+
 ## Client Mode and Server Mode
 
 ### Client mode
 
-A client usually has one current schema baked into the app bundle. The Schema Manager starts from that schema and keeps any reachable older schemas available for reads.
+A client usually has one current schema baked into the app bundle. The Schema
+Manager starts from that schema and keeps any reachable older schemas available
+for reads.
+
+If the client only boots with structural schema, it starts in
+`PermissiveLocal`. If its runtime schema envelope or rehydrated catalogue state
+includes a loaded permissions bundle, the manager switches the query layer into
+`Enforcing`.
 
 ### Server mode
 
-A server may learn schemas gradually from connected clients through catalogue sync. It can then answer queries for several client schema hashes at once without restarting or rebuilding the runtime from scratch.
+A server may learn schemas gradually from connected clients through catalogue
+sync. It can then answer queries for several client schema hashes at once
+without restarting or rebuilding the runtime from scratch.
+
+Dynamic servers boot in fail-closed mode even before they have learned the
+current permissions head. Once they receive a permissions head and its bundle,
+they keep enforcing with that authorization schema. An empty loaded bundle is
+still distinct from "no bundle loaded" and still means explicit grants only.
+
+The JS/native runtime schema wire payload now carries that loaded-bundle bit so
+an empty loaded bundle stays distinguishable from a structural-schema-only boot.
 
 ## Copy-on-Write Updates
 
@@ -100,7 +128,7 @@ If a client updates a row that was originally stored on an older schema branch, 
 
 1. load the row through the current schema view
 2. apply the user's update in the current schema
-3. write a new row version on the current schema branch
+3. write a new row batch entry on the current schema branch
 
 The old stored row history remains intact. The new visible row is written as a fresh flat visible
 record on the current schema branch.

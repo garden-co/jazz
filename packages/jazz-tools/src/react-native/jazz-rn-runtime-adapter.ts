@@ -1,6 +1,6 @@
-import type { InsertValues, WasmSchema } from "../drivers/types.js";
-import type { Row, Runtime } from "../runtime/client.js";
-import { OutboxDestinationKind } from "../runtime/sync-transport.js";
+import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
+import type { DirectInsertResult, DirectMutationResult, Row, Runtime } from "../runtime/client.js";
+import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 export type JazzRnErrorTag =
   | "InvalidJson"
@@ -20,15 +20,20 @@ export interface JazzRnRuntimeBinding {
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
   close(): void;
-  delete_(objectId: string): void;
-  deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
+  connect(url: string, authJson: string): void;
+  disconnect(): void;
+  updateAuth(authJson: string): void;
+  onAuthFailure(callback: { onFailure(reason: string): void }): void;
+  delete_(objectId: string): string;
+  deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
-  insert(table: string, valuesJson: string): string;
+  insert(table: string, valuesJson: string, objectId: string | undefined): string;
   insertWithSession?(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
+    objectId: string | undefined,
   ): string;
   onBatchedTickNeeded(
     callback:
@@ -39,18 +44,6 @@ export interface JazzRnRuntimeBinding {
   ): void;
   onSyncMessageReceived(messageJson: string, seq?: number | null): void;
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
-  onSyncMessageToSend(
-    callback:
-      | {
-          onSyncMessage(
-            destinationKind: OutboxDestinationKind,
-            destinationId: string,
-            payloadJson: string,
-            isCatalogue: boolean,
-          ): void;
-        }
-      | undefined,
-  ): void;
   query(queryJson: string, sessionJson: string | undefined, tier: string | undefined): string;
   removeServer(): void;
   setClientRole(clientId: string, role: string): void;
@@ -67,19 +60,19 @@ export interface JazzRnRuntimeBinding {
     tier: string | undefined,
   ): bigint;
   unsubscribe(handle: bigint): void;
-  update(objectId: string, valuesJson: string): void;
+  update(objectId: string, valuesJson: string): string;
   updateWithSession?(
     objectId: string,
     valuesJson: string,
     writeContextJson: string | undefined,
-  ): void;
+  ): string;
   uniffiDestroy?(): void;
 }
 
 function assertWorkerTier(tier: string): void {
-  if (tier !== "worker") {
+  if (tier !== "local") {
     throw new Error(
-      `jazz-rn runtime adapter currently supports only 'worker' tier for persisted mutations (received '${tier}')`,
+      `jazz-rn runtime adapter currently supports only 'local' tier for persisted mutations (received '${tier}')`,
     );
   }
 }
@@ -93,29 +86,6 @@ function swallowCallbackError(context: string, error: unknown): void {
   } catch {
     // Ignore logging failures.
   }
-}
-
-function isObjectNotFoundError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const maybeInner = (error as { inner?: { message?: unknown } }).inner;
-  const innerMessage =
-    maybeInner && typeof maybeInner === "object" ? maybeInner.message : undefined;
-  if (typeof innerMessage === "string" && innerMessage.includes("ObjectNotFound(")) {
-    return true;
-  }
-  const message = String(error);
-  return message.includes("ObjectNotFound(");
-}
-
-function swallowMissingObjectMutation(context: string, error: unknown): boolean {
-  if (!isObjectNotFoundError(error)) return false;
-  try {
-    // eslint-disable-next-line no-console
-    console.warn(`[jazz-rn] ${context}: object already missing, ignoring`, error);
-  } catch {
-    // Ignore logging failures.
-  }
-  return true;
 }
 
 function isJazzRnErrorLike(
@@ -164,26 +134,6 @@ function createErrorWithCause(message: string, cause: unknown): Error {
   }
 }
 
-function assertSyncMessageArgs(
-  destinationKind: unknown,
-  destinationId: unknown,
-  payloadJson: unknown,
-  isCatalogue: unknown,
-): asserts destinationKind is OutboxDestinationKind {
-  if (destinationKind !== "server" && destinationKind !== "client") {
-    throw new Error("Invalid RN sync callback destination kind");
-  }
-  if (typeof destinationId !== "string") {
-    throw new Error("Invalid RN sync callback destination id");
-  }
-  if (typeof payloadJson !== "string") {
-    throw new Error("Invalid RN sync callback payload");
-  }
-  if (typeof isCatalogue !== "boolean") {
-    throw new Error("Invalid RN sync callback catalogue flag");
-  }
-}
-
 export class JazzRnRuntimeAdapter implements Runtime {
   private readonly handleMap = new Map<number, bigint>();
   private closed = false;
@@ -218,67 +168,81 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
-  insert(table: string, values: InsertValues): Row {
+  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
     try {
-      const rowJson = this.binding.insert(table, JSON.stringify(values));
-      return JSON.parse(rowJson) as Row;
+      const rowJson = this.binding.insert(
+        table,
+        encodeFFIRecordToJson(values),
+        object_id ?? undefined,
+      );
+      return JSON.parse(rowJson) as DirectInsertResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
+  insertWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): DirectInsertResult {
     try {
       const rowJson = this.requireWriteContextMethod("insertWithSession")(
         table,
-        JSON.stringify(values),
+        encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
+        object_id ?? undefined,
       );
-      return JSON.parse(rowJson) as Row;
+      return JSON.parse(rowJson) as DirectInsertResult;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
   }
 
-  update(object_id: string, values: any): void {
+  update(object_id: string, values: Record<string, Value>): DirectMutationResult {
     try {
-      this.binding.update(object_id, JSON.stringify(values));
+      const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  updateWithSession(object_id: string, values: any, write_context_json?: string | null): void {
+  updateWithSession(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): DirectMutationResult {
     try {
-      this.requireWriteContextMethod("updateWithSession")(
+      const resultJson = this.requireWriteContextMethod("updateWithSession")(
         object_id,
-        JSON.stringify(values),
+        encodeFFIRecordToJson(values),
         write_context_json ?? undefined,
       );
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("update", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  delete(object_id: string): void {
+  delete(object_id: string): DirectMutationResult {
     try {
-      this.binding.delete_(object_id);
+      const resultJson = this.binding.delete_(object_id);
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("delete", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
 
-  deleteWithSession(object_id: string, write_context_json?: string | null): void {
+  deleteWithSession(object_id: string, write_context_json?: string | null): DirectMutationResult {
     try {
-      this.requireWriteContextMethod("deleteWithSession")(
+      const resultJson = this.requireWriteContextMethod("deleteWithSession")(
         object_id,
         write_context_json ?? undefined,
       );
+      return JSON.parse(resultJson) as DirectMutationResult;
     } catch (error) {
-      if (swallowMissingObjectMutation("delete", error)) return;
       throw normalizeJazzRnError(error);
     }
   }
@@ -384,7 +348,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve(row);
   }
 
-  updateDurable(object_id: string, values: any, tier: string): Promise<void> {
+  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
     this.binding.flush();
@@ -393,7 +357,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   updateDurableWithSession(
     object_id: string,
-    values: any,
+    values: Record<string, Value>,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void> {
@@ -426,19 +390,34 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.binding.onSyncMessageReceived(message_json, seq);
   }
 
-  onSyncMessageToSend(callback: Function): void {
-    this.binding.onSyncMessageToSend({
-      onSyncMessage: (
-        destinationKind: OutboxDestinationKind,
-        destinationId: string,
-        payloadJson: string,
-        isCatalogue: boolean,
-      ) => {
+  onSyncMessageToSend(_callback: Function): void {
+    // Server sync is handled by the Rust-owned WebSocket transport (runtime.connect()).
+    // The outbox callback is no longer wired through UniFFI for RN.
+  }
+
+  connect(url: string, authJson: string): void {
+    if (this.closed) return;
+    this.binding.connect(url, authJson);
+  }
+
+  disconnect(): void {
+    if (this.closed) return;
+    this.binding.disconnect();
+  }
+
+  updateAuth(authJson: string): void {
+    if (this.closed) return;
+    this.binding.updateAuth(authJson);
+  }
+
+  onAuthFailure(callback: (reason: string) => void): void {
+    if (this.closed) return;
+    this.binding.onAuthFailure({
+      onFailure: (reason: string) => {
         try {
-          assertSyncMessageArgs(destinationKind, destinationId, payloadJson, isCatalogue);
-          callback(destinationKind, destinationId, payloadJson, isCatalogue);
+          callback(reason);
         } catch (error) {
-          swallowCallbackError("sync message", error);
+          swallowCallbackError("onAuthFailure", error);
         }
       },
     });
@@ -478,7 +457,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.binding.onSyncMessageToSend(undefined);
     this.binding.onBatchedTickNeeded(undefined);
     this.handleMap.clear();
     try {

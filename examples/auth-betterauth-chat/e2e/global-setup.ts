@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { FullConfig } from "@playwright/test";
 import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
 
-const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
+const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const ADMIN_SECRET = process.env.ADMIN_SECRET!;
 const BACKEND_SECRET = process.env.BACKEND_SECRET!;
 const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;

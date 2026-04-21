@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
@@ -20,6 +20,17 @@ async function resolveWrappedConfig(
 ): Promise<NextConfigLike> {
   return wrapped(phase, { defaultConfig: {} });
 }
+
+// Managed-runtime writes NEXT_PUBLIC_JAZZ_APP_ID / NEXT_PUBLIC_JAZZ_SERVER_URL
+// to process.env on successful init; that state leaks across vitest workers in
+// the same thread pool and flips later tests onto the env-driven cloud branch.
+// Scrub before each test so every case starts from the same baseline.
+beforeEach(() => {
+  delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
+  delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.JAZZ_ADMIN_SECRET;
+  delete process.env.BACKEND_SECRET;
+});
 
 afterEach(async () => {
   await __resetJazzNextPluginForTests();
@@ -88,6 +99,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const wrapped = withJazz(
       { reactStrictMode: true },
@@ -102,9 +114,12 @@ describe("withJazz", () => {
     const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
     expect(healthResponse.ok).toBe(true);
 
-    const schemasResponse = await fetch(`http://127.0.0.1:${port}/schemas`, {
-      headers: { "X-Jazz-Admin-Secret": "next-test-admin" },
-    });
+    const schemasResponse = await fetch(
+      `http://127.0.0.1:${port}/apps/${resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID}/schemas`,
+      {
+        headers: { "X-Jazz-Admin-Secret": "next-test-admin" },
+      },
+    );
     expect(schemasResponse.ok).toBe(true);
 
     const body = (await schemasResponse.json()) as { hashes?: string[] };
@@ -113,6 +128,13 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBe(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID);
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+          `http://127.0.0.1:${port}`,
+        )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}&adminSecret=next-test-admin`,
+      ),
+    );
   }, 30_000);
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {

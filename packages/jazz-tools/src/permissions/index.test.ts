@@ -95,6 +95,20 @@ interface TeamWhere {
   identity_key?: string;
 }
 
+interface UserTeamEdge {
+  id: string;
+  user_id: string;
+  team: string;
+  administrator: boolean;
+}
+
+interface UserTeamEdgeWhere {
+  id?: string;
+  user_id?: string;
+  team?: string;
+  administrator?: boolean;
+}
+
 interface TeamTeamEdge {
   id: string;
   child_team: string;
@@ -170,6 +184,13 @@ class TeamQueryBuilder {
   }
 }
 
+class UserTeamEdgeQueryBuilder {
+  declare readonly _rowType: UserTeamEdge;
+  where(_input: UserTeamEdgeWhere): UserTeamEdgeQueryBuilder {
+    return this;
+  }
+}
+
 class TeamTeamEdgeQueryBuilder {
   declare readonly _rowType: TeamTeamEdge;
   where(_input: TeamTeamEdgeWhere): TeamTeamEdgeQueryBuilder {
@@ -189,6 +210,7 @@ const app = {
   projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
+  user_team_edges: new UserTeamEdgeQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
@@ -230,6 +252,19 @@ const app = {
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
         { name: "identity_key", column_type: { type: "Text" }, nullable: true },
+      ],
+    },
+    user_team_edges: {
+      columns: [
+        { name: "id", column_type: { type: "Uuid" }, nullable: false },
+        { name: "user_id", column_type: { type: "Text" }, nullable: false },
+        {
+          name: "team",
+          column_type: { type: "Uuid" },
+          nullable: false,
+          references: "teams",
+        },
+        { name: "administrator", column_type: { type: "Boolean" }, nullable: false },
       ],
     },
     team_team_edges: {
@@ -275,6 +310,7 @@ const appWithoutSchema = {
   projects: new ProjectQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
   teams: new TeamQueryBuilder(),
+  user_team_edges: new UserTeamEdgeQueryBuilder(),
   team_team_edges: new TeamTeamEdgeQueryBuilder(),
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
 };
@@ -946,6 +982,192 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("allows gather(...) to start from a same-table hop relation seed", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      const directParents = policy.team_team_edges
+        .where({ child_team: "team-a" })
+        .hopTo("parent_team");
+      relation = directParents.gather({
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected recursive relation to be initialized.");
+    }
+
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Project");
+    if (ir.seed.type !== "Project") {
+      throw new Error("Expected projected seed relation IR.");
+    }
+    expect(ir.seed.input.type).toBe("Filter");
+    if (ir.seed.input.type !== "Filter") {
+      throw new Error("Expected filtered hop seed relation IR.");
+    }
+    expect(ir.seed.input.input.type).toBe("Join");
+    if (ir.seed.input.input.type !== "Join") {
+      throw new Error("Expected hop seed join relation IR.");
+    }
+  });
+
+  it("allows gather(...) to start from a union of same-table relations", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      const directParents = policy.team_team_edges
+        .where({ child_team: "team-a" })
+        .hopTo("parent_team");
+      const adminReachableTeams = policy.teams.gather({
+        start: { kind: "individual" },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      relation = policy.union([directParents, adminReachableTeams]).gather({
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected recursive relation to be initialized.");
+    }
+
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Union");
+    if (ir.seed.type !== "Union") {
+      throw new Error("Expected union seed relation IR.");
+    }
+    expect(ir.seed.inputs).toHaveLength(2);
+    expect(ir.seed.inputs[0]?.type).toBe("Project");
+    expect(ir.seed.inputs[1]?.type).toBe("Gather");
+  });
+
+  it("supports qualified gather(...) start columns via implicit related-table joins", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      relation = policy.teams.gather({
+        start: { "team_team_edges.child_team": "team-a" },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected recursive relation to be initialized.");
+    }
+
+    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Gather");
+    if (ir.type !== "Gather") {
+      throw new Error("Expected gather relation IR.");
+    }
+    expect(ir.seed.type).toBe("Filter");
+    if (ir.seed.type !== "Filter") {
+      throw new Error("Expected filtered seed relation IR.");
+    }
+    expect(ir.seed.input.type).toBe("Join");
+    if (ir.seed.input.type !== "Join") {
+      throw new Error("Expected joined seed relation IR.");
+    }
+    expect(ir.seed.predicate).toEqual({
+      type: "Cmp",
+      left: { scope: "__join_0", column: "child_team" },
+      op: "Eq",
+      right: { type: "Literal", value: "team-a" },
+    });
+  });
+
+  it("compiles qualified allowRead.where(...) columns into implicit correlated exists relations", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where({
+        kind: "manual",
+        "user_team_edges.user_id": session.userId,
+        "user_team_edges.administrator": true,
+      } as Record<string, unknown>),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified rule predicate to compile to ExistsRel.");
+    }
+
+    const rel = toLegacyRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected outer correlation filter.");
+    }
+    expect(rel.predicate).toEqual({
+      type: "Cmp",
+      left: { scope: "teams", column: "id" },
+      op: "Eq",
+      right: { type: "RowId", source: "Outer" },
+    });
+    expect(rel.input.type).toBe("Filter");
+    if (rel.input.type !== "Filter") {
+      throw new Error("Expected qualified predicate filter.");
+    }
+    expect(rel.input.input.type).toBe("Join");
+    if (rel.input.input.type !== "Join") {
+      throw new Error("Expected implicit join for qualified rule predicate.");
+    }
+    expect(rel.input.predicate.type).toBe("And");
+    if (rel.input.predicate.type !== "And") {
+      throw new Error("Expected grouped qualified predicate filters.");
+    }
+    const predicateScopes = rel.input.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(expect.arrayContaining(["teams", "__join_0"]));
+  });
+
+  it("compiles qualified policy.<table>.exists.where(...) into ExistsRel", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where((team) =>
+        policy.user_team_edges.exists.where({
+          user_id: session.userId,
+          team: team.id,
+          "teams.kind": "manual",
+        } as Record<string, unknown>),
+      ),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified exists.where(...) to compile to ExistsRel.");
+    }
+
+    const rel = toLegacyRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected qualified exists relation filter.");
+    }
+    expect(rel.input.type).toBe("Join");
+    if (rel.input.type !== "Join") {
+      throw new Error("Expected qualified exists relation join.");
+    }
+    expect(rel.predicate.type).toBe("And");
+    if (rel.predicate.type !== "And") {
+      throw new Error("Expected qualified exists predicate group.");
+    }
+    const predicateScopes = rel.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(expect.arrayContaining(["user_team_edges", "__join_0"]));
+    expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
+  });
+
   it("compiles policy.exists(relation) to ExistsRel in definePermissions", () => {
     const compiled = definePermissions(app, ({ policy, session }) => {
       const reachableTeams = policy.teams.gather({
@@ -979,6 +1201,55 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("binds qualified gathered-hop filters to the hop alias for correlated exists", () => {
+    let relation: PermissionRelation | undefined;
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      const reachableTeams = policy.teams.gather({
+        start: {
+          kind: "individual",
+          identity_key: session.userId,
+        },
+        step: ({ current }) =>
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        maxDepth: 3,
+      });
+
+      return [
+        policy.todos.allowRead.where((todo) => {
+          relation = reachableTeams.hopTo("resource_access_edgesViaTeam").where({
+            "resource_access_edges.resource": todo.id,
+            grant_role: "viewer",
+          });
+
+          return policy.exists(relation);
+        }),
+      ];
+    });
+
+    expect(compiled.todos?.select?.using?.type).toBe("ExistsRel");
+    if (!relation) {
+      throw new Error("Expected correlated relation to be initialized.");
+    }
+
+    const rel = toLegacyRelExprForTest(relationToIr(relation));
+    expect(rel.type).toBe("Project");
+    if (rel.type !== "Project") {
+      throw new Error("Expected gathered-hop relation to project hop rows.");
+    }
+    expect(rel.input.type).toBe("Filter");
+    if (rel.input.type !== "Filter") {
+      throw new Error("Expected correlated gathered-hop relation to be filtered.");
+    }
+    expect(rel.input.predicate.type).toBe("And");
+    if (rel.input.predicate.type !== "And") {
+      throw new Error("Expected correlated gathered-hop predicate group.");
+    }
+
+    const predicateScopes = rel.input.predicate.exprs.map((expr: any) => expr.left?.scope);
+    expect(predicateScopes).toEqual(["__recursive_join_0", "__recursive_join_0"]);
+    expect(JSON.stringify(rel)).toContain('"type":"OuterColumn"');
+  });
+
   it("rejects invalid gather(...) step shapes", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => {
@@ -999,6 +1270,17 @@ describe("permissions DSL", () => {
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
     ).toThrow(/where condition bound to current/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => {
+        const reachableTeams = policy.teams.gather({
+          start: { "team_team_edges.id": session.userId },
+          step: ({ current }) =>
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        });
+        return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
+      }),
+    ).toThrow(/qualified.*start|ambiguous/i);
   });
 
   it("resolves allowedTo without Id suffix to the FK column", () => {

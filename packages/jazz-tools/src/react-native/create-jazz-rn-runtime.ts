@@ -1,7 +1,7 @@
 import jazzRn from "jazz-rn";
 import type { WasmSchema } from "../drivers/types.js";
 import type { DurabilityTier } from "../runtime/client.js";
-import { JazzRnRuntimeAdapter } from "./jazz-rn-runtime-adapter.js";
+import { type JazzRnRuntimeBinding, JazzRnRuntimeAdapter } from "./jazz-rn-runtime-adapter.js";
 
 export interface CreateJazzRnRuntimeOptions {
   schema: WasmSchema;
@@ -22,5 +22,5 @@ export function createJazzRnRuntime(options: CreateJazzRnRuntimeOptions): JazzRn
     options.dataPath,
   );
 
-  return new JazzRnRuntimeAdapter(runtime, options.schema);
+  return new JazzRnRuntimeAdapter(runtime as unknown as JazzRnRuntimeBinding, options.schema);
 }

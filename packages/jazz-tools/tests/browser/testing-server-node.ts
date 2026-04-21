@@ -1,5 +1,4 @@
 import type { BrowserContext, Route } from "playwright";
-
 type JazzNapiTestingServer = import("jazz-napi").TestingServer;
 
 interface StartedTestingServer {
@@ -9,7 +8,9 @@ interface StartedTestingServer {
   adminSecret: string;
 }
 
-let testingServerPromise: Promise<StartedTestingServer> | null = null;
+const DEFAULT_TESTING_SERVER_KEY = "__default__";
+const testingServerPromises = new Map<string, Promise<StartedTestingServer>>();
+const isolatedTestingServers = new Set<Promise<StartedTestingServer>>();
 const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
@@ -27,9 +28,9 @@ async function loadTestingServer(): Promise<typeof import("jazz-napi").TestingSe
   }
 }
 
-async function startTestingServer(): Promise<StartedTestingServer> {
+async function startTestingServer(appId?: string): Promise<StartedTestingServer> {
   const TestingServer = await loadTestingServer();
-  const server = await TestingServer.start();
+  const server = await TestingServer.start(appId ? { appId } : undefined);
   return {
     server,
     appId: server.appId,
@@ -38,49 +39,94 @@ async function startTestingServer(): Promise<StartedTestingServer> {
   };
 }
 
-async function getOrStartTestingServer(): Promise<StartedTestingServer> {
-  if (!testingServerPromise) {
-    testingServerPromise = startTestingServer().catch((error) => {
-      testingServerPromise = null;
+async function getOrStartTestingServer(appId?: string): Promise<StartedTestingServer> {
+  const key = appId ?? DEFAULT_TESTING_SERVER_KEY;
+  const existing = testingServerPromises.get(key);
+
+  if (!existing) {
+    const startedServer = startTestingServer(appId).catch((error) => {
+      testingServerPromises.delete(key);
       throw error;
     });
+    testingServerPromises.set(key, startedServer);
+    return startedServer;
   }
 
-  return testingServerPromise;
+  return existing;
 }
 
-export async function testingServerInfo(): Promise<{
+export async function testingServerInfo(appId?: string): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const { appId, serverUrl, adminSecret } = await getOrStartTestingServer();
-  return { appId, serverUrl, adminSecret };
+  const serverInfo = await getOrStartTestingServer(appId);
+  return {
+    appId: serverInfo.appId,
+    serverUrl: serverInfo.serverUrl,
+    adminSecret: serverInfo.adminSecret,
+  };
 }
 
 export async function testingServerJwtForUser(
   userId: string,
   claims?: Record<string, unknown>,
+  appId?: string,
 ): Promise<string> {
-  const { server } = await getOrStartTestingServer();
+  const { server } = await getOrStartTestingServer(appId);
   return server.jwtForUser(userId, claims);
 }
 
-export async function stopTestingServer(): Promise<void> {
-  const runningServer = testingServerPromise;
-  testingServerPromise = null;
+/**
+ * Starts a new isolated testing server and returns its info.
+ */
+export async function isolatedTestingServerInfo(): Promise<{
+  appId: string;
+  serverUrl: string;
+  adminSecret: string;
+}> {
+  const startedServerPromise = startTestingServer();
+  isolatedTestingServers.add(startedServerPromise);
 
-  if (!runningServer) {
+  try {
+    const { appId, serverUrl, adminSecret } = await startedServerPromise;
+    return { appId, serverUrl, adminSecret };
+  } catch (error) {
+    isolatedTestingServers.delete(startedServerPromise);
+    throw error;
+  }
+}
+
+export async function stopTestingServer(): Promise<void> {
+  const runningServers = [...testingServerPromises.values()];
+  testingServerPromises.clear();
+  const isolatedServerPromises = [...isolatedTestingServers];
+  isolatedTestingServers.clear();
+
+  if (runningServers.length === 0 && isolatedServerPromises.length === 0) {
     return;
   }
 
-  try {
-    const { server } = await runningServer;
-    await server.stop();
-  } catch {
-    // Swallow all errors: either startup never produced a server (nothing to stop),
-    // or stop() itself failed (nothing recoverable during teardown).
+  for (const runningServer of runningServers) {
+    try {
+      const { server } = await runningServer;
+      await server.stop();
+    } catch {
+      // Swallow all errors: either startup never produced a server (nothing to stop),
+      // or stop() itself failed (nothing recoverable during teardown).
+    }
   }
+
+  await Promise.all(
+    isolatedServerPromises.map(async (serverPromise) => {
+      try {
+        const { server } = await serverPromise;
+        await server.stop();
+      } catch {
+        // Same best-effort cleanup as the shared testing server.
+      }
+    }),
+  );
 }
 
 function testingServerUrlPattern(serverUrl: string): string {

@@ -6,6 +6,7 @@ use crate::sync_manager::QueryPropagation;
 pub struct ReadDurabilityOptions {
     pub tier: Option<DurabilityTier>,
     pub local_updates: LocalUpdates,
+    pub strict_transactions: bool,
 }
 
 impl Default for ReadDurabilityOptions {
@@ -13,6 +14,7 @@ impl Default for ReadDurabilityOptions {
         Self {
             tier: None,
             local_updates: LocalUpdates::Immediate,
+            strict_transactions: false,
         }
     }
 }
@@ -25,7 +27,7 @@ pub(super) struct PendingSubscription {
     pub propagation: QueryPropagation,
 }
 
-impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn allocate_subscription_handle(&mut self) -> SubscriptionHandle {
         let handle = SubscriptionHandle(self.next_subscription_handle);
         self.next_subscription_handle += 1;
@@ -46,6 +48,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 session,
                 durability.tier,
                 durability.local_updates,
+                durability.strict_transactions,
                 propagation,
             )
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
@@ -314,6 +317,46 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> QueryFuture {
+        self.query_with_overlay_rows(query, session, durability, propagation, HashMap::new())
+    }
+
+    pub fn query_with_local_overlay(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        overlay: QueryLocalOverlay,
+    ) -> QueryFuture {
+        let local_overlay_rows = if overlay.row_ids.is_empty() {
+            HashMap::new()
+        } else {
+            overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    (
+                        row_id,
+                        crate::sync_manager::RowBatchKey::new(
+                            row_id,
+                            overlay.branch_name,
+                            overlay.batch_id,
+                        ),
+                    )
+                })
+                .collect()
+        };
+        self.query_with_overlay_rows(query, session, durability, propagation, local_overlay_rows)
+    }
+
+    fn query_with_overlay_rows(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+        local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
+    ) -> QueryFuture {
         let _span = debug_span!(
             "query",
             table = query.table.as_str(),
@@ -326,12 +369,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let sub_id = match self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync_and_propagation_with_local_updates(
+            .subscribe_with_sync_and_propagation_with_local_overlay(
                 query,
                 session,
                 durability.tier,
-                durability.local_updates,
-                propagation,
+                crate::query_manager::subscriptions::SubscriptionExecutionOptions {
+                    local_updates: durability.local_updates,
+                    strict_transactions: durability.strict_transactions,
+                    propagation,
+                    local_overlay_rows,
+                },
             ) {
             Ok(id) => id,
             Err(e) => {

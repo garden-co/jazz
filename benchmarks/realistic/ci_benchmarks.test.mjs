@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { NATIVE_BENCHMARKS } from "./ci_benchmarks.mjs";
+import { ACTIVE_SKIP_MIN_OBSERVATIONS, NATIVE_BENCHMARKS, skipIds } from "./ci_benchmarks.mjs";
 import {
   buildNativeCriterionCommand,
   buildNativeExampleBaseCommand,
@@ -178,4 +178,67 @@ test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
   );
 
   assert.match(workflow, /pnpm --filter jazz-napi build/);
+});
+
+test("configured skips only activate after repeated timeout observations", () => {
+  const skipSet = {
+    entries: [
+      { id: "browser:b6", observations: ACTIVE_SKIP_MIN_OBSERVATIONS - 1 },
+      { id: "native:rocksdb:w1_interactive", observations: ACTIVE_SKIP_MIN_OBSERVATIONS },
+      { id: "native:sqlite:w1_interactive" },
+    ],
+  };
+
+  assert.deepEqual([...skipIds(skipSet)].sort(), ["native:rocksdb:w1_interactive"]);
+});
+
+test("trimmed CI scenarios keep their non-trivial topology", () => {
+  const w1Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/w1_interactive.json", import.meta.url), "utf8"),
+  );
+  const w4Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/w4_cold_start.json", import.meta.url), "utf8"),
+  );
+  const r4Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r4_fanout_updates.json", import.meta.url), "utf8"),
+  );
+  const r5Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r5_permission_recursive.json", import.meta.url), "utf8"),
+  );
+  const r6Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r6_permission_write_heavy.json", import.meta.url), "utf8"),
+  );
+  const r7Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r7_hotspot_history.json", import.meta.url), "utf8"),
+  );
+  const r8Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r8_many_branches.json", import.meta.url), "utf8"),
+  );
+  const r9Ci = JSON.parse(
+    readFileSync(new URL("./ci/scenarios/r9_subscribed_write_path.json", import.meta.url), "utf8"),
+  );
+  const browserHarness = readFileSync(
+    new URL("../../packages/jazz-tools/tests/browser/realistic-bench.test.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(w1Ci.operation_count, 10000);
+  assert.equal(w4Ci.reopen_cycles, 50);
+  assert.equal(r4Ci.operation_count, 4);
+  assert.deepEqual(r4Ci.fanout_clients, [10, 20]);
+  assert.equal(r5Ci.docs_per_folder, 16);
+  assert.equal(r5Ci.denied_docs, 64);
+  assert.equal(r5Ci.shared_chain_depth, 4);
+  assert.deepEqual(r5Ci.recursive_depths, [1, 3, 6]);
+  assert.equal(r6Ci.docs_per_folder, 16);
+  assert.equal(r6Ci.denied_docs, 64);
+  assert.equal(r6Ci.shared_chain_depth, 4);
+  assert.deepEqual(r6Ci.recursive_depths, [1, 3, 6]);
+  assert.equal(r7Ci.operation_count, 512);
+  assert.equal(r7Ci.hot_task_count, 10);
+  assert.equal(r8Ci.branch_count, 1000);
+  assert.equal(r8Ci.commits_per_branch, 4);
+  assert.equal(r8Ci.merge_fanin, 8);
+  assert.equal(r9Ci.scale, 128);
+  assert.match(browserHarness, /b6UpdateCount:\s*6000\b/);
 });

@@ -4,11 +4,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
-use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::row_histories::{QueryRowVersion, RowVisibilityChange, StoredRowVersion};
+use crate::row_histories::{BatchId, QueryRowBatch, RowState, RowVisibilityChange, StoredRowBatch};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
     translate_table_name_to_schema,
@@ -16,18 +16,19 @@ use crate::schema_manager::{
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    SchemaWarning, SyncManager,
+    RowBatchKey, SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::policy::Operation;
+use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, Schema,
-    SchemaHash, TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
+    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, RowPolicyMode,
+    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
+    build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -57,6 +58,12 @@ pub enum QueryError {
     RowHardDeleted(ObjectId),
     /// Policy denied the operation.
     PolicyDenied {
+        table: TableName,
+        operation: Operation,
+    },
+    /// Write denied because the session is anonymous.
+    /// Short-circuited before policy evaluation; surfaces as ANONYMOUS_WRITE_DENIED on the wire.
+    AnonymousWriteDenied {
         table: TableName,
         operation: Operation,
     },
@@ -94,6 +101,13 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
+            QueryError::AnonymousWriteDenied { table, operation } => {
+                write!(
+                    f,
+                    "anonymous session cannot {} on table {}",
+                    operation, table
+                )
+            }
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
@@ -123,8 +137,8 @@ pub struct QueryHandle(pub u64);
 pub struct InsertResult {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// Version ID of the row data.
-    pub row_version_id: CommitId,
+    /// Logical batch identity for the written row member.
+    pub batch_id: BatchId,
     /// Inserted row values in table column order.
     pub row_values: Vec<Value>,
 }
@@ -134,8 +148,8 @@ pub struct InsertResult {
 pub struct DeleteHandle {
     /// The row's ObjectId.
     pub row_id: ObjectId,
-    /// Version ID of the delete tombstone row.
-    pub delete_version_id: CommitId,
+    /// Logical batch identity for the tombstone row member.
+    pub batch_id: BatchId,
 }
 
 impl InsertResult {
@@ -143,7 +157,7 @@ impl InsertResult {
     ///
     /// Must call `QueryManager::process()` between checks to drive storage operations.
     pub fn is_complete(&self, qm: &QueryManager, storage: &dyn Storage) -> bool {
-        qm.is_version_stored(storage, self.row_id, &self.row_version_id)
+        qm.is_version_stored(storage, self.row_id, &self.batch_id)
     }
 
     /// Check if the row is indexed (appears in the _id index).
@@ -174,19 +188,30 @@ pub(crate) struct QuerySubscription {
     pub(crate) durability_tier: Option<DurabilityTier>,
     /// How local writes behave while waiting for durability.
     pub(crate) local_updates: LocalUpdates,
+    /// Whether accepted transactional batches must be complete for the
+    /// query's current local scope before becoming visible.
+    pub(crate) strict_transactions: bool,
     /// True when this subscription observed a local write since last delivery.
     pub(crate) has_pending_local_updates: bool,
     /// Row ids that should use the local current version as an overlay while
     /// waiting for a stricter settled tier.
     pub(crate) pending_local_row_ids: HashSet<ObjectId>,
+    /// Optional one-shot overlay keyed by row id for a specific local batch.
+    /// When present, reads must not fall back to unrelated pending local rows.
+    pub(crate) local_overlay_rows: HashMap<ObjectId, RowBatchKey>,
     /// True once the initial upstream query frontier has been replayed.
     pub(crate) query_frontier_complete: bool,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
     pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
+    /// Extra tables whose rows must be available locally to evaluate this
+    /// subscription's bundled policy context.
+    pub(crate) policy_context_tables: Vec<String>,
     /// Whether this subscription uses post-settle auth filtering instead of graph policies.
     pub(crate) uses_explicit_authorization_filtering: bool,
+    /// Whether visible rows must stay aligned to the latest upstream query scope.
+    pub(crate) sync_backed: bool,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
     /// Schema mismatch warnings already emitted for the latest settled state.
@@ -226,6 +251,7 @@ pub struct QueryUpdate {
 #[derive(Debug, Clone)]
 pub struct QuerySubscriptionFailure {
     pub subscription_id: QuerySubscriptionId,
+    pub code: String,
     pub reason: String,
 }
 
@@ -240,6 +266,17 @@ pub(super) struct PolicyCheckState {
     pub(super) branch: BranchName,
     /// The original pending permission check.
     pub(super) pending_check: PendingPermissionCheck,
+}
+
+#[derive(Debug)]
+pub(super) struct WriteTableCacheEntry {
+    pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) row_locator: RowLocator,
+    pub(super) insert_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) update_check_policy: Option<Arc<PolicyExpr>>,
+    pub(super) delete_using_policy: Option<Arc<PolicyExpr>>,
+    pub(super) select_policy: Option<Arc<PolicyExpr>>,
 }
 
 /// Server-side query subscription state.
@@ -258,6 +295,9 @@ pub(super) struct ServerQuerySubscription {
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
     pub(super) branches: Vec<String>,
+    /// Extra tables whose rows must be synced so downstream clients can
+    /// reproduce bundled policy context locally.
+    pub(super) policy_context_tables: Vec<String>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -346,6 +386,7 @@ pub struct CatalogueUpdate {
 pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
+    pub(super) row_policy_mode: RowPolicyMode,
     pub(super) authorization_schema: Option<Arc<Schema>>,
     pub(super) authorization_schema_required: bool,
 
@@ -383,21 +424,48 @@ pub struct QueryManager {
     /// These are retried when new schemas activate via try_activate_pending().
     pub(super) pending_row_visibility_changes: Vec<RowVisibilityChange>,
 
-    /// Latest locally-authored row version per row id.
+    /// Latest locally-authored row batch entry per row id.
     ///
     /// Used to let `local_updates = Immediate` queries fall back to the current
-    /// local row version when the requested remote durability tier has not been
+    /// local row batch entry when the requested remote durability tier has not been
     /// reached yet.
-    pub(super) pending_local_row_versions: HashMap<ObjectId, CommitId>,
+    pub(super) pending_local_row_batches: HashMap<ObjectId, RowBatchKey>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
     pub(super) known_schemas: Arc<HashMap<SchemaHash, Schema>>,
+
+    /// Schema hashes that still need catalogue persistence for the current
+    /// storage namespace.
+    pub(super) pending_catalogue_schema_hashes: HashSet<SchemaHash>,
+
+    /// Storage namespaces where all live schemas have already been upserted
+    /// into the catalogue for this manager.
+    pub(super) catalogued_storage_namespaces: HashSet<usize>,
+
+    /// Application id for catalogue schema persistence, when available.
+    pub(super) catalogue_app_id: Option<String>,
+
+    /// Per-schema, per-table write metadata cached to avoid cloning policy
+    /// trees and descriptors on every hot write.
+    pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
 }
 
 impl QueryManager {
+    fn mark_schema_catalogue_dirty(&mut self, schema_hash: SchemaHash) {
+        self.pending_catalogue_schema_hashes.insert(schema_hash);
+        self.catalogued_storage_namespaces.clear();
+    }
+
+    fn mark_all_live_schemas_catalogue_dirty(&mut self) {
+        for schema_hash in self.schema_context.all_live_hashes() {
+            self.pending_catalogue_schema_hashes.insert(schema_hash);
+        }
+        self.catalogued_storage_namespaces.clear();
+    }
+
     pub(super) fn finalize_schema_warnings(
         reported: &mut HashSet<SchemaWarningKey>,
         warnings: Vec<SchemaWarning>,
@@ -450,6 +518,7 @@ impl QueryManager {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
+            row_policy_mode: RowPolicyMode::PermissiveLocal,
             authorization_schema: None,
             authorization_schema_required: false,
             pending_catalogue_updates: Vec::new(),
@@ -462,9 +531,18 @@ impl QueryManager {
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_visibility_changes: Vec::new(),
-            pending_local_row_versions: HashMap::new(),
+            pending_local_row_batches: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
+            pending_catalogue_schema_hashes: HashSet::new(),
+            catalogued_storage_namespaces: HashSet::new(),
+            catalogue_app_id: None,
+            write_table_cache: HashMap::new(),
         }
+    }
+
+    pub fn set_catalogue_app_id(&mut self, app_id: impl Into<String>) {
+        self.catalogue_app_id = Some(app_id.into());
+        self.catalogued_storage_namespaces.clear();
     }
 
     /// Set the current schema (the one this client writes to).
@@ -472,11 +550,32 @@ impl QueryManager {
     /// Must be called before queries. Can only be called once.
     /// Creates indices for the current schema's branch.
     pub fn set_current_schema(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        let row_policy_mode = if Self::schema_has_any_explicit_policies(&schema) {
+            RowPolicyMode::Enforcing
+        } else {
+            RowPolicyMode::PermissiveLocal
+        };
+        self.set_current_schema_with_policy_mode(schema, env, user_branch, row_policy_mode);
+    }
+
+    pub fn set_current_schema_with_policy_mode(
+        &mut self,
+        schema: Schema,
+        env: &str,
+        user_branch: &str,
+        row_policy_mode: RowPolicyMode,
+    ) {
         self.schema_context
             .set_current(schema.clone(), env, user_branch);
         self.schema = Arc::new(schema.clone());
-        self.authorization_schema = Some(Arc::new(schema.clone()));
-        self.authorization_schema_required = true;
+        self.row_policy_mode = row_policy_mode;
+        self.authorization_schema = if matches!(row_policy_mode, RowPolicyMode::Enforcing) {
+            Some(Arc::new(schema.clone()))
+        } else {
+            None
+        };
+        self.authorization_schema_required = false;
+        self.write_table_cache.clear();
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -484,16 +583,29 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
+        self.pending_catalogue_schema_hashes.clear();
+        self.mark_schema_catalogue_dirty(self.schema_context.current_hash);
     }
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
+        self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
     }
 
     pub fn require_authorization_schema(&mut self) {
+        self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_authorization_state(&self) -> (RowPolicyMode, bool, bool) {
+        (
+            self.row_policy_mode,
+            self.authorization_schema_required,
+            self.authorization_schema.is_some(),
+        )
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -524,6 +636,7 @@ impl QueryManager {
         // Update branch -> schema hash map
         self.branch_schema_map
             .insert(branch.as_str().to_string(), hash);
+        self.mark_schema_catalogue_dirty(hash);
 
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
@@ -550,6 +663,7 @@ impl QueryManager {
 
                     self.branch_schema_map
                         .insert(branch.as_str().to_string(), hash);
+                    self.mark_schema_catalogue_dirty(hash);
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -561,8 +675,15 @@ impl QueryManager {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+        row_policy_mode: RowPolicyMode,
     ) -> Result<QueryGraph, QueryCompileError> {
-        QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
+        QueryGraph::try_compile_with_schema_context(
+            query,
+            schema,
+            session,
+            schema_context,
+            row_policy_mode,
+        )
     }
 
     pub(super) fn local_subscription_uses_explicit_authorization(
@@ -592,6 +713,12 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn schema_has_any_explicit_policies(schema: &Schema) -> bool {
+        schema
+            .values()
+            .any(|table_schema| table_schema.policies.has_any_explicit_policy())
+    }
+
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
@@ -605,44 +732,58 @@ impl QueryManager {
     }
 
     pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
     ) -> Result<(), StorageError> {
         if !self.schema_context.is_initialized() {
             return Ok(());
         }
 
-        let mut known_schemas = Vec::with_capacity(self.schema_context.live_schemas.len() + 1);
-        known_schemas.push((
-            self.schema_context.current_hash,
-            self.schema_context.current_schema.clone(),
-        ));
-        known_schemas.extend(
-            self.schema_context
-                .live_schemas
-                .iter()
-                .map(|(hash, schema)| (*hash, schema.clone())),
-        );
-
-        for (schema_hash, schema) in known_schemas {
-            let object_id = schema_hash.to_object_id();
-            if storage.load_catalogue_entry(object_id)?.is_some() {
-                continue;
-            }
-
-            storage.upsert_catalogue_entry(&CatalogueEntry {
-                object_id,
-                metadata: HashMap::from([
-                    (
-                        MetadataKey::Type.to_string(),
-                        ObjectType::CatalogueSchema.to_string(),
-                    ),
-                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-                ]),
-                content: encode_schema(&schema),
-            })?;
+        let storage_namespace = storage.storage_cache_namespace();
+        if !self
+            .catalogued_storage_namespaces
+            .contains(&storage_namespace)
+        {
+            self.mark_all_live_schemas_catalogue_dirty();
+        }
+        if self.pending_catalogue_schema_hashes.is_empty() {
+            return Ok(());
         }
 
+        let mut pending_hashes = self
+            .pending_catalogue_schema_hashes
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        pending_hashes.sort_by_key(|schema_hash| schema_hash.to_string());
+
+        for schema_hash in pending_hashes {
+            let Some(schema) = self.schema_context.get_schema(&schema_hash) else {
+                self.pending_catalogue_schema_hashes.remove(&schema_hash);
+                continue;
+            };
+            let object_id = schema_hash.to_object_id();
+            let mut metadata = storage
+                .load_catalogue_entry(object_id)?
+                .map(|entry| entry.metadata)
+                .unwrap_or_default();
+            metadata.insert(
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            );
+            metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
+            if let Some(app_id) = &self.catalogue_app_id {
+                metadata.insert(MetadataKey::AppId.to_string(), app_id.clone());
+            }
+            storage.upsert_catalogue_entry(&CatalogueEntry {
+                object_id,
+                metadata,
+                content: encode_schema(schema),
+            })?;
+            self.pending_catalogue_schema_hashes.remove(&schema_hash);
+        }
+
+        self.catalogued_storage_namespaces.insert(storage_namespace);
         Ok(())
     }
 
@@ -683,15 +824,24 @@ impl QueryManager {
                 };
 
                 // Recompile the graph
+                let compile_row_policy_mode = if uses_explicit_authorization_filtering {
+                    RowPolicyMode::PermissiveLocal
+                } else {
+                    self.row_policy_mode
+                };
                 match Self::compile_graph(
                     &sub.query,
                     &compile_schema,
                     sub.session.clone(),
                     &current_schema_context,
+                    compile_row_policy_mode,
                 ) {
                     Ok(new_graph) => {
+                        let policy_context_tables =
+                            Self::policy_context_tables_for_graph(&new_graph);
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.policy_context_tables = policy_context_tables;
                         sub.uses_explicit_authorization_filtering =
                             uses_explicit_authorization_filtering;
                         sub.needs_recompile = false;
@@ -718,6 +868,7 @@ impl QueryManager {
                 .unwrap_or(QueryPropagation::Full);
             self.failed_subscriptions.push(QuerySubscriptionFailure {
                 subscription_id: sub_id,
+                code: "query_recompile_failed".to_string(),
                 reason: reason.clone(),
             });
             if propagation == QueryPropagation::Full {
@@ -727,7 +878,8 @@ impl QueryManager {
             }
         }
 
-        let mut failed_server: Vec<(ClientId, QueryId, String, QueryPropagation)> = Vec::new();
+        let mut failed_server: Vec<(ClientId, QueryId, String, String, QueryPropagation)> =
+            Vec::new();
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
@@ -750,6 +902,7 @@ impl QueryManager {
                     &compile_schema,
                     sub.session.clone(),
                     &sub.schema_context,
+                    RowPolicyMode::PermissiveLocal,
                 ) {
                     Ok(new_graph) => {
                         sub.branches = Self::resolved_server_query_branches(
@@ -767,13 +920,19 @@ impl QueryManager {
                             error = %reason,
                             "server subscription stale recompile failed; dropping subscription"
                         );
-                        failed_server.push((*client_id, *query_id, reason, sub.propagation));
+                        failed_server.push((
+                            *client_id,
+                            *query_id,
+                            "query_recompile_failed".to_string(),
+                            reason,
+                            sub.propagation,
+                        ));
                     }
                 }
             }
         }
 
-        for (client_id, query_id, reason, propagation) in failed_server {
+        for (client_id, query_id, code, reason, propagation) in failed_server {
             self.server_subscriptions.remove(&(client_id, query_id));
             self.sync_manager
                 .drop_client_query_subscription(client_id, query_id);
@@ -784,6 +943,7 @@ impl QueryManager {
             self.sync_manager.emit_query_subscription_rejected(
                 client_id,
                 query_id,
+                code,
                 format!(
                     "query recompilation failed for query_id {}: {}",
                     query_id.0, reason
@@ -795,6 +955,28 @@ impl QueryManager {
     /// Get the schema context.
     pub fn schema_context(&self) -> &SchemaContext {
         &self.schema_context
+    }
+
+    fn process_pending_query_rejections(&mut self) {
+        for rejection in self.sync_manager.take_pending_query_rejections() {
+            let sub_id = QuerySubscriptionId(rejection.query_id.0);
+            if !self.subscriptions.contains_key(&sub_id) {
+                tracing::warn!(
+                    sub_id = sub_id.0,
+                    code = %rejection.code,
+                    error = %rejection.reason,
+                    "received rejection for unknown local subscription"
+                );
+                continue;
+            }
+
+            self.unsubscribe_with_sync(sub_id);
+            self.failed_subscriptions.push(QuerySubscriptionFailure {
+                subscription_id: sub_id,
+                code: rejection.code,
+                reason: rejection.reason,
+            });
+        }
     }
 
     /// Get the current branch name for writes.
@@ -945,6 +1127,8 @@ impl QueryManager {
             }
         }
 
+        self.process_pending_query_rejections();
+
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.
 
@@ -984,18 +1168,26 @@ impl QueryManager {
                 let branch_schema_map = &self.branch_schema_map;
                 let row_loader =
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
-                        let durability_tier = if subscription.settled_once
+                        let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
-                            && subscription.pending_local_row_ids.contains(&id)
+                            && !self
+                                .sync_manager
+                                .has_remote_query_scope_snapshot(QueryId(sub_id.0));
+                        let durability_tier = if lacks_authoritative_remote_scope
+                            || (subscription.local_updates == LocalUpdates::Immediate
+                                && subscription.pending_local_row_ids.contains(&id))
                         {
                             None
                         } else {
                             subscription.durability_tier
                         };
-                        let local_pending_version = (subscription.local_updates
-                            == LocalUpdates::Immediate)
-                            .then(|| self.pending_local_row_versions.get(&id).copied())
-                            .flatten();
+                        let local_pending_version = if !subscription.local_overlay_rows.is_empty() {
+                            subscription.local_overlay_rows.get(&id).copied()
+                        } else {
+                            (subscription.local_updates == LocalUpdates::Immediate)
+                                .then(|| self.pending_local_row_batches.get(&id).copied())
+                                .flatten()
+                        };
                         Self::load_visible_row_for_query(
                             storage_ref,
                             id,
@@ -1003,6 +1195,7 @@ impl QueryManager {
                             &branches,
                             durability_tier,
                             local_pending_version,
+                            !subscription.local_overlay_rows.is_empty(),
                             include_deleted,
                             schema_context,
                             branch_schema_map,
@@ -1030,150 +1223,120 @@ impl QueryManager {
                 );
             }
 
-            if !subscription.settled_once && !subscription.query_frontier_complete {
+            if !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
                 // Graph state updated by settle(), but don't deliver until the
-                // initial upstream frontier has been replayed.
+                // initial upstream frontier has been replayed — or until every
+                // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
+                // which means nothing upstream is going to replay.
                 tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
 
-            if subscription.uses_explicit_authorization_filtering {
+            let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                let visible_rows = self.authorized_rows_from_graph(
+                self.authorized_tuples_from_graph(
                     storage_ref,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,
                     subscription.session.as_ref(),
-                );
-                let visible_rows_by_id: HashMap<_, _> = visible_rows
-                    .iter()
-                    .cloned()
-                    .map(|row| (row.id, row))
-                    .collect();
-                let visible_delta = Self::row_delta_from_rows(
-                    &subscription.current_visible_rows,
-                    &subscription.current_ordered_ids,
-                    &visible_rows,
-                );
-                let ordered_ids_after: Vec<ObjectId> =
-                    visible_rows.iter().map(|row| row.id).collect();
-
-                if !subscription.settled_once {
-                    subscription.settled_once = true;
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &visible_delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    subscription.current_visible_rows = visible_rows_by_id;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = visible_delta.added.len(),
-                        "first delivery (snapshot)"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: visible_delta,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                } else if !visible_delta.is_empty() {
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &visible_delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    subscription.current_visible_rows = visible_rows_by_id;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = visible_delta.added.len(),
-                        removed = visible_delta.removed.len(),
-                        updated = visible_delta.updated.len(),
-                        "incremental delivery"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: visible_delta,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                }
+                )
             } else {
-                subscription.current_visible_rows.clear();
-                if !subscription.settled_once {
-                    // First delivery — full current state snapshot
-                    subscription.settled_once = true;
-                    let full_result = subscription.graph.current_result_as_delta();
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &full_result,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    // Always emit the first snapshot once tier is satisfied, even if empty.
-                    // This guarantees one-shot queries can resolve to [] instead of hanging.
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = full_result.added.len(),
-                        "first delivery (snapshot)"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: full_result,
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                } else if !delta.is_empty() {
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
-                    let ordered = build_ordered_delta_with_post_ids(
-                        &subscription.current_ordered_ids,
-                        &ordered_ids_after,
-                        &delta,
-                        false,
-                    );
-                    subscription.current_ordered_ids = ordered.ordered_ids_after;
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = delta.added.len(),
-                        removed = delta.removed.len(),
-                        updated = delta.updated.len(),
-                        "incremental delivery"
-                    );
-                    // Incremental delivery
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: sub_id,
-                        delta: delta.clone(),
-                        ordered_delta: ordered.delta,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                    subscription.has_pending_local_updates = false;
-                    subscription.pending_local_row_ids.clear();
-                }
+                subscription.graph.current_output_tuples()
+            };
+
+            if subscription.sync_backed
+                && subscription.query_frontier_complete
+                && self
+                    .sync_manager
+                    .has_remote_query_scope_snapshot(QueryId(sub_id.0))
+                && (subscription.propagation == QueryPropagation::Full
+                    || !self.sync_manager.has_durability_identity())
+            {
+                visible_tuples = self.filter_synced_query_scope_tuples(
+                    QueryId(sub_id.0),
+                    &subscription.pending_local_row_ids,
+                    visible_tuples,
+                );
+            }
+
+            if subscription.strict_transactions {
+                visible_tuples = self.filter_strict_transaction_tuples(
+                    storage_ref,
+                    QueryId(sub_id.0),
+                    visible_tuples,
+                );
+            }
+
+            let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
+            let visible_rows_by_id: HashMap<_, _> = visible_rows
+                .iter()
+                .cloned()
+                .map(|row| (row.id, row))
+                .collect();
+            let visible_delta = Self::row_delta_from_rows(
+                &subscription.current_visible_rows,
+                &subscription.current_ordered_ids,
+                &visible_rows,
+            );
+            let ordered_ids_after: Vec<ObjectId> = visible_rows.iter().map(|row| row.id).collect();
+
+            if !subscription.settled_once {
+                subscription.settled_once = true;
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &visible_delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
+                subscription.current_visible_rows = visible_rows_by_id;
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = visible_delta.added.len(),
+                    "first delivery (snapshot)"
+                );
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: sub_id,
+                    delta: visible_delta,
+                    ordered_delta: ordered.delta,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
+                });
+                subscription.has_pending_local_updates = false;
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
+            } else if !visible_delta.is_empty() {
+                let ordered = build_ordered_delta_with_post_ids(
+                    &subscription.current_ordered_ids,
+                    &ordered_ids_after,
+                    &visible_delta,
+                    false,
+                );
+                subscription.current_ordered_ids = ordered.ordered_ids_after;
+                subscription.current_visible_rows = visible_rows_by_id;
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = visible_delta.added.len(),
+                    removed = visible_delta.removed.len(),
+                    updated = visible_delta.updated.len(),
+                    "incremental delivery"
+                );
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: sub_id,
+                    delta: visible_delta,
+                    ordered_delta: ordered.delta,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
+                });
+                subscription.has_pending_local_updates = false;
+                subscription
+                    .pending_local_row_ids
+                    .retain(|id| self.pending_local_row_batches.contains_key(id));
             }
 
             self.subscriptions.insert(sub_id, subscription);
@@ -1270,19 +1433,21 @@ impl QueryManager {
 
         let descriptor = table_schema.columns.clone();
         let old_row = update.previous_row.as_ref();
-        let current_version_id = update.row.version_id();
+        let current_batch_id = update.row.batch_id;
+        let current_row_key = RowBatchKey::from_row(&update.row);
 
         if local_update {
-            self.pending_local_row_versions
-                .insert(update.object_id, current_version_id);
-        } else if let Some(pending_version_id) = self
-            .pending_local_row_versions
+            self.pending_local_row_batches
+                .insert(update.object_id, current_row_key);
+        } else if let Some(pending_row_key) = self
+            .pending_local_row_batches
             .get(&update.object_id)
             .copied()
-            && (pending_version_id != current_version_id
+            && (pending_row_key.branch_name.as_str() == update.row.branch.as_str())
+            && (pending_row_key.batch_id != current_batch_id
                 || update.row.confirmed_tier == Some(DurabilityTier::GlobalServer))
         {
-            self.pending_local_row_versions.remove(&update.object_id);
+            self.pending_local_row_batches.remove(&update.object_id);
         }
 
         if self.visible_row_is_hard_deleted(storage, update.object_id, &update.row.branch)
@@ -1361,7 +1526,7 @@ impl QueryManager {
             return;
         }
 
-        let was_soft_deleted = old_row.is_some_and(StoredRowVersion::is_soft_deleted);
+        let was_soft_deleted = old_row.is_some_and(StoredRowBatch::is_soft_deleted);
         let new_data = &update.row.data;
 
         if was_soft_deleted {
@@ -1396,7 +1561,7 @@ impl QueryManager {
             return;
         }
 
-        if old_row.is_none() || update.is_new_object {
+        if old_row.is_none() {
             if apply_index_mutations
                 && let Err(error) = Self::update_indices_for_insert_on_branch(
                     storage,
@@ -1411,7 +1576,8 @@ impl QueryManager {
                     table = branch_table,
                     branch,
                     object_id = %update.object_id,
-                    %error,
+                    index_column = error.column.as_str(),
+                    error = %error.source,
                     "failed to update indices for synced insert"
                 );
             }
@@ -1552,11 +1718,17 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn clear_local_pending_row_overlay(&mut self, table: &str, id: ObjectId) {
+        self.pending_local_row_batches.remove(&id);
+        self.mark_subscriptions_dirty_local(table);
+        self.mark_local_row_updated_in_subscriptions(table, id);
+    }
+
     fn load_row_locator(storage: &dyn Storage, row_id: ObjectId) -> Option<RowLocator> {
         storage.load_row_locator(row_id).ok().flatten()
     }
 
-    pub(super) fn load_best_visible_row_version(
+    pub(super) fn load_best_visible_row_batch(
         &self,
         storage: &dyn Storage,
         row_id: ObjectId,
@@ -1564,8 +1736,8 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
-        Self::load_best_visible_row_version_from_storage(
+    ) -> Option<(String, QueryRowBatch)> {
+        Self::load_best_visible_row_batch_from_storage(
             storage,
             row_id,
             branches,
@@ -1575,16 +1747,16 @@ impl QueryManager {
         )
     }
 
-    pub(super) fn load_best_visible_row_version_from_storage(
+    pub(super) fn load_best_visible_row_batch_from_storage(
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         let locator = Self::load_row_locator(storage, row_id)?;
-        Self::load_best_visible_row_version_from_storage_with_locator(
+        Self::load_best_visible_row_batch_from_storage_with_locator(
             storage,
             row_id,
             &locator,
@@ -1629,7 +1801,7 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
         durability_tier: Option<DurabilityTier>,
-    ) -> Option<QueryRowVersion> {
+    ) -> Option<QueryRowBatch> {
         let load = |table: &str| match durability_tier {
             Some(required_tier) => {
                 storage.load_visible_query_row_for_tier(table, branch, row_id, required_tier)
@@ -1644,7 +1816,69 @@ impl QueryManager {
         })
     }
 
-    fn load_best_visible_row_version_from_storage_with_table_hint(
+    fn load_local_pending_query_row_from_candidate_tables(
+        storage: &dyn Storage,
+        primary_table: &str,
+        fallback_table: Option<&str>,
+        row_batch_key: RowBatchKey,
+    ) -> Option<QueryRowBatch> {
+        let load = |table: &str| {
+            storage.load_history_query_row_batch(
+                table,
+                row_batch_key.branch_name.as_str(),
+                row_batch_key.row_id,
+                row_batch_key.batch_id,
+            )
+        };
+
+        load(primary_table).ok().flatten().or_else(|| {
+            fallback_table
+                .filter(|fallback| *fallback != primary_table)
+                .and_then(|fallback| load(fallback).ok().flatten())
+        })
+    }
+
+    fn load_local_pending_query_row_with_hint_or_locator(
+        storage: &dyn Storage,
+        row_batch_key: RowBatchKey,
+        table_hint: Option<&str>,
+        schema_context: &SchemaContext,
+    ) -> Option<(String, QueryRowBatch)> {
+        if let Some(hint) = table_hint
+            && let Some(row) = Self::load_local_pending_query_row_from_candidate_tables(
+                storage,
+                hint,
+                None,
+                row_batch_key,
+            )
+        {
+            return Some((hint.to_string(), row));
+        }
+
+        let locator = Self::load_row_locator(storage, row_batch_key.row_id)?;
+        let original_table = locator.table.as_str();
+        let current_table = locator
+            .origin_schema_hash
+            .filter(|hash| *hash != schema_context.current_hash)
+            .and_then(|origin_schema_hash| {
+                resolve_current_table_name(
+                    schema_context,
+                    original_table,
+                    Some(&origin_schema_hash),
+                )
+            })
+            .filter(|translated| translated != original_table);
+        let current_table_name = current_table.as_deref().unwrap_or(original_table);
+        let row = Self::load_local_pending_query_row_from_candidate_tables(
+            storage,
+            current_table_name,
+            Some(original_table),
+            row_batch_key,
+        )?;
+        Some((current_table_name.to_string(), row))
+    }
+
+    fn load_best_visible_row_batch_from_storage_with_table_hint(
         storage: &dyn Storage,
         row_id: ObjectId,
         table_hint: &str,
@@ -1652,8 +1886,8 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
-        let mut best: Option<(CommitId, QueryRowVersion)> = None;
+    ) -> Option<(String, QueryRowBatch)> {
+        let mut best: Option<(BatchId, QueryRowBatch)> = None;
 
         for branch in branches {
             let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
@@ -1683,13 +1917,13 @@ impl QueryManager {
                 continue;
             }
 
-            let version_id = row.version_id();
+            let batch_id = row.batch_id;
             match &best {
-                None => best = Some((version_id, row)),
-                Some((best_version_id, best_row))
-                    if (row.updated_at, version_id) > (best_row.updated_at, *best_version_id) =>
+                None => best = Some((batch_id, row)),
+                Some((best_batch_id, best_row))
+                    if (row.updated_at, batch_id) > (best_row.updated_at, *best_batch_id) =>
                 {
-                    best = Some((version_id, row));
+                    best = Some((batch_id, row));
                 }
                 _ => {}
             }
@@ -1698,7 +1932,7 @@ impl QueryManager {
         best.map(|(_, row)| (table_hint.to_string(), row))
     }
 
-    pub(super) fn load_best_visible_row_version_with_hint_or_locator(
+    pub(super) fn load_best_visible_row_batch_with_hint_or_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
         table_hint: Option<&str>,
@@ -1706,10 +1940,10 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         table_hint
             .and_then(|hint| {
-                Self::load_best_visible_row_version_from_storage_with_table_hint(
+                Self::load_best_visible_row_batch_from_storage_with_table_hint(
                     storage,
                     row_id,
                     hint,
@@ -1720,7 +1954,7 @@ impl QueryManager {
                 )
             })
             .or_else(|| {
-                Self::load_best_visible_row_version_from_storage(
+                Self::load_best_visible_row_batch_from_storage(
                     storage,
                     row_id,
                     branches,
@@ -1731,7 +1965,7 @@ impl QueryManager {
             })
     }
 
-    fn load_best_visible_row_version_from_storage_with_locator(
+    fn load_best_visible_row_batch_from_storage_with_locator(
         storage: &dyn Storage,
         row_id: ObjectId,
         locator: &RowLocator,
@@ -1739,7 +1973,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
-    ) -> Option<(String, QueryRowVersion)> {
+    ) -> Option<(String, QueryRowBatch)> {
         let original_table = locator.table.as_str();
         let current_table = locator
             .origin_schema_hash
@@ -1754,7 +1988,7 @@ impl QueryManager {
             .filter(|translated| translated != original_table);
         let current_table_name = current_table.as_deref().unwrap_or(original_table);
 
-        let mut best: Option<(CommitId, QueryRowVersion)> = None;
+        let mut best: Option<(BatchId, QueryRowBatch)> = None;
 
         for branch in branches {
             let branch_schema_hash = Self::branch_schema_hash_for_visible_load(
@@ -1790,13 +2024,13 @@ impl QueryManager {
                 continue;
             }
 
-            let version_id = row.version_id();
+            let batch_id = row.batch_id;
             match &best {
-                None => best = Some((version_id, row)),
-                Some((best_version_id, best_row))
-                    if (row.updated_at, version_id) > (best_row.updated_at, *best_version_id) =>
+                None => best = Some((batch_id, row)),
+                Some((best_batch_id, best_row))
+                    if (row.updated_at, batch_id) > (best_row.updated_at, *best_batch_id) =>
                 {
-                    best = Some((version_id, row));
+                    best = Some((batch_id, row));
                 }
                 _ => {}
             }
@@ -1812,7 +2046,8 @@ impl QueryManager {
         table_hint: Option<&str>,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
-        local_pending_version: Option<CommitId>,
+        local_pending_version: Option<RowBatchKey>,
+        prefer_local_overlay: bool,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -1820,18 +2055,9 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = Self::load_best_visible_row_version_with_hint_or_locator(
-            storage,
-            row_id,
-            table_hint,
-            branches,
-            durability_tier,
-            schema_context,
-            branch_schema_map,
-        )
-        .or_else(|| {
-            let pending_version_id = local_pending_version?;
-            let resolved = Self::load_best_visible_row_version_with_hint_or_locator(
+        let exact_pending_visible_row = || {
+            let pending_version = local_pending_version?;
+            let resolved = Self::load_best_visible_row_batch_with_hint_or_locator(
                 storage,
                 row_id,
                 table_hint,
@@ -1841,8 +2067,44 @@ impl QueryManager {
                 branch_schema_map,
             )?;
             let (_, row) = &resolved;
-            (row.version_id() == pending_version_id).then_some(resolved)
-        })?;
+            (row.batch_id == pending_version.batch_id
+                && row.branch.as_str() == pending_version.branch_name.as_str())
+            .then_some(resolved)
+        };
+        let pending_staged_row = || {
+            let pending_version = local_pending_version?;
+            let resolved = Self::load_local_pending_query_row_with_hint_or_locator(
+                storage,
+                pending_version,
+                table_hint,
+                schema_context,
+            )?;
+            let (_, row) = &resolved;
+            (row.batch_id == pending_version.batch_id
+                && row.branch.as_str() == pending_version.branch_name.as_str()
+                && matches!(row.state, RowState::StagingPending))
+            .then_some(resolved)
+        };
+        let best_visible_row = || {
+            Self::load_best_visible_row_batch_with_hint_or_locator(
+                storage,
+                row_id,
+                table_hint,
+                branches,
+                durability_tier,
+                schema_context,
+                branch_schema_map,
+            )
+        };
+        let resolved = if prefer_local_overlay {
+            exact_pending_visible_row()
+                .or_else(pending_staged_row)
+                .or_else(best_visible_row)
+        } else {
+            best_visible_row()
+                .or_else(exact_pending_visible_row)
+                .or_else(pending_staged_row)
+        }?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {
@@ -1853,7 +2115,7 @@ impl QueryManager {
             return None;
         }
 
-        let version_id = row.version_id();
+        let batch_id = row.batch_id;
         let row_provenance = row.row_provenance();
         let source_branch = row.branch.as_str();
 
@@ -1861,15 +2123,15 @@ impl QueryManager {
             && source_hash != schema_context.current_hash
         {
             let transformer = LensTransformer::new(schema_context, &table);
-            match transformer.transform(&row.data, version_id, source_hash) {
+            match transformer.transform(&row.data, batch_id, source_hash) {
                 Ok(result) => {
                     return Some(LoadedRow::new(
                         result.data,
-                        result.version_id,
                         row_provenance,
                         [(row_id, BranchName::new(source_branch))]
                             .into_iter()
                             .collect(),
+                        result.batch_id,
                     ));
                 }
                 Err(err) => {
@@ -1895,11 +2157,11 @@ impl QueryManager {
 
         Some(LoadedRow::new(
             row.data,
-            version_id,
             row_provenance,
             [(row_id, BranchName::new(source_branch))]
                 .into_iter()
                 .collect(),
+            row.batch_id,
         ))
     }
 
@@ -1944,7 +2206,7 @@ impl QueryManager {
             .iter()
             .filter_map(|row| {
                 previous_rows.get(&row.id).and_then(|previous| {
-                    (previous.data != row.data || previous.version_id != row.version_id)
+                    (previous.data != row.data || previous.batch_id != row.batch_id)
                         .then(|| (previous.clone(), row.clone()))
                 })
             })
@@ -1956,7 +2218,7 @@ impl QueryManager {
                     && previous_rows
                         .get(&row.id)
                         .map(|previous| {
-                            previous.data == row.data && previous.version_id == row.version_id
+                            previous.data == row.data && previous.batch_id == row.batch_id
                         })
                         .unwrap_or(false)
                     && previous_indices.get(&row.id) != next_indices.get(&row.id)
@@ -1970,6 +2232,112 @@ impl QueryManager {
             moved,
             updated,
         }
+    }
+
+    pub(super) fn rows_from_tuples(graph: &QueryGraph, tuples: &[Tuple]) -> Vec<Row> {
+        tuples
+            .iter()
+            .filter_map(|tuple| {
+                if tuple.len() == 1 {
+                    tuple.to_single_row()
+                } else {
+                    tuple
+                        .flatten_with_descriptors(
+                            &graph.table_descriptors,
+                            &graph.combined_descriptor,
+                        )
+                        .and_then(|flattened| flattened.to_single_row())
+                }
+            })
+            .collect()
+    }
+
+    fn filter_synced_query_scope_tuples(
+        &self,
+        query_id: QueryId,
+        pending_local_row_ids: &HashSet<ObjectId>,
+        tuples: Vec<Tuple>,
+    ) -> Vec<Tuple> {
+        let remote_scope = self.sync_manager.remote_query_scope(query_id);
+        tuples
+            .into_iter()
+            .filter(|tuple| {
+                tuple.id_iter().any(|id| {
+                    pending_local_row_ids.contains(&id)
+                        || self.pending_local_row_batches.contains_key(&id)
+                }) || tuple
+                    .provenance()
+                    .iter()
+                    .any(|scoped_object| remote_scope.contains(scoped_object))
+            })
+            .collect()
+    }
+
+    fn scope_from_tuples(tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
+        tuples
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect()
+    }
+
+    fn transactional_batch_complete_for_query_scope(
+        storage: &dyn Storage,
+        settlement_cache: &mut HashMap<BatchId, Option<BatchSettlement>>,
+        batch_id: BatchId,
+        local_scope: &HashSet<(ObjectId, BranchName)>,
+        query_scope: &HashSet<(ObjectId, BranchName)>,
+    ) -> bool {
+        let settlement = settlement_cache
+            .entry(batch_id)
+            .or_insert_with(|| match storage.load_authoritative_batch_settlement(batch_id) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
+                    None
+                }
+            });
+
+        match settlement {
+            Some(BatchSettlement::AcceptedTransaction {
+                visible_members, ..
+            }) => visible_members
+                .iter()
+                .filter(|member| query_scope.contains(&(member.object_id, member.branch_name)))
+                .all(|member| local_scope.contains(&(member.object_id, member.branch_name))),
+            _ => true,
+        }
+    }
+
+    fn filter_strict_transaction_tuples(
+        &self,
+        storage: &dyn Storage,
+        query_id: QueryId,
+        tuples: Vec<Tuple>,
+    ) -> Vec<Tuple> {
+        if tuples.is_empty() {
+            return tuples;
+        }
+
+        let local_scope = Self::scope_from_tuples(&tuples);
+        let mut query_scope = local_scope.clone();
+        query_scope.extend(self.sync_manager.remote_query_scope(query_id));
+
+        let mut settlement_cache: HashMap<BatchId, Option<BatchSettlement>> = HashMap::new();
+
+        tuples
+            .into_iter()
+            .filter(|tuple| {
+                tuple.batch_provenance().iter().copied().all(|batch_id| {
+                    Self::transactional_batch_complete_for_query_scope(
+                        storage,
+                        &mut settlement_cache,
+                        batch_id,
+                        &local_scope,
+                        &query_scope,
+                    )
+                })
+            })
+            .collect()
     }
     // ========================================================================
     // No-op storage driver (for tests)

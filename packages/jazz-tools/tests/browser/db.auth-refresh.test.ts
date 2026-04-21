@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import {
+  createDb,
+  fetchSchemaHashes,
+  publishStoredPermissions,
+  type Db,
+  type QueryBuilder,
+  type TableProxy,
+} from "../../src/runtime/index.js";
+import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
@@ -53,7 +61,8 @@ describe("Db auth refresh browser integration", () => {
   });
 
   it("recovers from auth loss after updateAuthToken and flushes queued local writes", async () => {
-    const { appId, serverUrl } = await getTestingServerInfo();
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
     const invalidJwt = makeFakeJwt({
@@ -80,6 +89,43 @@ describe("Db auth refresh browser integration", () => {
       }),
     );
 
+    const { hash: publishedSchemaHash } = await publishStoredSchema(serverUrl, {
+      appId,
+      adminSecret,
+      schema,
+    });
+
+    let latestSchemaHash: string | null = publishedSchemaHash;
+    await waitForCondition(
+      async () => {
+        const { hashes } = await fetchSchemaHashes(serverUrl, { appId, adminSecret });
+        latestSchemaHash = hashes.at(-1) ?? publishedSchemaHash;
+        return latestSchemaHash !== null;
+      },
+      20_000,
+      "expected at least one published schema hash before publishing test permissions",
+    );
+
+    const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
+
+    await publishStoredPermissions(serverUrl, {
+      appId,
+      adminSecret,
+      schemaHash: latestSchemaHash!,
+      permissions: {
+        todos: {
+          select: { using: { type: "True" } },
+          insert: { with_check: { type: "True" } },
+          update: {
+            using: { type: "True" },
+            with_check: { type: "True" },
+          },
+          delete: { using: { type: "True" } },
+        },
+      },
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+    });
+
     const marker = `queued-after-auth-loss-${Date.now()}`;
     writer.insert(todos, {
       title: marker,
@@ -87,17 +133,13 @@ describe("Db auth refresh browser integration", () => {
     });
 
     await waitForCondition(
-      async () => {
-        const authState = writer.getAuthState();
-        return authState.status === "unauthenticated" && authState.reason === "invalid";
-      },
+      async () => writer.getAuthState().error === "invalid",
       20_000,
       "writer should transition to unauthenticated after invalid JWT auth failure",
     );
 
     expect(writer.getAuthState()).toMatchObject({
-      status: "unauthenticated",
-      reason: "invalid",
+      error: "invalid",
       session: {
         user_id: "alice",
       },
@@ -106,7 +148,7 @@ describe("Db auth refresh browser integration", () => {
     writer.updateAuthToken(validJwt);
 
     await waitForCondition(
-      async () => writer.getAuthState().status === "authenticated",
+      async () => writer.getAuthState().error === undefined,
       20_000,
       "writer should return to authenticated after updateAuthToken",
     );
@@ -117,7 +159,7 @@ describe("Db auth refresh browser integration", () => {
       (rows) => rows.some((row) => row.title === marker),
       "queued write should flush after auth refresh",
       20_000,
-      "worker",
+      "local",
     );
   });
 });

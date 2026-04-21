@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 async function handler(request: Request) {
-  return auth.handler(request);
+  return (await auth).handler(request);
 }
 
 export const { GET, POST, PATCH, PUT, DELETE } = toNextJsHandler(handler);

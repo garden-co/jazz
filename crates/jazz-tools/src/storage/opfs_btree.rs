@@ -8,7 +8,7 @@
 //! ```text
 //! "raw:{table}:{local_key}"                               → raw table entry
 //! "row:{table}:0:{branch}:{row_uuid}"                     → encoded VisibleRowEntry
-//! "row:{table}:1:{row_uuid}:{version_id}"                 → encoded StoredRowVersion
+//! "row:{table}:1:{row_uuid}:{batch_id}"                 → encoded StoredRowBatch
 //! ```
 
 use std::cell::RefCell;
@@ -22,22 +22,19 @@ use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::object::ObjectId;
-use crate::row_histories::{HistoryScan, RowState, StoredRowVersion};
+use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    HistoryRowBytes, Storage, StorageError, VisibleRowBytes,
+    HistoryRowBytes, RawTableMutation, Storage, StorageError, VisibleRowBytes,
     key_codec::increment_bytes,
     storage_core::{
-        append_history_region_row_bytes_core, load_history_row_version_bytes_core,
-        load_visible_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
+        append_history_region_row_bytes_core, raw_table_delete_core, raw_table_get_core,
         raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_prefix_keys_core,
-        raw_table_scan_range_core, raw_table_scan_range_keys_core, scan_history_region_bytes_core,
-        scan_visible_region_bytes_core, scan_visible_region_row_version_branches_core,
+        raw_table_scan_range_core, raw_table_scan_range_keys_core,
         upsert_visible_region_row_bytes_core,
     },
 };
-use crate::commit::CommitId;
 
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -103,10 +100,42 @@ impl SyncFile for AnyFile {
 }
 
 pub struct OpfsBTreeStorage {
+    cache_namespace: usize,
     tree: RefCell<OpfsBTree<AnyFile>>,
 }
 
 impl OpfsBTreeStorage {
+    fn tree_has_any_rows(tree: &mut OpfsBTree<AnyFile>) -> Result<bool, StorageError> {
+        Ok(!tree
+            .range(b"", &[0xFF], 1)
+            .map_err(map_storage_err)?
+            .is_empty())
+    }
+
+    fn ensure_store_manifest(tree: &mut OpfsBTree<AnyFile>) -> Result<(), StorageError> {
+        let expected = super::expected_store_manifest(super::OPFS_BTREE_STORE_KIND);
+        match tree
+            .get(super::STORE_MANIFEST_KEY.as_bytes())
+            .map_err(map_storage_err)?
+        {
+            Some(bytes) => {
+                let actual = super::decode_store_manifest(&bytes)?;
+                super::validate_store_manifest(&actual, &expected)
+            }
+            None => {
+                if Self::tree_has_any_rows(tree)? {
+                    return Err(StorageError::IoError(
+                        "missing store manifest for non-empty opfs_btree store".to_string(),
+                    ));
+                }
+                let bytes = super::encode_store_manifest(&expected)?;
+                tree.put(super::STORE_MANIFEST_KEY.as_bytes(), &bytes)
+                    .and_then(|_| tree.checkpoint())
+                    .map_err(map_storage_err)
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let file = StdFile::open(path).map_err(map_storage_err)?;
@@ -135,8 +164,10 @@ impl OpfsBTreeStorage {
 
     fn open_with_file(file: AnyFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let options = Self::options(cache_size_bytes);
-        let tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
+        let mut tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
+        Self::ensure_store_manifest(&mut tree)?;
         let storage = Self {
+            cache_namespace: super::next_storage_cache_namespace(),
             tree: RefCell::new(tree),
         };
         Ok(storage)
@@ -232,6 +263,10 @@ impl OpfsBTreeStorage {
 }
 
 impl Storage for OpfsBTreeStorage {
+    fn storage_cache_namespace(&self) -> usize {
+        self.cache_namespace
+    }
+
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         raw_table_put_core(table, key, value, |storage_key, bytes| {
             self.tree_insert(storage_key, bytes)
@@ -240,6 +275,30 @@ impl Storage for OpfsBTreeStorage {
 
     fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         raw_table_delete_core(table, key, |storage_key| self.tree_delete(storage_key))
+    }
+
+    fn apply_raw_table_mutations(
+        &mut self,
+        mutations: &[RawTableMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.with_tree_mut(|tree| {
+            for mutation in mutations {
+                match mutation {
+                    RawTableMutation::Put { table, key, value } => {
+                        raw_table_put_core(table, key, value, |storage_key, bytes| {
+                            tree.put(storage_key.as_bytes(), bytes)
+                                .map_err(map_storage_err)
+                        })?;
+                    }
+                    RawTableMutation::Delete { table, key } => {
+                        raw_table_delete_core(table, key, |storage_key| {
+                            tree.delete(storage_key.as_bytes()).map_err(map_storage_err)
+                        })?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -326,7 +385,10 @@ impl Storage for OpfsBTreeStorage {
         branch: &str,
         row_id: ObjectId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        load_visible_region_row_bytes_core(table, branch, row_id, |key| self.tree_read(key))
+        Ok(
+            super::load_visible_region_row_bytes_with_storage(self, table, branch, row_id)?
+                .map(|row| row.bytes),
+        )
     }
 
     fn scan_visible_region_bytes(
@@ -334,17 +396,21 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         branch: &str,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        scan_visible_region_bytes_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
+        Ok(
+            super::scan_visible_row_bytes_with_storage(self, table, branch)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
-    fn scan_visible_region_row_versions(
+    fn scan_visible_region_row_batches(
         &self,
         table: &str,
         row_id: ObjectId,
-    ) -> Result<Vec<StoredRowVersion>, StorageError> {
-        let branches = scan_visible_region_row_version_branches_core(table, row_id, |prefix| {
-            self.tree_scan_prefix_keys(prefix)
-        })?;
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        let branches =
+            super::scan_visible_region_row_batch_branches_with_storage(self, table, row_id)?;
 
         let mut rows = Vec::new();
         for branch in branches {
@@ -356,13 +422,17 @@ impl Storage for OpfsBTreeStorage {
         Ok(rows)
     }
 
-    fn load_history_row_version_bytes(
+    fn load_history_row_batch_bytes(
         &self,
         table: &str,
+        branch: &str,
         row_id: ObjectId,
-        version_id: CommitId,
+        batch_id: crate::row_histories::BatchId,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        load_history_row_version_bytes_core(table, row_id, version_id, |key| self.tree_read(key))
+        Ok(super::load_history_row_batch_row_bytes_with_storage(
+            self, table, branch, row_id, batch_id,
+        )?
+        .map(|row| row.bytes))
     }
 
     fn scan_history_region_bytes(
@@ -370,7 +440,12 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         scan: HistoryScan,
     ) -> Result<Vec<Vec<u8>>, StorageError> {
-        scan_history_region_bytes_core(table, scan, |prefix| self.tree_scan_prefix(prefix))
+        Ok(
+            super::scan_history_row_bytes_with_storage(self, table, scan)?
+                .into_iter()
+                .map(|row| row.bytes)
+                .collect(),
+        )
     }
 
     fn flush(&self) {
@@ -401,7 +476,7 @@ mod tests {
     use crate::metadata::RowProvenance;
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
-    use crate::row_histories::{HistoryScan, RowState, StoredRowVersion, VisibleRowEntry};
+    use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
     use crate::test_row_history::persist_test_schema;
 
@@ -431,13 +506,13 @@ mod tests {
             .unwrap();
     }
 
-    fn make_row_version(
+    fn make_row_batch(
         row_id: ObjectId,
         branch: &str,
         updated_at: u64,
         value: &str,
-    ) -> StoredRowVersion {
-        StoredRowVersion::new(
+    ) -> StoredRowBatch {
+        StoredRowBatch::new(
             row_id,
             branch,
             Vec::new(),
@@ -458,24 +533,22 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_object_roundtrip() {
+    fn opfs_btree_row_locator_roundtrip() {
         let mut storage = test_storage();
 
         let id = ObjectId::new();
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            crate::metadata::MetadataKey::Table.to_string(),
-            "users".to_string(),
-        );
-        metadata.insert("app".to_string(), "test".to_string());
+        let locator = crate::storage::RowLocator {
+            table: "users".into(),
+            origin_schema_hash: Some(users_schema_hash()),
+        };
 
-        storage.put_metadata(id, metadata.clone()).unwrap();
+        storage.put_row_locator(id, Some(&locator)).unwrap();
 
-        let loaded = storage.load_metadata(id).unwrap();
-        assert_eq!(loaded, Some(metadata));
+        let loaded = storage.load_row_locator(id).unwrap();
+        assert_eq!(loaded, Some(locator));
 
         let other = ObjectId::new();
-        assert_eq!(storage.load_metadata(other).unwrap(), None);
+        assert_eq!(storage.load_row_locator(other).unwrap(), None);
     }
 
     #[test]
@@ -485,7 +558,7 @@ mod tests {
 
         let row_id = ObjectId::new();
         seed_users_row(&mut storage, row_id);
-        let row = make_row_version(row_id, "main", 12345, "first");
+        let row = make_row_batch(row_id, "main", 12345, "first");
 
         storage
             .append_history_region_rows("users", std::slice::from_ref(&row))
@@ -511,6 +584,59 @@ mod tests {
                 .scan_history_region("users", "main", HistoryScan::Row { row_id })
                 .unwrap(),
             vec![row]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn open_rejects_store_manifest_version_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.opfs");
+        let storage = OpfsBTreeStorage::open(&path, 4 * 1024 * 1024).unwrap();
+        let bad_manifest = crate::storage::StoreManifest {
+            store_kind: crate::storage::OPFS_BTREE_STORE_KIND.to_string(),
+            store_format_version: 999,
+        };
+        storage
+            .tree_insert(
+                crate::storage::STORE_MANIFEST_KEY,
+                &crate::storage::encode_store_manifest(&bad_manifest).unwrap(),
+            )
+            .unwrap();
+        storage.flush();
+        drop(storage);
+
+        let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
+            Ok(_) => panic!("expected store manifest version mismatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("store manifest version mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn open_rejects_nonempty_store_without_manifest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy.opfs");
+        let storage = OpfsBTreeStorage::open(&path, 4 * 1024 * 1024).unwrap();
+        storage.tree_insert("raw:legacy:alice", b"hello").unwrap();
+        storage
+            .tree_delete(crate::storage::STORE_MANIFEST_KEY)
+            .unwrap();
+        storage.flush();
+        drop(storage);
+
+        let err = match OpfsBTreeStorage::open(&path, 4 * 1024 * 1024) {
+            Ok(_) => panic!("expected missing manifest rejection"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("missing store manifest for non-empty opfs_btree store"),
+            "unexpected error: {err}"
         );
     }
 
@@ -617,7 +743,7 @@ mod tests {
         seed_users_schema(&mut storage);
         let row_id = ObjectId::new();
         seed_users_row(&mut storage, row_id);
-        let row = make_row_version(row_id, "main", 12345, "first");
+        let row = make_row_batch(row_id, "main", 12345, "first");
 
         storage
             .append_history_region_rows("users", std::slice::from_ref(&row))
@@ -655,21 +781,16 @@ mod tests {
         let db_path = temp_dir.path().join("test.opfsbtree");
 
         let id = ObjectId::new();
-        let row = make_row_version(id, "main", 12345, "persistent data");
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            crate::metadata::MetadataKey::Table.to_string(),
-            "users".to_string(),
-        );
-        metadata.insert(
-            crate::metadata::MetadataKey::OriginSchemaHash.to_string(),
-            users_schema_hash().to_string(),
-        );
+        let row = make_row_batch(id, "main", 12345, "persistent data");
+        let locator = crate::storage::RowLocator {
+            table: "users".into(),
+            origin_schema_hash: Some(users_schema_hash()),
+        };
 
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
             seed_users_schema(&mut storage);
-            storage.put_metadata(id, metadata.clone()).unwrap();
+            storage.put_row_locator(id, Some(&locator)).unwrap();
             storage
                 .append_history_region_rows("users", std::slice::from_ref(&row))
                 .unwrap();
@@ -699,8 +820,8 @@ mod tests {
         {
             let storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
 
-            let loaded_meta = storage.load_metadata(id).unwrap();
-            assert_eq!(loaded_meta, Some(metadata));
+            let loaded_locator = storage.load_row_locator(id).unwrap();
+            assert_eq!(loaded_locator, Some(locator));
             assert_eq!(
                 storage
                     .load_visible_region_row("users", "main", id)

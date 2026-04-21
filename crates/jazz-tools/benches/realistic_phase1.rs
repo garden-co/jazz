@@ -21,24 +21,26 @@ use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
-use jazz_tools::commit::CommitId;
-use jazz_tools::metadata::{MetadataKey, RowProvenance};
+use jazz_tools::catalogue::CatalogueEntry;
+use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
+    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TablePolicies, TableSchema, Value,
 };
-use jazz_tools::row_histories::{RowState, StoredRowVersion, apply_row_version};
-use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::row_format::encode_row;
+use jazz_tools::row_histories::{BatchId, RowState, StoredRowBatch, apply_row_batch};
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
+use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use jazz_tools::storage::RocksDBStorage;
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 use jazz_tools::storage::SqliteStorage;
-use jazz_tools::storage::{RowLocator, Storage};
+use jazz_tools::storage::Storage;
+use jazz_tools::storage::{MemoryStorage, RowLocator};
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
@@ -49,7 +51,7 @@ use serde::Deserialize;
 ))]
 use tempfile::TempDir;
 
-type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler, VecSyncSender>;
+type BenchRuntime<S = MemoryStorage> = RuntimeCore<S, NoopScheduler>;
 const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 const STORAGE_BENCH_CACHE_SIZE_BYTES: usize = 32 * 1024 * 1024;
@@ -346,7 +348,7 @@ impl Lcg {
 }
 
 struct R1State<S: Storage = MemoryStorage> {
-    runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: RuntimeCore<S, NoopScheduler>,
     rng: Lcg,
     users: Vec<ObjectId>,
     organizations: Vec<ObjectId>,
@@ -433,7 +435,7 @@ impl R1State<MemoryStorage> {
 
 impl<S: Storage> R1State<S> {
     fn with_runtime(
-        runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+        runtime: RuntimeCore<S, NoopScheduler>,
         profile: &ProfileConfig,
         seed: u64,
     ) -> Self {
@@ -822,7 +824,7 @@ impl<S: Storage> R1State<S> {
     all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 fn seed_project_board_dataset<S: Storage>(
-    runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
+    runtime: &mut RuntimeCore<S, NoopScheduler>,
     profile: &ProfileConfig,
     seed: u64,
 ) -> SeededProjectBoard {
@@ -1121,7 +1123,14 @@ impl<S: Storage> SingleHopR1State<S> {
         let mut server_to_client = 0usize;
 
         self.client.runtime.batched_tick();
-        for entry in self.client.runtime.sync_sender().take() {
+        for entry in self
+            .client
+            .runtime
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Server(self.server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.client_id_on_server),
@@ -1132,7 +1141,13 @@ impl<S: Storage> SingleHopR1State<S> {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self
+            .server
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Client(self.client_id_on_server) {
                 self.client.runtime.park_sync_message(InboxEntry {
                     source: Source::Server(self.server_id_on_client),
@@ -1289,7 +1304,14 @@ impl<S: Storage> FanoutR4State<S> {
         let mut routed = 0usize;
 
         self.writer.runtime.batched_tick();
-        for entry in self.writer.runtime.sync_sender().take() {
+        for entry in self
+            .writer
+            .runtime
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             if entry.destination == Destination::Server(self.writer_server_id_on_client) {
                 self.server.park_sync_message(InboxEntry {
                     source: Source::Client(self.writer_client_id_on_server),
@@ -1301,7 +1323,13 @@ impl<S: Storage> FanoutR4State<S> {
 
         for reader in &mut self.readers {
             reader.runtime.batched_tick();
-            for entry in reader.runtime.sync_sender().take() {
+            for entry in reader
+                .runtime
+                .schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut()
+                .take_outbox()
+            {
                 if entry.destination == Destination::Server(reader.server_id_on_client) {
                     self.server.park_sync_message(InboxEntry {
                         source: Source::Client(reader.client_id_on_server),
@@ -1313,7 +1341,13 @@ impl<S: Storage> FanoutR4State<S> {
         }
 
         self.server.batched_tick();
-        for entry in self.server.sync_sender().take() {
+        for entry in self
+            .server
+            .schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox()
+        {
             match entry.destination {
                 Destination::Client(client_id) if client_id == self.writer_client_id_on_server => {
                     self.writer.runtime.park_sync_message(InboxEntry {
@@ -2795,8 +2829,8 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     .expect("open rocksdb for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -2843,8 +2877,8 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     .expect("open sqlite for many-branches cold-load benchmark");
                 black_box(
                     storage
-                        .load_metadata(seeded.object_id)
-                        .expect("load metadata for many-branches cold-load benchmark")
+                        .load_row_locator(seeded.object_id)
+                        .expect("load row locator for many-branches cold-load benchmark")
                         .expect("cold-load many-branches object"),
                 );
                 let scan = scan_branch_heads(
@@ -3036,6 +3070,10 @@ fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
         },
     );
     scan_leaf_group.finish();
+    loaded_storage.flush();
+    loaded_storage
+        .close()
+        .expect("close many-branches rocksdb scan storage");
 
     let mut cold_load_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_cold_load");
     configure_group(&mut cold_load_group, 10, 5);
@@ -3449,11 +3487,48 @@ fn many_branches_benchmark_name(
     )
 }
 
-fn many_branches_row_metadata() -> HashMap<String, String> {
-    HashMap::from([(
-        MetadataKey::Table.to_string(),
-        MANY_BRANCHES_TABLE.to_string(),
-    )])
+fn many_branches_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder(MANY_BRANCHES_TABLE).column("payload", ColumnType::Bytea))
+        .build()
+}
+
+fn many_branches_schema_hash() -> SchemaHash {
+    SchemaHash::compute(&many_branches_schema())
+}
+
+fn persist_many_branches_schema<H: Storage>(storage: &mut H) -> RowDescriptor {
+    let schema = many_branches_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    storage
+        .upsert_catalogue_entry(&CatalogueEntry {
+            object_id: schema_hash.to_object_id(),
+            metadata: HashMap::from([
+                (
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                ),
+                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+            ]),
+            content: encode_schema(&schema),
+        })
+        .expect("seed many-branches schema");
+    schema[&MANY_BRANCHES_TABLE.into()].columns.clone()
+}
+
+fn many_branches_row_data(
+    row_descriptor: &RowDescriptor,
+    scenario: &R8Scenario,
+    branch_idx: usize,
+    commit_idx: usize,
+) -> Vec<u8> {
+    encode_row(
+        row_descriptor,
+        &[Value::Bytea(many_branches_payload_bytes(
+            scenario, branch_idx, commit_idx,
+        ))],
+    )
+    .expect("encode many-branches row data")
 }
 
 fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
@@ -3461,22 +3536,19 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     scenario: &R8Scenario,
 ) -> ManyBranchesDataset {
     let object_id = ObjectId::new();
-    storage
-        .put_metadata(object_id, many_branches_row_metadata())
-        .expect("seed many-branches metadata");
+    let row_descriptor = persist_many_branches_schema(storage);
     storage
         .put_row_locator(
             object_id,
             Some(&RowLocator {
                 table: MANY_BRANCHES_TABLE.into(),
-                origin_schema_hash: None,
+                origin_schema_hash: Some(many_branches_schema_hash()),
             }),
         )
         .expect("seed many-branches row locator");
     let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
     let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
-    let mut head_ids = Vec::with_capacity(scenario.branch_count);
     let mut used_as_parent = vec![false; scenario.branch_count];
     let mut next_timestamp = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
 
@@ -3488,55 +3560,59 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
         let root_timestamp = next_timestamp;
         next_timestamp += 1;
 
-        let mut head_id = apply_row_version(
+        let mut head_id = BatchId::new();
+        let root_row = StoredRowBatch::new_with_batch_id(
+            head_id,
+            object_id,
+            branch_name.clone(),
+            Vec::new(),
+            many_branches_row_data(&row_descriptor, scenario, branch_idx, 0),
+            RowProvenance::for_insert(author.clone(), root_timestamp),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        );
+        apply_row_batch(
             storage,
             object_id,
             &jazz_tools::object::BranchName::new(&branch_name),
-            StoredRowVersion::new(
-                object_id,
-                branch_name.clone(),
-                Vec::new(),
-                many_branches_payload(scenario, branch_idx, 0),
-                RowProvenance::for_insert(author.clone(), root_timestamp),
-                HashMap::new(),
-                RowState::VisibleDirect,
-                None,
-            ),
+            root_row,
             &[],
         )
-        .expect("seed many-branches root row version")
-        .version_id;
+        .expect("seed many-branches root row version");
 
         for commit_idx in 1..scenario.commits_per_branch {
             let updated_at = next_timestamp;
             next_timestamp += 1;
-            head_id = apply_row_version(
+            let next_batch_id = BatchId::new();
+            let row = StoredRowBatch::new_with_batch_id(
+                next_batch_id,
+                object_id,
+                branch_name.clone(),
+                vec![head_id],
+                many_branches_row_data(&row_descriptor, scenario, branch_idx, commit_idx),
+                RowProvenance {
+                    created_by: author.clone(),
+                    created_at: root_timestamp,
+                    updated_by: author.clone(),
+                    updated_at,
+                },
+                HashMap::new(),
+                RowState::VisibleDirect,
+                None,
+            );
+            apply_row_batch(
                 storage,
                 object_id,
                 &jazz_tools::object::BranchName::new(&branch_name),
-                StoredRowVersion::new(
-                    object_id,
-                    branch_name.clone(),
-                    vec![head_id],
-                    many_branches_payload(scenario, branch_idx, commit_idx),
-                    RowProvenance {
-                        created_by: author.clone(),
-                        created_at: root_timestamp,
-                        updated_by: author.clone(),
-                        updated_at,
-                    },
-                    HashMap::new(),
-                    RowState::VisibleDirect,
-                    None,
-                ),
+                row,
                 &[],
             )
-            .expect("append linear row version in many-branches benchmark")
-            .version_id;
+            .expect("append linear row version in many-branches benchmark");
+            head_id = next_batch_id;
         }
 
         branch_names.push(branch_name);
-        head_ids.push(head_id);
     }
 
     let leaf_branch_names = branch_names
@@ -3555,7 +3631,11 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     }
 }
 
-fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: usize) -> Vec<u8> {
+fn many_branches_payload_bytes(
+    scenario: &R8Scenario,
+    branch_idx: usize,
+    commit_idx: usize,
+) -> Vec<u8> {
     let mut payload = vec![0u8; scenario.payload_bytes.max(32)];
     let header = format!("branch={branch_idx};commit={commit_idx};");
     let header_bytes = header.as_bytes();
@@ -3632,7 +3712,7 @@ fn scan_leaf_like_branch_heads(
     scan
 }
 
-fn branch_head_checksum(branch_name: &str, head_id: CommitId) -> u64 {
+fn branch_head_checksum(branch_name: &str, head_id: BatchId) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&head_id.0[..8]);
     u64::from_le_bytes(bytes) ^ (branch_name.len() as u64)
@@ -3901,7 +3981,7 @@ fn create_runtime_with_storage<S: Storage>(schema: Schema, storage: S) -> BenchR
     )
     .expect("create schema manager");
 
-    RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new())
+    RuntimeCore::new(schema_manager, storage, NoopScheduler)
 }
 
 fn create_runtime(schema: Schema) -> BenchRuntime {
@@ -3913,7 +3993,7 @@ fn create_rocksdb_runtime(
     schema: Schema,
     db_path: &Path,
     cache_size_bytes: usize,
-) -> RuntimeCore<RocksDBStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<RocksDBStorage, NoopScheduler> {
     create_runtime_with_storage(
         schema,
         RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
@@ -3924,7 +4004,7 @@ fn create_rocksdb_runtime(
 fn create_sqlite_runtime(
     schema: Schema,
     db_path: &Path,
-) -> RuntimeCore<SqliteStorage, NoopScheduler, VecSyncSender> {
+) -> RuntimeCore<SqliteStorage, NoopScheduler> {
     create_runtime_with_storage(
         schema,
         SqliteStorage::open(db_path).expect("open sqlite for benchmark"),

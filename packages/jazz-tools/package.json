@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.27",
+  "version": "2.0.0-alpha.35",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -59,6 +59,14 @@
       "types": "./dist/dev/vite.d.ts",
       "default": "./dist/dev/vite.js"
     },
+    "./dev/expo": {
+      "types": "./dist/dev/expo.d.ts",
+      "default": "./dist/dev/expo.js"
+    },
+    "./dev/sveltekit": {
+      "types": "./dist/dev/sveltekit.d.ts",
+      "default": "./dist/dev/sveltekit.js"
+    },
     "./react-native": {
       "types": "./dist/react-native/index.d.ts",
       "react-native": "./dist/react-native/index.js",
@@ -69,10 +77,23 @@
       "svelte": "./dist/svelte/index.js",
       "default": "./dist/svelte/index.js"
     },
+    "./expo": {
+      "types": "./dist/expo/index.d.ts",
+      "react-native": "./dist/expo/index.js",
+      "default": "./dist/expo/index.js"
+    },
     "./expo/polyfills": {
       "types": "./dist/expo/polyfills.d.ts",
       "react-native": "./dist/expo/polyfills.js",
       "default": "./dist/expo/polyfills.js"
+    },
+    "./passphrase": {
+      "types": "./dist/passphrase.d.ts",
+      "default": "./dist/passphrase.js"
+    },
+    "./passkey-backup": {
+      "types": "./dist/passkey-backup.d.ts",
+      "default": "./dist/passkey-backup.js"
     },
     "./package.json": "./package.json"
   },
@@ -84,7 +105,7 @@
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte",
     "build:runtime": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.svelte.ts",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
@@ -93,21 +114,25 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
+    "esbuild": "^0.27.0",
     "jazz-rn": "workspace:*",
     "jazz-wasm": "workspace:*",
+    "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
-    "tsx": "^4.0.0",
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
     "@better-auth/test-utils": "^1.5.5",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "better-auth": "^1.5.5",
@@ -125,7 +150,9 @@
   "peerDependencies": {
     "better-auth": "^1.5.5",
     "expo": ">=54",
-    "react": "^18 || ^19",
+    "expo-crypto": ">=14.0.0",
+    "expo-secure-store": ">=14.0.0",
+    "react": ">=19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"
@@ -135,6 +162,12 @@
       "optional": true
     },
     "expo": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-secure-store": {
       "optional": true
     },
     "react": {

@@ -1,17 +1,8 @@
-use crate::commit::CommitId;
-use crate::object::ObjectId;
-use crate::row_histories::HistoryScan;
-
 use super::key_codec::{
-    history_row_key, history_row_prefix, history_row_versions_prefix, increment_string,
-    raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix, strip_raw_table_key,
-    visible_row_key, visible_row_prefix, visible_row_versions_key, visible_row_versions_prefix,
+    history_row_raw_table_key, increment_string, raw_table_entry_key, raw_table_prefix,
+    raw_table_scan_prefix, strip_raw_table_key, visible_row_raw_table_key,
 };
 use super::{HistoryRowBytes, RawTableKeys, RawTableRows, StorageError, VisibleRowBytes};
-
-fn encode_commit_id(version_id: CommitId) -> [u8; 32] {
-    version_id.0
-}
 
 pub(super) fn raw_table_put_core(
     table: &str,
@@ -110,97 +101,26 @@ pub(super) fn raw_table_scan_range_keys_core(
 
 #[allow(dead_code)]
 pub(super) fn append_history_region_row_bytes_core(
-    table: &str,
+    _table: &str,
     rows: &[HistoryRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = history_row_key(table, row.row_id, row.version_id);
-        set(&key, row.bytes)?;
+        let key = history_row_raw_table_key(row.row_id, row.branch, row.batch_id);
+        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
 pub(super) fn upsert_visible_region_row_bytes_core(
-    table: &str,
+    _table: &str,
     rows: &[VisibleRowBytes<'_>],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     for row in rows {
-        let key = visible_row_key(table, row.branch, row.row_id);
-        set(&key, row.bytes)?;
-        let row_versions_key = visible_row_versions_key(table, row.row_id, row.branch);
-        let version_id = encode_commit_id(row.current_version_id);
-        set(&row_versions_key, &version_id)?;
+        let key = visible_row_raw_table_key(row.branch, row.row_id);
+        raw_table_put_core(row.row_raw_table, &key, row.bytes, &mut set)?;
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-pub(super) fn load_history_row_version_bytes_core(
-    table: &str,
-    row_id: ObjectId,
-    version_id: CommitId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = history_row_key(table, row_id, version_id);
-    get(&key)
-}
-
-#[allow(dead_code)]
-pub(super) fn load_visible_region_row_bytes_core(
-    table: &str,
-    branch: &str,
-    row_id: ObjectId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<Vec<u8>>, StorageError> {
-    let key = visible_row_key(table, branch, row_id);
-    get(&key)
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_history_region_bytes_core(
-    table: &str,
-    scan: HistoryScan,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<Vec<u8>>, StorageError> {
-    let prefix = match scan {
-        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table),
-        HistoryScan::Row { row_id } => history_row_versions_prefix(table, row_id),
-    };
-
-    Ok(scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| bytes)
-        .collect())
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_bytes_core(
-    table: &str,
-    branch: &str,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<Vec<u8>>, StorageError> {
-    let prefix = visible_row_prefix(table, branch);
-    Ok(scan_prefix(&prefix)?
-        .into_iter()
-        .map(|(_, bytes)| bytes)
-        .collect())
-}
-
-#[allow(dead_code)]
-pub(super) fn scan_visible_region_row_version_branches_core(
-    table: &str,
-    row_id: ObjectId,
-    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
-) -> Result<Vec<String>, StorageError> {
-    let prefix = visible_row_versions_prefix(table, row_id);
-    let mut branches = scan_prefix_keys(&prefix)?
-        .into_iter()
-        .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
-        .collect::<Vec<_>>();
-    branches.sort();
-    branches.dedup();
-    Ok(branches)
 }

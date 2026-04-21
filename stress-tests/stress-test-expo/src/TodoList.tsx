@@ -9,8 +9,8 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react-native";
-import { app, type Todo, type TodoWithIncludes } from "../schema/app";
+import { useAll, useDb } from "jazz-tools/react-native";
+import { app } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";
@@ -20,10 +20,26 @@ type QueryMode = "plain" | "join_project" | "join_parent" | "join_both" | "filte
 
 const QUERY_MODES: { key: QueryMode; label: string; description: string }[] = [
   { key: "plain", label: "Plain", description: "SELECT * FROM todos" },
-  { key: "join_project", label: "Join Project", description: "todos + include(project)" },
-  { key: "join_parent", label: "Join Parent", description: "todos + include(parent)" },
-  { key: "join_both", label: "Join Both", description: "todos + include(project, parent)" },
-  { key: "filtered_join", label: "Filter + Join", description: "where(done) + include(project)" },
+  {
+    key: "join_project",
+    label: "Join Project",
+    description: "todos + include(project)",
+  },
+  {
+    key: "join_parent",
+    label: "Join Parent",
+    description: "todos + include(parent)",
+  },
+  {
+    key: "join_both",
+    label: "Join Both",
+    description: "todos + include(project, parent)",
+  },
+  {
+    key: "filtered_join",
+    label: "Filter + Join",
+    description: "where(done) + include(project)",
+  },
 ];
 
 function buildQuery(mode: QueryMode, filterTitle: string, showDoneOnly: boolean) {
@@ -94,7 +110,9 @@ export function TodoList() {
       <View style={styles.todoRow}>
         <Switch
           value={item.done}
-          onValueChange={() => db.update(app.todos, item.id, { done: !item.done })}
+          onValueChange={() => {
+            db.update(app.todos, item.id, { done: !item.done });
+          }}
         />
         <View style={styles.todoTextWrap}>
           <Text style={[styles.todoTitle, item.done && styles.todoDone]}>{displayTitle}</Text>

@@ -11,7 +11,7 @@ What it demonstrates:
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
 - Recreating `JazzProvider` on login and logout, while keeping `db.updateAuthToken(...)` only for same-user JWT refresh after auth expiry
-- Falling back to anonymous `localAuth` when no session exists
+- Falling back to local-first auth when no session exists
 - Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts), with generic-chat message ownership enforced via `$createdBy`.
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
@@ -27,8 +27,8 @@ cp .env.example .env
 
 The example reads these values from `.env`:
 
-- `NEXT_PUBLIC_APP_ID` — Jazz app id shared by the Next app and sync server
-- `NEXT_PUBLIC_SYNC_SERVER_URL` — Jazz sync server URL
+- `NEXT_PUBLIC_JAZZ_APP_ID` — Jazz app id shared by the Next app and sync server
+- `NEXT_PUBLIC_JAZZ_SERVER_URL` — Jazz sync server URL
 - `NEXT_PUBLIC_APP_ORIGIN` — Next app origin used by Better Auth and Playwright
 - `ADMIN_SECRET` — admin secret for the local sync server
 - `BACKEND_SECRET` — backend secret used by the Better Auth Jazz context
@@ -79,7 +79,6 @@ betterAuth({
   database: jazzAdapter({
     db: () => authJazzContext.asBackend(authSchema),
     schema: authSchema,
-    durabilityTier: "worker",
   }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
   plugins: [
@@ -153,12 +152,12 @@ React.useEffect(() => {
 
 While the JWT is being fetched the app renders a loading state. Once the token arrives,
 `JazzProvider` is mounted in JWT mode. On sign-out Better Auth clears the session cookie and
-the effect resets `initialJwtToken` to `null`, recreating Jazz in anonymous mode.
+the effect resets `initialJwtToken` to `null`, recreating Jazz in local-first mode.
 
 ```tsx
 const config: DbConfig = initialJwtToken
   ? { appId, jwtToken: initialJwtToken, serverUrl, ... }
-  : { appId, ...getActiveSyntheticAuth(appId, { defaultMode: "anonymous" }), ... };
+  : { appId, auth: { localFirstSecret: secret }, serverUrl, ... };
 
 <JazzProvider key={initialJwtToken ? "external" : "local"} config={config}>
   <ChatShell />

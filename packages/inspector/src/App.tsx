@@ -1,6 +1,6 @@
 import { BrowserRouter } from "react-router";
 import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "jazz-tools";
+import { fetchSchemaHashes, fetchStoredPermissions, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
 import { DevtoolsProvider } from "./contexts/devtools-context.js";
@@ -16,12 +16,12 @@ interface StoredConfig {
   env: string;
   branch: string;
   schemaHash: string;
-  serverPathPrefix?: string;
 }
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 
 type OnboardingStep = "form" | "schema" | null;
+type ConnectionFormMode = "connect" | "edit";
 
 export default function App() {
   const [fragmentConfig] = useState<DbConfigFormValues | null>(() => readFragmentConfig());
@@ -29,15 +29,20 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(
     fragmentConfig || !storedConfig ? "form" : null,
   );
+  const [connectionFormMode, setConnectionFormMode] = useState<ConnectionFormMode>("connect");
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<string[]>([]);
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<string[]>([]);
   const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
+  const [storedPermissions, setStoredPermissions] = useState<Awaited<
+    ReturnType<typeof fetchStoredPermissions>
+  > | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
   const handleFormSubmit = (values: DbConfigFormValues, hashes: string[]) => {
+    setConnectionFormMode("connect");
     setFormValues(values);
     setSchemaHashes(hashes);
     setOnboardingStep("schema");
@@ -52,7 +57,6 @@ export default function App() {
       env: formValues.env || "dev",
       branch: formValues.branch || "main",
       schemaHash,
-      serverPathPrefix: formValues.serverPathPrefix,
     };
     writeStoredConfig(config);
     setStoredConfig(config);
@@ -73,13 +77,14 @@ export default function App() {
       return null;
     });
     setWasmSchema(null);
+    setStoredPermissions(null);
     writeStoredConfig(nextConfig);
     setStoredConfig(nextConfig);
   };
 
-  const handleReset = () => {
-    clearStoredConfig();
-    setStoredConfig(null);
+  const handleEdit = () => {
+    if (!storedConfig) return;
+    setConnectionFormMode("edit");
     setClient((previousClient) => {
       if (previousClient) {
         void previousClient.shutdown();
@@ -87,6 +92,26 @@ export default function App() {
       return null;
     });
     setWasmSchema(null);
+    setError(null);
+    setFormValues(storedConfigToFormValues(storedConfig));
+    setSchemaHashes([]);
+    setAvailableSchemaHashes([]);
+    setIsSwitchingSchema(false);
+    setOnboardingStep("form");
+  };
+
+  const handleReset = () => {
+    clearStoredConfig();
+    setStoredConfig(null);
+    setConnectionFormMode("connect");
+    setClient((previousClient) => {
+      if (previousClient) {
+        void previousClient.shutdown();
+      }
+      return null;
+    });
+    setWasmSchema(null);
+    setStoredPermissions(null);
     setOnboardingStep("form");
     setFormValues(null);
     setSchemaHashes([]);
@@ -101,25 +126,28 @@ export default function App() {
 
     const run = async () => {
       try {
-        const [resolvedClient, { schema }, { hashes }] = await Promise.all([
+        const [resolvedClient, { schema }, { hashes }, permissions] = await Promise.all([
           createJazzClient({
             appId: storedConfig.appId,
             serverUrl: storedConfig.serverUrl,
-            serverPathPrefix: storedConfig.serverPathPrefix,
             env: storedConfig.env,
             userBranch: storedConfig.branch,
             adminSecret: storedConfig.adminSecret,
             driver: { type: "memory" },
           }),
           fetchStoredWasmSchema(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
             schemaHash: storedConfig.schemaHash,
-            pathPrefix: storedConfig.serverPathPrefix,
           }),
           fetchSchemaHashes(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
-            pathPrefix: storedConfig.serverPathPrefix,
           }),
+          fetchStoredPermissions(storedConfig.serverUrl, {
+            appId: storedConfig.appId,
+            adminSecret: storedConfig.adminSecret,
+          }).catch(() => null),
         ]);
 
         if (!active) {
@@ -134,6 +162,7 @@ export default function App() {
           return resolvedClient;
         });
         setWasmSchema(schema);
+        setStoredPermissions(permissions);
         setAvailableSchemaHashes(hashes);
         setError(null);
         setIsSwitchingSchema(false);
@@ -153,9 +182,19 @@ export default function App() {
   }, [storedConfig]);
 
   if (onboardingStep === "form") {
+    const initialValues =
+      connectionFormMode === "edit"
+        ? (formValues ?? (storedConfig ? storedConfigToFormValues(storedConfig) : undefined))
+        : (fragmentConfig ?? undefined);
+
     return (
       <main className={styles.statePage}>
-        <DbConfigForm onSubmit={handleFormSubmit} initialValues={fragmentConfig ?? undefined} />
+        <DbConfigForm
+          onSubmit={handleFormSubmit}
+          initialValues={initialValues}
+          mode={connectionFormMode}
+          onReset={connectionFormMode === "edit" ? handleReset : undefined}
+        />
       </main>
     );
   }
@@ -176,9 +215,14 @@ export default function App() {
           <p role="alert" className={styles.errorText}>
             {error}
           </p>
-          <button type="button" onClick={handleReset} className={styles.actionButton}>
-            Reset connection
-          </button>
+          <div className={styles.actionRow}>
+            <button type="button" onClick={handleEdit} className={styles.actionButton}>
+              Edit connection
+            </button>
+            <button type="button" onClick={handleReset} className={styles.actionButtonSecondary}>
+              Reset connection
+            </button>
+          </div>
         </section>
       </main>
     );
@@ -196,8 +240,13 @@ export default function App() {
 
   return (
     <JazzClientProvider client={client}>
-      <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
+      <DevtoolsProvider
+        wasmSchema={wasmSchema}
+        storedPermissions={storedPermissions}
+        runtime="standalone"
+      >
         <StandaloneProvider
+          onEdit={handleEdit}
           onReset={handleReset}
           schemaHashes={availableSchemaHashes}
           selectedSchemaHash={storedConfig?.schemaHash ?? null}
@@ -207,7 +256,6 @@ export default function App() {
             serverUrl: storedConfig.serverUrl,
             appId: storedConfig.appId,
             adminSecret: storedConfig.adminSecret,
-            serverPathPrefix: storedConfig.serverPathPrefix,
           }}
         >
           <BrowserRouter>
@@ -217,6 +265,16 @@ export default function App() {
       </DevtoolsProvider>
     </JazzClientProvider>
   );
+}
+
+function storedConfigToFormValues(config: StoredConfig): DbConfigFormValues {
+  return {
+    serverUrl: config.serverUrl,
+    appId: config.appId,
+    adminSecret: config.adminSecret,
+    env: config.env,
+    branch: config.branch,
+  };
 }
 
 function readStoredConfig(): StoredConfig | null {
@@ -255,33 +313,19 @@ function readFragmentConfig(): DbConfigFormValues | null {
   if (!raw) return null;
 
   const params = new URLSearchParams(raw);
-  const serverUrl = (params.get("url") ?? params.get("serverUrl") ?? "").trim();
-  const appId = (params.get("appid") ?? params.get("appId") ?? "").trim();
-  const adminSecret = (params.get("adminsecret") ?? params.get("adminSecret") ?? "").trim();
-  const env = (params.get("env") ?? "dev").trim() || "dev";
-  const branch = (params.get("branch") ?? "main").trim() || "main";
-  const serverPathPrefix = (
-    params.get("serverPathPrefix") ??
-    params.get("pathPrefix") ??
-    ""
-  ).trim();
+  const hasKnownPrefillParam = ["serverUrl", "appId", "adminSecret", "env", "branch"].some((key) =>
+    params.has(key),
+  );
 
-  if (!serverUrl || !appId || !adminSecret) {
-    return null;
-  }
-
-  try {
-    new URL(serverUrl);
-  } catch {
+  if (!hasKnownPrefillParam) {
     return null;
   }
 
   return {
-    serverUrl,
-    appId,
-    adminSecret,
-    env,
-    branch,
-    serverPathPrefix: serverPathPrefix || undefined,
+    serverUrl: (params.get("serverUrl") ?? "").trim(),
+    appId: (params.get("appId") ?? "").trim(),
+    adminSecret: (params.get("adminSecret") ?? "").trim(),
+    env: (params.get("env") ?? "dev").trim() || "dev",
+    branch: (params.get("branch") ?? "main").trim() || "main",
   };
 }

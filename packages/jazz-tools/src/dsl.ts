@@ -3,6 +3,8 @@
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import type {
   Column,
+  ColumnMergeStrategy,
+  ColumnMergeStrategyName,
   Schema,
   Table,
   SqlType,
@@ -87,10 +89,16 @@ function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
 interface ColumnBuilder {
   optional(): this;
   default(value: unknown): this;
+  merge(strategy: ColumnMergeStrategyName): this;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
 }
+
+type AllowedColumnMergeStrategy<
+  Sql extends SqlType,
+  Optional extends boolean,
+> = Optional extends true ? "lww" : Sql extends "INTEGER" ? ColumnMergeStrategyName : "lww";
 
 export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
@@ -105,6 +113,9 @@ export type TypedColumnBuilder<
   default(
     value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
   ): ColumnAlias<Sql, Optional, Ref, true>;
+  merge(
+    strategy: AllowedColumnMergeStrategy<Sql, Optional>,
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault>;
   optional(): ColumnAlias<Sql, true, Ref, HasDefault>;
 };
 
@@ -247,13 +258,31 @@ function validateReferenceColumnName(name: string, builder: ColumnBuilder): void
   }
 }
 
+function normalizeColumnMergeStrategy(
+  strategy: ColumnMergeStrategyName,
+  sqlType: SqlType,
+  nullable: boolean,
+): ColumnMergeStrategy | undefined {
+  if (strategy === "lww") {
+    return undefined;
+  }
+  if (sqlType !== "INTEGER" || nullable) {
+    throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+  }
+  return "counter";
+}
+
 class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
+  private _mergeStrategy: ColumnMergeStrategy | undefined;
 
   constructor(public _sqlType: ScalarSqlType) {}
 
   optional(): this {
+    if (this._mergeStrategy === "counter") {
+      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    }
     this._nullable = true;
     return this;
   }
@@ -263,12 +292,18 @@ class ScalarBuilder implements ColumnBuilder {
     return this;
   }
 
+  merge(strategy: ColumnMergeStrategyName): this {
+    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
+      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
     };
   }
 
@@ -280,6 +315,7 @@ class ScalarBuilder implements ColumnBuilder {
 class EnumBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
+  private _mergeStrategy: ColumnMergeStrategy | undefined;
   public _sqlType: EnumSqlType;
 
   constructor(...variants: string[]) {
@@ -287,6 +323,9 @@ class EnumBuilder implements ColumnBuilder {
   }
 
   optional(): this {
+    if (this._mergeStrategy === "counter") {
+      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    }
     this._nullable = true;
     return this;
   }
@@ -296,12 +335,18 @@ class EnumBuilder implements ColumnBuilder {
     return this;
   }
 
+  merge(strategy: ColumnMergeStrategyName): this {
+    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
+      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
     };
   }
 
@@ -313,6 +358,7 @@ class EnumBuilder implements ColumnBuilder {
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
+  private _mergeStrategy: ColumnMergeStrategy | undefined;
   public _sqlType: JsonSqlType<Output>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
@@ -322,6 +368,9 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   }
 
   optional(): this {
+    if (this._mergeStrategy === "counter") {
+      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    }
     this._nullable = true;
     return this;
   }
@@ -331,12 +380,18 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
     return this;
   }
 
+  merge(strategy: ColumnMergeStrategyName): this {
+    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
+      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
     };
   }
 
@@ -352,10 +407,14 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 class RefBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
+  private _mergeStrategy: ColumnMergeStrategy | undefined;
 
   constructor(private _targetTable: string) {}
 
   optional(): this {
+    if (this._mergeStrategy === "counter") {
+      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    }
     this._nullable = true;
     return this;
   }
@@ -365,12 +424,18 @@ class RefBuilder implements ColumnBuilder {
     return this;
   }
 
+  merge(strategy: ColumnMergeStrategyName): this {
+    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
+      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
       references: this._references,
     };
   }
@@ -387,10 +452,14 @@ class RefBuilder implements ColumnBuilder {
 class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
+  private _mergeStrategy: ColumnMergeStrategy | undefined;
 
   constructor(public _element: T) {}
 
   optional(): this {
+    if (this._mergeStrategy === "counter") {
+      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+    }
     this._nullable = true;
     return this;
   }
@@ -400,12 +469,18 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     return this;
   }
 
+  merge(strategy: ColumnMergeStrategyName): this {
+    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
       ...(this._default === undefined ? {} : { default: this._default }),
+      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
       references: this._references,
     };
   }

@@ -19,10 +19,16 @@ the runtime does four things:
 
 1. record that desired query subscription
 2. compile and settle the query using the client's schema/session context
-3. send the row versions needed for the initial result
+3. send the row batch entries needed for the initial result
 4. keep the subscription live so later row changes can add, update, or remove rows
 
 That is the entire shape of query-scoped sync in Jazz.
+
+On enforcing runtimes, that server-side graph is compiled against the active
+authorization schema. Missing explicit read policies filter rows out, and the
+same deny-by-default behavior shapes the current sync scope. Runtimes without a
+loaded policy bundle may stay permissive locally, but upstream query scope is
+still computed by the enforcing side.
 
 ## Initial Subscription Flow
 
@@ -31,11 +37,11 @@ client sends QuerySubscription
   -> SyncManager records pending subscription
   -> QueryManager compiles a server-side graph
   -> graph settles against current visible rows
-  -> matching rows are sent as RowVersionNeeded
+  -> matching rows are sent as RowBatchNeeded
   -> QuerySettled marks the first snapshot as ready at a given tier
 ```
 
-The point of `RowVersionNeeded` is straightforward: a newly subscribed client may need rows that already existed before the subscription was created.
+The point of `RowBatchNeeded` is straightforward: a newly subscribed client may need rows that already existed before the subscription was created.
 
 ## Live Update Flow
 
@@ -71,7 +77,7 @@ In the browser stack, for example:
 main thread subscribes
   -> worker settles locally
   -> worker may also forward upstream
-  -> worker sends row versions + QuerySettled(worker)
+  -> worker sends row batch entries + QuerySettled(local)
   -> main thread publishes once requested tier is satisfied
 ```
 

@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient } from "../runtime/client.js";
-import { Db, type DbConfig } from "./db.js";
+import { Db, type DbConfig, createDb } from "./db.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
 
 vi.mock("./create-jazz-rn-runtime.js", () => ({
   createJazzRnRuntime: vi.fn(),
+}));
+
+vi.mock("jazz-rn", () => ({
+  default: {
+    jazz_rn: {
+      mintLocalFirstToken: vi.fn(),
+    },
+  },
 }));
 
 class TestDb extends Db {
@@ -25,12 +33,46 @@ function makeSchema(tableName: string): WasmSchema {
 function makeClientStub() {
   const shutdown = vi.fn(async () => undefined);
   const updateAuthToken = vi.fn();
+  const connectTransport = vi.fn();
   return {
-    client: { shutdown, updateAuthToken } as unknown as JazzClient,
+    client: { shutdown, updateAuthToken, connectTransport } as unknown as JazzClient,
     shutdown,
     updateAuthToken,
+    connectTransport,
   };
 }
+
+describe("createDb", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("RNDB-U06 mints a JWT from secret and passes it to Db when secret is set", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+    mintMock.mockReturnValue("minted-jwt");
+
+    const config: DbConfig = {
+      appId: "test-app",
+      secret: "base64url-seed-32bytes",
+    };
+    const db = await createDb(config);
+
+    expect(mintMock).toHaveBeenCalledWith("base64url-seed-32bytes", "test-app", BigInt(3600));
+    expect(db).toBeInstanceOf(Db);
+  });
+
+  it("RNDB-U07 skips JWT minting and returns a plain Db when auth is absent", async () => {
+    const jazzRn = (await import("jazz-rn")).default;
+    const mintMock = vi.mocked(jazzRn.jazz_rn.mintLocalFirstToken);
+
+    const config: DbConfig = { appId: "test-app" };
+    const db = await createDb(config);
+
+    expect(mintMock).not.toHaveBeenCalled();
+    expect(db).toBeInstanceOf(Db);
+  });
+});
 
 describe("react-native Db", () => {
   const createJazzRnRuntimeMock = vi.mocked(createJazzRnRuntime);
@@ -51,14 +93,11 @@ describe("react-native Db", () => {
     const config: DbConfig = {
       appId: "rn-app",
       serverUrl: "https://example.test",
-      serverPathPrefix: "/apps/rn-app",
       env: "prod",
       userBranch: "user-branch",
       jwtToken: "jwt-token",
-      localAuthMode: "demo",
-      localAuthToken: "local-token",
       adminSecret: "admin-secret",
-      tier: "worker",
+      tier: "local",
       dataPath: "/tmp/rn-data",
     };
 
@@ -83,12 +122,9 @@ describe("react-native Db", () => {
         appId: config.appId,
         schema,
         serverUrl: config.serverUrl,
-        serverPathPrefix: config.serverPathPrefix,
         env: config.env,
         userBranch: config.userBranch,
         jwtToken: config.jwtToken,
-        localAuthMode: config.localAuthMode,
-        localAuthToken: config.localAuthToken,
         adminSecret: config.adminSecret,
         tier: config.tier,
         defaultDurabilityTier: config.tier,
@@ -204,5 +240,37 @@ describe("react-native Db", () => {
 
     expect(clientA.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(clientB.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
+  });
+
+  it("RNDB-U08 calls connectTransport when serverUrl is configured", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const stub = makeClientStub();
+    createJazzRnRuntimeMock.mockReturnValue({ id: "runtime" } as never);
+    connectWithRuntimeSpy.mockReturnValue(stub.client);
+
+    const db = new TestDb({
+      appId: "rn-app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+      adminSecret: "admin-y",
+    });
+    db.exposeGetClient(makeSchema("todos"));
+
+    expect(stub.connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+    });
+  });
+
+  it("RNDB-U09 does not call connectTransport when serverUrl is absent", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const stub = makeClientStub();
+    createJazzRnRuntimeMock.mockReturnValue({ id: "runtime" } as never);
+    connectWithRuntimeSpy.mockReturnValue(stub.client);
+
+    const db = new TestDb({ appId: "rn-app" });
+    db.exposeGetClient(makeSchema("todos"));
+
+    expect(stub.connectTransport).not.toHaveBeenCalled();
   });
 });
