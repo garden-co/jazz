@@ -183,8 +183,28 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+/**
+ * Controls when a write is visible to subscriptions.
+ *
+ * - With `"immediate"`, your own local writes appear in the subscription while it's still waiting for
+ * the tier to confirm the initial snapshot (only once the subscription has settled at least once).
+ * - With `"deferred"`, all delivery is held until the tier confirms.
+ * Default is `"immediate"`.
+ */
 export type LocalUpdatesMode = "immediate" | "deferred";
+/**
+ * Controls where the subscription reads data from.
+ *
+ * - With `"full"`, the subscription is sent to upstream servers, which push matching data back.
+ * - With `"local-only"`, only local storage is queried and no server communication happens.
+ */
 export type QueryPropagation = "full" | "local-only";
+/**
+ * Whether this query should be shown in the inspector.
+ * Useful for helpers and framework internals that create subscriptions
+ * but should stay out of the DB inspector.
+ * Defaults to `"public"`.
+ */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
@@ -215,10 +235,6 @@ export interface ResolvedQueryExecutionOptions {
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
   transactionOverlay?: TransactionQueryOverlay;
 };
-
-export interface WriteDurabilityOptions {
-  tier?: DurabilityTier;
-}
 
 interface TimestampOverrideOptions {
   updatedAt?: number;
@@ -267,21 +283,11 @@ export interface CreateOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
-export interface CreateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
-  id?: string;
-}
-
 export interface UpsertOptions extends TimestampOverrideOptions {
   id: string;
 }
 
-export interface UpsertDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {
-  id: string;
-}
-
 export interface UpdateOptions extends TimestampOverrideOptions {}
-
-export interface UpdateDurabilityOptions extends WriteDurabilityOptions, TimestampOverrideOptions {}
 
 /**
  * A mutation error event emitted by {@link JazzClient.onMutationError}.
@@ -781,6 +787,9 @@ function rejectionFromSettlement(
   return new PersistedWriteRejectedError(settlement.batchId, settlement.code, settlement.reason);
 }
 
+/**
+ * Error returned when a write fails to be persisted at a given durability tier.
+ */
 export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
@@ -790,28 +799,6 @@ export class PersistedWriteRejectedError extends Error {
     readonly reason: string,
   ) {
     super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
-  }
-}
-
-export class PersistedWrite<T> {
-  constructor(
-    private readonly client: JazzClient,
-    private readonly requestedTier: DurabilityTier,
-    private readonly persistedBatchId: string,
-    private readonly persistedValue: T,
-  ) {}
-
-  batchId(): string {
-    return this.persistedBatchId;
-  }
-
-  value(): T {
-    return this.persistedValue;
-  }
-
-  async wait(): Promise<T> {
-    await this.client.waitForPersistedBatch(this.persistedBatchId, this.requestedTier);
-    return this.persistedValue;
   }
 }
 
@@ -831,6 +818,8 @@ export class WriteHandle<T = void> {
 
   /**
    * Wait for the write to be persisted at a given durability tier.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
     return this.#client.waitForPersistedBatch(this.batchId, options.tier) as Promise<T>;
@@ -854,6 +843,12 @@ export class InsertHandle<T> extends WriteHandle<T> {
     super(batchId, client);
   }
 
+  /**
+   * Wait for the write to be persisted at a given durability tier.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * @returns the inserted row.
+   */
   override async wait(options: { tier: DurabilityTier }): Promise<T> {
     await super.wait(options);
     return this.value;
@@ -1529,10 +1524,6 @@ export class JazzClient {
       ...resolved,
       transactionOverlay: options.transactionOverlay,
     };
-  }
-
-  private resolveWriteTier(options?: WriteDurabilityOptions): DurabilityTier {
-    return options?.tier ?? this.defaultDurabilityTier;
   }
 
   private encodeWriteContext(

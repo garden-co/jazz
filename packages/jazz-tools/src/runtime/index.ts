@@ -1,5 +1,4 @@
 export {
-  type CreateDurabilityOptions,
   type CreateOptions,
   DirectBatch,
   JazzClient,
@@ -23,11 +22,8 @@ export {
   type Row,
   type Runtime,
   type SubscriptionCallback,
-  type UpdateDurabilityOptions,
   type UpdateOptions,
-  type UpsertDurabilityOptions,
   type UpsertOptions,
-  type WriteDurabilityOptions,
   type WasmModule,
   type InsertHandle,
   type WriteHandle,

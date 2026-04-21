@@ -117,9 +117,7 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
 
-## Write handles
-
-Write handles let you wait for a write to persisted up to a specific durability tier, and also access the value (in the case of inserts).
+`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
 ```ts
 const pending = db.insert(app.todos, {
@@ -139,7 +137,13 @@ try {
 }
 ```
 
-`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+You can also set a global `onMutationError` handler that will be notified anytime a write that was not explicitly awaited fails:
+
+```ts
+db.onMutationError((error) => {
+  console.error("DB mutation failed: ", error);
+});
+```
 
 ## Explicit batches
 
@@ -156,7 +160,13 @@ const batchId = tx.commit();
 console.log(batchId);
 ```
 
-Use a direct batch when you want to group several ordinary writes under one batch id without sealing:
+The changes made as part of the transaction are scoped to it, and will only be
+globally visible once it's committed and accepted by the authority.
+
+`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
+
+Use a direct batch when you want to group several ordinary writes under one batch id, but still want them
+to be globally visible immediately:
 
 ```ts
 const batch = db.beginDirectBatch(app.todos);
@@ -166,5 +176,3 @@ batch.update(app.todos, todoId, { done: true });
 
 console.log(batch.batchId());
 ```
-
-`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.

@@ -63,6 +63,21 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   }
 }
 
+/**
+ * Define a table with the given columns.
+ *
+ * @example
+ * ```typescript
+ * const schema = {
+ *   todos: s.table({
+ *     title: s.string(),
+ *     done: s.boolean(),
+ *   }),
+ * });
+ * type AppSchema = s.Schema<typeof schema>;
+ * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * ```
+ */
 export function defineTable<const TColumns extends TableDefinition>(
   columns: TColumns,
 ): DefinedTable<TColumns> {
@@ -1215,6 +1230,21 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
   return definition as unknown as Schema<TSchema>;
 }
 
+/**
+ * Create an app from a schema definition.
+ *
+ * @example
+ * ```typescript
+ * const schema = {
+ *   todos: s.table({
+ *     title: s.string(),
+ *     done: s.boolean(),
+ *   }),
+ * });
+ * type AppSchema = s.Schema<typeof schema>;
+ * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * ```
+ */
 export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema>,
