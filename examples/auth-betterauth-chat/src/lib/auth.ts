@@ -4,7 +4,7 @@ import { admin, bearer, jwt } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { authJazzContext } from "./auth-jazz-context";
-import { app } from "../../schema-better-auth/schema";
+import { app } from "../../schema";
 
 const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
 const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;

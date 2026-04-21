@@ -1,6 +1,8 @@
 import { schema as s } from "jazz-tools";
+import { schema as betterauthSchema } from "./schema-better-auth/schema";
 
 const schema = {
+  ...betterauthSchema,
   messages: s.table({
     author_name: s.string(),
     chat_id: s.string(),

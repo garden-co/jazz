@@ -5,8 +5,6 @@ export const baseNextConfig = {
   serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
 };
 
-export const jazzOptions = {
-  server: false as const,
-};
+export const jazzOptions = {};
 
 export default withJazz(baseNextConfig, jazzOptions);
