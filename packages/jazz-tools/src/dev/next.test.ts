@@ -105,6 +105,21 @@ describe("withJazz", () => {
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
   });
 
+  it("prefixes NEXT_PUBLIC_JAZZ_WASM_URL with basePath", async () => {
+    const resolved = await resolveWrappedConfig(
+      withJazz({ basePath: "/myapp" }),
+      PRODUCTION_BUILD_PHASE,
+    );
+
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_WASM_URL).toBe("/myapp/_jazz/jazz_wasm_bg.wasm");
+  });
+
+  it("omits basePath when not configured", async () => {
+    const resolved = await resolveWrappedConfig(withJazz({}), PRODUCTION_BUILD_PHASE);
+
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_WASM_URL).toBe("/_jazz/jazz_wasm_bg.wasm");
+  });
+
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-test-");

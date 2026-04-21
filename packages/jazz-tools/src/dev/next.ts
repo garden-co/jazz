@@ -36,7 +36,15 @@ const PUBLIC_APP_ID_ENV = "NEXT_PUBLIC_JAZZ_APP_ID";
 const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
 const PUBLIC_WASM_URL_ENV = "NEXT_PUBLIC_JAZZ_WASM_URL";
 const PUBLIC_WASM_SUBPATH = "_jazz/jazz_wasm_bg.wasm";
-const PUBLIC_WASM_URL = `/${PUBLIC_WASM_SUBPATH}`;
+
+function buildPublicWasmUrl(basePath: unknown): string {
+  if (typeof basePath !== "string" || basePath.length === 0) {
+    return `/${PUBLIC_WASM_SUBPATH}`;
+  }
+  const trimmed = basePath.replace(/\/+$/, "");
+  const prefix = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return `${prefix}/${PUBLIC_WASM_SUBPATH}`;
+}
 
 const runtime = new ManagedDevRuntime({
   appId: PUBLIC_APP_ID_ENV,
@@ -93,7 +101,10 @@ export function withJazz(
     const mergedWithWasmEnv: NextConfigLike = copyAndAdvertiseWasm
       ? {
           ...merged,
-          env: { ...merged.env, [PUBLIC_WASM_URL_ENV]: PUBLIC_WASM_URL },
+          env: {
+            ...merged.env,
+            [PUBLIC_WASM_URL_ENV]: buildPublicWasmUrl(merged.basePath),
+          },
         }
       : merged;
 
