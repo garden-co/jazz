@@ -451,6 +451,11 @@ pub struct QueryManager {
     /// Per-schema, per-table write metadata cached to avoid cloning policy
     /// trees and descriptors on every hot write.
     pub(super) write_table_cache: HashMap<(SchemaHash, TableName), Arc<WriteTableCacheEntry>>,
+
+    /// When true, `process()` applies ready `QuerySettled` messages itself.
+    /// RuntimeCore disables this so it can release them after settlement/state
+    /// changes from the same upstream turn have landed locally.
+    pub(super) auto_apply_query_settled: bool,
 }
 
 impl QueryManager {
@@ -537,6 +542,7 @@ impl QueryManager {
             catalogued_storage_namespaces: HashSet::new(),
             catalogue_app_id: None,
             write_table_cache: HashMap::new(),
+            auto_apply_query_settled: true,
         }
     }
 
@@ -1020,6 +1026,14 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
+    pub(crate) fn set_auto_apply_query_settled(&mut self, enabled: bool) {
+        self.auto_apply_query_settled = enabled;
+    }
+
+    pub(crate) fn enqueue_row_visibility_change(&mut self, update: RowVisibilityChange) {
+        self.pending_row_visibility_changes.push(update);
+    }
+
     pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
@@ -1112,18 +1126,20 @@ impl QueryManager {
         // 4c. Apply QuerySettled messages that do not depend on any earlier
         // sequenced sync updates. Watermarked settlements stay queued for
         // RuntimeCore, which tracks per-server stream progress.
-        let pending_query_settled = self.sync_manager.take_pending_query_settled();
-        if !pending_query_settled.is_empty() {
-            let mut blocked = Vec::new();
-            for pending_settled in pending_query_settled {
-                if pending_settled.through_seq == 0 {
-                    self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
-                } else {
-                    blocked.push(pending_settled);
+        if self.auto_apply_query_settled {
+            let pending_query_settled = self.sync_manager.take_pending_query_settled();
+            if !pending_query_settled.is_empty() {
+                let mut blocked = Vec::new();
+                for pending_settled in pending_query_settled {
+                    if pending_settled.through_seq == 0 {
+                        self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
+                    } else {
+                        blocked.push(pending_settled);
+                    }
                 }
-            }
-            if !blocked.is_empty() {
-                self.sync_manager.requeue_pending_query_settled(blocked);
+                if !blocked.is_empty() {
+                    self.sync_manager.requeue_pending_query_settled(blocked);
+                }
             }
         }
 
@@ -1229,6 +1245,18 @@ impl QueryManager {
                     removed = delta.removed.len(),
                     "settle delta"
                 );
+            }
+
+            if !subscription.settled_once
+                && !subscription.query_frontier_complete
+                && self.sync_manager.has_servers_or_pending_servers()
+            {
+                // Keep the first delivery held until the initial upstream
+                // frontier is complete, but still allow settle() above to keep
+                // the graph current while rows arrive.
+                tracing::trace!("query frontier incomplete, holding first delivery");
+                self.subscriptions.insert(sub_id, subscription);
+                continue;
             }
 
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {

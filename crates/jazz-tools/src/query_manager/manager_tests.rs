@@ -10825,7 +10825,7 @@ fn sync_backed_subscription_without_remote_scope_snapshot_keeps_local_rows() {
 }
 
 #[test]
-fn sync_backed_subscription_keeps_initial_rows_visible_without_reloading_on_tier_confirmations() {
+fn sync_backed_subscription_holds_initial_delivery_without_reloading_on_tier_confirmations() {
     use crate::sync_manager::{InboxEntry, QueryId, ServerId, Source, SyncPayload};
     use uuid::Uuid;
 
@@ -10866,19 +10866,12 @@ fn sync_backed_subscription_keeps_initial_rows_visible_without_reloading_on_tier
         "subscription should still be waiting on upstream QuerySettled"
     );
     assert!(
-        subscription.settled_once,
-        "subscription should deliver initial local rows before QuerySettled arrives"
+        !subscription.settled_once,
+        "subscription should keep the first delivery held until QuerySettled arrives"
     );
     assert!(
         !subscription.graph.has_dirty_nodes(),
-        "initial delivery should still settle the graph"
-    );
-
-    let initial_results = qm.get_subscription_results(sub_id);
-    assert_eq!(initial_results.len(), 1);
-    assert_eq!(
-        initial_results[0].1,
-        vec![Value::Text("Alice".into()), Value::Integer(100)]
+        "initial hold should still keep the graph settled"
     );
 
     for confirmed_tier in [
@@ -10913,8 +10906,8 @@ fn sync_backed_subscription_keeps_initial_rows_visible_without_reloading_on_tier
         "confirmations whose visibility is unchanged should not dirty the graph"
     );
     assert!(
-        subscription.settled_once,
-        "confirmations should not revoke the already-delivered initial snapshot"
+        !subscription.settled_once,
+        "confirmations should not release the held initial snapshot"
     );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -10937,7 +10930,7 @@ fn sync_backed_subscription_keeps_initial_rows_visible_without_reloading_on_tier
     );
     assert!(
         subscription.settled_once,
-        "frontier completion should preserve the initial delivery"
+        "frontier completion should allow the held initial delivery"
     );
     assert!(
         !subscription.graph.has_dirty_nodes(),
