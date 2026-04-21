@@ -340,10 +340,31 @@ function resolveBuiltQueryOutputTable(
 
 function resolveSchemaWithTable(
   preferredSchema: WasmSchema,
-  fallbackSchema: WasmSchema,
+  fallbackSchema: WasmSchema | (() => WasmSchema),
   tableName: string,
 ): WasmSchema {
-  return preferredSchema[tableName] ? preferredSchema : fallbackSchema;
+  if (preferredSchema[tableName]) {
+    return preferredSchema;
+  }
+
+  return typeof fallbackSchema === "function" ? fallbackSchema() : fallbackSchema;
+}
+
+function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
+  get: () => WasmSchema;
+  peek: () => WasmSchema | undefined;
+} {
+  let cachedRuntimeSchema: WasmSchema | undefined;
+
+  return {
+    get: () => {
+      if (!cachedRuntimeSchema) {
+        cachedRuntimeSchema = getRuntimeSchema();
+      }
+      return cachedRuntimeSchema;
+    },
+    peek: () => cachedRuntimeSchema,
+  };
 }
 
 function assertTableBelongsToClient<T, Init>(
@@ -2263,11 +2284,10 @@ export class Db {
     options: CreateDurabilityOptions,
   ): Promise<T> {
     const client = this.getClient(table._schema);
-    const inputSchema = resolveSchemaWithTable(
-      table._schema,
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
-      table._table,
     );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     await this.ensureBridgeReady();
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await client.createDurable(table._table, values, options);
@@ -2311,11 +2331,10 @@ export class Db {
     options: UpsertDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
-    const inputSchema = resolveSchemaWithTable(
-      table._schema,
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
-      table._table,
     );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     await this.ensureBridgeReady();
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await client.upsertDurable(table._table, values, options);
@@ -2345,11 +2364,10 @@ export class Db {
     options?: UpdateDurabilityOptions,
   ): Promise<void> {
     const client = this.getClient(table._schema);
-    const inputSchema = resolveSchemaWithTable(
-      table._schema,
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(client.getSchema()),
-      table._table,
     );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     await this.ensureBridgeReady();
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await client.updateDurable(id, updates, options);
@@ -2497,14 +2515,24 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     await this.ensureQueryReady(options);
-    const rows = await client.query(translateQuery(builderJson, planningSchema), options);
+    const wasmQuery = translateQuery(builderJson, planningSchema);
+    const rows =
+      "queryInternal" in client && typeof client.queryInternal === "function"
+        ? await client.queryInternal(wasmQuery, undefined, options, runtimeSchema.peek())
+        : await client.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
   }
@@ -2604,12 +2632,18 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
-    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(client.getSchema()),
+    );
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
@@ -2625,6 +2659,7 @@ export class Db {
       },
       session,
       options,
+      runtimeSchema.peek(),
     );
     const traceId = this.registerActiveQuerySubscriptionTrace(wasmQuery, builtQuery.table, options);
 
@@ -2845,8 +2880,10 @@ class ClientBackedDb extends Db {
     data: Init,
     options?: CreateOptions,
   ): InsertHandle<T> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = this.runtimeClient.createInternal(
       table._table,
@@ -2867,8 +2904,10 @@ class ClientBackedDb extends Db {
     data: Init,
     options: CreateDurabilityOptions,
   ): Promise<T> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await this.runtimeClient.createDurableInternal(
       table._table,
@@ -2885,8 +2924,10 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options: UpsertOptions,
   ): WriteHandle {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     const batchId = this.runtimeClient.upsertInternal(
       table._table,
@@ -2904,8 +2945,10 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options: UpsertDurabilityOptions,
   ): Promise<void> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await this.runtimeClient.upsertDurableInternal(
       table._table,
@@ -2922,8 +2965,10 @@ class ClientBackedDb extends Db {
     data: Init,
     options?: { tier?: DurabilityTier },
   ): DbPersistedWrite<T> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const pendingWrite = this.runtimeClient.createPersistedInternal(
       table._table,
@@ -2945,8 +2990,10 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     const batchId = this.runtimeClient.updateInternal(
       id,
@@ -2965,8 +3012,10 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options?: UpdateDurabilityOptions,
   ): Promise<void> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     await this.runtimeClient.updateDurableInternal(
       id,
@@ -2984,8 +3033,10 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options?: UpdateDurabilityOptions,
   ): DbPersistedWrite<void> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
     const pendingWrite = this.runtimeClient.updatePersistedInternal(
       id,
@@ -3056,17 +3107,24 @@ class ClientBackedDb extends Db {
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     await this.ensureQueryReady(options);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
       options,
+      runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
@@ -3084,12 +3142,18 @@ class ClientBackedDb extends Db {
     _session?: Session,
   ): () => void {
     const manager = new SubscriptionManager<T>();
-    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const runtimeSchema = createRuntimeSchemaResolver(() =>
+      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
+    );
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const planningSchema = resolveSchemaWithTable(
+      query._schema,
+      runtimeSchema.get,
+      builtQuery.table,
+    );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
@@ -3104,6 +3168,7 @@ class ClientBackedDb extends Db {
       },
       this.session,
       options,
+      runtimeSchema.peek(),
     );
 
     return () => {

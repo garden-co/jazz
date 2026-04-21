@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { JazzClient, resolveDefaultDurabilityTier } from "./client.js";
 import type { AppContext } from "./context.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
   return {
@@ -22,6 +23,7 @@ function makeFakeRuntime() {
     addServer: vi.fn(),
     removeServer: vi.fn(),
     addClient: vi.fn().mockReturnValue("client-id"),
+    returnsDeclaredSchemaRows: false,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
@@ -158,5 +160,95 @@ describe("resolveDefaultDurabilityTier", () => {
 
   it("still prefers edge when a server is configured outside the browser runtime", () => {
     expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
+  });
+});
+
+describe("JazzClient runtime schema caching", () => {
+  it("reuses the normalized runtime schema while the schema hash is unchanged", () => {
+    const schema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.getSchema.mockReturnValue(schema);
+    runtime.getSchemaHash.mockReturnValue("schema-hash-1");
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "schema-cache-app",
+      schema,
+    });
+
+    expect(client.getSchema()).toBe(schema);
+    expect(client.getSchema()).toBe(schema);
+
+    expect(runtime.getSchema).toHaveBeenCalledTimes(1);
+    expect(runtime.getSchemaHash).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the cached schema when the runtime schema hash changes", () => {
+    const firstSchema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const secondSchema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+        policies: {},
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.getSchema.mockReturnValueOnce(firstSchema).mockReturnValueOnce(secondSchema);
+    runtime.getSchemaHash.mockReturnValueOnce("schema-hash-1").mockReturnValueOnce("schema-hash-2");
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "schema-cache-refresh-app",
+      schema: firstSchema,
+    });
+
+    expect(client.getSchema()).toBe(firstSchema);
+    expect(client.getSchema()).toBe(secondSchema);
+
+    expect(runtime.getSchema).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips schema fetches for runtimes that already return declared-schema rows", async () => {
+    const schema: WasmSchema = {
+      todos: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    };
+    const runtime = makeFakeRuntime();
+    runtime.returnsDeclaredSchemaRows = true;
+    runtime.query.mockResolvedValue([
+      {
+        id: "todo-1",
+        values: [{ type: "Text", value: "already aligned" }],
+      },
+    ]);
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "declared-row-runtime",
+      schema,
+    });
+
+    await expect(
+      client.query({
+        _schema: schema,
+        _build: () =>
+          JSON.stringify({
+            table: "todos",
+            conditions: [],
+            includes: {},
+            orderBy: [],
+          }),
+      }),
+    ).resolves.toEqual([
+      {
+        id: "todo-1",
+        values: [{ type: "Text", value: "already aligned" }],
+      },
+    ]);
+
+    expect(runtime.getSchemaHash).not.toHaveBeenCalled();
+    expect(runtime.getSchema).not.toHaveBeenCalled();
   });
 });

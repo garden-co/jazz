@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import type { DirectInsertResult, DirectMutationResult, JazzClient } from "./client.js";
+import { JazzClient, type DirectInsertResult, type DirectMutationResult } from "./client.js";
 
 class TestDb extends Db {
   constructor(private readonly testClient: JazzClient) {
@@ -120,6 +120,65 @@ describe("Db runtime schema order", () => {
         done: true,
       },
     ]);
+  });
+
+  it("does not fetch runtime schema for client-backed queries that stay within the declared schema", async () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const runtime = {
+      returnsDeclaredSchemaRows: true,
+      query: vi.fn(async () => [
+        {
+          id: "todo-1",
+          values: [
+            { type: "Text", value: "No schema fetch" },
+            { type: "Boolean", value: true },
+          ],
+        },
+      ]),
+      getSchema: vi.fn(() => new Map()),
+      getSchemaHash: vi.fn(() => "runtime-schema-hash"),
+      onSyncMessageReceived: vi.fn(),
+      createSubscription: vi.fn(),
+      executeSubscription: vi.fn(),
+      unsubscribe: vi.fn(),
+      addServer: vi.fn(),
+      removeServer: vi.fn(),
+      addClient: vi.fn(() => "client-id"),
+    };
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      appId: "client-backed-schema-order",
+      schema: generatedSchema,
+    });
+    const db = createDbFromClient({ appId: "client-backed-schema-order" }, client);
+    const builder = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _build: () =>
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+        }),
+    } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
+
+    await expect(db.all(builder)).resolves.toEqual([
+      {
+        id: "todo-1",
+        title: "No schema fetch",
+        done: true,
+      },
+    ]);
+    expect(runtime.getSchema).not.toHaveBeenCalled();
+    expect(runtime.getSchemaHash).not.toHaveBeenCalled();
   });
 
   it("falls back to the generated schema when the runtime schema is missing a table", async () => {
