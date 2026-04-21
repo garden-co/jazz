@@ -347,6 +347,29 @@ it("config hook preserves existing ssr.external entries", () => {
   expect(result.ssr?.external).toContain("some-other-pkg");
 });
 
+it("config hook injects build target, worker format, and optimizeDeps exclude", () => {
+  const plugin = jazzSvelteKit();
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+  const result = config!({}) as {
+    build?: { target?: string };
+    worker?: { format?: string };
+    optimizeDeps?: { exclude?: string[] };
+  };
+  expect(result.build?.target).toBe("es2020");
+  expect(result.worker?.format).toBe("es");
+  expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
+});
+
+it("config hook preserves existing optimizeDeps excludes", () => {
+  const plugin = jazzSvelteKit();
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+  const result = config!({ optimizeDeps: { exclude: ["some-dep"] } }) as {
+    optimizeDeps?: { exclude?: string[] };
+  };
+  expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
+  expect(result.optimizeDeps?.exclude).toContain("some-dep");
+});
+
 describe("dev barrel", () => {
   it("exposes jazzSvelteKit", () => {
     expect((dev as Record<string, unknown>).jazzSvelteKit).toBeDefined();
