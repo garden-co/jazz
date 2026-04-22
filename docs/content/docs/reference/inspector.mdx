@@ -1,0 +1,63 @@
+---
+title: Inspector
+description: Standalone admin client for exploring Jazz sync servers, schemas, permissions, and live queries.
+reviewedAt: "efa67bfc2"
+---
+
+The [Jazz Inspector](https://v2.inspector.jazz.tools/) is a standalone client for inspecting a Jazz
+app through any reachable sync server. It is not tied to Jazz Cloud: if you have a server URL, app
+ID, and admin credential, you can connect to that app's sync server directly.
+
+<Callout type="warn" title="Admin access only">
+  The inspector uses `adminSecret`, not an end-user session token. On the sync connection, that
+  authenticates the client as the backend, so normal permission policies are bypassed. Treat it like
+  production infrastructure access and never expose it to end users.
+</Callout>
+
+## Connecting
+
+Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
+
+- **Server URL**&hairsp;—&hairsp;base URL of the sync server
+- **App ID**&hairsp;—&hairsp;Jazz app namespace to inspect
+- **Admin secret**&hairsp;—&hairsp;app admin credential
+- **Env**&hairsp;—&hairsp;logical environment such as `dev`, `staging`, or `prod`
+- **Branch**&hairsp;—&hairsp;logical branch, usually `main`
+
+After connecting, choose the published schema hash you want to inspect. The inspector stores the
+connection locally so you can reopen it without re-entering everything each time.
+
+## Features
+
+### Data Explorer
+
+Browse every table in the selected schema, inspect rows reactively, sort columns, and add typed
+filters. Relation cells link to the referenced table, so you can follow relations without manually
+rebuilding the query.
+
+The explorer also supports admin writes: edit cells inline, open a row sidebar for full-row edits,
+insert new rows, and delete existing ones.
+
+### Schema and permissions view
+
+Each table includes a schema view showing the stored structural schema for that table. In standalone
+mode, the same page also shows the currently published sync-server permissions for that table, which
+is useful when you want to confirm what policy bundle the server is enforcing.
+
+### Live Query
+
+The Live Query tab shows active server-managed subscriptions grouped by query on the connected sync
+server. You can inspect the table, propagation mode, branches, and compiled query JSON, then jump
+straight into the matching table view in Data Explorer.
+
+### Schema switching
+
+If an app has multiple published schema hashes, the inspector lets you switch between them without
+reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
+that still lives on older schema branches.
+
+## DevTools panel
+
+The same inspector UI also exists as a browser DevTools panel for local debugging. The hosted
+client at [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect
+a remote or self-hosted sync server directly.
