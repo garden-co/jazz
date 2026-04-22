@@ -158,11 +158,13 @@ So frontend is the hard part. But suspiciously, for me
 frontend was also the fun part.
 
 And if the fun part solves most of the problems, why is
-the rest such a drag?
+the rest such a drag? Again and again?
 
-So I asked myself - how could one make the entire full-stack
-development process as fun as the first parts, and make sure
-that we only have to think about what's actually important.
+This tragic situation sent me into an existential crisis,
+and, you know, when you're in an existential crisis, you
+gotta think some new thoughts and build some new stuff,
+even just to prove to yourself that a better world is
+possible.
 
 </Notes>
 </Slide>
@@ -177,10 +179,14 @@ that we only have to think about what's actually important.
 5. deploy a database
 
 <Notes>
-And the way I approached this problem was very stategic.
+So I got fixated on one fact.
 
 Building the flashy demo around local state felt fun
 and meaningful, right?
+
+What if it was fun because local state was easy?
+
+Thinking new thoughts is often very childlike.
 
 So like a toddler I wanted the most immediate unrealistic
 solution that would instantly magically fix everything.
@@ -252,9 +258,12 @@ become visible.
 # Putting your backend on ozempic
 
 <Notes>
-I'll now take you on a journey where we start with a traditional
+Now that that we know the metrics, let's get to work.
+
+I'll take you on a journey where we start with a traditional
 stack and watch as layer by layer gets subsumed by some or all
 of the more modern alternatives
+
 </Notes>
 </Slide>
 
@@ -505,7 +514,9 @@ pulled back under one roof.
 </Slide>
 
 <Slide>
-# Roughly where modern stacks land
+# Slimming the stack 6
+
+Roughly where modern stacks land
 
 Lines of code: ++++
 
@@ -547,7 +558,7 @@ started with.
 </Slide>
 
 <Slide>
-# Slimming the stack 6
+# Slimming the stack 7
 
 Lines of code: ++++
 
@@ -594,7 +605,7 @@ Our ambition is to get as close as possible to the feeling that
 </Slide>
 
 <Slide>
-# Jazz pushes further: regional edges
+# Slimming the stack 8
 
 Lines of code: ++++
 
@@ -643,7 +654,7 @@ TODO: us-east-1 joke
 </Slide>
 
 <Slide>
-# Jazz pushes further: truly local-first
+# Slimming the stack 9
 
 Lines of code: +++
 
@@ -687,6 +698,33 @@ Actually queryable.
 
 Actually part of the real system.
 
+</Notes>
+</Slide>
+
+<Slide>
+# Jazz the last 4 years: a fun database for simple, local-first state
+
+<Notes>
+And this is how far we got with Jazz.
+
+We found a bunch of adopters who really fell in love with Jazz
+and local-first state.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Adopter success stories
+
+<Notes>
+TODO
+</Notes>
+</Slide>
+
+<Slide>
+# Local-first got hands
+
+<Notes>
 And that is the moment where the easy story ends and the hard story begins.
 
 Because once the database is truly local-first, a whole new class of
@@ -696,29 +734,503 @@ problems shows up.
 </Slide>
 
 <Slide>
-# Local-first got hands
+# Maybe `useState()` databasen't?
 
-- How do consistency and transactions work now?
-- How do permissions work when data can exist locally?
-- How do collaboration and history work?
-- How does schema evolution work when old and new clients are all out there
-  at once?
+- consistency and transactions?
+- permissions for local-first state?
+- schema evolution?
 
 <Notes>
 And these problems point at ways in which durable databases
 that many users read from and write to
-are simply truly different from ephemeral local state
+are simply truly different from ephemeral local state.
+
+Like what if eventual consistency isn't enough and you
+need global transactions? Should you use a second database?
+Yuck!
+
+And then it's usually pretty easy to enforce permissions
+using a centralized API in front of a database, but the
+crazy system we came up with for local-first permissions
+was way too confusing
+
+Same for schema evolution: what if you want to change the
+shape of stored data? No problem for ephemeral useState(),
+but once you've got data persisted on different devices
+things get tricky unleass you're extremely careful with
+only changing your schema in backwards compatible ways.
 
 </Notes>
 </Slide>
 
-{/* MIDDLE PART */}
+<Slide>
+# It's so over.
 
-{/* Jazz v2 as the first push to really solve the challenges with the four fresh ideas */}
+<Notes>
+And more and more our adopters kept asking us about exactly
+these challenges. And it's not like we didn't have any answers
+to those in our API. They just felt much worse than the how
+great it felt to have local-first state to build your app around.
 
-{/* Announcement of the alpha release *for React Miami* */}
+And once again I found myself in a situation where some things
+were really good, and others felt really unnecessarily hard.
 
-{/* DEMO */}
+By end of last December it had turned into another existential
+crisis, this time with a company and a team attached.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Time for some fresh ideas.
+
+<Notes>
+It was time for some fresh ideas again. To unreasonably ask
+for the impossible like a toddler again.
+
+I considered taking quite radical changes. I told my team
+about the forbidden crazy ideas from the back of my head
+that had been screaming at me that they might solve our
+problems. They looked at me like I went completely nuts.
+
+But they do that often, so all was fine, really.
+To their credit, they actually were immediately on board
+to take a big swing.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Very little time for some fresh ideas.
+
+<Notes>
+The problem is that we didn't have much time. Our talk
+that promised a database that worked like useState was
+already accepted to React Miami.
+
+And we couldn't in good conscience present something to
+you that didn't have all the answers.
+
+But in four short months, we pulled through, and today
+I'm very happy to announce that
+
+</Notes>
+</Slide>
+
+<Slide>
+# We're so back.
+
+<Notes>
+We're so back.
+
+We figured it out.
+
+And today, just for you guys, we're launching...
+
+</Notes>
+</Slide>
+
+<Slide>
+# Jazz v2
+
+<Notes>
+Jazz version two...
+</Notes>
+</Slide>
+
+<Slide>
+# Jazz v2 (alpha)
+
+<Notes>
+(quietly) alpha
+</Notes>
+</Slide>
+
+<Slide>
+# 4 Fresh Ideas To Make Local-first actually work
+
+<Notes>
+Thank you!
+
+Let's take a look at the four fresh ideas that went
+into Jazz v2 that will actually make local-first work.
+
+You'll see that they eerily correspond to all the ways
+in which shared state is actually different from local state.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 1: Tunable consistency
+
+<Notes>
+The first idea is a simple compromise. In the old version
+of Jazz, which I'll call classic Jazz from now on, we made
+learned again and again through our adopters that, surprisingly,
+in most apps, eventual consistency is fine 90% of the time.
+
+Like it's OK if for a short moment, we see different versions
+of shared data.
+
+But the exceptions where it's not OK are important! like only one
+user being able to buy the last ticket for an React Miami,
+or wanting to take resources away here and deposit
+them over there in an all-or-nothing way.
+
+And again, we don't want to use a whole extra database just because
+some corners of our app need global consistency like that, yuck!
+
+So we found a clean way to just let you choose, for each part of your
+app, for each table in your schema, whether it needs to be globally
+consistent, or whether eventual consistency is OK. And like that you,
+as the app developer can granularly trade off latency and offline support
+with consistency. Because you as the app developer know best, and you
+deserver something better than whole systems that force you into one
+or the other for your whole app.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 2: Row-level security and per-query auth
+
+<Notes>
+TODO
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 3: Fluid schema evolution
+
+<Notes>
+TODO
+</Notes>
+</Slide>
+
+<Slide>
+# The dimensions of state
+- table 2D
+
+<Notes>
+One way I like to visualize how these ideas make Jazz different
+is to ask, "which dimensions are we adding here?"
+
+A normal database table with columns and rows is clearly 2D
+
+</Notes>
+</Slide>
+
+<Slide>
+# The dimensions of state
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+
+<Notes>
+But now we have multiple instances of that table on different
+devices and servers that we sync between, so I'm considering
+this one extra dimension.
+</Notes>
+</Slide>
+
+<Slide>
+# The dimensions of state
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+- fluid schema evolution 4D
+
+<Notes>
+And then we have our fluid schema evolution, where multiple shapes
+of tables can coexist compatibly at the same time, which I would
+consider another dimension.
+</Notes>
+</Slide>
+
+<Slide>
+# Checkers
+- table 2D
+
+<Notes>
+So while everyone else is playing checkers
+</Notes>
+</Slide>
+
+<Slide>
+# Literally 4D chess
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+- fluid schema evolution 4D
+
+<Notes>
+With Jazz you're literally play 4D chess
+</Notes>
+</Slide>
+
+<Slide>
+# Wait...
+
+<Notes>
+But now you might be wondering: but Anselm! We're still
+one fresh idea short!
+
+Well...
+
+</Notes>
+</Slide>
+
+<Slide>
+# What if there was a fifth dimension?
+
+<Notes>
+What if I told you there was a fifth dimension?
+
+And this one I'm most exited about...
+
+</Notes>
+</Slide>
+
+<Slide>
+# What if every row had history
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+- fluid schema evolution 4D
+- per-row history 5D
+
+<Notes>
+Because in Jazz, every row in your database actually
+has automatic history.
+
+And with that, precise edit metadata of when each row
+was last updated, and by whom. Automatically captured.
+
+This makes it super easy to build all kinds of complex
+collaborative features, while your UI still only does
+what looks like a simple local state update.
+
+But it gets even better! Because it's each row has not
+just linear history...
+
+</Notes>
+</Slide>
+
+<Slide>
+# What if every row had **git-like** history
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+- fluid schema evolution 4D
+- per-row branching history 5D
+
+<Notes>
+But branching history, like git? In the simplest case
+this makes the tricky problem of people editing data
+at the same time actually tractible.
+
+It's actually even better than git, because it lets you
+choose a custom, precise merge strategy per column,
+whether that's a simple last-writer wins, or a deep json
+merge, or a smart rich-text merge.
+
+This is another example where if you wanted any of this,
+you would need to combine a bunch of different libraries
+for collaboration, each of which would kind of force you
+into one model. Here, you get everything in one system,
+and you as the app developer who understands the best
+collaboration behavior for your app can choose in detail.
+
+</Notes>
+</Slide>
+
+<Slide>
+# What if every row had **git-like** history
+- table 2D
+- sync 3D (with tunable consistency and permissions)
+- fluid schema evolution 4D
+- per-row branching history 5D
+
+<Notes>
+But maybe people editing things at the same time in your
+app is kind of rare. Maybe it's a slower paced app where
+many people and their agents interact with shared data over
+a longer time horizon.
+
+Well wouldn't it be cool if you could expose the full
+expressiveness of this "better than git model" to your users
+through personal-draft flows, or full on branching like us
+nerds do?
+
+In Jazz it's baked into how data works. This is what I think
+will enable the most interesting new kinds of apps, and this
+is why this is my favorite dimension.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+<Notes>
+Alright, you wanna see what this looks like in action?
+Let's take a quick look at a super simple Jazz v2 app.
+
+Let's build a shared canvas with multiplayer cursors
+where everyone can add letters and drag them around
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model
+<Notes>
+The data model is simple enough: we have canvasses,
+and then cursors and letters associated with them.
+
+And each cursor belongs to a user.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model
+- rendering
+<Notes>
+How do we render this state now? It's very simple,
+we just use the useAll hook, which reactively subscribes
+a component to a query, with some filters, like for
+the canvas we care about.
+
+Under the hood, this will read local data, and trigger
+sync from the Jazz database server upstream, which will
+send us existing state that we don't have yet, and live
+updates from other users.
+
+But to us it really just looks like reactive state
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model
+- rendering
+- mutation
+<Notes>
+Mutation is also super simple: just get a database handle
+from useDb and then insert or update data.
+
+All of this is typesafe from our schema by the way.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model
+- rendering
+- mutation
+- permissions
+<Notes>
+And last, but most importantly, we have permissions.
+
+Jazz actually makes you define those and fails closed otherwise.
+We also tried to make the permission DSL as readable as possible
+so its easy to see at a glance whether you set them up correctly
+
+For our app, everyone can create a canvas.
+Everyone can add letters and move them around.
+But cursors can only be updated by the user that created them.
+Makes sense, right?
+
+Of course this is a super simple app. For more complex app
+Jazz gives you a full permission testing framework that makes
+it really fast to set up all kinds of complicated situations
+and edge cases and make sure your permissions work as expected,
+without having to end-to-end test your entire app.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model (updated)
+- rendering (updated)
+- mutation (updated)
+- permissions (updated)
+<Notes>
+But wait! Didn't we say we don't need to capture edit metadata
+ourselves? Why should we maintain the owner of a cursor.
+
+You're absolutely right! We can just use the builtin magic column
+$createdBy instead. This makes our mutations even easier, it really
+just looks like a local update now.
+
+And the permissions can and often do use the edit metadata as well.
+
+But let's say we realized this too late and already shipped our
+letter app to millions of users...
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+- data model (updated)
+- rendering (updated)
+- mutation (updated)
+- permissions (updated)
+- migrations
+<Notes>
+Well, no problem, let's just create a fluid migration. Jazz
+actually helps you scaffold one whenever you change your schema.
+
+And you can see that it reads pretty cleanly, with the only
+special bit being that the migration is bidirectional, but this
+gives us perfect backwards-compatibility with old clients, who
+can keep reading a user column that we fake for them even on
+new data.
+
+And all of this is typechecked as well, so you get instant
+feedback if you got the migration shape right.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Demo time
+<Notes>
+Ok! Do you actually want to try it?
+
+I actually had promised to myself to not do a demo in my talk this time.
+And if I did to definitely not do one that relied on conference wifi.
+And if I did that, to definitely not do one where the audience interaction
+is presented directly on a giant screen and recorded where people might
+do silly things _demo gentle profanity_
+
+Anyways, here is the join code (QR code), lets put this through the paces,
+but please be wholesome.
+
+speaker time placeholder for demo:
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+la la la la la la la la la la la la la la la la la la
+
+</Notes>
+</Slide>
 
 <Slide>
 # what if `useState()` was your database?
@@ -761,19 +1273,22 @@ durable, local-first multi-user app.
 
 As easy as starting a new purely-frontend project.
 
+</Notes>
+</Slide>
+
+<Slide>
+# npm create jazz
+
+Docs: jazz.tools
+Join our Discord!
+
+<Notes>
 I really can't wait to see what you build with it
 and would love to hear what you think. Especially if
 you've got strong opinions and if you've tried some
 of the alternative and love or hate specific aspects.
 
-And with all the disclaimers about it being alpha,
-let me also say that we're also already onboarding bigger
-adopters to Jazz v2 in close partnership, so if you're
-building something serious we're ready to do pilots
-and show you some of Jazz's unique properties for your
-use case specifically. Just come grab me or shoot me a dm.
-
-Same if you have questions or just wanna chat, I'm around
+I'm around
 all day today and tomorrow and most of Saturday, as are
 Guido, Gio and Nico, who you'll recognize by their Jazz shirts.
 
