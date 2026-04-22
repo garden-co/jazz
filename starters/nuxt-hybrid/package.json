@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/init-env.mjs",
-    "dev": "nuxt dev --dotenv .env.local",
+    "dev": "nuxt dev",
     "build": "nuxt build --dotenv .env.local",
     "preview": "nuxt preview",
     "test:e2e": "playwright test"
