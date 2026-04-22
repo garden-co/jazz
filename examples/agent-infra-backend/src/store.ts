@@ -320,9 +320,14 @@ export interface RecordCommitTurnResultInput {
   status: CommitTurnResultStatus;
   agentId?: string;
   runId?: string;
+  threadId?: string;
   repoRoot?: string;
   message?: string;
+  classification?: string;
+  commitMessage?: string;
   todoItems?: string[];
+  notes?: string;
+  conversationHash?: string;
   processedAt?: TimestampInput;
 }
 
@@ -339,9 +344,14 @@ export interface CommitTurnResultRecord {
   status: CommitTurnResultStatus;
   agentId?: string;
   runId?: string;
+  threadId?: string;
   repoRoot?: string;
   message?: string;
+  classification?: string;
+  commitMessage?: string;
   todoItems?: string[];
+  notes?: string;
+  conversationHash?: string;
   processedAt: Date;
 }
 
@@ -1154,15 +1164,20 @@ export class AgentDataStore {
       {
         runId: COMMIT_TURN_CONTROL_RUN_ID,
         eventType: COMMIT_TURN_RESULT_EVENT_TYPE,
-        summaryText: input.message ?? input.status,
+        summaryText: input.message ?? input.commitMessage ?? input.status,
         payloadJson: pruneUndefined({
           operationId: input.operationId,
           status: input.status,
           agentId: input.agentId,
           runId: input.runId,
+          threadId: input.threadId,
           repoRoot: input.repoRoot,
           message: input.message,
+          classification: input.classification,
+          commitMessage: input.commitMessage,
           todoItems: input.todoItems,
+          notes: input.notes,
+          conversationHash: input.conversationHash,
         }) as JsonValue,
         occurredAt: input.processedAt,
       },
@@ -1438,9 +1453,14 @@ export class AgentDataStore {
       status,
       agentId: readObjectString(payload, "agentId"),
       runId: readObjectString(payload, "runId"),
+      threadId: readObjectString(payload, "threadId"),
       repoRoot: readObjectString(payload, "repoRoot"),
       message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      classification: readObjectString(payload, "classification"),
+      commitMessage: readObjectString(payload, "commitMessage"),
       todoItems: readObjectStringArray(payload, "todoItems"),
+      notes: readObjectString(payload, "notes"),
+      conversationHash: readObjectString(payload, "conversationHash"),
       processedAt: event.occurred_at,
     };
   }

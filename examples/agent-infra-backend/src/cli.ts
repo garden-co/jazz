@@ -192,9 +192,14 @@ interface SerializedCommitTurnResult {
   status: string;
   agentId: string | null;
   runId: string | null;
+  threadId: string | null;
   repoRoot: string | null;
   message: string | null;
+  classification: string | null;
+  commitMessage: string | null;
   todoItems: string[] | null;
+  notes: string | null;
+  conversationHash: string | null;
   processedAt: string;
 }
 
@@ -490,9 +495,14 @@ function serializeCommitTurnResult(
     status: result.status,
     agentId: result.agentId ?? null,
     runId: result.runId ?? null,
+    threadId: result.threadId ?? null,
     repoRoot: result.repoRoot ?? null,
     message: result.message ?? null,
+    classification: result.classification ?? null,
+    commitMessage: result.commitMessage ?? null,
     todoItems: result.todoItems ?? null,
+    notes: result.notes ?? null,
+    conversationHash: result.conversationHash ?? null,
     processedAt: result.processedAt.toISOString(),
   };
 }
