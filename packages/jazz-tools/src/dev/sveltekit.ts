@@ -47,14 +47,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     name: "jazz-sveltekit",
 
     config(config: {
-      build?: { target?: string | string[] };
       ssr?: { external?: string[] };
       optimizeDeps?: { exclude?: string[] };
     }) {
       const existingSsr = config.ssr?.external ?? [];
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
-        build: { target: config.build?.target ?? "es2020" },
         worker: { format: "es" as const },
         optimizeDeps: {
           exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),

@@ -59,13 +59,9 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: {
-      build?: { target?: string | string[] };
-      optimizeDeps?: { exclude?: string[] };
-    }) {
+    config(config: { optimizeDeps?: { exclude?: string[] } }) {
       const existing = config.optimizeDeps?.exclude ?? [];
       return {
-        build: { target: config.build?.target ?? "es2020" },
         worker: { format: "es" as const },
         optimizeDeps: {
           exclude: Array.from(new Set([...existing, "jazz-wasm"])),
