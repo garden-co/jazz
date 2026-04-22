@@ -56,13 +56,13 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: { optimizeDeps?: { exclude?: string[] } }) {
-      const existing = config.optimizeDeps?.exclude ?? [];
+    config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
+      const existingSsr = config.ssr?.external ?? [];
+      const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
         worker: { format: "es" as const },
-        optimizeDeps: {
-          exclude: Array.from(new Set([...existing, "jazz-wasm"])),
-        },
+        optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
+        ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
       };
     },
 
