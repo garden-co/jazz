@@ -14,6 +14,23 @@ export interface FetchStoredWasmSchemaOptions {
   schemaHash: string;
 }
 
+const MICROSECONDS_PER_MILLISECOND = 1_000;
+const EPOCH_MICROSECONDS_THRESHOLD = 100_000_000_000_000;
+
+function normalizePublishedAtEpochMilliseconds(
+  publishedAt: number | null | undefined,
+): number | null {
+  if (typeof publishedAt !== "number" || !Number.isFinite(publishedAt)) {
+    return null;
+  }
+
+  if (publishedAt >= EPOCH_MICROSECONDS_THRESHOLD) {
+    return Math.trunc(publishedAt / MICROSECONDS_PER_MILLISECOND);
+  }
+
+  return publishedAt;
+}
+
 export async function fetchStoredWasmSchema(
   serverUrl: string,
   options: FetchStoredWasmSchemaOptions,
@@ -44,7 +61,7 @@ export async function fetchStoredWasmSchema(
 
   return {
     schema: body.schema,
-    publishedAt: body.publishedAt ?? null,
+    publishedAt: normalizePublishedAtEpochMilliseconds(body.publishedAt),
   };
 }
 

@@ -2636,6 +2636,26 @@ describe("bin integration", () => {
     expect(JSON.parse(String(result.stdout))).toEqual(schema);
   });
 
+  it("loads schema export --schema-hash from a legacy malformed local snapshot filename", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const snapshotsDir = join(root, "migrations", "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `582761109T032422-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
+      "utf8",
+    );
+
+    const result = runBin(["schema", "export", APP_ID, "--schema-hash", schemaHash], {
+      cwd: root,
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
+  });
+
   it("loads schema export --schema-hash from a custom migrations dir", async () => {
     const { root } = await createWorkspace();
     const schema = storedRootSchema();
@@ -2702,6 +2722,44 @@ describe("bin integration", () => {
     expect(
       JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
     ).toEqual(schema);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes microsecond publishedAt values when persisting fetched snapshots", async () => {
+    const { root } = await createWorkspace();
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
+    const publishedAtMicros = Date.UTC(2026, 3, 6, 12, 0, 0) * 1_000;
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const fetchMock = vi.fn(async () => storedSchemaResponse(schema, publishedAtMicros));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await exportSchema({
+        schemaHash,
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const shortSchemaHash = schemaHash.slice(0, 12);
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(`-${shortSchemaHash}.json`),
+    );
+    expect(snapshotFiles).toEqual([`20260406T120000-${shortSchemaHash}.json`]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
