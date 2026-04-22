@@ -38,7 +38,6 @@ export function jazzNuxt(options: JazzPluginOptions = {}) {
       const existingSsr = config.ssr?.external ?? [];
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
-        build: { target: "es2020" },
         worker: { format: "es" as const },
         optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
         ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
