@@ -43,10 +43,15 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   return {
     name: "jazz-sveltekit",
 
-    config(config: { ssr?: { external?: string[] } }) {
-      const existing = config.ssr?.external ?? [];
+    config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
+      const existingSsr = config.ssr?.external ?? [];
+      const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
-        ssr: { external: Array.from(new Set([...existing, "jazz-napi"])) },
+        worker: { format: "es" as const },
+        optimizeDeps: {
+          exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
+        },
+        ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
       };
     },
 
@@ -133,5 +138,8 @@ function resolveServerWithJwks(
   if (serverConfig.jwksUrl !== undefined) return serverConfig as BaseJazzServerOptions;
 
   const appOrigin = process.env.APP_ORIGIN ?? resolveViteOrigin(viteServer);
-  return { ...serverConfig, jwksUrl: `${appOrigin}/api/auth/jwks` } as BaseJazzServerOptions;
+  return {
+    ...serverConfig,
+    jwksUrl: `${appOrigin}/api/auth/jwks`,
+  } as BaseJazzServerOptions;
 }
