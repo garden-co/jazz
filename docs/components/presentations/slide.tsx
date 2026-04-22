@@ -1,5 +1,6 @@
 "use client";
 
+import { cn } from "@/lib/cn";
 import { createContext, useContext, type ReactNode } from "react";
 
 const PresentationSlideContext = createContext<string | null>(null);
@@ -19,6 +20,7 @@ type PresentationDeckViewProps = {
 };
 
 type SlideProps = {
+  className?: string;
   children: ReactNode;
   slug: string;
   title?: string;
@@ -70,9 +72,47 @@ export function PresentationNotesProvider({
   );
 }
 
-export function Slide({ children, slug }: SlideProps) {
+export function Slide({ children, className, slug }: SlideProps) {
   const activeSlide = useContext(PresentationSlideContext);
   const renderMode = useContext(PresentationRenderModeContext);
+  const slideClassName = [
+    "flex",
+    "h-screen",
+    "relative",
+    "p-[5vw]",
+    "flex-col",
+    "justify-end",
+    "gap-6",
+    "[&_*:first-child]:mt-0",
+    "[&_*:last-child]:mb-0",
+    "[&_h1]:max-w-[15ch]",
+    "[&_h1]:text-balance",
+    "[&_h1]:text-[12vw]",
+    "[&_h1]:font-black",
+    "[&_h1]:leading-[0.9]",
+    "[&_h1]:tracking-[-0.04em]",
+    "[&_h1]:[hanging-punctuation:first]",
+    "[&_h2]:max-w-[40ch]",
+    "[&_h2]:text-balance",
+    "[&_h2]:text-[8vw]",
+    "[&_h2]:font-extrabold",
+    "[&_h2]:leading-[0.9]",
+    "[&_h2]:tracking-[-0.03em]",
+    "[&_p]:max-w-[40ch]",
+    "[&_p]:text-[2.5vw]",
+    "[&_p]:leading-[1.5]",
+    "[&_ul]:grid",
+    "[&_ul]:gap-[0.85rem]",
+    "[&_ol]:grid",
+    "[&_ol]:gap-[0.85rem]",
+    "[&_ul>li]:max-w-[40ch]",
+    "[&_ul>li]:text-[2.5vw]",
+    "[&_ul>li]:leading-[1.5]",
+    "[&_ol>li]:max-w-[40ch]",
+    "[&_ol>li]:text-[2.5vw]",
+    "[&_ol>li]:leading-[1.5]",
+    "[&_strong]:text-inherit",
+  ].join(" ");
 
   if (activeSlide && activeSlide !== slug) return null;
 
@@ -81,9 +121,50 @@ export function Slide({ children, slug }: SlideProps) {
   }
 
   return (
-    <div className="flex min-h-full flex-col justify-center gap-6 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>h1]:max-w-[12ch] [&>h1]:text-balance [&>h1]:text-[clamp(3.5rem,8vw,7.5rem)] [&>h1]:font-black [&>h1]:leading-[0.9] [&>h1]:tracking-[-0.05em] [&>h2]:max-w-[20ch] [&>h2]:text-balance [&>h2]:text-[clamp(1.75rem,3vw,3rem)] [&>h2]:font-extrabold [&>h2]:leading-none [&>h2]:tracking-[-0.04em] [&>h2]:text-fd-muted-foreground [&>p]:max-w-[46rem] [&>p]:text-[clamp(1.125rem,1.8vw,1.6rem)] [&>p]:leading-[1.5] [&>p]:text-fd-muted-foreground [&>ul]:grid [&>ul]:gap-[0.85rem] [&>ul]:pl-5 [&>ol]:grid [&>ol]:gap-[0.85rem] [&>ol]:pl-5 [&>ul>li]:max-w-[46rem] [&>ul>li]:text-[clamp(1.125rem,1.8vw,1.6rem)] [&>ul>li]:leading-[1.5] [&>ul>li]:text-fd-muted-foreground [&>ol>li]:max-w-[46rem] [&>ol>li]:text-[clamp(1.125rem,1.8vw,1.6rem)] [&>ol>li]:leading-[1.5] [&>ol>li]:text-fd-muted-foreground [&_strong]:text-inherit">
-      {children}
-    </div>
+    <>
+      <style jsx>{`
+        .presentation-slide :global(ul) {
+          list-style: none;
+          padding-left: 0;
+        }
+        
+        .presentation-slide :global(ol) {
+          counter-reset: slide-item;
+          list-style: none;
+          padding-left: 0;
+        }
+        
+        .presentation-slide :global(ol > li) {
+          counter-increment: slide-item;
+          padding-left: 2.2em;
+          position: relative;
+        }
+        
+        .presentation-slide :global(ol > li::before) {
+          content: counter(slide-item);
+          left: 0;
+          font-variant-numeric: tabular-nums;
+          font-feature-settings: "tnum";
+          min-width: 1.6em;
+          position: absolute;
+          text-align: right;
+          top: 0;
+        }
+        
+        .presentation-slide :global(ul > li) {
+          padding-left: 1.4em;
+          position: relative;
+        }
+        
+        .presentation-slide :global(ul > li::before) {
+          content: "—";
+          left: 0;
+          position: absolute;
+          top: 0;
+        }
+      `}</style>
+      <div className={cn("presentation-slide", slideClassName, className)}>{children}</div>
+    </>
   );
 }
 
