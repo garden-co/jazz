@@ -1126,19 +1126,44 @@ impl SyncManager {
                             .as_ref()
                             .map(|meta| meta.metadata.clone())
                             .unwrap_or_default();
-                        let (stored_metadata, old_content) = self
+                        let (stored_metadata, old_content, old_batch_id) = self
                             .row_metadata_from_payload(storage, row, metadata.as_ref())
                             .and_then(|stored_metadata| {
                                 let table =
                                     stored_metadata.get(MetadataKey::Table.as_str())?.clone();
-                                let old_content = storage
+                                let existing = storage
                                     .load_visible_region_row(&table, &row.branch, row.row_id)
                                     .ok()
-                                    .flatten()
-                                    .map(|previous| previous.data);
-                                Some((stored_metadata, old_content))
+                                    .flatten();
+                                let old_content =
+                                    existing.as_ref().map(|previous| previous.data.clone());
+                                let old_batch_id =
+                                    existing.as_ref().map(|previous| previous.batch_id);
+                                Some((stored_metadata, old_content, old_batch_id))
                             })
-                            .unwrap_or_else(|| (HashMap::new(), None));
+                            .unwrap_or_else(|| (HashMap::new(), None, None));
+
+                        // Idempotent replay short-circuit: on reconnect the client
+                        // replays its entire row history to the server; rows whose
+                        // batch_id already matches our stored copy have nothing new
+                        // to contribute and must not go through the permission
+                        // check — otherwise tables without an allowUpdate policy
+                        // would reject the replay and the client would retract
+                        // rows it never intended to modify.
+                        if let Some(existing_batch_id) = old_batch_id
+                            && existing_batch_id == row.batch_id
+                        {
+                            if let Some(settlement) = self
+                                .load_batch_settlement_by_batch_id_from_storage(
+                                    storage,
+                                    row.batch_id,
+                                )
+                            {
+                                self.queue_batch_settlement_to_client(client_id, settlement);
+                            }
+                            return;
+                        }
+
                         let metadata = if old_content.is_none() && stored_metadata.is_empty() {
                             payload_metadata
                         } else {

@@ -2985,3 +2985,73 @@ fn remove_client_skips_when_inbox_entries_exist() {
     assert!(!sm.remove_client(alice));
     assert!(sm.get_client(alice).is_some());
 }
+
+/// On client reconnect, the client replays its entire OPFS row history to the
+/// server as `RowBatchCreated`, including rows originally authored by *other*
+/// users. If the server re-runs permission checks classifying these as
+/// `Operation::Update` (because a row with that id already exists), tables
+/// without an `allowUpdate` policy end up rejecting the replay and the client
+/// retracts the row from its view on the Rejected settlement — making data
+/// "disappear on reload".
+///
+/// When the incoming batch_id matches the already-stored row's batch_id, the
+/// server has nothing new to learn: it should short-circuit the permission
+/// check and re-emit the cached settlement so the client can reconcile.
+#[test]
+fn row_batch_created_from_user_with_matching_batch_id_skips_permission_check() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let batch_id = row.batch_id;
+
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::User);
+    sm.set_client_session(
+        client_id,
+        crate::query_manager::session::Session::new("bob"),
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+
+    let pending = sm.take_pending_permission_checks();
+    assert!(
+        pending.is_empty(),
+        "idempotent replay of a row with matching batch_id must not queue a permission check, got {} pending",
+        pending.len(),
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchSettlement {
+                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                },
+            } if *id == client_id && *settled == batch_id
+        )),
+        "idempotent replay should re-emit the cached settlement to the client, got {outbox:?}",
+    );
+}
