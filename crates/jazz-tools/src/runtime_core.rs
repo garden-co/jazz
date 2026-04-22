@@ -335,7 +335,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        let rejected_batch_ids = storage
+        let rejected_batch_ids: BTreeSet<BatchId> = storage
             .scan_local_batch_records()
             .map(|records| {
                 records
@@ -351,7 +351,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             })
             .unwrap_or_default();
 
-        Self {
+        let mut core = Self {
             schema_manager,
             storage,
             scheduler,
@@ -368,11 +368,22 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
-            rejected_batch_ids,
+            rejected_batch_ids: rejected_batch_ids.clone(),
             tier_label: "unknown",
             sync_tracer: None,
             auth_failure_callback: None,
+        };
+
+        // If a crash landed between "persist rejection settlement" and
+        // "delete visible row + retract subscriptions", lingering visible
+        // rows would render on reload and then get retracted by the next
+        // network-delivered settlement — a visible flash. Re-apply stored
+        // rejections before any query can observe the visible region.
+        for batch_id in rejected_batch_ids {
+            core.mark_local_batch_rows_rejected(batch_id);
         }
+
+        core
     }
 
     /// Set the tier label used in tracing spans.
