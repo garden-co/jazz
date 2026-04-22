@@ -37,7 +37,7 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
   return firstMessage ? formatChatDate(firstMessage.createdAt) : "Chat";
 }
 
-function formatChatDate(date: Date): string {
+function formatChatDate(date: number | Date): string {
   const months = [
     "Jan",
     "Feb",
@@ -52,10 +52,11 @@ function formatChatDate(date: Date): string {
     "Nov",
     "Dec",
   ];
-  const d = date.getDate().toString().padStart(2, "0");
-  const mon = months[date.getMonth()];
-  const y = date.getFullYear();
-  const h = date.getHours().toString().padStart(2, "0");
-  const m = date.getMinutes().toString().padStart(2, "0");
+  const resolved = date instanceof Date ? date : new Date(date);
+  const d = resolved.getDate().toString().padStart(2, "0");
+  const mon = months[resolved.getMonth()];
+  const y = resolved.getFullYear();
+  const h = resolved.getHours().toString().padStart(2, "0");
+  const m = resolved.getMinutes().toString().padStart(2, "0");
   return `${d} ${mon} ${y} ${h}:${m}`;
 }

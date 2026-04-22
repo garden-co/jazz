@@ -138,7 +138,7 @@ function ChatSettingsContent({
           <div className="space-y-2">
             {memberProfiles.map((profile) => (
               <div key={profile.id} className="flex items-center gap-2">
-                <Avatar profileId={profile.id} avatarData={profile.avatar} size={32} />
+                <Avatar profileId={profile.id} avatarData={profile.avatar ?? undefined} size={32} />
                 <span>{profile.name}</span>
                 {profile.userId === userId && (
                   <span className="text-xs text-muted-foreground">(you)</span>

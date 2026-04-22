@@ -100,7 +100,7 @@ export function useSync(playerId: string): SyncResult {
 
   // Uncollected deposits — what the game renders on the surface.
   // "edge" tier: undefined until the edge subscription connects, which drives settled detection.
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), "edge");
+  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).

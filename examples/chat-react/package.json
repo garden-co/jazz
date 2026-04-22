@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npx tsx scripts/dev.ts",
+    "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts",

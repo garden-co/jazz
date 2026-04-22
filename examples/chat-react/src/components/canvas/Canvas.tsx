@@ -67,7 +67,7 @@ export function CollaborativeCanvas({
       points,
       color: s.color,
       width: s.width,
-      createdAt: s.createdAt,
+      createdAt: new Date(s.createdAt),
     });
   }
 
