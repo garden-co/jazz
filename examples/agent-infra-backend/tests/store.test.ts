@@ -207,4 +207,48 @@ describe("AgentDataStore", () => {
     expect(task?.branch).toBe("review/nikiv-designer-build123d-monaco-editor");
     expect(task?.pr).toBe("https://github.com/fl2024008/prometheus/pull/3296");
   });
+
+  it("records cursor review operations and hides processed entries by default", async () => {
+    const operation = await store.recordCursorReviewOperation({
+      operationId: "cursor-op-1",
+      operationType: "show-branch-diff",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      note: "show diff in Flow review",
+      sourceSessionId: "cursor:session-1",
+      sourceChatKind: "cursor",
+    });
+
+    const pending = await store.listCursorReviewOperations({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+    });
+
+    expect(operation.operationId).toBe("cursor-op-1");
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.bookmark).toBe("review/nikiv-designer-telemetry-pr1-main");
+    expect(pending[0]?.latestResult).toBeUndefined();
+
+    const result = await store.recordCursorReviewResult({
+      operationId: "cursor-op-1",
+      status: "completed",
+      clientId: "flow-window-1",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      message: "Flow opened the diff",
+    });
+
+    const filtered = await store.listCursorReviewOperations({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+    });
+    const withProcessed = await store.listCursorReviewOperations({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      includeProcessed: true,
+    });
+
+    expect(result.operationId).toBe("cursor-op-1");
+    expect(filtered).toEqual([]);
+    expect(withProcessed).toHaveLength(1);
+    expect(withProcessed[0]?.latestResult?.status).toBe("completed");
+    expect(withProcessed[0]?.latestResult?.message).toBe("Flow opened the diff");
+  });
 });

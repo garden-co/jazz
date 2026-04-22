@@ -35,7 +35,12 @@ import {
 
 const DEFAULT_APP_ID = "run-agent-infra";
 const DEFAULT_STATUS = "started";
+const CURSOR_REVIEW_AGENT_ID = "cursor-review";
+const CURSOR_REVIEW_CONTROL_RUN_ID = "cursor-review-control";
+const CURSOR_REVIEW_OPERATION_EVENT_TYPE = "cursor_review_operation";
+const CURSOR_REVIEW_RESULT_EVENT_TYPE = "cursor_review_result";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "error"]);
+const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
 const TASK_PLACEMENT_ORDER: Record<string, number> = {
   now: 0,
   next: 1,
@@ -48,7 +53,7 @@ const TASK_PRIORITY_ORDER: Record<string, number> = {
   P3: 3,
 };
 
-type DurabilityTier = "worker" | "edge" | "global";
+type DurabilityTier = "local" | "edge" | "global";
 type TimestampInput = Date | string | number;
 export type TaskPlacement = "now" | "next" | "backlog" | string;
 
@@ -221,6 +226,70 @@ export interface ListTaskRecordsInput {
   limit?: number;
 }
 
+export type CursorReviewOperationType =
+  | "focus-branch-review"
+  | "refresh-branch-review"
+  | "copy-branch-review-prompt"
+  | "open-branch-review-chat"
+  | "show-branch-diff"
+  | "open-branch-file-diff";
+
+export type CursorReviewOperationResultStatus = "completed" | "failed" | "ignored";
+
+export interface RecordCursorReviewOperationInput {
+  operationId?: string;
+  operationType: CursorReviewOperationType;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  bookmark?: string;
+  relPath?: string;
+  note?: string;
+  sourceSessionId?: string;
+  sourceChatKind?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface RecordCursorReviewResultInput {
+  operationId: string;
+  status: CursorReviewOperationResultStatus;
+  clientId?: string;
+  repoRoot?: string;
+  message?: string;
+  processedAt?: TimestampInput;
+}
+
+export interface ListCursorReviewOperationsInput {
+  repoRoot?: string;
+  workspaceRoot?: string;
+  includeProcessed?: boolean;
+  limit?: number;
+}
+
+export interface CursorReviewOperationResultRecord {
+  eventId: string;
+  operationId: string;
+  status: CursorReviewOperationResultStatus;
+  clientId?: string;
+  repoRoot?: string;
+  message?: string;
+  processedAt: Date;
+}
+
+export interface CursorReviewOperationRecord {
+  eventId: string;
+  operationId: string;
+  operationType: CursorReviewOperationType;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  bookmark?: string;
+  relPath?: string;
+  note?: string;
+  sourceSessionId?: string;
+  sourceChatKind?: string;
+  createdAt: Date;
+  latestResult?: CursorReviewOperationResultRecord;
+}
+
 export interface AgentRunSummary {
   run: AgentRun;
   items: RunItem[];
@@ -260,6 +329,19 @@ function compareTaskRecords(left: TaskRecord, right: TaskRecord): number {
   if (updatedCompare !== 0) return updatedCompare;
 
   return left.task_id.localeCompare(right.task_id);
+}
+
+function asObjectRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, JsonValue>;
+}
+
+function readObjectString(
+  value: Record<string, JsonValue> | null,
+  key: string,
+): string | undefined {
+  const raw = value?.[key];
+  return typeof raw === "string" ? raw : undefined;
 }
 
 function asDate(value?: TimestampInput): Date {
@@ -829,6 +911,114 @@ export class AgentDataStore {
       .slice(0, clampLimit(input.limit));
   }
 
+  async recordCursorReviewOperation(
+    input: RecordCursorReviewOperationInput,
+    session?: Session,
+  ): Promise<CursorReviewOperationRecord> {
+    const db = this.getDb(session);
+    await this.ensureCursorReviewControlRun(db);
+    const operationId = input.operationId ?? randomUUID();
+    const event = await this.appendSemanticEvent(
+      {
+        runId: CURSOR_REVIEW_CONTROL_RUN_ID,
+        eventId: operationId,
+        eventType: CURSOR_REVIEW_OPERATION_EVENT_TYPE,
+        summaryText: input.note ?? input.operationType,
+        payloadJson: pruneUndefined({
+          operationId,
+          operationType: input.operationType,
+          repoRoot: input.repoRoot,
+          workspaceRoot: input.workspaceRoot,
+          bookmark: input.bookmark,
+          relPath: input.relPath,
+          note: input.note,
+          sourceSessionId: input.sourceSessionId,
+          sourceChatKind: input.sourceChatKind,
+        }) as JsonValue,
+        occurredAt: input.createdAt,
+      },
+      session,
+    );
+    const operation = this.cursorReviewOperationFromEvent(event);
+    if (!operation) {
+      throw new Error("cursor review operation event could not be decoded");
+    }
+    return operation;
+  }
+
+  async recordCursorReviewResult(
+    input: RecordCursorReviewResultInput,
+    session?: Session,
+  ): Promise<CursorReviewOperationResultRecord> {
+    const db = this.getDb(session);
+    await this.ensureCursorReviewControlRun(db);
+    const event = await this.appendSemanticEvent(
+      {
+        runId: CURSOR_REVIEW_CONTROL_RUN_ID,
+        eventType: CURSOR_REVIEW_RESULT_EVENT_TYPE,
+        summaryText: input.message ?? input.status,
+        payloadJson: pruneUndefined({
+          operationId: input.operationId,
+          status: input.status,
+          clientId: input.clientId,
+          repoRoot: input.repoRoot,
+          message: input.message,
+        }) as JsonValue,
+        occurredAt: input.processedAt,
+      },
+      session,
+    );
+    const result = this.cursorReviewResultFromEvent(event);
+    if (!result) {
+      throw new Error(`cursor review result ${event.event_id} failed to parse`);
+    }
+    return result;
+  }
+
+  async listCursorReviewOperations(
+    input: ListCursorReviewOperationsInput = {},
+    session?: Session,
+  ): Promise<CursorReviewOperationRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: CURSOR_REVIEW_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 8),
+    );
+
+    const latestResults = new Map<string, CursorReviewOperationResultRecord>();
+    for (const row of rows) {
+      if (row.event_type !== CURSOR_REVIEW_RESULT_EVENT_TYPE) continue;
+      const result = this.cursorReviewResultFromEvent(row);
+      if (!result) continue;
+      const existing = latestResults.get(result.operationId);
+      if (!existing || existing.processedAt.getTime() < result.processedAt.getTime()) {
+        latestResults.set(result.operationId, result);
+      }
+    }
+
+    const operations = rows
+      .filter((row) => row.event_type === CURSOR_REVIEW_OPERATION_EVENT_TYPE)
+      .map((row) => this.cursorReviewOperationFromEvent(row))
+      .filter((row): row is CursorReviewOperationRecord => Boolean(row))
+      .filter((row) => {
+        if (input.repoRoot && row.repoRoot && row.repoRoot !== input.repoRoot) return false;
+        if (input.workspaceRoot && row.workspaceRoot && row.workspaceRoot !== input.workspaceRoot) return false;
+        const latestResult = latestResults.get(row.operationId);
+        if (!input.includeProcessed && latestResult && TERMINAL_CURSOR_REVIEW_RESULT_STATUSES.has(latestResult.status)) {
+          return false;
+        }
+        row.latestResult = latestResult;
+        return true;
+      })
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .slice(0, clampLimit(input.limit));
+
+    return operations;
+  }
+
   async listRecentRuns(limit?: number, session?: Session): Promise<AgentRun[]> {
     return this.getDb(session).all(
       app.agent_runs.orderBy("started_at", "desc").limit(clampLimit(limit)),
@@ -898,6 +1088,78 @@ export class AgentDataStore {
     return db.one(app.task_records.where({ task_id: taskId }));
   }
 
+  private async ensureCursorReviewControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(db, CURSOR_REVIEW_CONTROL_RUN_ID);
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: CURSOR_REVIEW_CONTROL_RUN_ID,
+      agentId: CURSOR_REVIEW_AGENT_ID,
+      requestSummary: "Cursor review UI control plane",
+      status: "running",
+      agent: {
+        lane: "cursor-review",
+        promptSurface: "cursor-review",
+      },
+    });
+    run = await this.getRunByExternalId(db, CURSOR_REVIEW_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error("cursor review control run not found after creation");
+    }
+    return run;
+  }
+
+  private cursorReviewOperationFromEvent(
+    event: SemanticEvent,
+  ): CursorReviewOperationRecord | null {
+    if (event.event_type !== CURSOR_REVIEW_OPERATION_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const operationId = readObjectString(payload, "operationId") ?? event.event_id;
+    const operationType = readObjectString(payload, "operationType");
+    if (
+      operationType !== "focus-branch-review"
+      && operationType !== "refresh-branch-review"
+      && operationType !== "copy-branch-review-prompt"
+      && operationType !== "open-branch-review-chat"
+      && operationType !== "show-branch-diff"
+      && operationType !== "open-branch-file-diff"
+    ) {
+      return null;
+    }
+    return {
+      eventId: event.event_id,
+      operationId,
+      operationType,
+      repoRoot: readObjectString(payload, "repoRoot"),
+      workspaceRoot: readObjectString(payload, "workspaceRoot"),
+      bookmark: readObjectString(payload, "bookmark"),
+      relPath: readObjectString(payload, "relPath"),
+      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      sourceSessionId: readObjectString(payload, "sourceSessionId"),
+      sourceChatKind: readObjectString(payload, "sourceChatKind"),
+      createdAt: event.occurred_at,
+    };
+  }
+
+  private cursorReviewResultFromEvent(
+    event: SemanticEvent,
+  ): CursorReviewOperationResultRecord | null {
+    if (event.event_type !== CURSOR_REVIEW_RESULT_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const operationId = readObjectString(payload, "operationId");
+    const status = readObjectString(payload, "status");
+    if (!operationId) return null;
+    if (status !== "completed" && status !== "failed" && status !== "ignored") return null;
+    return {
+      eventId: event.event_id,
+      operationId,
+      status,
+      clientId: readObjectString(payload, "clientId"),
+      repoRoot: readObjectString(payload, "repoRoot"),
+      message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      processedAt: event.occurred_at,
+    };
+  }
+
   private async requireItemByExternalId(db: Db, runId: string, itemId: string): Promise<RunItem> {
     const item = await this.getItemByExternalId(db, runId, itemId);
     if (!item) {
@@ -935,6 +1197,7 @@ export function createAgentDataStore(config: AgentDataStoreConfig): AgentDataSto
   const context = createJazzContext({
     appId: config.appId ?? DEFAULT_APP_ID,
     app,
+    permissions: {},
     driver: { type: "persistent", dataPath: config.dataPath },
     env: config.env ?? "dev",
     userBranch: config.userBranch ?? "main",

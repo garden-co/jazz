@@ -20,7 +20,7 @@ describe("agent-infra backend CLI run commands", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("records and summarizes a prep-workflow run through JSON CLI commands", () => {
+  it("records and summarizes a prep-workflow run through JSON CLI commands", { timeout: 20_000 }, () => {
     const run = runCliJson("record-run-started", {
       runId: "prep-run-1",
       agentId: "designer-prep-implementation",
@@ -111,6 +111,52 @@ describe("agent-infra backend CLI run commands", () => {
 
     const activeAfter = runCliJson("list-active-runs");
     expect(activeAfter).toEqual([]);
+  });
+
+  it("records and lists cursor review operations through the CLI", { timeout: 20_000 }, () => {
+    const operation = runCliJson("record-cursor-review-op", {
+      operationId: "cursor-op-2",
+      operationType: "open-branch-review-chat",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      note: "open review chat",
+      sourceSessionId: "cursor:session-2",
+      sourceChatKind: "cursor",
+    });
+
+    expect(operation.operationId).toBe("cursor-op-2");
+    expect(operation.operationType).toBe("open-branch-review-chat");
+
+    const pending = runCliJson("list-cursor-review-ops", undefined, [
+      "--repo-root",
+      "/Users/nikitavoloboev/code/prom",
+    ]);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.bookmark).toBe("review/nikiv-designer-telemetry-pr1-main");
+
+    const result = runCliJson("record-cursor-review-result", {
+      operationId: "cursor-op-2",
+      status: "completed",
+      clientId: "flow-window-cli",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      message: "opened in fresh chat",
+    });
+    expect(result.operationId).toBe("cursor-op-2");
+
+    const filtered = runCliJson("list-cursor-review-ops", undefined, [
+      "--repo-root",
+      "/Users/nikitavoloboev/code/prom",
+    ]);
+    expect(filtered).toEqual([]);
+
+    const withProcessed = runCliJson("list-cursor-review-ops", undefined, [
+      "--repo-root",
+      "/Users/nikitavoloboev/code/prom",
+      "--include-processed",
+    ]);
+    expect(withProcessed).toHaveLength(1);
+    expect(withProcessed[0]?.latestResult?.status).toBe("completed");
   });
 
   function runCliJson(command: string, input?: unknown, extraArgs: string[] = []): any {

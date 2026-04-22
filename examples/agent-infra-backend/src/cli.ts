@@ -7,8 +7,13 @@ import {
   type AgentRunSummary,
   type AgentStateSnapshot,
   type Artifact,
+  type CursorReviewOperationRecord,
+  type CursorReviewOperationResultRecord,
   createAgentDataStore,
+  type ListCursorReviewOperationsInput,
   type ListTaskRecordsInput,
+  type RecordCursorReviewOperationInput,
+  type RecordCursorReviewResultInput,
   type MemoryLink,
   type RecordArtifactInput,
   type RecordItemCompletedInput,
@@ -149,6 +154,31 @@ interface SerializedAgentStateSnapshot {
   status: string | null;
   stateJson: unknown | null;
   capturedAt: string;
+}
+
+interface SerializedCursorReviewOperationResult {
+  eventId: string;
+  operationId: string;
+  status: string;
+  clientId: string | null;
+  repoRoot: string | null;
+  message: string | null;
+  processedAt: string;
+}
+
+interface SerializedCursorReviewOperation {
+  eventId: string;
+  operationId: string;
+  operationType: string;
+  repoRoot: string | null;
+  workspaceRoot: string | null;
+  bookmark: string | null;
+  relPath: string | null;
+  note: string | null;
+  sourceSessionId: string | null;
+  sourceChatKind: string | null;
+  createdAt: string;
+  latestResult: SerializedCursorReviewOperationResult | null;
 }
 
 interface SerializedAgentRunSummary {
@@ -379,6 +409,41 @@ function serializeAgentStateSnapshot(
   };
 }
 
+function serializeCursorReviewOperationResult(
+  result: CursorReviewOperationResultRecord,
+): SerializedCursorReviewOperationResult {
+  return {
+    eventId: result.eventId,
+    operationId: result.operationId,
+    status: result.status,
+    clientId: result.clientId ?? null,
+    repoRoot: result.repoRoot ?? null,
+    message: result.message ?? null,
+    processedAt: result.processedAt.toISOString(),
+  };
+}
+
+function serializeCursorReviewOperation(
+  operation: CursorReviewOperationRecord,
+): SerializedCursorReviewOperation {
+  return {
+    eventId: operation.eventId,
+    operationId: operation.operationId,
+    operationType: operation.operationType,
+    repoRoot: operation.repoRoot ?? null,
+    workspaceRoot: operation.workspaceRoot ?? null,
+    bookmark: operation.bookmark ?? null,
+    relPath: operation.relPath ?? null,
+    note: operation.note ?? null,
+    sourceSessionId: operation.sourceSessionId ?? null,
+    sourceChatKind: operation.sourceChatKind ?? null,
+    createdAt: operation.createdAt.toISOString(),
+    latestResult: operation.latestResult
+      ? serializeCursorReviewOperationResult(operation.latestResult)
+      : null,
+  };
+}
+
 function serializeRunSummary(summary: AgentRunSummary): SerializedAgentRunSummary {
   return {
     run: serializeAgentRun(summary.run),
@@ -547,6 +612,34 @@ async function main(): Promise<void> {
           throw new Error(`run ${runId} not found`);
         }
         renderJson(serializeRunSummary(summary));
+        break;
+      }
+      case "record-cursor-review-op": {
+        const input = readJsonInput<RecordCursorReviewOperationInput>(
+          "record-cursor-review-op",
+        );
+        const operation = await store.recordCursorReviewOperation(input);
+        renderJson(serializeCursorReviewOperation(operation));
+        break;
+      }
+      case "record-cursor-review-result": {
+        const input = readJsonInput<RecordCursorReviewResultInput>(
+          "record-cursor-review-result",
+        );
+        const result = await store.recordCursorReviewResult(input);
+        renderJson(serializeCursorReviewOperationResult(result));
+        break;
+      }
+      case "list-cursor-review-ops": {
+        const limitRaw = readFlag("--limit");
+        const query: ListCursorReviewOperationsInput = {
+          repoRoot: readFlag("--repo-root"),
+          workspaceRoot: readFlag("--workspace-root"),
+          includeProcessed: hasFlag("--include-processed"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const operations = await store.listCursorReviewOperations(query);
+        renderJson(operations.map(serializeCursorReviewOperation));
         break;
       }
       default:
