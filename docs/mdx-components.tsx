@@ -5,6 +5,7 @@ import { Mermaid } from "./components/mdx/mermaid";
 import { GenerateAppId } from "./components/mdx/generate-app-id";
 import { CloudConfig } from "./components/mdx/cloud-config";
 import { DeployCommand } from "./components/mdx/deploy-command";
+import { JazzLogo } from "./components/brand/jazz-logo";
 
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
@@ -14,6 +15,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     GenerateAppId,
     CloudConfig,
     DeployCommand,
+    JazzLogo,
     ...components,
   };
 }

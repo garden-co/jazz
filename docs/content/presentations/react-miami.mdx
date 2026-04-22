@@ -6,10 +6,15 @@ description: Placeholder deck for the Jazz launch talk at React Miami.
 <Slide>
 # Hello,<br/>React Miami!
 
-Anselm Eickhoff
+<div className="absolute [&_p]:text-[4vw] top-[5vw] right-[5vw] text-right flex flex-col gap-6">
+Anselm Eickhoff<br/>
+@anselm_io
 
-founder of Garden Computing
-building Jazz
+Garden Computing<br/>
+
+building<br/>Jazz
+
+</div>
 
 <Notes>
 Hey everyone! My name is Anselm. I run a little company called Garden
@@ -21,15 +26,15 @@ The first thing you should know about me is that I believe that...
 </Slide>
 
 <Slide>
-# Frontend is harder than backend
+# Frontend <br/> is harder <br/> than backend
 
 <Notes>
 Frontend is harder than backend.
 </Notes>
 </Slide>
 
-<Slide>
-# "LLMs are bad at frontend"
+<Slide className="justify-start">
+## &ldquo;LLMs are bad at frontend&rdquo;
 
 Maybe frontend is just harder than backend???
 
@@ -47,7 +52,7 @@ frontend is harder?
 </Slide>
 
 <Slide>
-# Frontend is harder than backend
+# Frontend <br/> is harder <br/> than backend
 
 <Notes>
 The reason I believe frontend is harder than backend is because of my
@@ -55,8 +60,8 @@ many years in the SaaS mines.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 <Notes>
 Let me explain.
@@ -68,8 +73,8 @@ same motions over and over again.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. map out domain model
 
@@ -80,8 +85,8 @@ about. That's hard and usually most of the conceptual work.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. map out domain model
 2. build the UI
@@ -95,12 +100,12 @@ people who invent the CSS standard.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. map out domain model
 2. build the UI
-3. impress everyone with flashy demo around local state
+3. impress everyone with flashy demo<br/>around local state
 
 <Notes>
 Then I usually built a quick mostly working demo around local UI state,
@@ -109,12 +114,12 @@ because that's easy to iterate on.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. map out domain model
 2. build the UI
-3. impress everyone with flashy demo around local state
+3. impress everyone with flashy demo<br/>around local state
 4. grueling work of building a backend
 5. deploy a database
 
@@ -150,12 +155,12 @@ database and the frontend, and seeing that again and again got boring.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. **map out domain model**
 2. **build the UI**
-3. **impress everyone with flashy demo around local state**
+3. **impress everyone with flashy demo<br/>around local state**
 4. grueling work of building a backend
 5. deploy a database
 
@@ -174,12 +179,12 @@ possible.
 </Notes>
 </Slide>
 
-<Slide>
-# My experience in the SaaS mines
+<Slide className="justify-start">
+## My experience in the SaaS mines
 
 1. map out domain model
 2. build the UI
-3. impress everyone with flashy demo around **local state**
+3. impress everyone with flashy demo<br/>around **local state**
 4. grueling work of building a backend
 5. deploy a database
 
@@ -196,8 +201,8 @@ magically fix everything.
 </Notes>
 </Slide>
 
-<Slide>
-# what if `useState()` was your database?
+<Slide className="justify-center items-center">
+## What if `useState()` was your database?
 
 <Notes>
 What if my database "simply" looked like useState()?
@@ -207,15 +212,18 @@ That's what I started building, and that's what became Jazz.
 </Notes>
 </Slide>
 
-<Slide>
-# Modern real-time databases and sync engines
+<Slide className="justify-start">
+## Modern real&#x2011;time databases and sync engines
 
-- Zero
-- ElectricSQL
-- InstantDB
-- Convex
-- Turso
-- Jazz
+<div className="flex mt-[10vw] gap-12 justify-center">
+  <p>Zero</p>
+  <p>ElectricSQL</p>
+  <p>InstantDB</p>
+  <p>PowerSync</p>
+  <p>Convex</p>
+  <p>Turso</p>
+  <p>Jazz</p>
+</div>
 
 <Notes>
 Turns out other people had similar ideas and also wanted to simplify
@@ -233,8 +241,8 @@ main message is: you deserve a better stack.
 </Notes>
 </Slide>
 
-<Slide>
-# Metrics to judge a stack by
+<Slide className="justify-start">
+## Metrics to judge a stack by
 
 - Lines of code
 - Layers of infra BS
@@ -268,8 +276,8 @@ alternatives.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 0
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 0
 
 Lines of code: +++++++++++++++
 
@@ -301,8 +309,8 @@ point out "durable streams" as newest addition to the stack
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 1
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 1
 
 Lines of code: ++++++++++++++
 
@@ -342,8 +350,8 @@ we get the first huge win: optimistic preview goes to zero.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 2
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 2
 
 Lines of code: +++++++++++++
 
@@ -383,8 +391,8 @@ the idea that yes, a database client can live in the frontend too.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 3
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 3
 
 Lines of code: +++++++++++++
 
@@ -420,8 +428,8 @@ but we are deleting operational surface area, which matters a lot.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 4
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 4
 
 Lines of code: +++++++++
 
@@ -456,8 +464,8 @@ real-time coordination system.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 5
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 5
 
 Lines of code: ++++++++
 
@@ -492,10 +500,8 @@ pulled back under one roof.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 6
-
-Roughly where modern stacks land
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 6
 
 Lines of code: ++++
 
@@ -533,8 +539,8 @@ started with.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 7
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 7
 
 Lines of code: ++++
 
@@ -571,8 +577,8 @@ feeling that `useState()` is your database.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 8
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 8
 
 Lines of code: ++++
 
@@ -620,8 +626,8 @@ but only if you live in us-east-1.
 </Notes>
 </Slide>
 
-<Slide>
-# Slimming the stack 9
+<Slide className="justify-start [&_p]:text-[1vw] [&_ul>li]:text-[1vw]">
+## Slimming the stack 9
 
 Lines of code: +++
 
@@ -658,8 +664,8 @@ but actually durable, queryable offline, and part of the real system.
 </Notes>
 </Slide>
 
-<Slide>
-# Jazz the last 4 years: a fun database for simple, local-first state
+<Slide className="justify-start">
+## Jazz the last 4 years: a fun database for simple, local-first state
 
 <Notes>
 And this is how far we got with Jazz.
@@ -670,8 +676,8 @@ and local-first state.
 </Notes>
 </Slide>
 
-<Slide>
-# Adopter success stories
+<Slide className="justify-start">
+## Adopter success stories
 
 <Notes>
 And they built the coolest stuff,
@@ -697,8 +703,8 @@ problems shows up.
 </Notes>
 </Slide>
 
-<Slide>
-# Maybe `useState()` databasen't?
+<Slide className="justify-start">
+## Maybe `useState()` databasen't?
 
 - consistency and transactions?
 - permissions for local-first state?
@@ -741,8 +747,8 @@ crisis.
 </Notes>
 </Slide>
 
-<Slide>
-# Time for some fresh ideas.
+<Slide className="justify-start">
+## Time<br/>for some<br/>fresh ideas.
 
 <Notes>
 It was time for some fresh ideas again. To unreasonably ask
@@ -754,8 +760,8 @@ immediately on board to take a big swing.
 </Notes>
 </Slide>
 
-<Slide>
-# Very little time for some fresh ideas.
+<Slide className="justify-start">
+## Very Little Time<br/>for some<br/>fresh ideas.
 
 <Notes>
 The problem is that we didn't have much time. You see,
@@ -784,24 +790,31 @@ And today, just for you guys, we're launching...
 </Notes>
 </Slide>
 
-<Slide>
-# Jazz v2
+<Slide className="justify-center items-center">
+<h1 className="flex items-center gap-[0.16em]">
+  <JazzLogo className="h-[0.98em] w-auto shrink-0 relative top-[0.14em]" />
+  <span className='text-black/60'>v2</span>
+</h1>
 
 <Notes>
 Jazz version two...
 </Notes>
 </Slide>
 
-<Slide>
-# Jazz v2 (alpha)
+<Slide className="justify-center items-center">
+<h1 className="flex items-center gap-[0.16em]">
+  <JazzLogo className="h-[0.98em] w-auto shrink-0 relative top-[0.14em]" />
+  <span className='text-black/60'>v2</span>
+  <sup className='text-[5vw] tracking-normal text-black/50 -mr-[17.5vw]'>(alpha)</sup>
+</h1>
 
 <Notes>
 (quietly) alpha
 </Notes>
 </Slide>
 
-<Slide>
-# 4 Fresh Ideas To Make Local-first actually work
+<Slide className="justify-start">
+## Four fresh ideas<br/>to make local-first<br/>actually work
 
 <Notes>
 Thank you!
@@ -814,8 +827,8 @@ actually different from local state.
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 1: Tunable consistency
+<Slide className="justify-start">
+## Fresh Idea 1: Tunable consistency
 
 <Notes>
 The first idea is a simple compromise. In classic Jazz we learned again
@@ -841,8 +854,8 @@ kind of consistency.
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 2: Row-level security and per-query auth
+<Slide className="justify-start">
+## Fresh Idea 2: Row-level security and per-query auth
 
 <Notes>
 The next idea is even more essential for making local-first work:
@@ -867,8 +880,8 @@ This is why I think row-level security is a good idea...
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 2: Row-level security and per-query auth
+<Slide className="justify-start">
+## Fresh Idea 2: Row-level security and per-query auth
 
 EMERGENCY ALERT:
 
@@ -892,8 +905,8 @@ and in Supabase people often start from everything being public.
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 2: Row-level security and per-query auth
+<Slide className="justify-start">
+## Fresh Idea 2: Row-level security and per-query auth
 
 <Notes>
 Ok, I have a lot of thoughts about this.
@@ -910,8 +923,8 @@ with row-level security in Jazz is
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 3: Fluid schema evolution
+<Slide className="justify-start">
+## Fresh Idea 3: Fluid schema evolution
 
 <Notes>
 Moving on, let me show you the most unique fresh idea of Jazz.
@@ -938,8 +951,8 @@ Jazz does this just in time instead of making you stop the world.
 </Notes>
 </Slide>
 
-<Slide>
-# Fresh Idea 3: Fluid schema evolution
+<Slide className="justify-start">
+## Fresh Idea 3: Fluid schema evolution
 
 <Notes>
 And then we realized something important:
@@ -956,8 +969,8 @@ Making all of that automatically compatible is suddenly much easier.
 </Notes>
 </Slide>
 
-<Slide>
-# The dimensions of state
+<Slide className="justify-start">
+## The dimensions of state
 - table 2D
 
 <Notes>
@@ -970,8 +983,8 @@ A normal database table with columns and rows is clearly 2D.
 </Notes>
 </Slide>
 
-<Slide>
-# The dimensions of state
+<Slide className="justify-start">
+## The dimensions of state
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 
@@ -982,8 +995,8 @@ this one extra dimension.
 </Notes>
 </Slide>
 
-<Slide>
-# The dimensions of state
+<Slide className="justify-start">
+## The dimensions of state
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 - fluid schema evolution 4D
@@ -995,8 +1008,8 @@ another dimension.
 </Notes>
 </Slide>
 
-<Slide>
-# Checkers
+<Slide className="justify-start">
+## Checkers
 - table 2D
 
 <Notes>
@@ -1004,8 +1017,8 @@ So while everyone else is playing checkers
 </Notes>
 </Slide>
 
-<Slide>
-# Literally 4D chess
+<Slide className="justify-start">
+## Literally 4D chess
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 - fluid schema evolution 4D
@@ -1027,8 +1040,8 @@ Well...
 </Notes>
 </Slide>
 
-<Slide>
-# What if there was a fifth dimension?
+<Slide className="justify-start">
+## What if there was a fifth dimension?
 
 <Notes>
 What if I told you there was a fifth dimension?
@@ -1038,8 +1051,8 @@ And this one I'm most exited about...
 </Notes>
 </Slide>
 
-<Slide>
-# What if every row had history
+<Slide className="justify-start">
+## What if every row<br/>had history
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 - fluid schema evolution 4D
@@ -1060,8 +1073,8 @@ But it gets even better, because each row has not just linear history...
 </Notes>
 </Slide>
 
-<Slide>
-# What if every row had **git-like** history
+<Slide className="justify-start">
+## What if every row<br/>had _git-like_ history
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 - fluid schema evolution 4D
@@ -1083,8 +1096,8 @@ it in one system, and you can choose the behavior in detail.
 </Notes>
 </Slide>
 
-<Slide>
-# What if every row had **git-like** history
+<Slide className="justify-start">
+## What if every row<br/>had _git-like_ history
 - table 2D
 - sync 3D (with tunable consistency and permissions)
 - fluid schema evolution 4D
@@ -1117,8 +1130,8 @@ where everyone can add letters and drag them around.
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model
 <Notes>
 The data model is simple enough: we have canvasses,
@@ -1129,8 +1142,8 @@ And each cursor belongs to a user.
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model
 - rendering
 <Notes>
@@ -1148,8 +1161,8 @@ But to us it really just looks like reactive state.
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model
 - rendering
 - mutation
@@ -1162,8 +1175,8 @@ All of this is typesafe from our schema by the way.
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model
 - rendering
 - mutation
@@ -1186,8 +1199,8 @@ testing your whole app.
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model (updated)
 - rendering (updated)
 - mutation (updated)
@@ -1206,8 +1219,8 @@ letter app to millions of users...
 </Notes>
 </Slide>
 
-<Slide>
-# Example: Letters app
+<Slide className="justify-start">
+## Example: Letters app
 - data model (updated)
 - rendering (updated)
 - mutation (updated)
@@ -1250,8 +1263,8 @@ please be wholesome.
 </Notes>
 </Slide>
 
-<Slide>
-# what if `useState()` was your database?
+<Slide className="justify-center items-center">
+## What if `useState()` was your database?
 
 <Notes>
 So now you've seen the theory and a tiny bit of practiec
@@ -1261,8 +1274,8 @@ What would it actually feel like if useState was _your_ database?
 </Notes>
 </Slide>
 
-<Slide>
-# what if Jazz was your database?
+<Slide className="justify-center items-center">
+<h2>What if <JazzLogo className="inline h-[0.98em] w-auto shrink-0 relative top-[0.04em]" /> was your database?</h2>
 
 <Notes>
 What if *jazz* was your database?
@@ -1272,8 +1285,14 @@ What if *jazz* was your database?
 <Slide>
 # npm create jazz
 
-Docs: jazz.tools
-Join our Discord!
+<div className="absolute [&_p]:text-[4vw] top-[5vw] right-[5vw] text-right flex flex-col gap-6">
+jazz.tools<br/>
+@jazz_tools
+
+Join our Discord!<br/>
+discord.gg/jazz-tools
+
+</div>
 
 <Notes>
 The best way to find out is to
@@ -1291,8 +1310,14 @@ As easy as starting a new purely frontend project.
 <Slide>
 # npm create jazz
 
-Docs: jazz.tools
-Join our Discord!
+<div className="absolute [&_p]:text-[4vw] top-[5vw] right-[5vw] text-right flex flex-col gap-6">
+jazz.tools<br/>
+@jazz_tools
+
+Join our Discord!<br/>
+discord.gg/jazz-tools
+
+</div>
 
 <Notes>
 I really can't wait to see what you build with it

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   startTransition,
@@ -214,57 +213,11 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
   }, []);
 
   return (
-    <div className="min-h-screen bg-fd-background text-fd-foreground">
-      <div className="flex min-h-screen flex-col">
-        <header className="flex items-center justify-between gap-6 px-6 py-4 text-[0.72rem] font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground sm:px-8">
-          <div className="min-w-0">
-            <p className="truncate">{deckTitle}</p>
-          </div>
-          <div className="hidden shrink-0 md:block">
-            <p>
-              Arrows / Space navigate. <kbd className="font-mono normal-case">S</kbd> toggles
-              presenter notes.
-            </p>
-          </div>
-          <div className="shrink-0">
-            <p>
-              {activeIndex + 1} / {slides.length}
-            </p>
-          </div>
-        </header>
-
-        <main className="flex flex-1 items-stretch px-4 pb-4 sm:px-6 sm:pb-6 lg:px-8 lg:pb-8">
-          <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col rounded-[2rem] border border-fd-border/70 bg-fd-card/40 shadow-[0_24px_80px_rgba(0,0,0,0.08)] backdrop-blur">
-            <div className="flex-1 overflow-auto px-6 py-8 sm:px-10 sm:py-10 lg:px-16 lg:py-14">
-              {children}
-            </div>
-            <footer className="flex items-center justify-between gap-4 border-t border-fd-border/70 px-6 py-4 sm:px-10 lg:px-16">
-              {previousSlide ? (
-                <Link
-                  href={previousSlide.href}
-                  onClick={() => syncNotesWindow(previousSlide.notesHref)}
-                  className="text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-                >
-                  Previous
-                </Link>
-              ) : (
-                <span className="text-sm text-fd-muted-foreground/60">Beginning</span>
-              )}
-              {nextSlide ? (
-                <Link
-                  href={nextSlide.href}
-                  onClick={() => syncNotesWindow(nextSlide.notesHref)}
-                  className="text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-                >
-                  Next
-                </Link>
-              ) : (
-                <span className="text-sm text-fd-muted-foreground/60">End</span>
-              )}
-            </footer>
-          </div>
-        </main>
-      </div>
+    <div
+      className="min-h-screen bg-fd-background text-fd-foreground"
+      aria-label={`${deckTitle} slide ${activeIndex + 1} of ${slides.length}`}
+    >
+      <main className="w-screen h-screen">{children}</main>
     </div>
   );
 }
