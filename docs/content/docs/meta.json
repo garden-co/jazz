@@ -2,7 +2,8 @@
   "title": "Jazz 2",
   "pages": [
     "index",
-    "quickstarts",
+    "quickstart",
+    "install",
     "---Getting Started---",
     "getting-started/client-setup",
     "getting-started/server-setup",

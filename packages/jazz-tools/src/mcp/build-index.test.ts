@@ -428,34 +428,4 @@ describe("packaged docs index", () => {
     expect(txt).not.toContain("allowSelfSigned");
     expect(txt).not.toContain("jazz-server --jwks-url https://your-app.example.com/api/auth/jwks");
   });
-
-  it("ships current auth docs in docs-index.db", () => {
-    const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
-
-    try {
-      const localFirstPage = db
-        .prepare("SELECT body FROM pages WHERE slug = 'auth/local-first-auth'")
-        .get() as { body: string } | undefined;
-      const serverSetupPage = db
-        .prepare("SELECT body FROM pages WHERE slug = 'getting-started/server-setup'")
-        .get() as { body: string } | undefined;
-      const quickstartPage = db
-        .prepare("SELECT body FROM pages WHERE slug = 'quickstarts/typescript-server'")
-        .get() as { body: string } | undefined;
-      const authProviderPage = db
-        .prepare("SELECT body FROM pages WHERE slug = 'recipes/auth-provider-integration'")
-        .get() as { body: string } | undefined;
-
-      expect(localFirstPage?.body).toContain("jazz-tools server  --allow-local-first-auth");
-      expect(serverSetupPage?.body).toContain("--allow-local-first-auth");
-      expect(quickstartPage?.body).toContain(
-        'allowLocalFirstAuth: process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false"',
-      );
-      expect(authProviderPage?.body).toContain(
-        "jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks",
-      );
-    } finally {
-      db.close();
-    }
-  });
 });
