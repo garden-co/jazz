@@ -5585,6 +5585,76 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 }
 
 #[test]
+fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
+    // Simulates a crash between "rejection settlement persisted" and
+    // "visible row deleted + query retracted": the local batch record has a
+    // Rejected settlement but its visible row is still in the visible
+    // region. On restart the runtime must retract the lingering visible row
+    // so queries never emit it — otherwise the row would render on reload
+    // and then be retracted by the next network-delivered re-rejection,
+    // causing a visible flash.
+    let schema = test_schema();
+    let mut alice =
+        create_runtime_with_schema(schema.clone(), "rc-restart-apply-stored-rejected-test");
+
+    let ((row_id, _row_values), _receiver) = alice
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+
+    let branch_name = alice.schema_manager().branch_name();
+    let visible_row_before = alice
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("insert_persisted should create one visible row");
+    let batch_id = visible_row_before.batch_id;
+
+    let mut record = alice
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("insert_persisted should create a local batch record");
+    record.latest_settlement = Some(crate::batch_fate::BatchSettlement::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "simulated post-insert rejection".to_string(),
+    });
+    alice
+        .storage_mut()
+        .upsert_local_batch_record(&record)
+        .unwrap();
+
+    let storage = alice.into_storage();
+    let restarted =
+        create_runtime_with_storage(schema, "rc-restart-apply-stored-rejected-test", storage);
+
+    assert_eq!(
+        restarted
+            .storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "restart must apply stored Rejected settlement and retract the lingering visible row"
+    );
+
+    let history_rows = restarted
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::Rejected,
+        "row history should reflect the stored rejection"
+    );
+}
+
+#[test]
 fn rc_restart_recovers_completed_sealed_batch_from_storage() {
     let schema = test_schema();
     let schema_hash = SchemaHash::compute(&schema);
