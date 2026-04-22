@@ -19,17 +19,26 @@ const sessionStore = authClient.useSession();
 const appId = config.public.jazzAppId as string;
 const serverUrl = config.public.jazzServerUrl as string;
 
+// Track current auth mode so the watch doesn't recreate the client on every
+// BetterAuth poll — only switch when the identity actually changes (local ↔ jwt).
+let authMode: "none" | "local" | "jwt" = "none";
+
 watch(
   sessionStore,
   async (store) => {
     if (!appId || !serverUrl || store.isPending) return;
-    if (store.data) {
+    const targetMode = store.data ? "jwt" : "local";
+    if (targetMode === authMode) return;
+
+    if (targetMode === "jwt") {
       const { data, error } = await authClient.token();
       if (!error && data?.token) {
+        authMode = "jwt";
         jazzClient.value = createJazzClient({ appId, serverUrl, jwtToken: data.token });
         return;
       }
     }
+    authMode = "local";
     const secret = await BrowserAuthSecretStore.getOrCreateSecret();
     jazzClient.value = createJazzClient({ appId, serverUrl, secret });
   },
