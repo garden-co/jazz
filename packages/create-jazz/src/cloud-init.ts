@@ -72,7 +72,7 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
 
     console.log("Jazz app provisioned successfully and written to .env:");
     console.log(`  ${envKeys.appId}=${appId}`);
-    console.log(`  ${envKeys.serverUrl}=${appServerUrl}`);
+    console.log(`  ${envKeys.serverUrl}=${cloudSyncUrl}`);
     console.log(`  ${envKeys.adminSecret}=${adminSecret}`);
     console.log(`  ${envKeys.backendSecret}=${backendSecret}`);
     console.log("");

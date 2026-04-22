@@ -74,7 +74,7 @@ describe("runHostedInit", () => {
       const content = readEnv(dir);
       const values = parseEnv(content);
       expect(values["NEXT_PUBLIC_JAZZ_APP_ID"]).toBe("app-alice");
-      expect(values["NEXT_PUBLIC_JAZZ_SERVER_URL"]).toBe(`${CLOUD_SYNC_URL}apps/app-alice/`);
+      expect(values["NEXT_PUBLIC_JAZZ_SERVER_URL"]).toBe(CLOUD_SYNC_URL);
       expect(values["JAZZ_ADMIN_SECRET"]).toBe("admin-secret-alice");
       expect(values["BACKEND_SECRET"]).toBe("backend-secret-alice");
       expect(content).not.toContain("TODO");
@@ -111,7 +111,7 @@ describe("runHostedInit", () => {
 
       const values = parseEnv(readEnv(dir));
       expect(values["PUBLIC_JAZZ_APP_ID"]).toBe("app-bob");
-      expect(values["PUBLIC_JAZZ_SERVER_URL"]).toBe(`${CLOUD_SYNC_URL}apps/app-bob/`);
+      expect(values["PUBLIC_JAZZ_SERVER_URL"]).toBe(CLOUD_SYNC_URL);
       expect(values["JAZZ_ADMIN_SECRET"]).toBe("admin-bob");
       expect(values["BACKEND_SECRET"]).toBe("backend-bob");
     });
