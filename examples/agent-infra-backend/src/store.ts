@@ -39,8 +39,13 @@ const CURSOR_REVIEW_AGENT_ID = "cursor-review";
 const CURSOR_REVIEW_CONTROL_RUN_ID = "cursor-review-control";
 const CURSOR_REVIEW_OPERATION_EVENT_TYPE = "cursor_review_operation";
 const CURSOR_REVIEW_RESULT_EVENT_TYPE = "cursor_review_result";
+const COMMIT_TURN_AGENT_ID = "commit";
+const COMMIT_TURN_CONTROL_RUN_ID = "commit-turn-control";
+const COMMIT_TURN_OPERATION_EVENT_TYPE = "commit_turn_operation";
+const COMMIT_TURN_RESULT_EVENT_TYPE = "commit_turn_result";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "error"]);
 const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
+const TERMINAL_COMMIT_TURN_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
 const TASK_PLACEMENT_ORDER: Record<string, number> = {
   now: 0,
   next: 1,
@@ -290,6 +295,76 @@ export interface CursorReviewOperationRecord {
   latestResult?: CursorReviewOperationResultRecord;
 }
 
+export type CommitTurnResultStatus = "completed" | "failed" | "ignored";
+
+export interface RecordCommitTurnOperationInput {
+  operationId?: string;
+  provider: string;
+  sessionId: string;
+  conversation: string;
+  conversationHash: string;
+  trigger: string;
+  turnOrdinal: number;
+  sessionEventId: string;
+  repoRoot?: string;
+  repoRoots?: string[];
+  cwd?: string;
+  artifactPath?: string;
+  promptPreview?: string;
+  sourceChatKind?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface RecordCommitTurnResultInput {
+  operationId: string;
+  status: CommitTurnResultStatus;
+  agentId?: string;
+  runId?: string;
+  repoRoot?: string;
+  message?: string;
+  todoItems?: string[];
+  processedAt?: TimestampInput;
+}
+
+export interface ListCommitTurnOperationsInput {
+  repoRoot?: string;
+  conversationHash?: string;
+  includeProcessed?: boolean;
+  limit?: number;
+}
+
+export interface CommitTurnResultRecord {
+  eventId: string;
+  operationId: string;
+  status: CommitTurnResultStatus;
+  agentId?: string;
+  runId?: string;
+  repoRoot?: string;
+  message?: string;
+  todoItems?: string[];
+  processedAt: Date;
+}
+
+export interface CommitTurnOperationRecord {
+  eventId: string;
+  operationId: string;
+  provider: string;
+  sessionId: string;
+  conversation: string;
+  conversationHash: string;
+  trigger: string;
+  turnOrdinal: number;
+  sessionEventId: string;
+  repoRoot?: string;
+  repoRoots?: string[];
+  cwd?: string;
+  artifactPath?: string;
+  promptPreview?: string;
+  sourceChatKind?: string;
+  createdAt: Date;
+  latestResult?: CommitTurnResultRecord;
+}
+
 export interface AgentRunSummary {
   run: AgentRun;
   items: RunItem[];
@@ -342,6 +417,16 @@ function readObjectString(
 ): string | undefined {
   const raw = value?.[key];
   return typeof raw === "string" ? raw : undefined;
+}
+
+function readObjectStringArray(
+  value: Record<string, JsonValue> | null,
+  key: string,
+): string[] | undefined {
+  const raw = value?.[key];
+  if (!Array.isArray(raw)) return undefined;
+  const items = raw.filter((entry): entry is string => typeof entry === "string");
+  return items.length > 0 ? items : undefined;
 }
 
 function asDate(value?: TimestampInput): Date {
@@ -1019,6 +1104,127 @@ export class AgentDataStore {
     return operations;
   }
 
+  async recordCommitTurnOperation(
+    input: RecordCommitTurnOperationInput,
+    session?: Session,
+  ): Promise<CommitTurnOperationRecord> {
+    const db = this.getDb(session);
+    await this.ensureCommitTurnControlRun(db);
+    const operationId = input.operationId ?? randomUUID();
+    const event = await this.appendSemanticEvent(
+      {
+        runId: COMMIT_TURN_CONTROL_RUN_ID,
+        eventId: operationId,
+        eventType: COMMIT_TURN_OPERATION_EVENT_TYPE,
+        summaryText: input.promptPreview ?? input.conversationHash,
+        payloadJson: pruneUndefined({
+          operationId,
+          provider: input.provider,
+          sessionId: input.sessionId,
+          conversation: input.conversation,
+          conversationHash: input.conversationHash,
+          trigger: input.trigger,
+          turnOrdinal: input.turnOrdinal,
+          sessionEventId: input.sessionEventId,
+          repoRoot: input.repoRoot,
+          repoRoots: input.repoRoots,
+          cwd: input.cwd,
+          artifactPath: input.artifactPath,
+          promptPreview: input.promptPreview,
+          sourceChatKind: input.sourceChatKind,
+        }) as JsonValue,
+        occurredAt: input.createdAt,
+      },
+      session,
+    );
+    const operation = this.commitTurnOperationFromEvent(event);
+    if (!operation) {
+      throw new Error("commit turn operation event could not be decoded");
+    }
+    return operation;
+  }
+
+  async recordCommitTurnResult(
+    input: RecordCommitTurnResultInput,
+    session?: Session,
+  ): Promise<CommitTurnResultRecord> {
+    const db = this.getDb(session);
+    await this.ensureCommitTurnControlRun(db);
+    const event = await this.appendSemanticEvent(
+      {
+        runId: COMMIT_TURN_CONTROL_RUN_ID,
+        eventType: COMMIT_TURN_RESULT_EVENT_TYPE,
+        summaryText: input.message ?? input.status,
+        payloadJson: pruneUndefined({
+          operationId: input.operationId,
+          status: input.status,
+          agentId: input.agentId,
+          runId: input.runId,
+          repoRoot: input.repoRoot,
+          message: input.message,
+          todoItems: input.todoItems,
+        }) as JsonValue,
+        occurredAt: input.processedAt,
+      },
+      session,
+    );
+    const result = this.commitTurnResultFromEvent(event);
+    if (!result) {
+      throw new Error(`commit turn result ${event.event_id} failed to parse`);
+    }
+    return result;
+  }
+
+  async listCommitTurnOperations(
+    input: ListCommitTurnOperationsInput = {},
+    session?: Session,
+  ): Promise<CommitTurnOperationRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: COMMIT_TURN_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 8),
+    );
+
+    const latestResults = new Map<string, CommitTurnResultRecord>();
+    for (const row of rows) {
+      if (row.event_type !== COMMIT_TURN_RESULT_EVENT_TYPE) continue;
+      const result = this.commitTurnResultFromEvent(row);
+      if (!result) continue;
+      const existing = latestResults.get(result.operationId);
+      if (!existing || existing.processedAt.getTime() < result.processedAt.getTime()) {
+        latestResults.set(result.operationId, result);
+      }
+    }
+
+    const operations = rows
+      .filter((row) => row.event_type === COMMIT_TURN_OPERATION_EVENT_TYPE)
+      .map((row) => this.commitTurnOperationFromEvent(row))
+      .filter((row): row is CommitTurnOperationRecord => Boolean(row))
+      .filter((row) => {
+        if (input.repoRoot) {
+          const matchesPrimary = row.repoRoot === input.repoRoot;
+          const matchesAny = row.repoRoots?.includes(input.repoRoot) ?? false;
+          if (!matchesPrimary && !matchesAny) return false;
+        }
+        if (input.conversationHash && row.conversationHash !== input.conversationHash) {
+          return false;
+        }
+        const latestResult = latestResults.get(row.operationId);
+        if (!input.includeProcessed && latestResult && TERMINAL_COMMIT_TURN_RESULT_STATUSES.has(latestResult.status)) {
+          return false;
+        }
+        row.latestResult = latestResult;
+        return true;
+      })
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .slice(0, clampLimit(input.limit));
+
+    return operations;
+  }
+
   async listRecentRuns(limit?: number, session?: Session): Promise<AgentRun[]> {
     return this.getDb(session).all(
       app.agent_runs.orderBy("started_at", "desc").limit(clampLimit(limit)),
@@ -1108,6 +1314,26 @@ export class AgentDataStore {
     return run;
   }
 
+  private async ensureCommitTurnControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(db, COMMIT_TURN_CONTROL_RUN_ID);
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: COMMIT_TURN_CONTROL_RUN_ID,
+      agentId: COMMIT_TURN_AGENT_ID,
+      requestSummary: "Commit turn event control plane",
+      status: "running",
+      agent: {
+        lane: "commit-turn",
+        promptSurface: "commit-turn",
+      },
+    });
+    run = await this.getRunByExternalId(db, COMMIT_TURN_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error("commit turn control run not found after creation");
+    }
+    return run;
+  }
+
   private cursorReviewOperationFromEvent(
     event: SemanticEvent,
   ): CursorReviewOperationRecord | null {
@@ -1156,6 +1382,65 @@ export class AgentDataStore {
       clientId: readObjectString(payload, "clientId"),
       repoRoot: readObjectString(payload, "repoRoot"),
       message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      processedAt: event.occurred_at,
+    };
+  }
+
+  private commitTurnOperationFromEvent(
+    event: SemanticEvent,
+  ): CommitTurnOperationRecord | null {
+    if (event.event_type !== COMMIT_TURN_OPERATION_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const operationId = readObjectString(payload, "operationId") ?? event.event_id;
+    const provider = readObjectString(payload, "provider");
+    const sessionId = readObjectString(payload, "sessionId");
+    const conversation = readObjectString(payload, "conversation");
+    const conversationHash = readObjectString(payload, "conversationHash");
+    const trigger = readObjectString(payload, "trigger");
+    const sessionEventId = readObjectString(payload, "sessionEventId");
+    const turnOrdinalRaw = payload?.turnOrdinal;
+    const turnOrdinal = typeof turnOrdinalRaw === "number" ? turnOrdinalRaw : null;
+    if (!provider || !sessionId || !conversation || !conversationHash || !trigger || !sessionEventId || !turnOrdinal) {
+      return null;
+    }
+    return {
+      eventId: event.event_id,
+      operationId,
+      provider,
+      sessionId,
+      conversation,
+      conversationHash,
+      trigger,
+      turnOrdinal,
+      sessionEventId,
+      repoRoot: readObjectString(payload, "repoRoot"),
+      repoRoots: readObjectStringArray(payload, "repoRoots"),
+      cwd: readObjectString(payload, "cwd"),
+      artifactPath: readObjectString(payload, "artifactPath"),
+      promptPreview: readObjectString(payload, "promptPreview") ?? event.summary_text ?? undefined,
+      sourceChatKind: readObjectString(payload, "sourceChatKind"),
+      createdAt: event.occurred_at,
+    };
+  }
+
+  private commitTurnResultFromEvent(
+    event: SemanticEvent,
+  ): CommitTurnResultRecord | null {
+    if (event.event_type !== COMMIT_TURN_RESULT_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const operationId = readObjectString(payload, "operationId");
+    const status = readObjectString(payload, "status");
+    if (!operationId) return null;
+    if (status !== "completed" && status !== "failed" && status !== "ignored") return null;
+    return {
+      eventId: event.event_id,
+      operationId,
+      status,
+      agentId: readObjectString(payload, "agentId"),
+      runId: readObjectString(payload, "runId"),
+      repoRoot: readObjectString(payload, "repoRoot"),
+      message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      todoItems: readObjectStringArray(payload, "todoItems"),
       processedAt: event.occurred_at,
     };
   }

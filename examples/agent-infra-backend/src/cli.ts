@@ -7,11 +7,16 @@ import {
   type AgentRunSummary,
   type AgentStateSnapshot,
   type Artifact,
+  type CommitTurnOperationRecord,
+  type CommitTurnResultRecord,
   type CursorReviewOperationRecord,
   type CursorReviewOperationResultRecord,
   createAgentDataStore,
+  type ListCommitTurnOperationsInput,
   type ListCursorReviewOperationsInput,
   type ListTaskRecordsInput,
+  type RecordCommitTurnOperationInput,
+  type RecordCommitTurnResultInput,
   type RecordCursorReviewOperationInput,
   type RecordCursorReviewResultInput,
   type MemoryLink,
@@ -179,6 +184,38 @@ interface SerializedCursorReviewOperation {
   sourceChatKind: string | null;
   createdAt: string;
   latestResult: SerializedCursorReviewOperationResult | null;
+}
+
+interface SerializedCommitTurnResult {
+  eventId: string;
+  operationId: string;
+  status: string;
+  agentId: string | null;
+  runId: string | null;
+  repoRoot: string | null;
+  message: string | null;
+  todoItems: string[] | null;
+  processedAt: string;
+}
+
+interface SerializedCommitTurnOperation {
+  eventId: string;
+  operationId: string;
+  provider: string;
+  sessionId: string;
+  conversation: string;
+  conversationHash: string;
+  trigger: string;
+  turnOrdinal: number;
+  sessionEventId: string;
+  repoRoot: string | null;
+  repoRoots: string[] | null;
+  cwd: string | null;
+  artifactPath: string | null;
+  promptPreview: string | null;
+  sourceChatKind: string | null;
+  createdAt: string;
+  latestResult: SerializedCommitTurnResult | null;
 }
 
 interface SerializedAgentRunSummary {
@@ -444,6 +481,48 @@ function serializeCursorReviewOperation(
   };
 }
 
+function serializeCommitTurnResult(
+  result: CommitTurnResultRecord,
+): SerializedCommitTurnResult {
+  return {
+    eventId: result.eventId,
+    operationId: result.operationId,
+    status: result.status,
+    agentId: result.agentId ?? null,
+    runId: result.runId ?? null,
+    repoRoot: result.repoRoot ?? null,
+    message: result.message ?? null,
+    todoItems: result.todoItems ?? null,
+    processedAt: result.processedAt.toISOString(),
+  };
+}
+
+function serializeCommitTurnOperation(
+  operation: CommitTurnOperationRecord,
+): SerializedCommitTurnOperation {
+  return {
+    eventId: operation.eventId,
+    operationId: operation.operationId,
+    provider: operation.provider,
+    sessionId: operation.sessionId,
+    conversation: operation.conversation,
+    conversationHash: operation.conversationHash,
+    trigger: operation.trigger,
+    turnOrdinal: operation.turnOrdinal,
+    sessionEventId: operation.sessionEventId,
+    repoRoot: operation.repoRoot ?? null,
+    repoRoots: operation.repoRoots ?? null,
+    cwd: operation.cwd ?? null,
+    artifactPath: operation.artifactPath ?? null,
+    promptPreview: operation.promptPreview ?? null,
+    sourceChatKind: operation.sourceChatKind ?? null,
+    createdAt: operation.createdAt.toISOString(),
+    latestResult: operation.latestResult
+      ? serializeCommitTurnResult(operation.latestResult)
+      : null,
+  };
+}
+
 function serializeRunSummary(summary: AgentRunSummary): SerializedAgentRunSummary {
   return {
     run: serializeAgentRun(summary.run),
@@ -628,6 +707,34 @@ async function main(): Promise<void> {
         );
         const result = await store.recordCursorReviewResult(input);
         renderJson(serializeCursorReviewOperationResult(result));
+        break;
+      }
+      case "record-commit-turn-op": {
+        const input = readJsonInput<RecordCommitTurnOperationInput>(
+          "record-commit-turn-op",
+        );
+        const operation = await store.recordCommitTurnOperation(input);
+        renderJson(serializeCommitTurnOperation(operation));
+        break;
+      }
+      case "record-commit-turn-result": {
+        const input = readJsonInput<RecordCommitTurnResultInput>(
+          "record-commit-turn-result",
+        );
+        const result = await store.recordCommitTurnResult(input);
+        renderJson(serializeCommitTurnResult(result));
+        break;
+      }
+      case "list-commit-turn-ops": {
+        const limitRaw = readFlag("--limit");
+        const query: ListCommitTurnOperationsInput = {
+          repoRoot: readFlag("--repo-root"),
+          conversationHash: readFlag("--conversation-hash"),
+          includeProcessed: hasFlag("--include-processed"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const operations = await store.listCommitTurnOperations(query);
+        renderJson(operations.map(serializeCommitTurnOperation));
         break;
       }
       case "list-cursor-review-ops": {
