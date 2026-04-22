@@ -90,9 +90,15 @@ export function jazzNuxt(options: JazzPluginOptions = {}) {
         throw error;
       }
 
+      // viteServer.config.env exposes values via import.meta.env in the
+      // client bundle. process.env is what Nitro reads at request time to
+      // populate runtimeConfig.public — without this, useRuntimeConfig()
+      // returns the empty defaults from nuxt.config.ts.
       viteServer.config.env ??= {};
       viteServer.config.env.NUXT_PUBLIC_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.NUXT_PUBLIC_JAZZ_SERVER_URL = managed.serverUrl;
+      process.env.NUXT_PUBLIC_JAZZ_APP_ID = managed.appId;
+      process.env.NUXT_PUBLIC_JAZZ_SERVER_URL = managed.serverUrl;
 
       viteServer.httpServer?.once("close", () => {
         runtime.dispose().catch((error) => {
