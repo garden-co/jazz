@@ -53,3 +53,9 @@ pnpm release:publish
 # publish with the alpha dist-tag
 pnpm release:publish:alpha
 ```
+
+## License
+
+Jazz is MIT licensed. The webfont files bundled with the homepage under
+`docs/public/fonts/` are expressly excluded from the repo MIT license and
+remain subject to their own upstream license terms.
