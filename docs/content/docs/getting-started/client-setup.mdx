@@ -132,8 +132,8 @@ Browser clients default to `driver: { type: "persistent" }`, which stores data l
 Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars so `createJazzClient({ appId, serverUrl })` picks them up without any manual wiring.
 
 <Tabs
-  groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  groupId="jazz-metaframework"
+  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "SvelteKit", "Next.js", "Nuxt", "Expo"]}
   persist
   updateAnchor
 >
@@ -205,6 +205,26 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
 
   </Tab>
+  <Tab value="Nuxt">
+    ```ts title="nuxt.config.ts"
+    import { jazzNuxt } from "jazz-tools/dev/nuxt";
+
+    export default defineNuxtConfig({
+      vite: {
+        plugins: [jazzNuxt()],
+      },
+      runtimeConfig: {
+        public: {
+          jazzAppId: "",
+          jazzServerUrl: "",
+        },
+      },
+    });
+    ```
+
+    Injects `NUXT_PUBLIC_JAZZ_APP_ID` and `NUXT_PUBLIC_JAZZ_SERVER_URL`, which Nuxt maps to `useRuntimeConfig().public.jazzAppId` and `useRuntimeConfig().public.jazzServerUrl`.
+
+  </Tab>
   <Tab value="Expo">
     ```js title="metro.config.js"
     import { getDefaultConfig } from "expo/metro-config";
@@ -233,6 +253,7 @@ Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix i
 | Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
 | Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
 | SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
+| Nuxt      | `NUXT_PUBLIC_JAZZ_APP_ID` | `NUXT_PUBLIC_JAZZ_SERVER_URL` |
 | Expo      | `EXPO_PUBLIC_JAZZ_APP_ID` | `EXPO_PUBLIC_JAZZ_SERVER_URL` |
 
 Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.

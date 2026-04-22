@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Drift detector for the nine Jazz starters.
+// Drift detector for the Jazz starters.
 //
 // Verifies that files meant to be identical actually are, and that every
 // README follows the same section order. Runs in CI / lefthook and also
@@ -24,6 +24,7 @@ const STARTERS = {
     "starters/sveltekit-hybrid",
   ],
   react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
+  nuxt: ["starters/nuxt-betterauth", "starters/nuxt-localfirst", "starters/nuxt-hybrid"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -33,18 +34,26 @@ const HORIZONTAL_FILES = {
   next: ["schema.ts", "permissions.ts", "components/todo-widget.tsx"],
   sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
   react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
+  nuxt: ["schema.ts", "permissions.ts", "components/TodoWidget.client.vue"],
 };
 
 // Files that should be byte-identical across both frameworks (a "vertical"
 // parity rule on top of the horizontal one). We resolve them per framework
 // via HORIZONTAL_FILES — the logical name is the dict key.
 const CROSS_FRAMEWORK_FILES = [
-  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts", react: "schema.ts" },
+  {
+    logical: "schema",
+    next: "schema.ts",
+    sveltekit: "src/lib/schema.ts",
+    react: "schema.ts",
+    nuxt: "schema.ts",
+  },
   {
     logical: "permissions",
     next: "permissions.ts",
     sveltekit: "src/lib/permissions.ts",
     react: "permissions.ts",
+    nuxt: "permissions.ts",
   },
 ];
 
@@ -107,17 +116,26 @@ function checkHorizontalParity() {
 }
 
 function checkCrossFrameworkParity() {
-  for (const { logical, next, sveltekit } of CROSS_FRAMEWORK_FILES) {
-    // Both frameworks already passed horizontal parity if we got this far,
-    // so one exemplar per framework is enough.
-    const nextContent = read(`${STARTERS.next[0]}/${next}`);
-    const svelteContent = read(`${STARTERS.sveltekit[0]}/${sveltekit}`);
-    if (nextContent === null || svelteContent === null) continue;
-    if (hash(nextContent) !== hash(svelteContent)) {
-      errors.push(
-        `Cross-framework drift in ${logical}: ` +
-          `${STARTERS.next[0]}/${next} vs ${STARTERS.sveltekit[0]}/${sveltekit}`,
-      );
+  for (const entry of CROSS_FRAMEWORK_FILES) {
+    // Horizontal parity already passed for each framework, so one exemplar
+    // per framework is enough. Compare all frameworks that have a path.
+    const exemplars = Object.entries(entry)
+      .filter(([k]) => k !== "logical" && STARTERS[k])
+      .map(([fw, rel]) => ({ fw, path: `${STARTERS[fw][0]}/${rel}` }));
+
+    const hashes = new Map();
+    for (const { fw, path } of exemplars) {
+      const content = read(path);
+      if (content === null) continue;
+      const h = hash(content);
+      if (!hashes.has(h)) hashes.set(h, []);
+      hashes.get(h).push(`${fw}:${path}`);
+    }
+    if (hashes.size > 1) {
+      const groups = [...hashes.entries()]
+        .map(([h, refs]) => `  ${h.slice(0, 12)}  ${refs.join(", ")}`)
+        .join("\n");
+      errors.push(`Cross-framework drift in ${entry.logical}:\n${groups}`);
     }
   }
 }

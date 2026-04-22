@@ -12,3 +12,4 @@ export { jazzPlugin, type JazzPluginOptions, type JazzServerOptions } from "./vi
 export { withJazz } from "./next.js";
 export { withJazz as withJazzExpo, type ExpoConfigLike } from "./expo.js";
 export { jazzSvelteKit } from "./sveltekit.js";
+export { jazzNuxt } from "./nuxt.js";
