@@ -2,6 +2,7 @@ export type PresentationSlideDefinition = {
   estimatedDurationSeconds: number;
   href: string;
   notesText: string;
+  notesHref: string;
   slug: string;
   title: string;
 };
@@ -41,6 +42,7 @@ export function parsePresentationSlidesFromMdx(
       estimatedDurationSeconds: estimatePresentationSpeakingDurationSeconds(notesText),
       href: `/presentations/${deckSlug}/${normalizedSlug}`,
       notesText,
+      notesHref: `/presenter/${deckSlug}/${normalizedSlug}`,
       slug: normalizedSlug,
       title: normalizedTitle,
     });

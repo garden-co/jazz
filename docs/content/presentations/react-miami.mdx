@@ -733,9 +733,6 @@ and local-first state.
 # Adopter success stories
 
 <Notes>
-TODO
-</Notes>
-</Slide>
 And they built the coolest stuff,
 from language-learning apps
 to uber for robot teleoperation,
@@ -745,6 +742,9 @@ and just a ton of personal software
 with way too high production value for
 single devs, because they could actually
 focus on the frontend and their product
+</Notes>
+</Slide>
+
 <Slide>
 # Local-first got hands
 
@@ -920,7 +920,73 @@ or the other for your whole app.
 # Fresh Idea 2: Row-level security and per-query auth
 
 <Notes>
-TODO
+The next idea is even more essential for making local-first work:
+permissions.
+
+In traditional backends, the boundary to enforce permissions is clear,
+you do it at the API that sits in front of the database.
+
+But here, we have local state, and we sync directly to the database.
+So the database itself needs to be really good at understanding permissions.
+
+For this we decided to rely on a proven concept: row-level security.
+This lets you define permissions based on queries that look just like
+your normal queries, in a nice, centralized, llm-friendly, testable place.
+
+This means that the database knows how permissions work and enforces them
+for you at sync time. Even better, the local client also knows how permissions
+work and give you a much better preview of what the current user can and can't
+do, even before the sync roundtrip.
+
+This is why I think row-level security is a good idea...
+
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 2: Row-level security and per-query auth
+
+EMERGENCY ALERT:
+
+TWITTER DEPARTMENT OF WEB DEV DISCOURSE
+
+YOUR NORMAL TAKE IS NOW A HOT TAKE
+
+_lots of twitter controversy around RLS_
+
+<Notes>
+Oh wait whats this? "Emergency alert"?
+
+"Your normal take is now a hot take"??
+
+So this happened a couple days ago...
+After a decade of using row level security
+in postgres, I'm learning that many people have
+a much more mixed experience with it.
+
+And a large part seems to be that they're
+super hard to get right in Postgres
+And in Supabase they default to everything being
+public????
+
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 2: Row-level security and per-query auth
+
+<Notes>
+Ok, I have a lot of thoughts about this.
+Expect a blog post.
+
+But the short version is that our goal
+with row-level security in Jazz is
+
+- that the policies are easy to get right
+- you have to have them, everything is locked down by default
+- they're not an afterthought, but built into all of jazz
+- and they're tightly integrated with external auth
+
 </Notes>
 </Slide>
 
@@ -928,7 +994,56 @@ TODO
 # Fresh Idea 3: Fluid schema evolution
 
 <Notes>
-TODO
+Moving on, let me show you the most unique fresh idea of Jazz.
+
+This has to do with the hardest part of local-first data:
+When you want to change the shape of your data as you evolve your app,
+you can't do a good old stop-the-world migration of a central
+database anymore, because there might be old clients that still
+expect the old shape.
+
+Usually, backwards compatibility is the job of the API.
+See a pattern here? Again, if we have clients syncing directly
+to the database, the database needs to understand backwards
+compatibility.
+
+So in Jazz, we took the idea of migrations and turned them
+into something slightly different. Instead of a one-time
+"change the shape of all the data at once" event, in Jazz
+migrations describe a mapping between two schema versions.
+
+And it's a two-directional mapping, so we can translate
+both old data into the new shape for new clients
+_and_ new data into the old shape for old clients.
+
+And Jazz does this for you just-in-time instead of
+having to stop the world.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Fresh Idea 3: Fluid schema evolution
+
+<Notes>
+And here I we realized something important:
+
+The two-directional migrations aren't just a solution
+we needed to make schema evolution work for local-first data.
+
+They also mean that it's suddenly much easier to
+deploy schema changes for _any_ kind of app.
+
+This same idea lets you manically work on 10 app features
+at once with your horde of claudes.
+
+Or removes a central release bottleneck in a large company with
+many teams that launch different features, maybe even behind
+feature flags.
+
+Making all of that automatically compatible with each other
+is now much easier.
+
 </Notes>
 </Slide>
 
@@ -937,7 +1052,8 @@ TODO
 - table 2D
 
 <Notes>
-One way I like to visualize how these ideas make Jazz different
+Now, to summarize the fresh ideas,
+one way I like to visualize how these ideas make Jazz different
 is to ask, "which dimensions are we adding here?"
 
 A normal database table with columns and rows is clearly 2D
@@ -1239,26 +1355,6 @@ do silly things _demo gentle profanity_
 
 Anyways, here is the join code (QR code), lets put this through the paces,
 but please be wholesome.
-
-speaker time placeholder for demo:
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
-la la la la la la la la la la la la la la la la la la
 
 </Notes>
 </Slide>
