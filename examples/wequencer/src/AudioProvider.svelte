@@ -291,15 +291,12 @@
 		const jamRows = jam.current ?? [];
 		if (jamRows.length === 0) return;
 
-		const userId = session.user_id;
-
-		db.all(app.participants.where({ jamId: jamId, userId: userId })).then((existing) => {
+		db.all(app.participants.where({ jamId: jamId, $createdBy: session.user_id })).then((existing) => {
 			if (existing.length === 0) {
 				const name = localStorage.getItem('wequencer-name') ?? getRandomName();
 				localStorage.setItem('wequencer-name', name);
 				db.insert(app.participants, {
 					jamId: jamId,
-					userId: userId,
 					display_name: name,
 				});
 			}

@@ -9,7 +9,8 @@
 import { join } from "node:path";
 import { createServer } from "node:net";
 import type { BrowserCommand } from "vitest/node";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, ConsoleMessage, Page } from "playwright";
+import type {} from "@vitest/browser-playwright";
 import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 
 function findFreePort(): Promise<number> {
@@ -19,6 +20,7 @@ function findFreePort(): Promise<number> {
       const port = (srv.address() as { port: number }).port;
       srv.close(() => resolve(port));
     });
+    // @ts-expect-error -- net.Server inherits EventEmitter.on; types vary by @types/node resolution
     srv.on("error", reject);
   });
 }
@@ -97,12 +99,12 @@ export const openIsolatedApp: BrowserCommand<[opts: OpenIsolatedAppOpts]> = asyn
   });
 
   // Log console output from the isolated page for debugging
-  page.on("console", (msg) => {
+  page.on("console", (msg: ConsoleMessage) => {
     if (msg.type() === "error" || msg.type() === "warning") {
       console.error(`[isolated:${opts.label}:${msg.type()}] ${msg.text()}`);
     }
   });
-  page.on("pageerror", (err) => {
+  page.on("pageerror", (err: Error) => {
     console.error(`[isolated:${opts.label}] page error:`, err.message);
   });
 

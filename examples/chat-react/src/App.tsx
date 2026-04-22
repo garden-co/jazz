@@ -1,8 +1,6 @@
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
-import { Suspense, use } from "react";
-import { BrowserAuthSecretStore } from "jazz-tools";
-
-type DbConfig = Parameters<typeof createJazzClient>[0];
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import { Suspense } from "react";
+import type { DbConfig } from "jazz-tools";
 
 import { Loader2Icon } from "lucide-react";
 import { CreateChatRedirect } from "@/components/CreateChatRedirect";
@@ -13,37 +11,34 @@ import { InviteHandler } from "@/components/InviteHandler";
 import { NavBar } from "@/components/navbar/NavBar";
 import Router from "@/components/Router";
 
-const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "019d4349-2486-7021-a33e-566b0820c5af";
-const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL || undefined;
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? APP_ID;
+const appId = import.meta.env.VITE_JAZZ_APP_ID;
+const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
+function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId,
     env: "dev",
     userBranch: "main",
+    serverUrl,
     secret,
-    ...(SERVER_URL ? { serverUrl: SERVER_URL } : {}),
     ...overrides,
   };
 }
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
-  return (
-    <Suspense fallback={<p id="joining-chat">Loading...</p>}>
-      <AppInner config={config} />
-    </Suspense>
-  );
+  return <AppInner config={config} />;
 }
 
 function AppInner({ config }: { config?: Partial<DbConfig> }) {
-  const secret = use(BrowserAuthSecretStore.getOrCreateSecret({ appId: APP_ID }));
-  const resolvedConfig = defaultConfig(secret, config);
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) {
+    return <p id="joining-chat">Loading...</p>;
+  }
 
   return (
     <JazzProvider
-      config={resolvedConfig}
-      createJazzClient={createJazzClient}
+      config={defaultConfig(secret, config)}
       fallback={<p id="joining-chat">Loading...</p>}
     >
       <AppContent />

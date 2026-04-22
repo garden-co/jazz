@@ -27,7 +27,7 @@ function ChatHeaderContent({ chatId }: ChatHeaderProps) {
   const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
   const chat = chatRows[0];
 
-  const displayName = useChatDisplayName(chatId, chat?.name);
+  const displayName = useChatDisplayName(chatId, chat?.name ?? undefined);
 
   return (
     <>

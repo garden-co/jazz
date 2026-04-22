@@ -41,12 +41,12 @@
   <h2>The Band</h2>
 
   {#each participants.current ?? [] as participant (participant.id)}
-    {@const isMe = participant.userId === session?.user_id}
+    {@const isMe = participant.$createdBy === session?.user_id}
     <div class="participant" class:is-me={isMe}>
       <div
         class="avatar"
         style="background-color: oklch(0.6 0.15 {getStableHue(
-          participant.userId,
+          participant.$createdBy,
         )})"
       ></div>
       {#if isMe && editingId === participant.id}

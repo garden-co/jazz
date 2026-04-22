@@ -39,7 +39,11 @@ function NavBarContent() {
   if (inIframe) {
     return (
       <div className="mx-auto flex items-center gap-2">
-        <Avatar profileId={myProfile?.id ?? ""} avatarData={myProfile?.avatar} size={32} />
+        <Avatar
+          profileId={myProfile?.id ?? ""}
+          avatarData={myProfile?.avatar ?? undefined}
+          size={32}
+        />
         <h3>{displayName}</h3>
       </div>
     );
@@ -50,7 +54,11 @@ function NavBarContent() {
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button type="button" className="flex gap-2 items-center focus-visible:outline-0">
-            <Avatar profileId={myProfile?.id ?? ""} avatarData={myProfile?.avatar} size={32} />
+            <Avatar
+              profileId={myProfile?.id ?? ""}
+              avatarData={myProfile?.avatar ?? undefined}
+              size={32}
+            />
             <h3>{displayName}</h3>
           </button>
         </DropdownMenuTrigger>
