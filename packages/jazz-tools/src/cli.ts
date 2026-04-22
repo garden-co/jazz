@@ -44,6 +44,10 @@ export interface SchemaExportOptions {
   adminSecret?: string;
 }
 
+export interface SchemaHashOptions {
+  schemaDir: string;
+}
+
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
 
@@ -125,6 +129,13 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
   const currentSchema = await loadCurrentSchema(options.schemaDir);
   await ensureLocalSnapshot(options.schemaDir, options.migrationsDir, currentSchema);
   process.stdout.write(`${JSON.stringify(currentSchema.schema, null, 2)}\n`);
+}
+
+export async function schemaHash(options: SchemaHashOptions): Promise<void> {
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
+  const hash = await computeSchemaHash(compiled.wasmSchema);
+  console.log(`Current schema hash: ${shortSchemaHash(hash)}`);
 }
 
 export interface MigrationCommandOptions {
@@ -1830,35 +1841,41 @@ if (isMainModule()) {
     });
   } else if (command === "schema") {
     const subcommand = process.argv[3] ?? "";
-    if (subcommand !== "export") {
-      console.error(
-        "Usage: node dist/cli.js schema export [<appId>] [--schema-dir <path> | --schema-hash <hash>] [--migrations-dir <path>] [--server-url <url>] [--admin-secret <secret>]",
-      );
+    if (subcommand === "hash") {
+      const args = process.argv.slice(4);
+      const schemaDirFlag = getFlagValue(args, "--schema-dir");
+      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
+      schemaHash({ schemaDir }).catch((err) => {
+        console.error(err.message);
+        process.exit(1);
+      });
+    } else if (subcommand === "export") {
+      const { appId, args } = splitLeadingAppId(process.argv.slice(4));
+      const schemaDirFlag = getFlagValue(args, "--schema-dir");
+      const schemaHashFlag = getFlagValue(args, "--schema-hash");
+      if (schemaDirFlag && schemaHashFlag) {
+        console.error("--schema-dir and --schema-hash are mutually exclusive.");
+        process.exit(1);
+      }
+
+      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
+      exportSchema({
+        schemaDir,
+        migrationsDir: getFlagValue(args, "--migrations-dir")
+          ? resolve(process.cwd(), getFlagValue(args, "--migrations-dir")!)
+          : undefined,
+        schemaHash: schemaHashFlag,
+        appId,
+        serverUrl: getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL,
+        adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
+      }).catch((err) => {
+        console.error(err.message);
+        process.exit(1);
+      });
+    } else {
+      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
       process.exit(1);
     }
-
-    const { appId, args } = splitLeadingAppId(process.argv.slice(4));
-    const schemaDirFlag = getFlagValue(args, "--schema-dir");
-    const schemaHash = getFlagValue(args, "--schema-hash");
-    if (schemaDirFlag && schemaHash) {
-      console.error("--schema-dir and --schema-hash are mutually exclusive.");
-      process.exit(1);
-    }
-
-    const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-    exportSchema({
-      schemaDir,
-      migrationsDir: getFlagValue(args, "--migrations-dir")
-        ? resolve(process.cwd(), getFlagValue(args, "--migrations-dir")!)
-        : undefined,
-      schemaHash,
-      appId,
-      serverUrl: getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL,
-      adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
-    }).catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
   } else if (command === "migrations") {
     const subcommand = process.argv[3] ?? "";
     let task: Promise<unknown>;
@@ -1928,6 +1945,7 @@ if (isMainModule()) {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
     console.log("  validate              Validate root schema.ts and optional permissions.ts");
+    console.log("  schema hash           Print the short hash of the current schema.ts");
     console.log("  schema export         Print the compiled structural schema as JSON");
     console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
     console.log(
@@ -1940,6 +1958,8 @@ if (isMainModule()) {
       "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
     );
     console.log("\nValidation options:");
+    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("\nSchema hash options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");
     console.log("  <appId>               Required for server-backed schema export by hash");
