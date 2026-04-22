@@ -20,7 +20,7 @@ const SVELTE_KEYS = {
   backendSecret: "BACKEND_SECRET",
 };
 
-const CLOUD_SYNC_URL = "https://prod.v2.aws.cloud.jazz.tools/";
+const CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
 const API_URL = "https://example.com/api/apps/generate";
 
 let dir: string;

@@ -89,7 +89,7 @@ write the values below by hand.
 | ----------------------------- | ---------- | ------------------------------------------------------------------- |
 | `BETTER_AUTH_SECRET`          | always     | BetterAuth session signing. `lib/auth.ts` throws loudly if missing. |
 | `NEXT_PUBLIC_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it.   |
-| `NEXT_PUBLIC_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://prod.v2.aws.cloud.jazz.tools`).       |
+| `NEXT_PUBLIC_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://v2.sync.jazz.tools`).                 |
 | `JAZZ_ADMIN_SECRET`           | cloud only | Admin credential for schema pushes to the cloud.                    |
 | `BACKEND_SECRET`              | cloud only | Backend signing credential.                                         |
 
