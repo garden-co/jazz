@@ -39,6 +39,9 @@ const CURSOR_REVIEW_AGENT_ID = "cursor-review";
 const CURSOR_REVIEW_CONTROL_RUN_ID = "cursor-review-control";
 const CURSOR_REVIEW_OPERATION_EVENT_TYPE = "cursor_review_operation";
 const CURSOR_REVIEW_RESULT_EVENT_TYPE = "cursor_review_result";
+const BRANCH_FILE_REVIEW_AGENT_ID = "branch-file-review";
+const BRANCH_FILE_REVIEW_CONTROL_RUN_ID = "branch-file-review-control";
+const BRANCH_FILE_REVIEW_STATE_EVENT_TYPE = "branch_file_review_state";
 const COMMIT_TURN_AGENT_ID = "commit";
 const COMMIT_TURN_CONTROL_RUN_ID = "commit-turn-control";
 const COMMIT_TURN_OPERATION_EVENT_TYPE = "commit_turn_operation";
@@ -53,10 +56,28 @@ const JOB_EVENT_EVENT_TYPE = "job_event";
 const CONTEXT_DIGEST_AGENT_ID = "context-distill";
 const CONTEXT_DIGEST_CONTROL_RUN_ID = "context-digest-control";
 const CONTEXT_DIGEST_EVENT_TYPE = "context_digest";
-const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "error"]);
-const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
-const TERMINAL_COMMIT_TURN_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
-const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "cancelled-superseded"]);
+const TERMINAL_RUN_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "error",
+]);
+const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set([
+  "completed",
+  "failed",
+  "ignored",
+]);
+const TERMINAL_COMMIT_TURN_RESULT_STATUSES = new Set([
+  "completed",
+  "failed",
+  "ignored",
+]);
+const TERMINAL_JOB_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "cancelled-superseded",
+]);
 const TASK_PLACEMENT_ORDER: Record<string, number> = {
   now: 0,
   next: 1,
@@ -250,7 +271,10 @@ export type CursorReviewOperationType =
   | "show-branch-diff"
   | "open-branch-file-diff";
 
-export type CursorReviewOperationResultStatus = "completed" | "failed" | "ignored";
+export type CursorReviewOperationResultStatus =
+  | "completed"
+  | "failed"
+  | "ignored";
 
 export interface RecordCursorReviewOperationInput {
   operationId?: string;
@@ -306,6 +330,43 @@ export interface CursorReviewOperationRecord {
   latestResult?: CursorReviewOperationResultRecord;
 }
 
+export type BranchFileReviewStatus = "happy" | "needs-work" | "cleared";
+
+export interface RecordBranchFileReviewStateInput {
+  eventId?: string;
+  repoRoot: string;
+  workspaceRoot?: string;
+  bookmark: string;
+  relPath: string;
+  status: BranchFileReviewStatus;
+  note?: string;
+  sourceSessionId?: string;
+  sourceChatKind?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface ListBranchFileReviewStatesInput {
+  repoRoot?: string;
+  workspaceRoot?: string;
+  bookmark?: string;
+  relPath?: string;
+  includeCleared?: boolean;
+  limit?: number;
+}
+
+export interface BranchFileReviewStateRecord {
+  eventId: string;
+  repoRoot: string;
+  workspaceRoot?: string;
+  bookmark: string;
+  relPath: string;
+  status: BranchFileReviewStatus;
+  note?: string;
+  sourceSessionId?: string;
+  sourceChatKind?: string;
+  createdAt: Date;
+}
+
 export type CommitTurnResultStatus = "completed" | "failed" | "ignored";
 
 export interface RecordCommitTurnOperationInput {
@@ -340,6 +401,9 @@ export interface RecordCommitTurnResultInput {
   commitMessage?: string;
   todoItems?: string[];
   notes?: string;
+  group?: string;
+  groupReason?: string;
+  groupIsNew?: boolean;
   snapshotCommitId?: string;
   reviewJobId?: string;
   conversationHash?: string;
@@ -368,6 +432,9 @@ export interface CommitTurnResultRecord {
   commitMessage?: string;
   todoItems?: string[];
   notes?: string;
+  group?: string;
+  groupReason?: string;
+  groupIsNew?: boolean;
   snapshotCommitId?: string;
   reviewJobId?: string;
   conversationHash?: string;
@@ -658,7 +725,8 @@ function taskPriorityRank(value: string | undefined): number {
 }
 
 function compareTaskRecords(left: TaskRecord, right: TaskRecord): number {
-  const placementCompare = taskPlacementRank(left.placement) - taskPlacementRank(right.placement);
+  const placementCompare =
+    taskPlacementRank(left.placement) - taskPlacementRank(right.placement);
   if (placementCompare !== 0) return placementCompare;
 
   const leftFocusRank = left.focus_rank ?? Number.MAX_SAFE_INTEGER;
@@ -667,7 +735,8 @@ function compareTaskRecords(left: TaskRecord, right: TaskRecord): number {
     return leftFocusRank - rightFocusRank;
   }
 
-  const priorityCompare = taskPriorityRank(left.priority) - taskPriorityRank(right.priority);
+  const priorityCompare =
+    taskPriorityRank(left.priority) - taskPriorityRank(right.priority);
   if (priorityCompare !== 0) return priorityCompare;
 
   const updatedCompare = right.updated_at.getTime() - left.updated_at.getTime();
@@ -676,7 +745,9 @@ function compareTaskRecords(left: TaskRecord, right: TaskRecord): number {
   return left.task_id.localeCompare(right.task_id);
 }
 
-function asObjectRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+function asObjectRecord(
+  value: JsonValue | undefined,
+): Record<string, JsonValue> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, JsonValue>;
 }
@@ -695,7 +766,9 @@ function readObjectStringArray(
 ): string[] | undefined {
   const raw = value?.[key];
   if (!Array.isArray(raw)) return undefined;
-  const items = raw.filter((entry): entry is string => typeof entry === "string");
+  const items = raw.filter(
+    (entry): entry is string => typeof entry === "string",
+  );
   return items.length > 0 ? items : undefined;
 }
 
@@ -705,6 +778,14 @@ function readObjectNumber(
 ): number | undefined {
   const raw = value?.[key];
   return typeof raw === "number" ? raw : undefined;
+}
+
+function readObjectBoolean(
+  value: Record<string, JsonValue> | null,
+  key: string,
+): boolean | undefined {
+  const raw = value?.[key];
+  return typeof raw === "boolean" ? raw : undefined;
 }
 
 function readObjectDate(
@@ -727,8 +808,12 @@ function asDate(value?: TimestampInput): Date {
   return new Date();
 }
 
-function pruneUndefined<T extends Record<string, unknown>>(input: T): Partial<T> {
-  const entries = Object.entries(input).filter(([, value]) => value !== undefined);
+function pruneUndefined<T extends Record<string, unknown>>(
+  input: T,
+): Partial<T> {
+  const entries = Object.entries(input).filter(
+    ([, value]) => value !== undefined,
+  );
   return Object.fromEntries(entries) as Partial<T>;
 }
 
@@ -754,7 +839,10 @@ export class AgentDataStore {
     await this.context.shutdown();
   }
 
-  async upsertAgent(input: UpsertAgentInput, session?: Session): Promise<Agent> {
+  async upsertAgent(
+    input: UpsertAgentInput,
+    session?: Session,
+  ): Promise<Agent> {
     const db = this.getDb(session);
     const now = asDate(input.updatedAt);
     const existing = await this.getAgentByExternalId(db, input.agentId);
@@ -768,7 +856,11 @@ export class AgentDataStore {
         metadata_json: input.metadataJson,
         updated_at: now,
       });
-      return this.requireByQuery(db, app.agents.where({ agent_id: input.agentId }), "agent");
+      return this.requireByQuery(
+        db,
+        app.agents.where({ agent_id: input.agentId }),
+        "agent",
+      );
     }
 
     return db.insertDurable(
@@ -787,7 +879,10 @@ export class AgentDataStore {
     );
   }
 
-  async recordRunStarted(input: RecordRunStartedInput, session?: Session): Promise<AgentRun> {
+  async recordRunStarted(
+    input: RecordRunStartedInput,
+    session?: Session,
+  ): Promise<AgentRun> {
     const db = this.getDb(session);
     const agent = await this.upsertAgent(
       {
@@ -816,7 +911,11 @@ export class AgentDataStore {
         context_json: input.contextJson,
         source_trace_path: input.sourceTracePath,
       });
-      return this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
+      return this.requireByQuery(
+        db,
+        app.agent_runs.where({ run_id: input.runId }),
+        "agent run",
+      );
     }
 
     return db.insertDurable(
@@ -839,7 +938,10 @@ export class AgentDataStore {
     );
   }
 
-  async recordRunCompleted(input: RecordRunCompletedInput, session?: Session): Promise<AgentRun> {
+  async recordRunCompleted(
+    input: RecordRunCompletedInput,
+    session?: Session,
+  ): Promise<AgentRun> {
     const db = this.getDb(session);
     const existing = await this.requireByQuery(
       db,
@@ -850,13 +952,28 @@ export class AgentDataStore {
       status: input.status ?? "completed",
       ended_at: asDate(input.endedAt),
     });
-    return this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
+    return this.requireByQuery(
+      db,
+      app.agent_runs.where({ run_id: input.runId }),
+      "agent run",
+    );
   }
 
-  async recordItemStarted(input: RecordItemStartedInput, session?: Session): Promise<RunItem> {
+  async recordItemStarted(
+    input: RecordItemStartedInput,
+    session?: Session,
+  ): Promise<RunItem> {
     const db = this.getDb(session);
-    const run = await this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
-    const existing = await this.getItemByExternalId(db, input.runId, input.itemId);
+    const run = await this.requireByQuery(
+      db,
+      app.agent_runs.where({ run_id: input.runId }),
+      "agent run",
+    );
+    const existing = await this.getItemByExternalId(
+      db,
+      input.runId,
+      input.itemId,
+    );
 
     if (existing) {
       await this.updateRow(db, app.run_items, existing.id, {
@@ -887,9 +1004,16 @@ export class AgentDataStore {
     );
   }
 
-  async recordItemCompleted(input: RecordItemCompletedInput, session?: Session): Promise<RunItem> {
+  async recordItemCompleted(
+    input: RecordItemCompletedInput,
+    session?: Session,
+  ): Promise<RunItem> {
     const db = this.getDb(session);
-    const existing = await this.requireItemByExternalId(db, input.runId, input.itemId);
+    const existing = await this.requireItemByExternalId(
+      db,
+      input.runId,
+      input.itemId,
+    );
     await this.updateRow(db, app.run_items, existing.id, {
       status: input.status ?? "completed",
       summary_json: input.summaryJson,
@@ -903,10 +1027,18 @@ export class AgentDataStore {
     session?: Session,
   ): Promise<SemanticEvent> {
     const db = this.getDb(session);
-    const run = await this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
-    const item = input.itemId ? await this.getItemByExternalId(db, input.runId, input.itemId) : null;
+    const run = await this.requireByQuery(
+      db,
+      app.agent_runs.where({ run_id: input.runId }),
+      "agent run",
+    );
+    const item = input.itemId
+      ? await this.getItemByExternalId(db, input.runId, input.itemId)
+      : null;
     const eventId = input.eventId ?? randomUUID();
-    const existing = await db.one(app.semantic_events.where({ event_id: eventId }));
+    const existing = await db.one(
+      app.semantic_events.where({ event_id: eventId }),
+    );
 
     if (existing) {
       await this.updateRow(db, app.semantic_events, existing.id, {
@@ -941,9 +1073,14 @@ export class AgentDataStore {
     );
   }
 
-  async appendWireEvent(input: AppendWireEventInput, session?: Session): Promise<WireEvent> {
+  async appendWireEvent(
+    input: AppendWireEventInput,
+    session?: Session,
+  ): Promise<WireEvent> {
     const db = this.getDb(session);
-    const run = input.runId ? await this.getRunByExternalId(db, input.runId) : null;
+    const run = input.runId
+      ? await this.getRunByExternalId(db, input.runId)
+      : null;
     const eventId = input.eventId ?? randomUUID();
     const existing = await db.one(app.wire_events.where({ event_id: eventId }));
 
@@ -959,7 +1096,11 @@ export class AgentDataStore {
         payload_json: input.payloadJson,
         occurred_at: input.occurredAt ? asDate(input.occurredAt) : undefined,
       });
-      return this.requireByQuery(db, app.wire_events.where({ event_id: eventId }), "wire event");
+      return this.requireByQuery(
+        db,
+        app.wire_events.where({ event_id: eventId }),
+        "wire event",
+      );
     }
 
     return db.insertDurable(
@@ -980,11 +1121,20 @@ export class AgentDataStore {
     );
   }
 
-  async recordArtifact(input: RecordArtifactInput, session?: Session): Promise<Artifact> {
+  async recordArtifact(
+    input: RecordArtifactInput,
+    session?: Session,
+  ): Promise<Artifact> {
     const db = this.getDb(session);
-    const run = await this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
+    const run = await this.requireByQuery(
+      db,
+      app.agent_runs.where({ run_id: input.runId }),
+      "agent run",
+    );
     const artifactId = input.artifactId ?? randomUUID();
-    const existing = await db.one(app.artifacts.where({ artifact_id: artifactId }));
+    const existing = await db.one(
+      app.artifacts.where({ artifact_id: artifactId }),
+    );
 
     if (existing) {
       await this.updateRow(db, app.artifacts, existing.id, {
@@ -994,7 +1144,11 @@ export class AgentDataStore {
         checksum: input.checksum,
         created_at: input.createdAt ? asDate(input.createdAt) : undefined,
       });
-      return this.requireByQuery(db, app.artifacts.where({ artifact_id: artifactId }), "artifact");
+      return this.requireByQuery(
+        db,
+        app.artifacts.where({ artifact_id: artifactId }),
+        "artifact",
+      );
     }
 
     return db.insertDurable(
@@ -1018,9 +1172,15 @@ export class AgentDataStore {
     session?: Session,
   ): Promise<WorkspaceSnapshot> {
     const db = this.getDb(session);
-    const run = await this.requireByQuery(db, app.agent_runs.where({ run_id: input.runId }), "agent run");
+    const run = await this.requireByQuery(
+      db,
+      app.agent_runs.where({ run_id: input.runId }),
+      "agent run",
+    );
     const snapshotId = input.snapshotId ?? randomUUID();
-    const existing = await db.one(app.workspace_snapshots.where({ snapshot_id: snapshotId }));
+    const existing = await db.one(
+      app.workspace_snapshots.where({ snapshot_id: snapshotId }),
+    );
 
     if (existing) {
       await this.updateRow(db, app.workspace_snapshots, existing.id, {
@@ -1069,7 +1229,9 @@ export class AgentDataStore {
       session,
     );
     const snapshotId = input.snapshotId ?? randomUUID();
-    const existing = await db.one(app.agent_state_snapshots.where({ snapshot_id: snapshotId }));
+    const existing = await db.one(
+      app.agent_state_snapshots.where({ snapshot_id: snapshotId }),
+    );
 
     if (existing) {
       await this.updateRow(db, app.agent_state_snapshots, existing.id, {
@@ -1100,11 +1262,18 @@ export class AgentDataStore {
     );
   }
 
-  async recordMemoryLink(input: RecordMemoryLinkInput, session?: Session): Promise<MemoryLink> {
+  async recordMemoryLink(
+    input: RecordMemoryLinkInput,
+    session?: Session,
+  ): Promise<MemoryLink> {
     const db = this.getDb(session);
-    const run = input.runId ? await this.getRunByExternalId(db, input.runId) : null;
+    const run = input.runId
+      ? await this.getRunByExternalId(db, input.runId)
+      : null;
     const item =
-      input.runId && input.itemId ? await this.getItemByExternalId(db, input.runId, input.itemId) : null;
+      input.runId && input.itemId
+        ? await this.getItemByExternalId(db, input.runId, input.itemId)
+        : null;
     const linkId = input.linkId ?? randomUUID();
     const existing = await db.one(app.memory_links.where({ link_id: linkId }));
 
@@ -1120,7 +1289,11 @@ export class AgentDataStore {
         link_json: input.linkJson,
         created_at: input.createdAt ? asDate(input.createdAt) : undefined,
       });
-      return this.requireByQuery(db, app.memory_links.where({ link_id: linkId }), "memory link");
+      return this.requireByQuery(
+        db,
+        app.memory_links.where({ link_id: linkId }),
+        "memory link",
+      );
     }
 
     return db.insertDurable(
@@ -1141,11 +1314,18 @@ export class AgentDataStore {
     );
   }
 
-  async recordSourceFile(input: RecordSourceFileInput, session?: Session): Promise<SourceFile> {
+  async recordSourceFile(
+    input: RecordSourceFileInput,
+    session?: Session,
+  ): Promise<SourceFile> {
     const db = this.getDb(session);
-    const run = input.runId ? await this.getRunByExternalId(db, input.runId) : null;
+    const run = input.runId
+      ? await this.getRunByExternalId(db, input.runId)
+      : null;
     const sourceFileId = input.sourceFileId ?? randomUUID();
-    const existing = await db.one(app.source_files.where({ source_file_id: sourceFileId }));
+    const existing = await db.one(
+      app.source_files.where({ source_file_id: sourceFileId }),
+    );
 
     if (existing) {
       await this.updateRow(db, app.source_files, existing.id, {
@@ -1248,7 +1428,10 @@ export class AgentDataStore {
     );
   }
 
-  async getTaskRecord(taskId: string, session?: Session): Promise<TaskRecord | null> {
+  async getTaskRecord(
+    taskId: string,
+    session?: Session,
+  ): Promise<TaskRecord | null> {
     return this.getTaskByExternalId(this.getDb(session), taskId);
   }
 
@@ -1258,7 +1441,11 @@ export class AgentDataStore {
   ): Promise<TaskRecord[]> {
     const db = this.getDb(session);
     const rawRecords = input.context
-      ? await db.all(app.task_records.where({ context: input.context }).orderBy("updated_at", "desc"))
+      ? await db.all(
+          app.task_records
+            .where({ context: input.context })
+            .orderBy("updated_at", "desc"),
+        )
       : await db.all(app.task_records.orderBy("updated_at", "desc"));
 
     const statuses = input.statuses?.map((value) => value.toLowerCase());
@@ -1267,7 +1454,11 @@ export class AgentDataStore {
 
     return rawRecords
       .filter((record) => {
-        if (statuses && statuses.length > 0 && !statuses.includes(record.status.toLowerCase())) {
+        if (
+          statuses &&
+          statuses.length > 0 &&
+          !statuses.includes(record.status.toLowerCase())
+        ) {
           return false;
         }
         if (
@@ -1373,7 +1564,10 @@ export class AgentDataStore {
       const result = this.cursorReviewResultFromEvent(row);
       if (!result) continue;
       const existing = latestResults.get(result.operationId);
-      if (!existing || existing.processedAt.getTime() < result.processedAt.getTime()) {
+      if (
+        !existing ||
+        existing.processedAt.getTime() < result.processedAt.getTime()
+      ) {
         latestResults.set(result.operationId, result);
       }
     }
@@ -1383,19 +1577,101 @@ export class AgentDataStore {
       .map((row) => this.cursorReviewOperationFromEvent(row))
       .filter((row): row is CursorReviewOperationRecord => Boolean(row))
       .filter((row) => {
-        if (input.repoRoot && row.repoRoot && row.repoRoot !== input.repoRoot) return false;
-        if (input.workspaceRoot && row.workspaceRoot && row.workspaceRoot !== input.workspaceRoot) return false;
+        if (input.repoRoot && row.repoRoot && row.repoRoot !== input.repoRoot)
+          return false;
+        if (
+          input.workspaceRoot &&
+          row.workspaceRoot &&
+          row.workspaceRoot !== input.workspaceRoot
+        )
+          return false;
         const latestResult = latestResults.get(row.operationId);
-        if (!input.includeProcessed && latestResult && TERMINAL_CURSOR_REVIEW_RESULT_STATUSES.has(latestResult.status)) {
+        if (
+          !input.includeProcessed &&
+          latestResult &&
+          TERMINAL_CURSOR_REVIEW_RESULT_STATUSES.has(latestResult.status)
+        ) {
           return false;
         }
         row.latestResult = latestResult;
         return true;
       })
-      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .sort(
+        (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
+      )
       .slice(0, clampLimit(input.limit));
 
     return operations;
+  }
+
+  async recordBranchFileReviewState(
+    input: RecordBranchFileReviewStateInput,
+    session?: Session,
+  ): Promise<BranchFileReviewStateRecord> {
+    const db = this.getDb(session);
+    await this.ensureBranchFileReviewControlRun(db);
+    const event = await this.appendSemanticEvent(
+      {
+        runId: BRANCH_FILE_REVIEW_CONTROL_RUN_ID,
+        eventId: input.eventId,
+        eventType: BRANCH_FILE_REVIEW_STATE_EVENT_TYPE,
+        summaryText: input.note ?? `${input.status} ${input.relPath}`,
+        payloadJson: pruneUndefined({
+          repoRoot: input.repoRoot,
+          workspaceRoot: input.workspaceRoot,
+          bookmark: input.bookmark,
+          relPath: input.relPath,
+          status: input.status,
+          note: input.note,
+          sourceSessionId: input.sourceSessionId,
+          sourceChatKind: input.sourceChatKind,
+        }) as JsonValue,
+        occurredAt: input.createdAt,
+      },
+      session,
+    );
+    const state = this.branchFileReviewStateFromEvent(event);
+    if (!state) {
+      throw new Error("branch file review state event could not be decoded");
+    }
+    return state;
+  }
+
+  async listBranchFileReviewStates(
+    input: ListBranchFileReviewStatesInput = {},
+    session?: Session,
+  ): Promise<BranchFileReviewStateRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: BRANCH_FILE_REVIEW_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 12),
+    );
+
+    const latestStates = new Map<string, BranchFileReviewStateRecord>();
+    for (const row of rows) {
+      if (row.event_type !== BRANCH_FILE_REVIEW_STATE_EVENT_TYPE) continue;
+      const state = this.branchFileReviewStateFromEvent(row);
+      if (!state) continue;
+      if (input.repoRoot && state.repoRoot !== input.repoRoot) continue;
+      if (input.workspaceRoot && state.workspaceRoot !== input.workspaceRoot)
+        continue;
+      if (input.bookmark && state.bookmark !== input.bookmark) continue;
+      if (input.relPath && state.relPath !== input.relPath) continue;
+      const key = `${state.repoRoot}\n${state.bookmark}\n${state.relPath}`;
+      if (!latestStates.has(key)) {
+        latestStates.set(key, state);
+      }
+    }
+
+    return Array.from(latestStates.values())
+      .filter((state) => input.includeCleared || state.status !== "cleared")
+      .sort(
+        (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
+      )
+      .slice(0, clampLimit(input.limit));
   }
 
   async recordCommitTurnOperation(
@@ -1463,6 +1739,9 @@ export class AgentDataStore {
           commitMessage: input.commitMessage,
           todoItems: input.todoItems,
           notes: input.notes,
+          group: input.group,
+          groupReason: input.groupReason,
+          groupIsNew: input.groupIsNew,
           snapshotCommitId: input.snapshotCommitId,
           reviewJobId: input.reviewJobId,
           conversationHash: input.conversationHash,
@@ -1497,7 +1776,10 @@ export class AgentDataStore {
       const result = this.commitTurnResultFromEvent(row);
       if (!result) continue;
       const existing = latestResults.get(result.operationId);
-      if (!existing || existing.processedAt.getTime() < result.processedAt.getTime()) {
+      if (
+        !existing ||
+        existing.processedAt.getTime() < result.processedAt.getTime()
+      ) {
         latestResults.set(result.operationId, result);
       }
     }
@@ -1512,17 +1794,26 @@ export class AgentDataStore {
           const matchesAny = row.repoRoots?.includes(input.repoRoot) ?? false;
           if (!matchesPrimary && !matchesAny) return false;
         }
-        if (input.conversationHash && row.conversationHash !== input.conversationHash) {
+        if (
+          input.conversationHash &&
+          row.conversationHash !== input.conversationHash
+        ) {
           return false;
         }
         const latestResult = latestResults.get(row.operationId);
-        if (!input.includeProcessed && latestResult && TERMINAL_COMMIT_TURN_RESULT_STATUSES.has(latestResult.status)) {
+        if (
+          !input.includeProcessed &&
+          latestResult &&
+          TERMINAL_COMMIT_TURN_RESULT_STATUSES.has(latestResult.status)
+        ) {
           return false;
         }
         row.latestResult = latestResult;
         return true;
       })
-      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .sort(
+        (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
+      )
       .slice(0, clampLimit(input.limit));
 
     return operations;
@@ -1538,7 +1829,9 @@ export class AgentDataStore {
     const expiresAt = input.expiresAt
       ? asDate(input.expiresAt)
       : new Date(startedAt.getTime() + 2 * 60 * 60 * 1000);
-    const heartbeatAt = input.heartbeatAt ? asDate(input.heartbeatAt) : startedAt;
+    const heartbeatAt = input.heartbeatAt
+      ? asDate(input.heartbeatAt)
+      : startedAt;
     const releasedAt = input.releasedAt ? asDate(input.releasedAt) : undefined;
     const claimId = input.claimId ?? randomUUID();
     const status = input.status ?? (releasedAt ? "released" : "active");
@@ -1587,8 +1880,12 @@ export class AgentDataStore {
     if (existing.status === "released") {
       throw new Error(`agent claim ${input.claimId} has already been released`);
     }
-    const heartbeatAt = input.heartbeatAt ? asDate(input.heartbeatAt) : new Date();
-    const expiresAt = input.expiresAt ? asDate(input.expiresAt) : existing.expiresAt;
+    const heartbeatAt = input.heartbeatAt
+      ? asDate(input.heartbeatAt)
+      : new Date();
+    const expiresAt = input.expiresAt
+      ? asDate(input.expiresAt)
+      : existing.expiresAt;
     return this.recordAgentClaim(
       {
         claimId: existing.claimId,
@@ -1669,22 +1966,34 @@ export class AgentDataStore {
         return claim;
       })
       .filter((claim) => {
-        if (input.scopePrefix && !claim.scope.startsWith(input.scopePrefix)) return false;
-        if (input.ownerSession && claim.ownerSession !== input.ownerSession) return false;
+        if (input.scopePrefix && !claim.scope.startsWith(input.scopePrefix))
+          return false;
+        if (input.ownerSession && claim.ownerSession !== input.ownerSession)
+          return false;
         if (!input.includeReleased && claim.status === "released") return false;
         if (!input.includeExpired && claim.status === "expired") return false;
         return true;
       })
-      .sort((left, right) => right.heartbeatAt.getTime() - left.heartbeatAt.getTime())
+      .sort(
+        (left, right) =>
+          right.heartbeatAt.getTime() - left.heartbeatAt.getTime(),
+      )
       .slice(0, clampLimit(input.limit));
   }
 
-  async recordJob(input: RecordJobInput, session?: Session): Promise<JobRecord> {
+  async recordJob(
+    input: RecordJobInput,
+    session?: Session,
+  ): Promise<JobRecord> {
     const db = this.getDb(session);
     await this.ensureJobControlRun(db);
     const createdAt = asDate(input.createdAt);
     if (!input.jobId && input.kind && input.dedupeKey) {
-      const existing = await this.findLiveJobByDedupeKey(db, input.kind, input.dedupeKey);
+      const existing = await this.findLiveJobByDedupeKey(
+        db,
+        input.kind,
+        input.dedupeKey,
+      );
       if (existing) {
         return existing;
       }
@@ -1762,20 +2071,24 @@ export class AgentDataStore {
       : new Date(claimedAt.getTime() + 15 * 60 * 1000);
     const leaseExpired = isExpired(existing.leaseExpiresAt, claimedAt);
     const renewal =
-      existing.claimedBy === input.claimedBy
-      && (existing.status === "claimed" || existing.status === "running");
+      existing.claimedBy === input.claimedBy &&
+      (existing.status === "claimed" || existing.status === "running");
     if (
-      !renewal
-      && !leaseExpired
-      && existing.claimedBy
-      && existing.claimedBy !== input.claimedBy
-      && (existing.status === "claimed" || existing.status === "running")
+      !renewal &&
+      !leaseExpired &&
+      existing.claimedBy &&
+      existing.claimedBy !== input.claimedBy &&
+      (existing.status === "claimed" || existing.status === "running")
     ) {
-      throw new Error(`job ${input.jobId} is already claimed by ${existing.claimedBy}`);
+      throw new Error(
+        `job ${input.jobId} is already claimed by ${existing.claimedBy}`,
+      );
     }
 
-    const status = renewal && existing.status === "running" ? "running" : "claimed";
-    const attempt = input.attempt ?? (renewal ? existing.attempt : existing.attempt + 1);
+    const status =
+      renewal && existing.status === "running" ? "running" : "claimed";
+    const attempt =
+      input.attempt ?? (renewal ? existing.attempt : existing.attempt + 1);
     const event = await this.appendSemanticEvent(
       {
         runId: JOB_CONTROL_RUN_ID,
@@ -1827,7 +2140,10 @@ export class AgentDataStore {
     return job;
   }
 
-  async updateJob(input: UpdateJobInput, session?: Session): Promise<JobRecord> {
+  async updateJob(
+    input: UpdateJobInput,
+    session?: Session,
+  ): Promise<JobRecord> {
     const db = this.getDb(session);
     await this.ensureJobControlRun(db);
     const existing = await this.getLatestJobByID(db, input.jobId);
@@ -1837,14 +2153,16 @@ export class AgentDataStore {
 
     const updatedAt = asDate(input.updatedAt);
     const terminal = TERMINAL_JOB_STATUSES.has(input.status);
-    const claimedBy = terminal || input.status === "queued"
-      ? undefined
-      : input.claimedBy ?? existing.claimedBy;
-    const leaseExpiresAt = terminal || input.status === "queued"
-      ? undefined
-      : input.leaseExpiresAt
-        ? asDate(input.leaseExpiresAt)
-        : existing.leaseExpiresAt;
+    const claimedBy =
+      terminal || input.status === "queued"
+        ? undefined
+        : (input.claimedBy ?? existing.claimedBy);
+    const leaseExpiresAt =
+      terminal || input.status === "queued"
+        ? undefined
+        : input.leaseExpiresAt
+          ? asDate(input.leaseExpiresAt)
+          : existing.leaseExpiresAt;
     const attempt = input.attempt ?? existing.attempt;
     const resultJson = input.resultJson ?? existing.resultJson;
     const note = input.note ?? existing.note;
@@ -1901,7 +2219,10 @@ export class AgentDataStore {
     return job;
   }
 
-  async cancelJob(input: CancelJobInput, session?: Session): Promise<JobRecord> {
+  async cancelJob(
+    input: CancelJobInput,
+    session?: Session,
+  ): Promise<JobRecord> {
     return this.updateJob(
       {
         jobId: input.jobId,
@@ -1917,7 +2238,10 @@ export class AgentDataStore {
     return this.getLatestJobByID(this.getDb(session), jobId);
   }
 
-  async listJobs(input: ListJobsInput = {}, session?: Session): Promise<JobRecord[]> {
+  async listJobs(
+    input: ListJobsInput = {},
+    session?: Session,
+  ): Promise<JobRecord[]> {
     const db = this.getDb(session);
     const limit = Math.max(clampLimit(input.limit), 50);
     const rows = await db.all(
@@ -1941,15 +2265,23 @@ export class AgentDataStore {
         if (input.status && job.status !== input.status) return false;
         if (input.claimedBy && job.claimedBy !== input.claimedBy) return false;
         if (input.repoRoot && job.repoRoot !== input.repoRoot) return false;
-        if (input.targetSession && job.targetSession !== input.targetSession) return false;
-        if (!input.includeFinished && TERMINAL_JOB_STATUSES.has(job.status)) return false;
+        if (input.targetSession && job.targetSession !== input.targetSession)
+          return false;
+        if (!input.includeFinished && TERMINAL_JOB_STATUSES.has(job.status))
+          return false;
         return true;
       })
-      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
+      .sort(
+        (left, right) => right.updatedAt.getTime() - left.updatedAt.getTime(),
+      )
       .slice(0, clampLimit(input.limit));
   }
 
-  async listJobEvents(jobId: string, limit?: number, session?: Session): Promise<JobEventRecord[]> {
+  async listJobEvents(
+    jobId: string,
+    limit?: number,
+    session?: Session,
+  ): Promise<JobEventRecord[]> {
     const db = this.getDb(session);
     const rows = await db.all(
       app.semantic_events
@@ -1962,7 +2294,9 @@ export class AgentDataStore {
       .map((row) => this.jobEventFromEvent(row))
       .filter((event): event is JobEventRecord => Boolean(event))
       .filter((event) => event.jobId === jobId)
-      .sort((left, right) => right.occurredAt.getTime() - left.occurredAt.getTime())
+      .sort(
+        (left, right) => right.occurredAt.getTime() - left.occurredAt.getTime(),
+      )
       .slice(0, clampLimit(limit));
   }
 
@@ -2043,23 +2377,35 @@ export class AgentDataStore {
         return digest;
       })
       .filter((digest) => {
-        if (input.targetSession && digest.targetSession !== input.targetSession) return false;
-        if (input.targetConversation && digest.targetConversation !== input.targetConversation) return false;
-        if (input.targetConversationHash && digest.targetConversationHash !== input.targetConversationHash) {
+        if (input.targetSession && digest.targetSession !== input.targetSession)
           return false;
-        }
         if (
-          input.targetTurnOrdinal !== undefined
-          && digest.targetTurnOrdinal !== input.targetTurnOrdinal
+          input.targetConversation &&
+          digest.targetConversation !== input.targetConversation
+        )
+          return false;
+        if (
+          input.targetConversationHash &&
+          digest.targetConversationHash !== input.targetConversationHash
         ) {
           return false;
         }
-        if (input.sourceSession && digest.sourceSession !== input.sourceSession) return false;
+        if (
+          input.targetTurnOrdinal !== undefined &&
+          digest.targetTurnOrdinal !== input.targetTurnOrdinal
+        ) {
+          return false;
+        }
+        if (input.sourceSession && digest.sourceSession !== input.sourceSession)
+          return false;
         if (input.kind && digest.kind !== input.kind) return false;
         if (!input.includeExpired && digest.status === "expired") return false;
         return true;
       })
-      .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())
+      .sort(
+        (left, right) =>
+          right.generatedAt.getTime() - left.generatedAt.getTime(),
+      )
       .slice(0, clampLimit(input.limit));
   }
 
@@ -2070,27 +2416,56 @@ export class AgentDataStore {
   }
 
   async listActiveRuns(limit?: number, session?: Session): Promise<AgentRun[]> {
-    const recent = await this.listRecentRuns(Math.max(clampLimit(limit), 50), session);
+    const recent = await this.listRecentRuns(
+      Math.max(clampLimit(limit), 50),
+      session,
+    );
     return recent
       .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status))
       .slice(0, clampLimit(limit));
   }
 
-  async getRunSummary(runId: string, session?: Session): Promise<AgentRunSummary | null> {
+  async getRunSummary(
+    runId: string,
+    session?: Session,
+  ): Promise<AgentRunSummary | null> {
     const db = this.getDb(session);
     const run = await this.getRunByExternalId(db, runId);
     if (!run) return null;
 
-    const [items, semanticEvents, wireEvents, artifacts, workspaceSnapshots, memoryLinks, sourceFiles] =
-      await Promise.all([
-        db.all(app.run_items.where({ run_id: runId }).orderBy("sequence", "asc")),
-        db.all(app.semantic_events.where({ run_id: runId }).orderBy("occurred_at", "asc")),
-        db.all(app.wire_events.where({ run_id: runId }).orderBy("occurred_at", "asc")),
-        db.all(app.artifacts.where({ run_id: runId }).orderBy("created_at", "asc")),
-        db.all(app.workspace_snapshots.where({ run_id: runId }).orderBy("captured_at", "desc")),
-        db.all(app.memory_links.where({ run_id: runId }).orderBy("created_at", "asc")),
-        db.all(app.source_files.where({ run_id: runId }).orderBy("created_at", "desc")),
-      ]);
+    const [
+      items,
+      semanticEvents,
+      wireEvents,
+      artifacts,
+      workspaceSnapshots,
+      memoryLinks,
+      sourceFiles,
+    ] = await Promise.all([
+      db.all(app.run_items.where({ run_id: runId }).orderBy("sequence", "asc")),
+      db.all(
+        app.semantic_events
+          .where({ run_id: runId })
+          .orderBy("occurred_at", "asc"),
+      ),
+      db.all(
+        app.wire_events.where({ run_id: runId }).orderBy("occurred_at", "asc"),
+      ),
+      db.all(
+        app.artifacts.where({ run_id: runId }).orderBy("created_at", "asc"),
+      ),
+      db.all(
+        app.workspace_snapshots
+          .where({ run_id: runId })
+          .orderBy("captured_at", "desc"),
+      ),
+      db.all(
+        app.memory_links.where({ run_id: runId }).orderBy("created_at", "asc"),
+      ),
+      db.all(
+        app.source_files.where({ run_id: runId }).orderBy("created_at", "desc"),
+      ),
+    ]);
 
     const latestAgentState = await db.one(
       app.agent_state_snapshots
@@ -2113,22 +2488,37 @@ export class AgentDataStore {
   }
 
   private getDb(session?: Session): Db {
-    return session ? this.context.forSession(session, app) : this.context.db(app);
+    return session
+      ? this.context.forSession(session, app)
+      : this.context.db(app);
   }
 
-  private async getAgentByExternalId(db: Db, agentId: string): Promise<Agent | null> {
+  private async getAgentByExternalId(
+    db: Db,
+    agentId: string,
+  ): Promise<Agent | null> {
     return db.one(app.agents.where({ agent_id: agentId }));
   }
 
-  private async getRunByExternalId(db: Db, runId: string): Promise<AgentRun | null> {
+  private async getRunByExternalId(
+    db: Db,
+    runId: string,
+  ): Promise<AgentRun | null> {
     return db.one(app.agent_runs.where({ run_id: runId }));
   }
 
-  private async getItemByExternalId(db: Db, runId: string, itemId: string): Promise<RunItem | null> {
+  private async getItemByExternalId(
+    db: Db,
+    runId: string,
+    itemId: string,
+  ): Promise<RunItem | null> {
     return db.one(app.run_items.where({ run_id: runId, item_id: itemId }));
   }
 
-  private async getTaskByExternalId(db: Db, taskId: string): Promise<TaskRecord | null> {
+  private async getTaskByExternalId(
+    db: Db,
+    taskId: string,
+  ): Promise<TaskRecord | null> {
     return db.one(app.task_records.where({ task_id: taskId }));
   }
 
@@ -2148,6 +2538,31 @@ export class AgentDataStore {
     run = await this.getRunByExternalId(db, CURSOR_REVIEW_CONTROL_RUN_ID);
     if (!run) {
       throw new Error("cursor review control run not found after creation");
+    }
+    return run;
+  }
+
+  private async ensureBranchFileReviewControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(
+      db,
+      BRANCH_FILE_REVIEW_CONTROL_RUN_ID,
+    );
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: BRANCH_FILE_REVIEW_CONTROL_RUN_ID,
+      agentId: BRANCH_FILE_REVIEW_AGENT_ID,
+      requestSummary: "Branch file review state control plane",
+      status: "running",
+      agent: {
+        lane: "branch-file-review",
+        promptSurface: "branch-file-review",
+      },
+    });
+    run = await this.getRunByExternalId(db, BRANCH_FILE_REVIEW_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error(
+        "branch file review control run not found after creation",
+      );
     }
     return run;
   }
@@ -2237,15 +2652,16 @@ export class AgentDataStore {
   ): CursorReviewOperationRecord | null {
     if (event.event_type !== CURSOR_REVIEW_OPERATION_EVENT_TYPE) return null;
     const payload = asObjectRecord(event.payload_json);
-    const operationId = readObjectString(payload, "operationId") ?? event.event_id;
+    const operationId =
+      readObjectString(payload, "operationId") ?? event.event_id;
     const operationType = readObjectString(payload, "operationType");
     if (
-      operationType !== "focus-branch-review"
-      && operationType !== "refresh-branch-review"
-      && operationType !== "copy-branch-review-prompt"
-      && operationType !== "open-branch-review-chat"
-      && operationType !== "show-branch-diff"
-      && operationType !== "open-branch-file-diff"
+      operationType !== "focus-branch-review" &&
+      operationType !== "refresh-branch-review" &&
+      operationType !== "copy-branch-review-prompt" &&
+      operationType !== "open-branch-review-chat" &&
+      operationType !== "show-branch-diff" &&
+      operationType !== "open-branch-file-diff"
     ) {
       return null;
     }
@@ -2257,7 +2673,8 @@ export class AgentDataStore {
       workspaceRoot: readObjectString(payload, "workspaceRoot"),
       bookmark: readObjectString(payload, "bookmark"),
       relPath: readObjectString(payload, "relPath"),
-      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      note:
+        readObjectString(payload, "note") ?? event.summary_text ?? undefined,
       sourceSessionId: readObjectString(payload, "sourceSessionId"),
       sourceChatKind: readObjectString(payload, "sourceChatKind"),
       createdAt: event.occurred_at,
@@ -2272,15 +2689,44 @@ export class AgentDataStore {
     const operationId = readObjectString(payload, "operationId");
     const status = readObjectString(payload, "status");
     if (!operationId) return null;
-    if (status !== "completed" && status !== "failed" && status !== "ignored") return null;
+    if (status !== "completed" && status !== "failed" && status !== "ignored")
+      return null;
     return {
       eventId: event.event_id,
       operationId,
       status,
       clientId: readObjectString(payload, "clientId"),
       repoRoot: readObjectString(payload, "repoRoot"),
-      message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      message:
+        readObjectString(payload, "message") ?? event.summary_text ?? undefined,
       processedAt: event.occurred_at,
+    };
+  }
+
+  private branchFileReviewStateFromEvent(
+    event: SemanticEvent,
+  ): BranchFileReviewStateRecord | null {
+    if (event.event_type !== BRANCH_FILE_REVIEW_STATE_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const repoRoot = readObjectString(payload, "repoRoot");
+    const bookmark = readObjectString(payload, "bookmark");
+    const relPath = readObjectString(payload, "relPath");
+    const status = readObjectString(payload, "status");
+    if (!repoRoot || !bookmark || !relPath) return null;
+    if (status !== "happy" && status !== "needs-work" && status !== "cleared")
+      return null;
+    return {
+      eventId: event.event_id,
+      repoRoot,
+      workspaceRoot: readObjectString(payload, "workspaceRoot"),
+      bookmark,
+      relPath,
+      status,
+      note:
+        readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      sourceSessionId: readObjectString(payload, "sourceSessionId"),
+      sourceChatKind: readObjectString(payload, "sourceChatKind"),
+      createdAt: event.occurred_at,
     };
   }
 
@@ -2289,7 +2735,8 @@ export class AgentDataStore {
   ): CommitTurnOperationRecord | null {
     if (event.event_type !== COMMIT_TURN_OPERATION_EVENT_TYPE) return null;
     const payload = asObjectRecord(event.payload_json);
-    const operationId = readObjectString(payload, "operationId") ?? event.event_id;
+    const operationId =
+      readObjectString(payload, "operationId") ?? event.event_id;
     const provider = readObjectString(payload, "provider");
     const sessionId = readObjectString(payload, "sessionId");
     const conversation = readObjectString(payload, "conversation");
@@ -2297,8 +2744,17 @@ export class AgentDataStore {
     const trigger = readObjectString(payload, "trigger");
     const sessionEventId = readObjectString(payload, "sessionEventId");
     const turnOrdinalRaw = payload?.turnOrdinal;
-    const turnOrdinal = typeof turnOrdinalRaw === "number" ? turnOrdinalRaw : null;
-    if (!provider || !sessionId || !conversation || !conversationHash || !trigger || !sessionEventId || !turnOrdinal) {
+    const turnOrdinal =
+      typeof turnOrdinalRaw === "number" ? turnOrdinalRaw : null;
+    if (
+      !provider ||
+      !sessionId ||
+      !conversation ||
+      !conversationHash ||
+      !trigger ||
+      !sessionEventId ||
+      !turnOrdinal
+    ) {
       return null;
     }
     return {
@@ -2315,7 +2771,10 @@ export class AgentDataStore {
       repoRoots: readObjectStringArray(payload, "repoRoots"),
       cwd: readObjectString(payload, "cwd"),
       artifactPath: readObjectString(payload, "artifactPath"),
-      promptPreview: readObjectString(payload, "promptPreview") ?? event.summary_text ?? undefined,
+      promptPreview:
+        readObjectString(payload, "promptPreview") ??
+        event.summary_text ??
+        undefined,
       sourceChatKind: readObjectString(payload, "sourceChatKind"),
       createdAt: event.occurred_at,
     };
@@ -2329,7 +2788,8 @@ export class AgentDataStore {
     const operationId = readObjectString(payload, "operationId");
     const status = readObjectString(payload, "status");
     if (!operationId) return null;
-    if (status !== "completed" && status !== "failed" && status !== "ignored") return null;
+    if (status !== "completed" && status !== "failed" && status !== "ignored")
+      return null;
     return {
       eventId: event.event_id,
       operationId,
@@ -2338,13 +2798,17 @@ export class AgentDataStore {
       runId: readObjectString(payload, "runId"),
       threadId: readObjectString(payload, "threadId"),
       repoRoot: readObjectString(payload, "repoRoot"),
-      message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
+      message:
+        readObjectString(payload, "message") ?? event.summary_text ?? undefined,
       classification: readObjectString(payload, "classification"),
       title: readObjectString(payload, "title"),
       description: readObjectString(payload, "description"),
       commitMessage: readObjectString(payload, "commitMessage"),
       todoItems: readObjectStringArray(payload, "todoItems"),
       notes: readObjectString(payload, "notes"),
+      group: readObjectString(payload, "group"),
+      groupReason: readObjectString(payload, "groupReason"),
+      groupIsNew: readObjectBoolean(payload, "groupIsNew"),
       snapshotCommitId: readObjectString(payload, "snapshotCommitId"),
       reviewJobId: readObjectString(payload, "reviewJobId"),
       conversationHash: readObjectString(payload, "conversationHash"),
@@ -2360,11 +2824,14 @@ export class AgentDataStore {
     const owner = readObjectString(payload, "owner");
     const startedAt = readObjectDate(payload, "startedAt");
     const expiresAt = readObjectDate(payload, "expiresAt");
-    const heartbeatAt = readObjectDate(payload, "heartbeatAt") ?? event.occurred_at;
+    const heartbeatAt =
+      readObjectDate(payload, "heartbeatAt") ?? event.occurred_at;
     const releasedAt = readObjectDate(payload, "releasedAt");
     const status = readObjectString(payload, "status");
-    if (!scope || !owner || !startedAt || !expiresAt || !heartbeatAt) return null;
-    if (status !== "active" && status !== "released" && status !== "expired") return null;
+    if (!scope || !owner || !startedAt || !expiresAt || !heartbeatAt)
+      return null;
+    if (status !== "active" && status !== "released" && status !== "expired")
+      return null;
     return {
       eventId: event.event_id,
       claimId,
@@ -2372,7 +2839,8 @@ export class AgentDataStore {
       owner,
       ownerSession: readObjectString(payload, "ownerSession"),
       mode: readObjectString(payload, "mode"),
-      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      note:
+        readObjectString(payload, "note") ?? event.summary_text ?? undefined,
       repoRoot: readObjectString(payload, "repoRoot"),
       workspaceRoot: readObjectString(payload, "workspaceRoot"),
       startedAt,
@@ -2394,13 +2862,13 @@ export class AgentDataStore {
     const attempt = readObjectNumber(payload, "attempt") ?? 0;
     if (!kind || !createdAt || !updatedAt) return null;
     if (
-      status !== "queued"
-      && status !== "claimed"
-      && status !== "running"
-      && status !== "completed"
-      && status !== "failed"
-      && status !== "cancelled"
-      && status !== "cancelled-superseded"
+      status !== "queued" &&
+      status !== "claimed" &&
+      status !== "running" &&
+      status !== "completed" &&
+      status !== "failed" &&
+      status !== "cancelled" &&
+      status !== "cancelled-superseded"
     ) {
       return null;
     }
@@ -2424,7 +2892,8 @@ export class AgentDataStore {
       targetTurnWatermark: readObjectString(payload, "targetTurnWatermark"),
       sourceSession: readObjectString(payload, "sourceSession"),
       sourceWatermark: readObjectString(payload, "sourceWatermark"),
-      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      note:
+        readObjectString(payload, "note") ?? event.summary_text ?? undefined,
     };
   }
 
@@ -2435,28 +2904,28 @@ export class AgentDataStore {
     const eventType = readObjectString(payload, "eventType");
     if (!jobId) return null;
     if (
-      eventType !== "created"
-      && eventType !== "claimed"
-      && eventType !== "renewed"
-      && eventType !== "running"
-      && eventType !== "completed"
-      && eventType !== "failed"
-      && eventType !== "cancelled"
-      && eventType !== "cancelled-superseded"
+      eventType !== "created" &&
+      eventType !== "claimed" &&
+      eventType !== "renewed" &&
+      eventType !== "running" &&
+      eventType !== "completed" &&
+      eventType !== "failed" &&
+      eventType !== "cancelled" &&
+      eventType !== "cancelled-superseded"
     ) {
       return null;
     }
 
     const status = readObjectString(payload, "status");
     if (
-      status !== undefined
-      && status !== "queued"
-      && status !== "claimed"
-      && status !== "running"
-      && status !== "completed"
-      && status !== "failed"
-      && status !== "cancelled"
-      && status !== "cancelled-superseded"
+      status !== undefined &&
+      status !== "queued" &&
+      status !== "claimed" &&
+      status !== "running" &&
+      status !== "completed" &&
+      status !== "failed" &&
+      status !== "cancelled" &&
+      status !== "cancelled-superseded"
     ) {
       return null;
     }
@@ -2469,14 +2938,17 @@ export class AgentDataStore {
       claimedBy: readObjectString(payload, "claimedBy"),
       leaseExpiresAt: readObjectDate(payload, "leaseExpiresAt"),
       attempt: readObjectNumber(payload, "attempt"),
-      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      note:
+        readObjectString(payload, "note") ?? event.summary_text ?? undefined,
       payloadJson: payload?.payloadJson as JsonValue | undefined,
       resultJson: payload?.resultJson as JsonValue | undefined,
       occurredAt: event.occurred_at,
     };
   }
 
-  private contextDigestFromEvent(event: SemanticEvent): ContextDigestRecord | null {
+  private contextDigestFromEvent(
+    event: SemanticEvent,
+  ): ContextDigestRecord | null {
     if (event.event_type !== CONTEXT_DIGEST_EVENT_TYPE) return null;
     const payload = asObjectRecord(event.payload_json);
     const digestId = readObjectString(payload, "digestId") ?? event.event_id;
@@ -2484,30 +2956,45 @@ export class AgentDataStore {
     const targetSession = readObjectString(payload, "targetSession");
     const targetTurnOrdinal = readObjectNumber(payload, "targetTurnOrdinal");
     const targetConversation = readObjectString(payload, "targetConversation");
-    const targetConversationHash = readObjectString(payload, "targetConversationHash");
+    const targetConversationHash = readObjectString(
+      payload,
+      "targetConversationHash",
+    );
     const sourceSession = readObjectString(payload, "sourceSession");
-    const sourceWatermarkKind = readObjectString(payload, "sourceWatermarkKind");
-    const sourceWatermarkValue = readObjectString(payload, "sourceWatermarkValue");
+    const sourceWatermarkKind = readObjectString(
+      payload,
+      "sourceWatermarkKind",
+    );
+    const sourceWatermarkValue = readObjectString(
+      payload,
+      "sourceWatermarkValue",
+    );
     const kind = readObjectString(payload, "kind");
     const digestText = readObjectString(payload, "digestText");
-    const generatedAt = readObjectDate(payload, "generatedAt") ?? event.occurred_at;
+    const generatedAt =
+      readObjectDate(payload, "generatedAt") ?? event.occurred_at;
     const status = readObjectString(payload, "status");
     if (
-      !targetProvider
-      || !targetSession
-      || targetTurnOrdinal === undefined
-      || !targetConversation
-      || !targetConversationHash
-      || !sourceSession
-      || !sourceWatermarkKind
-      || !sourceWatermarkValue
-      || !kind
-      || !digestText
-      || !generatedAt
+      !targetProvider ||
+      !targetSession ||
+      targetTurnOrdinal === undefined ||
+      !targetConversation ||
+      !targetConversationHash ||
+      !sourceSession ||
+      !sourceWatermarkKind ||
+      !sourceWatermarkValue ||
+      !kind ||
+      !digestText ||
+      !generatedAt
     ) {
       return null;
     }
-    if (status !== "ready" && status !== "superseded" && status !== "expired" && status !== "error") {
+    if (
+      status !== "ready" &&
+      status !== "superseded" &&
+      status !== "expired" &&
+      status !== "error"
+    ) {
       return null;
     }
     return {
@@ -2521,13 +3008,17 @@ export class AgentDataStore {
       sourceSession,
       sourceWatermarkKind,
       sourceWatermarkValue,
-      sourceConversationHash: readObjectString(payload, "sourceConversationHash"),
+      sourceConversationHash: readObjectString(
+        payload,
+        "sourceConversationHash",
+      ),
       kind,
       digestText,
       modelUsed: readObjectString(payload, "modelUsed"),
       score: readObjectNumber(payload, "score"),
       confidence: readObjectString(payload, "confidence"),
-      reason: readObjectString(payload, "reason") ?? event.summary_text ?? undefined,
+      reason:
+        readObjectString(payload, "reason") ?? event.summary_text ?? undefined,
       generatedAt,
       expiresAt: readObjectDate(payload, "expiresAt"),
       status,
@@ -2554,7 +3045,10 @@ export class AgentDataStore {
     return null;
   }
 
-  private async getLatestJobByID(db: Db, jobId: string): Promise<JobRecord | null> {
+  private async getLatestJobByID(
+    db: Db,
+    jobId: string,
+  ): Promise<JobRecord | null> {
     const rows = await db.all(
       app.semantic_events
         .where({ run_id: JOB_CONTROL_RUN_ID })
@@ -2588,9 +3082,9 @@ export class AgentDataStore {
       if (!job) continue;
       const normalized = this.normalizeJobLease(job, now);
       if (
-        normalized.kind === kind
-        && normalized.dedupeKey === dedupeKey
-        && !TERMINAL_JOB_STATUSES.has(normalized.status)
+        normalized.kind === kind &&
+        normalized.dedupeKey === dedupeKey &&
+        !TERMINAL_JOB_STATUSES.has(normalized.status)
       ) {
         return normalized;
       }
@@ -2600,8 +3094,8 @@ export class AgentDataStore {
 
   private normalizeJobLease(job: JobRecord, now: Date): JobRecord {
     if (
-      (job.status === "claimed" || job.status === "running")
-      && isExpired(job.leaseExpiresAt, now)
+      (job.status === "claimed" || job.status === "running") &&
+      isExpired(job.leaseExpiresAt, now)
     ) {
       return {
         ...job,
@@ -2655,10 +3149,16 @@ export class AgentDataStore {
     return jobEvent;
   }
 
-  private async requireItemByExternalId(db: Db, runId: string, itemId: string): Promise<RunItem> {
+  private async requireItemByExternalId(
+    db: Db,
+    runId: string,
+    itemId: string,
+  ): Promise<RunItem> {
     const item = await this.getItemByExternalId(db, runId, itemId);
     if (!item) {
-      throw new Error(`Run item not found for run_id=${runId} item_id=${itemId}`);
+      throw new Error(
+        `Run item not found for run_id=${runId} item_id=${itemId}`,
+      );
     }
     return item;
   }
@@ -2683,11 +3183,15 @@ export class AgentDataStore {
   ): Promise<void> {
     const payload = pruneUndefined(updates as Record<string, unknown>);
     if (Object.keys(payload).length === 0) return;
-    await db.updateDurable(table as never, id, payload as never, { tier: this.writeTier });
+    await db.updateDurable(table as never, id, payload as never, {
+      tier: this.writeTier,
+    });
   }
 }
 
-export function createAgentDataStore(config: AgentDataStoreConfig): AgentDataStore {
+export function createAgentDataStore(
+  config: AgentDataStoreConfig,
+): AgentDataStore {
   const tier = config.tier ?? "edge";
   const context = createJazzContext({
     appId: config.appId ?? DEFAULT_APP_ID,

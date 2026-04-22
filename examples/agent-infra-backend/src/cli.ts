@@ -8,6 +8,7 @@ import {
   type AgentStateSnapshot,
   type AgentClaimRecord,
   type Artifact,
+  type BranchFileReviewStateRecord,
   type CommitTurnOperationRecord,
   type CommitTurnResultRecord,
   type ContextDigestRecord,
@@ -19,12 +20,14 @@ import {
   type CancelJobInput,
   type ClaimJobInput,
   type ListAgentClaimsInput,
+  type ListBranchFileReviewStatesInput,
   type ListCommitTurnOperationsInput,
   type ListContextDigestsInput,
   type ListCursorReviewOperationsInput,
   type ListJobsInput,
   type ListTaskRecordsInput,
   type RecordAgentClaimInput,
+  type RecordBranchFileReviewStateInput,
   type RecordCommitTurnOperationInput,
   type RecordCommitTurnResultInput,
   type RecordContextDigestInput,
@@ -201,6 +204,19 @@ interface SerializedCursorReviewOperation {
   latestResult: SerializedCursorReviewOperationResult | null;
 }
 
+interface SerializedBranchFileReviewState {
+  eventId: string;
+  repoRoot: string;
+  workspaceRoot: string | null;
+  bookmark: string;
+  relPath: string;
+  status: string;
+  note: string | null;
+  sourceSessionId: string | null;
+  sourceChatKind: string | null;
+  createdAt: string;
+}
+
 interface SerializedCommitTurnResult {
   eventId: string;
   operationId: string;
@@ -216,6 +232,9 @@ interface SerializedCommitTurnResult {
   commitMessage: string | null;
   todoItems: string[] | null;
   notes: string | null;
+  group: string | null;
+  groupReason: string | null;
+  groupIsNew: boolean;
   snapshotCommitId: string | null;
   reviewJobId: string | null;
   conversationHash: string | null;
@@ -366,7 +385,9 @@ function readJsonInput<T>(command: string): T {
   const inputFile = readFlag("--input-file");
 
   if (inlineJson && inputFile) {
-    throw new Error(`${command} accepts only one of --input-json or --input-file`);
+    throw new Error(
+      `${command} accepts only one of --input-json or --input-file`,
+    );
   }
 
   const text = inputFile
@@ -378,7 +399,9 @@ function readJsonInput<T>(command: string): T {
         : null;
 
   if (!text) {
-    throw new Error(`${command} requires --input-json, --input-file, or stdin JSON`);
+    throw new Error(
+      `${command} requires --input-json, --input-file, or stdin JSON`,
+    );
   }
 
   return JSON.parse(text) as T;
@@ -497,7 +520,9 @@ function serializeArtifact(artifact: Artifact): SerializedArtifact {
   };
 }
 
-function serializeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): SerializedWorkspaceSnapshot {
+function serializeWorkspaceSnapshot(
+  snapshot: WorkspaceSnapshot,
+): SerializedWorkspaceSnapshot {
   return {
     snapshotId: snapshot.snapshot_id,
     runId: snapshot.run_id,
@@ -582,6 +607,23 @@ function serializeCursorReviewOperation(
   };
 }
 
+function serializeBranchFileReviewState(
+  state: BranchFileReviewStateRecord,
+): SerializedBranchFileReviewState {
+  return {
+    eventId: state.eventId,
+    repoRoot: state.repoRoot,
+    workspaceRoot: state.workspaceRoot ?? null,
+    bookmark: state.bookmark,
+    relPath: state.relPath,
+    status: state.status,
+    note: state.note ?? null,
+    sourceSessionId: state.sourceSessionId ?? null,
+    sourceChatKind: state.sourceChatKind ?? null,
+    createdAt: state.createdAt.toISOString(),
+  };
+}
+
 function serializeCommitTurnResult(
   result: CommitTurnResultRecord,
 ): SerializedCommitTurnResult {
@@ -600,6 +642,9 @@ function serializeCommitTurnResult(
     commitMessage: result.commitMessage ?? null,
     todoItems: result.todoItems ?? null,
     notes: result.notes ?? null,
+    group: result.group ?? null,
+    groupReason: result.groupReason ?? null,
+    groupIsNew: result.groupIsNew ?? false,
     snapshotCommitId: result.snapshotCommitId ?? null,
     reviewJobId: result.reviewJobId ?? null,
     conversationHash: result.conversationHash ?? null,
@@ -720,14 +765,18 @@ function serializeJobEvent(event: JobEventRecord): SerializedJobEvent {
   };
 }
 
-function serializeRunSummary(summary: AgentRunSummary): SerializedAgentRunSummary {
+function serializeRunSummary(
+  summary: AgentRunSummary,
+): SerializedAgentRunSummary {
   return {
     run: serializeAgentRun(summary.run),
     items: summary.items.map(serializeRunItem),
     semanticEvents: summary.semanticEvents.map(serializeSemanticEvent),
     wireEvents: summary.wireEvents.map(serializeWireEvent),
     artifacts: summary.artifacts.map(serializeArtifact),
-    workspaceSnapshots: summary.workspaceSnapshots.map(serializeWorkspaceSnapshot),
+    workspaceSnapshots: summary.workspaceSnapshots.map(
+      serializeWorkspaceSnapshot,
+    ),
     memoryLinks: summary.memoryLinks.map(serializeMemoryLink),
     sourceFiles: summary.sourceFiles.map(serializeSourceFile),
     latestAgentState: summary.latestAgentState
@@ -742,7 +791,9 @@ function renderJson(value: unknown): void {
 
 async function main(): Promise<void> {
   const command = requireCommand();
-  const dataPath = expandHomePath(readFlag("--data-path") ?? "~/.jazz2/agent-infra.db");
+  const dataPath = expandHomePath(
+    readFlag("--data-path") ?? "~/.jazz2/agent-infra.db",
+  );
   await mkdir(path.dirname(dataPath), { recursive: true });
 
   const store = createAgentDataStore({
@@ -827,25 +878,32 @@ async function main(): Promise<void> {
         break;
       }
       case "record-run-started": {
-        const input = readJsonInput<RecordRunStartedInput>("record-run-started");
+        const input =
+          readJsonInput<RecordRunStartedInput>("record-run-started");
         const run = await store.recordRunStarted(input);
         renderJson(serializeAgentRun(run));
         break;
       }
       case "record-run-completed": {
-        const input = readJsonInput<RecordRunCompletedInput>("record-run-completed");
+        const input = readJsonInput<RecordRunCompletedInput>(
+          "record-run-completed",
+        );
         const run = await store.recordRunCompleted(input);
         renderJson(serializeAgentRun(run));
         break;
       }
       case "record-item-started": {
-        const input = readJsonInput<RecordItemStartedInput>("record-item-started");
+        const input = readJsonInput<RecordItemStartedInput>(
+          "record-item-started",
+        );
         const item = await store.recordItemStarted(input);
         renderJson(serializeRunItem(item));
         break;
       }
       case "record-item-completed": {
-        const input = readJsonInput<RecordItemCompletedInput>("record-item-completed");
+        const input = readJsonInput<RecordItemCompletedInput>(
+          "record-item-completed",
+        );
         const item = await store.recordItemCompleted(input);
         renderJson(serializeRunItem(item));
         break;
@@ -906,6 +964,14 @@ async function main(): Promise<void> {
         renderJson(serializeCursorReviewOperationResult(result));
         break;
       }
+      case "record-branch-file-review-state": {
+        const input = readJsonInput<RecordBranchFileReviewStateInput>(
+          "record-branch-file-review-state",
+        );
+        const state = await store.recordBranchFileReviewState(input);
+        renderJson(serializeBranchFileReviewState(state));
+        break;
+      }
       case "record-commit-turn-op": {
         const input = readJsonInput<RecordCommitTurnOperationInput>(
           "record-commit-turn-op",
@@ -923,7 +989,8 @@ async function main(): Promise<void> {
         break;
       }
       case "record-agent-claim": {
-        const input = readJsonInput<RecordAgentClaimInput>("record-agent-claim");
+        const input =
+          readJsonInput<RecordAgentClaimInput>("record-agent-claim");
         const claim = await store.recordAgentClaim(input);
         renderJson(serializeAgentClaim(claim));
         break;
@@ -935,7 +1002,9 @@ async function main(): Promise<void> {
         break;
       }
       case "release-agent-claim": {
-        const input = readJsonInput<ReleaseAgentClaimInput>("release-agent-claim");
+        const input = readJsonInput<ReleaseAgentClaimInput>(
+          "release-agent-claim",
+        );
         const claim = await store.releaseAgentClaim(input);
         renderJson(serializeAgentClaim(claim));
         break;
@@ -954,7 +1023,9 @@ async function main(): Promise<void> {
         break;
       }
       case "record-context-digest": {
-        const input = readJsonInput<RecordContextDigestInput>("record-context-digest");
+        const input = readJsonInput<RecordContextDigestInput>(
+          "record-context-digest",
+        );
         const digest = await store.recordContextDigest(input);
         renderJson(serializeContextDigest(digest));
         break;
@@ -966,7 +1037,9 @@ async function main(): Promise<void> {
           targetSession: readFlag("--target-session"),
           targetConversation: readFlag("--target-conversation"),
           targetConversationHash: readFlag("--target-conversation-hash"),
-          targetTurnOrdinal: turnOrdinalRaw ? Number.parseInt(turnOrdinalRaw, 10) : undefined,
+          targetTurnOrdinal: turnOrdinalRaw
+            ? Number.parseInt(turnOrdinalRaw, 10)
+            : undefined,
           sourceSession: readFlag("--source-session"),
           kind: readFlag("--kind"),
           includeExpired: hasFlag("--include-expired"),
@@ -1062,6 +1135,20 @@ async function main(): Promise<void> {
         };
         const operations = await store.listCursorReviewOperations(query);
         renderJson(operations.map(serializeCursorReviewOperation));
+        break;
+      }
+      case "list-branch-file-review-states": {
+        const limitRaw = readFlag("--limit");
+        const query: ListBranchFileReviewStatesInput = {
+          repoRoot: readFlag("--repo-root"),
+          workspaceRoot: readFlag("--workspace-root"),
+          bookmark: readFlag("--bookmark"),
+          relPath: readFlag("--rel-path"),
+          includeCleared: hasFlag("--include-cleared"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const states = await store.listBranchFileReviewStates(query);
+        renderJson(states.map(serializeBranchFileReviewState));
         break;
       }
       default:

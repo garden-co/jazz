@@ -174,7 +174,8 @@ describe("AgentDataStore", () => {
     await store.upsertTaskRecord({
       taskId: "d-002",
       context: "designer",
-      title: "Merge PR #3296 and clean up the rest of the open Designer PR stack",
+      title:
+        "Merge PR #3296 and clean up the rest of the open Designer PR stack",
       status: "active",
       priority: "P0",
       placement: "now",
@@ -226,7 +227,9 @@ describe("AgentDataStore", () => {
 
     expect(operation.operationId).toBe("cursor-op-1");
     expect(pending).toHaveLength(1);
-    expect(pending[0]?.bookmark).toBe("review/nikiv-designer-telemetry-pr1-main");
+    expect(pending[0]?.bookmark).toBe(
+      "review/nikiv-designer-telemetry-pr1-main",
+    );
     expect(pending[0]?.latestResult).toBeUndefined();
 
     const result = await store.recordCursorReviewResult({
@@ -249,6 +252,62 @@ describe("AgentDataStore", () => {
     expect(filtered).toEqual([]);
     expect(withProcessed).toHaveLength(1);
     expect(withProcessed[0]?.latestResult?.status).toBe("completed");
-    expect(withProcessed[0]?.latestResult?.message).toBe("Flow opened the diff");
+    expect(withProcessed[0]?.latestResult?.message).toBe(
+      "Flow opened the diff",
+    );
+  });
+
+  it("records and lists latest branch file review states", async () => {
+    await store.recordBranchFileReviewState({
+      eventId: "branch-file-review-1",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      relPath: "ide/designer/src/telemetry/log.ts",
+      status: "needs-work",
+      note: "event names are too noisy",
+      sourceSessionId: "cursor:session-1",
+      sourceChatKind: "cursor",
+    });
+    await store.recordBranchFileReviewState({
+      eventId: "branch-file-review-2",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      relPath: "ide/designer/src/telemetry/log.ts",
+      status: "happy",
+      note: "looks good now",
+      sourceSessionId: "codex:session-2",
+      sourceChatKind: "codex",
+    });
+    await store.recordBranchFileReviewState({
+      eventId: "branch-file-review-3",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      relPath: "ide/designer/src/telemetry/buffer.ts",
+      status: "cleared",
+    });
+
+    const states = await store.listBranchFileReviewStates({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+    });
+    const withCleared = await store.listBranchFileReviewStates({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      bookmark: "review/nikiv-designer-telemetry-pr1-main",
+      includeCleared: true,
+    });
+
+    expect(states).toHaveLength(1);
+    expect(states[0]?.relPath).toBe("ide/designer/src/telemetry/log.ts");
+    expect(states[0]?.status).toBe("happy");
+    expect(states[0]?.note).toBe("looks good now");
+    expect(withCleared).toHaveLength(2);
+    expect(
+      withCleared.find(
+        (item) => item.relPath === "ide/designer/src/telemetry/buffer.ts",
+      )?.status,
+    ).toBe("cleared");
   });
 });
