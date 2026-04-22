@@ -172,7 +172,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    fn mark_local_batch_rows_rejected(&mut self, batch_id: crate::row_histories::BatchId) {
+    pub(super) fn mark_local_batch_rows_rejected(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) {
         let mut cleared_rows = Vec::new();
         let mut batch_patch_succeeded_by_table = std::collections::HashMap::new();
 
