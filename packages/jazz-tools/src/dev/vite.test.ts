@@ -2,7 +2,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
-import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
+import {
+  createTempRootTracker,
+  getAvailablePort,
+  todoSchema,
+} from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
@@ -49,7 +53,9 @@ describe("jazzPlugin", () => {
 
   it("config hook injects build target, worker format, and optimizeDeps exclude", () => {
     const plugin = jazzPlugin();
-    const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+    const config = (
+      plugin as { config?: (c: Record<string, unknown>) => unknown }
+    ).config;
     const result = config!({}) as {
       build?: { target?: string };
       worker?: { format?: string };
@@ -60,9 +66,22 @@ describe("jazzPlugin", () => {
     expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
   });
 
+  it("config hook respects a higher build target set by the user", () => {
+    const plugin = jazzPlugin();
+    const config = (
+      plugin as { config?: (c: Record<string, unknown>) => unknown }
+    ).config;
+    const result = config!({ build: { target: "esnext" } }) as {
+      build?: { target?: string };
+    };
+    expect(result.build?.target).toBe("esnext");
+  });
+
   it("config hook preserves existing optimizeDeps excludes", () => {
     const plugin = jazzPlugin();
-    const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+    const config = (
+      plugin as { config?: (c: Record<string, unknown>) => unknown }
+    ).config;
     const result = config!({ optimizeDeps: { exclude: ["some-dep"] } }) as {
       optimizeDeps?: { exclude?: string[] };
     };
@@ -83,7 +102,11 @@ describe("jazzPlugin", () => {
 
     const closeHandlers: (() => Promise<void> | void)[] = [];
     const fakeViteServer = {
-      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
       httpServer: {
         once(_event: string, cb: () => void) {
           closeHandlers.push(cb);
@@ -110,12 +133,19 @@ describe("jazzPlugin", () => {
       },
     );
     const schemasRaw = await schemasResponse.text();
-    expect(schemasResponse.ok, `schemas ${schemasResponse.status}: ${schemasRaw}`).toBe(true);
+    expect(
+      schemasResponse.ok,
+      `schemas ${schemasResponse.status}: ${schemasRaw}`,
+    ).toBe(true);
     const body = JSON.parse(schemasRaw) as { hashes?: string[] };
     expect(body.hashes?.length).toBeGreaterThan(0);
     expect(fakeViteServer.config.env.VITE_JAZZ_APP_ID).toBeTruthy();
-    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
+    expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(
+      `http://127.0.0.1:${port}`,
+    );
+    expect(process.env.VITE_JAZZ_APP_ID).toBe(
+      fakeViteServer.config.env.VITE_JAZZ_APP_ID,
+    );
     expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -129,7 +159,9 @@ describe("jazzPlugin", () => {
       await handler();
     }
 
-    await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
+    await expect(
+      fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok),
+    ).rejects.toThrow();
   }, 30_000);
 
   it("does not inject a dev server url during build", async () => {
@@ -167,7 +199,11 @@ describe("jazzPlugin", () => {
 
     const closeHandlers: (() => Promise<void> | void)[] = [];
     const fakeViteServer = {
-      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
       httpServer: {
         once(_event: string, cb: () => void) {
           closeHandlers.push(cb);
@@ -198,7 +234,10 @@ describe("jazzPlugin", () => {
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
 
     const existingAppId = "00000000-0000-0000-0000-000000000001";
-    await writeFile(join(schemaDir, ".env"), `VITE_JAZZ_APP_ID=${existingAppId}\n`);
+    await writeFile(
+      join(schemaDir, ".env"),
+      `VITE_JAZZ_APP_ID=${existingAppId}\n`,
+    );
 
     const plugin = jazzPlugin({
       server: { port, adminSecret: "vite-existing-env-test-admin" },
