@@ -42,15 +42,15 @@ absent — see notes).
 These three share the same Vite plugin API and should behave consistently unless
 a note below documents an intentional difference.
 
-| Pattern                    | What to look for                                                                                                        |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| **WASM config hook**       | `config()` returns `build.target: "es2020"`, `worker.format: "es"`, and `optimizeDeps.exclude` containing `"jazz-wasm"` |
-| **Env file backfill**      | `loadEnvFileIntoProcessEnv(viteServer.config.root)` called inside `configureServer` before runtime initialisation       |
-| **Schema error surfacing** | `onSchemaError` callback passed to `runtime.initialize`, which calls `viteServer.ws.send({ type: "error", ... })`       |
-| **Runtime disposal**       | `viteServer.httpServer?.once("close", ...)` calls `runtime.dispose()`                                                   |
-| **Init error surfacing**   | `try/catch` around `runtime.initialize` that calls `viteServer.ws.send({ type: "error", ... })` on failure              |
-| **backendSecret**          | `backendSecret` extracted from plugin options and passed to `runtime.initialize`                                        |
-| **schemaDir default**      | Which directory is used when `options.schemaDir` is not set                                                             |
+| Pattern                    | What to look for                                                                                                  |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **WASM config hook**       | `config()` returns `worker.format: "es"` and `optimizeDeps.exclude` containing `"jazz-wasm"`                      |
+| **Env file backfill**      | `loadEnvFileIntoProcessEnv(viteServer.config.root)` called inside `configureServer` before runtime initialisation |
+| **Schema error surfacing** | `onSchemaError` callback passed to `runtime.initialize`, which calls `viteServer.ws.send({ type: "error", ... })` |
+| **Runtime disposal**       | `viteServer.httpServer?.once("close", ...)` calls `runtime.dispose()`                                             |
+| **Init error surfacing**   | `try/catch` around `runtime.initialize` that calls `viteServer.ws.send({ type: "error", ... })` on failure        |
+| **backendSecret**          | `backendSecret` extracted from plugin options and passed to `runtime.initialize`                                  |
+| **schemaDir default**      | Which directory is used when `options.schemaDir` is not set                                                       |
 
 **Known intentional differences within the Vite trio:**
 
@@ -62,6 +62,12 @@ a note below documents an intentional difference.
 - `schemaDir` default — `sveltekit.ts` defaults to `src/lib/` (where SvelteKit
   keeps shared library code). `vite.ts` and `nuxt.ts` default to the project root.
   This is intentional and correct.
+
+- `build.target` — intentionally absent from all plugins. Vite's own default
+  (`baseline-widely-available`) already covers every feature Jazz needs,
+  including BigInt. Injecting `"es2020"` would silently override a safer,
+  broader default for no benefit. If a user deliberately targets an ancient
+  baseline that lacks BigInt, that is their responsibility to manage.
 
 ### Patterns for Next.js and Expo
 
