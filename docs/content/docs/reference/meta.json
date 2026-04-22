@@ -5,6 +5,7 @@
     "where-operators",
     "durability-tiers",
     "framework-patterns",
+    "inspector",
     "mcp",
     "internals"
   ]
