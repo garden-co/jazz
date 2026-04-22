@@ -96,14 +96,14 @@ session on every row and the permission policy scopes reads/writes to it.
 Scaffold via `create-jazz` to have `.env` populated automatically; otherwise
 write the values below by hand.
 
-| Variable               | When       | Purpose                                                              |
-| ---------------------- | ---------- | -------------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`   | always     | BetterAuth session signing. `server/auth.ts` throws if missing.      |
-| `PORT`                 | optional   | Hono server port (default `3001`).                                   |
-| `VITE_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it.    |
-| `VITE_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://prod.v2.aws.cloud.jazz.tools/apps/…`). |
-| `JAZZ_ADMIN_SECRET`    | cloud only | Admin credential for schema pushes to the cloud.                     |
-| `BACKEND_SECRET`       | cloud only | Backend signing credential.                                          |
+| Variable               | When       | Purpose                                                           |
+| ---------------------- | ---------- | ----------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`   | always     | BetterAuth session signing. `server/auth.ts` throws if missing.   |
+| `PORT`                 | optional   | Hono server port (default `3001`).                                |
+| `VITE_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it. |
+| `VITE_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://prod.v2.aws.cloud.jazz.tools`).     |
+| `JAZZ_ADMIN_SECRET`    | cloud only | Admin credential for schema pushes to the cloud.                  |
+| `BACKEND_SECRET`       | cloud only | Backend signing credential.                                       |
 
 Generate a dev `BETTER_AUTH_SECRET` with `openssl rand -base64 32`. In
 self-hosted mode (no cloud env vars), the `jazzPlugin` plugin spawns a local
