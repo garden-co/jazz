@@ -20,6 +20,10 @@ Communicate tersely without losing precision or warmth.
 
 **Builds:** `pnpm build` (everything), `pnpm test` (everything), via turbo.
 
+**Test failures are your problem.** All work that lands on `main` is tested in CI, so pre-existing failures are extremely unlikely. If a test fails unexpectedly, do not assume it was already broken — investigate. The failure is most likely caused by an incorrect implementation or tests that haven't been updated to a changed API contract, though stale binaries are cheap to rule out and worth checking early. Use judgement: weigh how likely each cause is against how much effort it takes to verify. Surface the failure to the user only after you've genuinely exhausted these avenues.
+
+**Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
+
 ## Skills
 
 Repo-local skills live in `.agents/skills/`. Check them proactively.
