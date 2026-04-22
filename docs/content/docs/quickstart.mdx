@@ -1,0 +1,24 @@
+---
+title: Quickstart
+description: Scaffold a synced local-first app in one command.
+---
+
+## Scaffold a new Jazz app
+
+```bash title="Terminal"
+pnpm create jazz
+```
+
+Pick a framework, hosting mode, and auth style when prompted. The scaffolder installs dependencies and — if you chose hosted — provisions an app on Jazz Cloud with env vars filled in for you.
+
+## What you get
+
+- `schema.ts` — the source of truth for your data. Tables, types, and queries all flow from here. See [Schemas](/docs/schemas/defining-tables).
+- `permissions.ts` — row-level access, pre-wired. See [Permissions](/docs/auth/permissions).
+- A Jazz provider and a todo UI you can reshape into your own app.
+
+## Next steps
+
+- **Model your own data** — edit `schema.ts`, then use `db.insert` and `db.subscribeAll` from your components. See [Writing Data](/docs/writing/writing-data) and [Queries](/docs/reading/queries).
+- **Add auth** — see [Authentication](/docs/auth/authentication) to go beyond an anonymous identity.
+- **Install into an existing app** — see [Install → Client](/docs/install/client) or [Install → TypeScript Server](/docs/install/typescript-server).
