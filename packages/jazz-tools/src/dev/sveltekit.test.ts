@@ -1,17 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  createTempRootTracker,
-  getAvailablePort,
-  todoSchema,
-} from "./test-helpers.js";
+import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as schemaWatcher from "./schema-watcher.js";
-import {
-  jazzSvelteKit,
-  __resetJazzSvelteKitPluginForTests,
-} from "./sveltekit.js";
+import { jazzSvelteKit, __resetJazzSvelteKitPluginForTests } from "./sveltekit.js";
 import type { ViteDevServer } from "./vite.js";
 
 const dev = await import("./index.js");
@@ -83,9 +76,7 @@ describe("jazzSvelteKit", () => {
       server: { port, adminSecret: "sveltekit-test-admin" },
     });
     const viteServer = makeViteServer("serve", root);
-    const configureServer = plugin.configureServer as (
-      server: typeof viteServer,
-    ) => Promise<void>;
+    const configureServer = plugin.configureServer as (server: typeof viteServer) => Promise<void>;
     await configureServer(viteServer);
 
     const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
@@ -102,12 +93,8 @@ describe("jazzSvelteKit", () => {
     expect(body.hashes?.length).toBeGreaterThan(0);
 
     expect(viteServer.config.env!.PUBLIC_JAZZ_APP_ID).toBeTruthy();
-    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe(
-      `http://127.0.0.1:${port}`,
-    );
-    expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(
-      viteServer.config.env!.PUBLIC_JAZZ_APP_ID,
-    );
+    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+    expect(process.env.PUBLIC_JAZZ_APP_ID).toBe(viteServer.config.env!.PUBLIC_JAZZ_APP_ID);
     expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
   }, 30_000);
 
@@ -117,9 +104,7 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19999, adminSecret: "build-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      makeViteServer("build"),
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("build"));
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
@@ -129,9 +114,7 @@ describe("jazzSvelteKit", () => {
     const spy = vi.spyOn(devServer, "startLocalJazzServer");
 
     const plugin = jazzSvelteKit({ server: false });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      makeViteServer("serve"),
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
 
     expect(spy).not.toHaveBeenCalled();
     expect(process.env.PUBLIC_JAZZ_APP_ID).toBeUndefined();
@@ -154,23 +137,19 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19998, adminSecret: "backend-secret-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      makeViteServer("serve"),
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
 
     expect(process.env.BACKEND_SECRET).toBe("test-backend-secret");
   });
 
   it("builds jwksUrl from Vite's configured host and port", async () => {
-    const startSpy = vi
-      .spyOn(devServer, "startLocalJazzServer")
-      .mockResolvedValue({
-        appId: "00000000-0000-0000-0000-000000000004",
-        port: 19995,
-        url: "http://127.0.0.1:19995",
-        dataDir: undefined as unknown as string,
-        stop: vi.fn().mockResolvedValue(undefined),
-      });
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000004",
+      port: 19995,
+      url: "http://127.0.0.1:19995",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
       hash: "abc",
     });
@@ -185,9 +164,7 @@ describe("jazzSvelteKit", () => {
       httpServer: { once() {} },
       ws: { send() {} },
     };
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      viteServer,
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(startSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -200,15 +177,13 @@ describe("jazzSvelteKit", () => {
     const originalAppOrigin = process.env.APP_ORIGIN;
     process.env.APP_ORIGIN = "https://app.example.com";
 
-    const startSpy = vi
-      .spyOn(devServer, "startLocalJazzServer")
-      .mockResolvedValue({
-        appId: "00000000-0000-0000-0000-000000000005",
-        port: 19994,
-        url: "http://127.0.0.1:19994",
-        dataDir: undefined as unknown as string,
-        stop: vi.fn().mockResolvedValue(undefined),
-      });
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000005",
+      port: 19994,
+      url: "http://127.0.0.1:19994",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
       hash: "abc",
     });
@@ -224,9 +199,7 @@ describe("jazzSvelteKit", () => {
         httpServer: { once() {} },
         ws: { send() {} },
       };
-      await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-        viteServer,
-      );
+      await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
       expect(startSpy).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -254,9 +227,7 @@ describe("jazzSvelteKit", () => {
 
     const plugin = jazzSvelteKit({ adminSecret: "env-test-admin" });
     const viteServer = makeViteServer("serve");
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      viteServer,
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
     expect(devServer.pushSchemaCatalogue).toHaveBeenCalledWith(
@@ -265,9 +236,7 @@ describe("jazzSvelteKit", () => {
         appId: "00000000-0000-0000-0000-000000000010",
       }),
     );
-    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe(
-      "http://jazz-test-server:4000",
-    );
+    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe("http://jazz-test-server:4000");
   });
 
   it("connects to an existing server via options.server string URL", async () => {
@@ -282,9 +251,7 @@ describe("jazzSvelteKit", () => {
       adminSecret: "str-admin",
       appId: "00000000-0000-0000-0000-000000000020",
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      makeViteServer("serve"),
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve"));
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
     expect(devServer.pushSchemaCatalogue).toHaveBeenCalledWith(
@@ -301,12 +268,8 @@ describe("jazzSvelteKit", () => {
 
     const plugin = jazzSvelteKit({});
     await expect(
-      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-        makeViteServer("serve"),
-      ),
-    ).rejects.toThrow(
-      "adminSecret is required when connecting to an existing server",
-    );
+      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve")),
+    ).rejects.toThrow("adminSecret is required when connecting to an existing server");
   });
 
   it("throws when connecting to an existing server without appId", async () => {
@@ -315,12 +278,8 @@ describe("jazzSvelteKit", () => {
 
     const plugin = jazzSvelteKit({ adminSecret: "admin" });
     await expect(
-      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-        makeViteServer("serve"),
-      ),
-    ).rejects.toThrow(
-      "appId is required when connecting to an existing server",
-    );
+      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve")),
+    ).rejects.toThrow("appId is required when connecting to an existing server");
   });
 
   it("stops the server and closes the watcher when the close hook fires", async () => {
@@ -354,9 +313,7 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19997, adminSecret: "close-hook-admin" },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      viteServer,
-    );
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(capturedCloseCallback).toBeDefined();
     capturedCloseCallback!();
@@ -374,9 +331,7 @@ describe("jazzSvelteKit", () => {
       dataDir: undefined as unknown as string,
       stop: vi.fn().mockResolvedValue(undefined),
     });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(
-      new Error("schema push failed"),
-    );
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockRejectedValue(new Error("schema push failed"));
     vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
 
     const root = await tempRoots.create("jazz-sveltekit-hmr-test-");
@@ -390,13 +345,9 @@ describe("jazzSvelteKit", () => {
     const plugin = jazzSvelteKit({
       server: { port: 19996, adminSecret: "hmr-error-admin" },
     });
-    const configureServer = plugin.configureServer as (
-      s: ViteDevServer,
-    ) => Promise<void>;
+    const configureServer = plugin.configureServer as (s: ViteDevServer) => Promise<void>;
 
-    await expect(configureServer(viteServer)).rejects.toThrow(
-      "schema push failed",
-    );
+    await expect(configureServer(viteServer)).rejects.toThrow("schema push failed");
     expect(wsSend).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "error",
@@ -410,9 +361,7 @@ describe("jazzSvelteKit", () => {
 
 it("config hook adds jazz-napi to ssr.external", () => {
   const plugin = jazzSvelteKit();
-  const config = (
-    plugin as { config?: (c: Record<string, unknown>) => unknown }
-  ).config;
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
   expect(config).toBeDefined();
   const result = config!({}) as { ssr?: { external?: string[] } };
   expect(result.ssr?.external).toContain("jazz-napi");
@@ -420,9 +369,7 @@ it("config hook adds jazz-napi to ssr.external", () => {
 
 it("config hook preserves existing ssr.external entries", () => {
   const plugin = jazzSvelteKit();
-  const config = (
-    plugin as { config?: (c: Record<string, unknown>) => unknown }
-  ).config;
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
   const result = config!({ ssr: { external: ["some-other-pkg"] } }) as {
     ssr?: { external?: string[] };
   };
@@ -432,9 +379,7 @@ it("config hook preserves existing ssr.external entries", () => {
 
 it("config hook injects worker format and optimizeDeps exclude", () => {
   const plugin = jazzSvelteKit();
-  const config = (
-    plugin as { config?: (c: Record<string, unknown>) => unknown }
-  ).config;
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
   const result = config!({}) as {
     worker?: { format?: string };
     optimizeDeps?: { exclude?: string[] };
@@ -445,9 +390,7 @@ it("config hook injects worker format and optimizeDeps exclude", () => {
 
 it("config hook preserves existing optimizeDeps excludes", () => {
   const plugin = jazzSvelteKit();
-  const config = (
-    plugin as { config?: (c: Record<string, unknown>) => unknown }
-  ).config;
+  const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
   const result = config!({ optimizeDeps: { exclude: ["some-dep"] } }) as {
     optimizeDeps?: { exclude?: string[] };
   };

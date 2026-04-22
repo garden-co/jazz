@@ -40,10 +40,7 @@ export interface ViteDevServer {
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
   ws: {
-    send(payload: {
-      type: string;
-      err?: { message: string; stack?: string };
-    }): void;
+    send(payload: { type: string; err?: { message: string; stack?: string } }): void;
   };
 }
 
