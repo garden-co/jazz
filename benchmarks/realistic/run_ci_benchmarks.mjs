@@ -521,7 +521,7 @@ export function buildNativeCriterionCommand(benchmark) {
 async function runNativeBenchmark(benchmark, args) {
   if (benchmark.kind === "native-example") {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
-    const env = { ...process.env, ...(benchmark.env ?? {}) };
+    const env = { ...process.env, ...benchmark.env };
     const profilePath =
       benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
     const baseCommand = buildNativeExampleBaseCommand(benchmark, args);
@@ -701,7 +701,7 @@ async function runNativeBenchmark(benchmark, args) {
   const result = await runCommand({
     command,
     cwd: process.cwd(),
-    env: { ...process.env, ...(benchmark.env ?? {}) },
+    env: { ...process.env, ...benchmark.env },
     timeoutSeconds: args.timeoutSeconds,
     logFile,
     streamStdoutToConsole: true,
@@ -753,7 +753,7 @@ async function runBrowserBenchmark(benchmark, args) {
     );
     const env = {
       ...process.env,
-      ...(benchmark.env ?? {}),
+      ...benchmark.env,
       JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
       JAZZ_REALISTIC_BROWSER_RUN_ID: `${fileSafeId(benchmark.id)}-attempt-${attemptIndex}`,
     };
