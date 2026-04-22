@@ -46,12 +46,17 @@ const COMMIT_TURN_RESULT_EVENT_TYPE = "commit_turn_result";
 const AGENT_CLAIM_AGENT_ID = "ops-claim";
 const AGENT_CLAIM_CONTROL_RUN_ID = "ops-claim-control";
 const AGENT_CLAIM_STATE_EVENT_TYPE = "agent_claim_state";
+const JOB_AGENT_ID = "job";
+const JOB_CONTROL_RUN_ID = "job-control";
+const JOB_STATE_EVENT_TYPE = "job_state";
+const JOB_EVENT_EVENT_TYPE = "job_event";
 const CONTEXT_DIGEST_AGENT_ID = "context-distill";
 const CONTEXT_DIGEST_CONTROL_RUN_ID = "context-digest-control";
 const CONTEXT_DIGEST_EVENT_TYPE = "context_digest";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "error"]);
 const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
 const TERMINAL_COMMIT_TURN_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "cancelled-superseded"]);
 const TASK_PLACEMENT_ORDER: Record<string, number> = {
   now: 0,
   next: 1,
@@ -443,6 +448,116 @@ export interface AgentClaimRecord {
   status: AgentClaimStatus;
 }
 
+export type JobStatus =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "cancelled-superseded";
+
+export type JobEventType =
+  | "created"
+  | "claimed"
+  | "renewed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "cancelled-superseded";
+
+export interface RecordJobInput {
+  jobId?: string;
+  kind: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  sourceChatKind?: string;
+  dedupeKey?: string;
+  targetSession?: string;
+  targetTurnWatermark?: string;
+  sourceSession?: string;
+  sourceWatermark?: string;
+  payloadJson?: JsonValue;
+  resultJson?: JsonValue;
+  note?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface ClaimJobInput {
+  jobId: string;
+  claimedBy: string;
+  leaseExpiresAt?: TimestampInput;
+  claimedAt?: TimestampInput;
+  attempt?: number;
+  note?: string;
+}
+
+export interface UpdateJobInput {
+  jobId: string;
+  status: JobStatus;
+  claimedBy?: string;
+  leaseExpiresAt?: TimestampInput;
+  attempt?: number;
+  resultJson?: JsonValue;
+  note?: string;
+  updatedAt?: TimestampInput;
+}
+
+export interface CancelJobInput {
+  jobId: string;
+  reason?: string;
+  cancelledAt?: TimestampInput;
+  status?: Extract<JobStatus, "cancelled" | "cancelled-superseded">;
+}
+
+export interface ListJobsInput {
+  kind?: string;
+  status?: JobStatus;
+  claimedBy?: string;
+  repoRoot?: string;
+  targetSession?: string;
+  includeFinished?: boolean;
+  limit?: number;
+}
+
+export interface JobRecord {
+  eventId: string;
+  jobId: string;
+  kind: string;
+  status: JobStatus;
+  createdAt: Date;
+  updatedAt: Date;
+  claimedBy?: string;
+  leaseExpiresAt?: Date;
+  attempt: number;
+  payloadJson?: JsonValue;
+  resultJson?: JsonValue;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  sourceChatKind?: string;
+  dedupeKey?: string;
+  targetSession?: string;
+  targetTurnWatermark?: string;
+  sourceSession?: string;
+  sourceWatermark?: string;
+  note?: string;
+}
+
+export interface JobEventRecord {
+  eventId: string;
+  jobId: string;
+  eventType: JobEventType;
+  status?: JobStatus;
+  claimedBy?: string;
+  leaseExpiresAt?: Date;
+  attempt?: number;
+  note?: string;
+  payloadJson?: JsonValue;
+  resultJson?: JsonValue;
+  occurredAt: Date;
+}
+
 export type ContextDigestStatus = "ready" | "superseded" | "expired" | "error";
 
 export interface RecordContextDigestInput {
@@ -499,6 +614,25 @@ export interface ContextDigestRecord {
   generatedAt: Date;
   expiresAt?: Date;
   status: ContextDigestStatus;
+}
+
+function jobEventTypeForStatus(status: JobStatus): JobEventType {
+  switch (status) {
+    case "queued":
+      return "created";
+    case "claimed":
+      return "claimed";
+    case "running":
+      return "running";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "cancelled-superseded":
+      return "cancelled-superseded";
+  }
 }
 
 export interface AgentRunSummary {
@@ -1545,6 +1679,293 @@ export class AgentDataStore {
       .slice(0, clampLimit(input.limit));
   }
 
+  async recordJob(input: RecordJobInput, session?: Session): Promise<JobRecord> {
+    const db = this.getDb(session);
+    await this.ensureJobControlRun(db);
+    const createdAt = asDate(input.createdAt);
+    if (!input.jobId && input.kind && input.dedupeKey) {
+      const existing = await this.findLiveJobByDedupeKey(db, input.kind, input.dedupeKey);
+      if (existing) {
+        return existing;
+      }
+    }
+
+    const jobId = input.jobId ?? randomUUID();
+    const existing = await this.getLatestJobByID(db, jobId);
+    if (existing) {
+      return existing;
+    }
+
+    const event = await this.appendSemanticEvent(
+      {
+        runId: JOB_CONTROL_RUN_ID,
+        eventId: jobId,
+        eventType: JOB_STATE_EVENT_TYPE,
+        summaryText: input.note ?? input.kind,
+        payloadJson: pruneUndefined({
+          jobId,
+          kind: input.kind,
+          status: "queued",
+          createdAt: createdAt.toISOString(),
+          updatedAt: createdAt.toISOString(),
+          attempt: 0,
+          payloadJson: input.payloadJson,
+          resultJson: input.resultJson,
+          repoRoot: input.repoRoot,
+          workspaceRoot: input.workspaceRoot,
+          sourceChatKind: input.sourceChatKind,
+          dedupeKey: input.dedupeKey,
+          targetSession: input.targetSession,
+          targetTurnWatermark: input.targetTurnWatermark,
+          sourceSession: input.sourceSession,
+          sourceWatermark: input.sourceWatermark,
+          note: input.note,
+        }) as JsonValue,
+        occurredAt: createdAt,
+      },
+      session,
+    );
+    await this.appendJobEvent(
+      {
+        jobId,
+        eventType: "created",
+        status: "queued",
+        attempt: 0,
+        note: input.note,
+        payloadJson: input.payloadJson,
+        resultJson: input.resultJson,
+        occurredAt: createdAt,
+      },
+      session,
+    );
+    const job = this.jobFromEvent(event);
+    if (!job) {
+      throw new Error(`job ${event.event_id} failed to parse`);
+    }
+    return job;
+  }
+
+  async claimJob(input: ClaimJobInput, session?: Session): Promise<JobRecord> {
+    const db = this.getDb(session);
+    await this.ensureJobControlRun(db);
+    const existing = await this.getLatestJobByID(db, input.jobId);
+    if (!existing) {
+      throw new Error(`job ${input.jobId} not found`);
+    }
+    if (TERMINAL_JOB_STATUSES.has(existing.status)) {
+      throw new Error(`job ${input.jobId} is already ${existing.status}`);
+    }
+
+    const claimedAt = asDate(input.claimedAt);
+    const leaseExpiresAt = input.leaseExpiresAt
+      ? asDate(input.leaseExpiresAt)
+      : new Date(claimedAt.getTime() + 15 * 60 * 1000);
+    const leaseExpired = isExpired(existing.leaseExpiresAt, claimedAt);
+    const renewal =
+      existing.claimedBy === input.claimedBy
+      && (existing.status === "claimed" || existing.status === "running");
+    if (
+      !renewal
+      && !leaseExpired
+      && existing.claimedBy
+      && existing.claimedBy !== input.claimedBy
+      && (existing.status === "claimed" || existing.status === "running")
+    ) {
+      throw new Error(`job ${input.jobId} is already claimed by ${existing.claimedBy}`);
+    }
+
+    const status = renewal && existing.status === "running" ? "running" : "claimed";
+    const attempt = input.attempt ?? (renewal ? existing.attempt : existing.attempt + 1);
+    const event = await this.appendSemanticEvent(
+      {
+        runId: JOB_CONTROL_RUN_ID,
+        eventId: existing.jobId,
+        eventType: JOB_STATE_EVENT_TYPE,
+        summaryText: input.note ?? existing.note ?? existing.kind,
+        payloadJson: pruneUndefined({
+          jobId: existing.jobId,
+          kind: existing.kind,
+          status,
+          createdAt: existing.createdAt.toISOString(),
+          updatedAt: claimedAt.toISOString(),
+          claimedBy: input.claimedBy,
+          leaseExpiresAt: leaseExpiresAt.toISOString(),
+          attempt,
+          payloadJson: existing.payloadJson,
+          resultJson: existing.resultJson,
+          repoRoot: existing.repoRoot,
+          workspaceRoot: existing.workspaceRoot,
+          sourceChatKind: existing.sourceChatKind,
+          dedupeKey: existing.dedupeKey,
+          targetSession: existing.targetSession,
+          targetTurnWatermark: existing.targetTurnWatermark,
+          sourceSession: existing.sourceSession,
+          sourceWatermark: existing.sourceWatermark,
+          note: input.note ?? existing.note,
+        }) as JsonValue,
+        occurredAt: claimedAt,
+      },
+      session,
+    );
+    await this.appendJobEvent(
+      {
+        jobId: existing.jobId,
+        eventType: renewal ? "renewed" : "claimed",
+        status,
+        claimedBy: input.claimedBy,
+        leaseExpiresAt,
+        attempt,
+        note: input.note ?? existing.note,
+        occurredAt: claimedAt,
+      },
+      session,
+    );
+    const job = this.jobFromEvent(event);
+    if (!job) {
+      throw new Error(`job ${event.event_id} failed to parse`);
+    }
+    return job;
+  }
+
+  async updateJob(input: UpdateJobInput, session?: Session): Promise<JobRecord> {
+    const db = this.getDb(session);
+    await this.ensureJobControlRun(db);
+    const existing = await this.getLatestJobByID(db, input.jobId);
+    if (!existing) {
+      throw new Error(`job ${input.jobId} not found`);
+    }
+
+    const updatedAt = asDate(input.updatedAt);
+    const terminal = TERMINAL_JOB_STATUSES.has(input.status);
+    const claimedBy = terminal || input.status === "queued"
+      ? undefined
+      : input.claimedBy ?? existing.claimedBy;
+    const leaseExpiresAt = terminal || input.status === "queued"
+      ? undefined
+      : input.leaseExpiresAt
+        ? asDate(input.leaseExpiresAt)
+        : existing.leaseExpiresAt;
+    const attempt = input.attempt ?? existing.attempt;
+    const resultJson = input.resultJson ?? existing.resultJson;
+    const note = input.note ?? existing.note;
+
+    const event = await this.appendSemanticEvent(
+      {
+        runId: JOB_CONTROL_RUN_ID,
+        eventId: existing.jobId,
+        eventType: JOB_STATE_EVENT_TYPE,
+        summaryText: note ?? existing.kind,
+        payloadJson: pruneUndefined({
+          jobId: existing.jobId,
+          kind: existing.kind,
+          status: input.status,
+          createdAt: existing.createdAt.toISOString(),
+          updatedAt: updatedAt.toISOString(),
+          claimedBy,
+          leaseExpiresAt: leaseExpiresAt?.toISOString(),
+          attempt,
+          payloadJson: existing.payloadJson,
+          resultJson,
+          repoRoot: existing.repoRoot,
+          workspaceRoot: existing.workspaceRoot,
+          sourceChatKind: existing.sourceChatKind,
+          dedupeKey: existing.dedupeKey,
+          targetSession: existing.targetSession,
+          targetTurnWatermark: existing.targetTurnWatermark,
+          sourceSession: existing.sourceSession,
+          sourceWatermark: existing.sourceWatermark,
+          note,
+        }) as JsonValue,
+        occurredAt: updatedAt,
+      },
+      session,
+    );
+    await this.appendJobEvent(
+      {
+        jobId: existing.jobId,
+        eventType: jobEventTypeForStatus(input.status),
+        status: input.status,
+        claimedBy,
+        leaseExpiresAt,
+        attempt,
+        note,
+        resultJson,
+        occurredAt: updatedAt,
+      },
+      session,
+    );
+    const job = this.jobFromEvent(event);
+    if (!job) {
+      throw new Error(`job ${event.event_id} failed to parse`);
+    }
+    return job;
+  }
+
+  async cancelJob(input: CancelJobInput, session?: Session): Promise<JobRecord> {
+    return this.updateJob(
+      {
+        jobId: input.jobId,
+        status: input.status ?? "cancelled",
+        note: input.reason,
+        updatedAt: input.cancelledAt,
+      },
+      session,
+    );
+  }
+
+  async getJob(jobId: string, session?: Session): Promise<JobRecord | null> {
+    return this.getLatestJobByID(this.getDb(session), jobId);
+  }
+
+  async listJobs(input: ListJobsInput = {}, session?: Session): Promise<JobRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: JOB_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 8),
+    );
+
+    const latestJobs = new Map<string, JobRecord>();
+    for (const row of rows) {
+      if (row.event_type !== JOB_STATE_EVENT_TYPE) continue;
+      const job = this.jobFromEvent(row);
+      if (!job || latestJobs.has(job.jobId)) continue;
+      latestJobs.set(job.jobId, this.normalizeJobLease(job, new Date()));
+    }
+
+    return [...latestJobs.values()]
+      .filter((job) => {
+        if (input.kind && job.kind !== input.kind) return false;
+        if (input.status && job.status !== input.status) return false;
+        if (input.claimedBy && job.claimedBy !== input.claimedBy) return false;
+        if (input.repoRoot && job.repoRoot !== input.repoRoot) return false;
+        if (input.targetSession && job.targetSession !== input.targetSession) return false;
+        if (!input.includeFinished && TERMINAL_JOB_STATUSES.has(job.status)) return false;
+        return true;
+      })
+      .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async listJobEvents(jobId: string, limit?: number, session?: Session): Promise<JobEventRecord[]> {
+    const db = this.getDb(session);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: JOB_CONTROL_RUN_ID, event_type: JOB_EVENT_EVENT_TYPE })
+        .orderBy("occurred_at", "desc")
+        .limit(Math.max(clampLimit(limit), 50) * 4),
+    );
+
+    return rows
+      .map((row) => this.jobEventFromEvent(row))
+      .filter((event): event is JobEventRecord => Boolean(event))
+      .filter((event) => event.jobId === jobId)
+      .sort((left, right) => right.occurredAt.getTime() - left.occurredAt.getTime())
+      .slice(0, clampLimit(limit));
+  }
+
   async recordContextDigest(
     input: RecordContextDigestInput,
     session?: Session,
@@ -1771,6 +2192,26 @@ export class AgentDataStore {
     return run;
   }
 
+  private async ensureJobControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(db, JOB_CONTROL_RUN_ID);
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: JOB_CONTROL_RUN_ID,
+      agentId: JOB_AGENT_ID,
+      requestSummary: "Durable workflow job control plane",
+      status: "running",
+      agent: {
+        lane: "job",
+        promptSurface: "job",
+      },
+    });
+    run = await this.getRunByExternalId(db, JOB_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error("job control run not found after creation");
+    }
+    return run;
+  }
+
   private async ensureContextDigestControlRun(db: Db): Promise<AgentRun> {
     let run = await this.getRunByExternalId(db, CONTEXT_DIGEST_CONTROL_RUN_ID);
     if (run) return run;
@@ -1942,6 +2383,99 @@ export class AgentDataStore {
     };
   }
 
+  private jobFromEvent(event: SemanticEvent): JobRecord | null {
+    if (event.event_type !== JOB_STATE_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const jobId = readObjectString(payload, "jobId") ?? event.event_id;
+    const kind = readObjectString(payload, "kind");
+    const status = readObjectString(payload, "status");
+    const createdAt = readObjectDate(payload, "createdAt");
+    const updatedAt = readObjectDate(payload, "updatedAt") ?? event.occurred_at;
+    const attempt = readObjectNumber(payload, "attempt") ?? 0;
+    if (!kind || !createdAt || !updatedAt) return null;
+    if (
+      status !== "queued"
+      && status !== "claimed"
+      && status !== "running"
+      && status !== "completed"
+      && status !== "failed"
+      && status !== "cancelled"
+      && status !== "cancelled-superseded"
+    ) {
+      return null;
+    }
+    return {
+      eventId: event.event_id,
+      jobId,
+      kind,
+      status,
+      createdAt,
+      updatedAt,
+      claimedBy: readObjectString(payload, "claimedBy"),
+      leaseExpiresAt: readObjectDate(payload, "leaseExpiresAt"),
+      attempt,
+      payloadJson: payload?.payloadJson as JsonValue | undefined,
+      resultJson: payload?.resultJson as JsonValue | undefined,
+      repoRoot: readObjectString(payload, "repoRoot"),
+      workspaceRoot: readObjectString(payload, "workspaceRoot"),
+      sourceChatKind: readObjectString(payload, "sourceChatKind"),
+      dedupeKey: readObjectString(payload, "dedupeKey"),
+      targetSession: readObjectString(payload, "targetSession"),
+      targetTurnWatermark: readObjectString(payload, "targetTurnWatermark"),
+      sourceSession: readObjectString(payload, "sourceSession"),
+      sourceWatermark: readObjectString(payload, "sourceWatermark"),
+      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+    };
+  }
+
+  private jobEventFromEvent(event: SemanticEvent): JobEventRecord | null {
+    if (event.event_type !== JOB_EVENT_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const jobId = readObjectString(payload, "jobId");
+    const eventType = readObjectString(payload, "eventType");
+    if (!jobId) return null;
+    if (
+      eventType !== "created"
+      && eventType !== "claimed"
+      && eventType !== "renewed"
+      && eventType !== "running"
+      && eventType !== "completed"
+      && eventType !== "failed"
+      && eventType !== "cancelled"
+      && eventType !== "cancelled-superseded"
+    ) {
+      return null;
+    }
+
+    const status = readObjectString(payload, "status");
+    if (
+      status !== undefined
+      && status !== "queued"
+      && status !== "claimed"
+      && status !== "running"
+      && status !== "completed"
+      && status !== "failed"
+      && status !== "cancelled"
+      && status !== "cancelled-superseded"
+    ) {
+      return null;
+    }
+
+    return {
+      eventId: event.event_id,
+      jobId,
+      eventType,
+      status,
+      claimedBy: readObjectString(payload, "claimedBy"),
+      leaseExpiresAt: readObjectDate(payload, "leaseExpiresAt"),
+      attempt: readObjectNumber(payload, "attempt"),
+      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      payloadJson: payload?.payloadJson as JsonValue | undefined,
+      resultJson: payload?.resultJson as JsonValue | undefined,
+      occurredAt: event.occurred_at,
+    };
+  }
+
   private contextDigestFromEvent(event: SemanticEvent): ContextDigestRecord | null {
     if (event.event_type !== CONTEXT_DIGEST_EVENT_TYPE) return null;
     const payload = asObjectRecord(event.payload_json);
@@ -2018,6 +2552,107 @@ export class AgentDataStore {
       }
     }
     return null;
+  }
+
+  private async getLatestJobByID(db: Db, jobId: string): Promise<JobRecord | null> {
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: JOB_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(400),
+    );
+    for (const row of rows) {
+      if (row.event_type !== JOB_STATE_EVENT_TYPE) continue;
+      const job = this.jobFromEvent(row);
+      if (job?.jobId === jobId) {
+        return this.normalizeJobLease(job, new Date());
+      }
+    }
+    return null;
+  }
+
+  private async findLiveJobByDedupeKey(
+    db: Db,
+    kind: string,
+    dedupeKey: string,
+  ): Promise<JobRecord | null> {
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: JOB_CONTROL_RUN_ID, event_type: JOB_STATE_EVENT_TYPE })
+        .orderBy("occurred_at", "desc")
+        .limit(400),
+    );
+    const now = new Date();
+    for (const row of rows) {
+      const job = this.jobFromEvent(row);
+      if (!job) continue;
+      const normalized = this.normalizeJobLease(job, now);
+      if (
+        normalized.kind === kind
+        && normalized.dedupeKey === dedupeKey
+        && !TERMINAL_JOB_STATUSES.has(normalized.status)
+      ) {
+        return normalized;
+      }
+    }
+    return null;
+  }
+
+  private normalizeJobLease(job: JobRecord, now: Date): JobRecord {
+    if (
+      (job.status === "claimed" || job.status === "running")
+      && isExpired(job.leaseExpiresAt, now)
+    ) {
+      return {
+        ...job,
+        status: "queued",
+        claimedBy: undefined,
+        leaseExpiresAt: undefined,
+      };
+    }
+    return job;
+  }
+
+  private async appendJobEvent(
+    input: {
+      jobId: string;
+      eventType: JobEventType;
+      status?: JobStatus;
+      claimedBy?: string;
+      leaseExpiresAt?: Date;
+      attempt?: number;
+      note?: string;
+      payloadJson?: JsonValue;
+      resultJson?: JsonValue;
+      occurredAt?: Date;
+    },
+    session?: Session,
+  ): Promise<JobEventRecord> {
+    const event = await this.appendSemanticEvent(
+      {
+        runId: JOB_CONTROL_RUN_ID,
+        eventType: JOB_EVENT_EVENT_TYPE,
+        summaryText: input.note ?? `${input.jobId} ${input.eventType}`,
+        payloadJson: pruneUndefined({
+          jobId: input.jobId,
+          eventType: input.eventType,
+          status: input.status,
+          claimedBy: input.claimedBy,
+          leaseExpiresAt: input.leaseExpiresAt?.toISOString(),
+          attempt: input.attempt,
+          note: input.note,
+          payloadJson: input.payloadJson,
+          resultJson: input.resultJson,
+        }) as JsonValue,
+        occurredAt: input.occurredAt,
+      },
+      session,
+    );
+    const jobEvent = this.jobEventFromEvent(event);
+    if (!jobEvent) {
+      throw new Error(`job event ${event.event_id} failed to parse`);
+    }
+    return jobEvent;
   }
 
   private async requireItemByExternalId(db: Db, runId: string, itemId: string): Promise<RunItem> {

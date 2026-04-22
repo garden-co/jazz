@@ -13,11 +13,16 @@ import {
   type ContextDigestRecord,
   type CursorReviewOperationRecord,
   type CursorReviewOperationResultRecord,
+  type JobEventRecord,
+  type JobRecord,
   createAgentDataStore,
+  type CancelJobInput,
+  type ClaimJobInput,
   type ListAgentClaimsInput,
   type ListCommitTurnOperationsInput,
   type ListContextDigestsInput,
   type ListCursorReviewOperationsInput,
+  type ListJobsInput,
   type ListTaskRecordsInput,
   type RecordAgentClaimInput,
   type RecordCommitTurnOperationInput,
@@ -25,6 +30,7 @@ import {
   type RecordContextDigestInput,
   type RecordCursorReviewOperationInput,
   type RecordCursorReviewResultInput,
+  type RecordJobInput,
   type MemoryLink,
   type RecordArtifactInput,
   type RecordItemCompletedInput,
@@ -38,6 +44,7 @@ import {
   type SemanticEvent,
   type SourceFile,
   type TaskRecord,
+  type UpdateJobInput,
   type WireEvent,
   type WorkspaceSnapshot,
   type UpsertTaskRecordInput,
@@ -273,6 +280,43 @@ interface SerializedContextDigest {
   generatedAt: string;
   expiresAt: string | null;
   status: string;
+}
+
+interface SerializedJob {
+  eventId: string;
+  jobId: string;
+  kind: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  claimedBy: string | null;
+  leaseExpiresAt: string | null;
+  attempt: number;
+  payloadJson: unknown | null;
+  resultJson: unknown | null;
+  repoRoot: string | null;
+  workspaceRoot: string | null;
+  sourceChatKind: string | null;
+  dedupeKey: string | null;
+  targetSession: string | null;
+  targetTurnWatermark: string | null;
+  sourceSession: string | null;
+  sourceWatermark: string | null;
+  note: string | null;
+}
+
+interface SerializedJobEvent {
+  eventId: string;
+  jobId: string;
+  eventType: string;
+  status: string | null;
+  claimedBy: string | null;
+  leaseExpiresAt: string | null;
+  attempt: number | null;
+  note: string | null;
+  payloadJson: unknown | null;
+  resultJson: unknown | null;
+  occurredAt: string;
 }
 
 interface SerializedAgentRunSummary {
@@ -635,6 +679,47 @@ function serializeContextDigest(
   };
 }
 
+function serializeJob(job: JobRecord): SerializedJob {
+  return {
+    eventId: job.eventId,
+    jobId: job.jobId,
+    kind: job.kind,
+    status: job.status,
+    createdAt: job.createdAt.toISOString(),
+    updatedAt: job.updatedAt.toISOString(),
+    claimedBy: job.claimedBy ?? null,
+    leaseExpiresAt: serializeNullableDate(job.leaseExpiresAt),
+    attempt: job.attempt,
+    payloadJson: job.payloadJson ?? null,
+    resultJson: job.resultJson ?? null,
+    repoRoot: job.repoRoot ?? null,
+    workspaceRoot: job.workspaceRoot ?? null,
+    sourceChatKind: job.sourceChatKind ?? null,
+    dedupeKey: job.dedupeKey ?? null,
+    targetSession: job.targetSession ?? null,
+    targetTurnWatermark: job.targetTurnWatermark ?? null,
+    sourceSession: job.sourceSession ?? null,
+    sourceWatermark: job.sourceWatermark ?? null,
+    note: job.note ?? null,
+  };
+}
+
+function serializeJobEvent(event: JobEventRecord): SerializedJobEvent {
+  return {
+    eventId: event.eventId,
+    jobId: event.jobId,
+    eventType: event.eventType,
+    status: event.status ?? null,
+    claimedBy: event.claimedBy ?? null,
+    leaseExpiresAt: serializeNullableDate(event.leaseExpiresAt),
+    attempt: event.attempt ?? null,
+    note: event.note ?? null,
+    payloadJson: event.payloadJson ?? null,
+    resultJson: event.resultJson ?? null,
+    occurredAt: event.occurredAt.toISOString(),
+  };
+}
+
 function serializeRunSummary(summary: AgentRunSummary): SerializedAgentRunSummary {
   return {
     run: serializeAgentRun(summary.run),
@@ -889,6 +974,70 @@ async function main(): Promise<void> {
         };
         const digests = await store.listContextDigests(query);
         renderJson(digests.map(serializeContextDigest));
+        break;
+      }
+      case "record-job": {
+        const input = readJsonInput<RecordJobInput>("record-job");
+        const job = await store.recordJob(input);
+        renderJson(serializeJob(job));
+        break;
+      }
+      case "claim-job": {
+        const input = readJsonInput<ClaimJobInput>("claim-job");
+        const job = await store.claimJob(input);
+        renderJson(serializeJob(job));
+        break;
+      }
+      case "update-job": {
+        const input = readJsonInput<UpdateJobInput>("update-job");
+        const job = await store.updateJob(input);
+        renderJson(serializeJob(job));
+        break;
+      }
+      case "cancel-job": {
+        const input = readJsonInput<CancelJobInput>("cancel-job");
+        const job = await store.cancelJob(input);
+        renderJson(serializeJob(job));
+        break;
+      }
+      case "get-job": {
+        const jobId = readFlag("--job-id");
+        if (!jobId) {
+          throw new Error("get-job requires --job-id");
+        }
+        const job = await store.getJob(jobId);
+        if (!job) {
+          throw new Error(`job ${jobId} not found`);
+        }
+        renderJson(serializeJob(job));
+        break;
+      }
+      case "list-jobs": {
+        const limitRaw = readFlag("--limit");
+        const query: ListJobsInput = {
+          kind: readFlag("--kind"),
+          status: readFlag("--status") as ListJobsInput["status"],
+          claimedBy: readFlag("--claimed-by"),
+          repoRoot: readFlag("--repo-root"),
+          targetSession: readFlag("--target-session"),
+          includeFinished: hasFlag("--include-finished"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const jobs = await store.listJobs(query);
+        renderJson(jobs.map(serializeJob));
+        break;
+      }
+      case "list-job-events": {
+        const jobId = readFlag("--job-id");
+        if (!jobId) {
+          throw new Error("list-job-events requires --job-id");
+        }
+        const limitRaw = readFlag("--limit");
+        const events = await store.listJobEvents(
+          jobId,
+          limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        );
+        renderJson(events.map(serializeJobEvent));
         break;
       }
       case "list-commit-turn-ops": {
