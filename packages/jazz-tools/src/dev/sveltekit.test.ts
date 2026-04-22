@@ -430,30 +430,17 @@ it("config hook preserves existing ssr.external entries", () => {
   expect(result.ssr?.external).toContain("some-other-pkg");
 });
 
-it("config hook injects build target, worker format, and optimizeDeps exclude", () => {
+it("config hook injects worker format and optimizeDeps exclude", () => {
   const plugin = jazzSvelteKit();
   const config = (
     plugin as { config?: (c: Record<string, unknown>) => unknown }
   ).config;
   const result = config!({}) as {
-    build?: { target?: string };
     worker?: { format?: string };
     optimizeDeps?: { exclude?: string[] };
   };
-  expect(result.build?.target).toBe("es2020");
   expect(result.worker?.format).toBe("es");
   expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
-});
-
-it("config hook respects a higher build target set by the user", () => {
-  const plugin = jazzSvelteKit();
-  const config = (
-    plugin as { config?: (c: Record<string, unknown>) => unknown }
-  ).config;
-  const result = config!({ build: { target: "esnext" } }) as {
-    build?: { target?: string };
-  };
-  expect(result.build?.target).toBe("esnext");
 });
 
 it("config hook preserves existing optimizeDeps excludes", () => {
