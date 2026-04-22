@@ -315,8 +315,9 @@ interface SnapshotEntry {
   schema: WasmSchema;
 }
 
+// Supports both millisecond and microsecond-precision timestamps
 function looksLikeSnapshotFileName(fileName: string): boolean {
-  return /^(?:\d{8,}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
+  return /^(?:\d{8,17}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
 }
 
 async function readSnapshotEntry(dir: string, fileName: string): Promise<SnapshotEntry | null> {
