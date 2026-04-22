@@ -2603,17 +2603,19 @@ describe("bin integration", () => {
     ).toBe(true);
   });
 
-  it("rejects schema export when both --schema-dir and --schema-hash are provided", async () => {
+  it("rejects schema export when both --schema-dir and --schema-hash are provided at parse time", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
 
-    const result = runBin(
-      ["schema", "export", "--schema-dir", root, "--schema-hash", "a".repeat(64)],
-      { cwd: root },
-    );
+    const schemaHash = "a".repeat(64);
+    const result = runBin(["schema", "export", "--schema-dir", root, "--schema-hash", schemaHash], {
+      cwd: root,
+    });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("mutually exclusive");
+    expect(result.stderr).toContain(
+      `Error: "--schema-dir" "${root}" and "--schema-hash" "${schemaHash}" cannot be used together.`,
+    );
   });
 
   it("loads schema export --schema-hash from a local snapshot without hitting the server", async () => {
@@ -2874,5 +2876,33 @@ exit 0
     expect(result.stdout).toContain("migrations push");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
+  });
+
+  it("shows deploy help without requiring app credentials", () => {
+    const result = runBin(["deploy", "--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Publish the current schema.ts and permissions.ts");
+    expect(result.stdout).toContain("--server-url");
+    expect(result.stdout).toContain("--admin-secret");
+    expect(result.stderr).not.toContain("Missing app ID");
+  });
+
+  it("shows permissions status help without requiring an app id", () => {
+    const result = runBin(["permissions", "status", "--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Show the current server permissions head for this app");
+    expect(result.stdout).toContain("--schema-dir");
+    expect(result.stderr).not.toContain("Missing app ID");
+  });
+
+  it("shows schema export help without trying to load a schema", () => {
+    const result = runBin(["schema", "export", "--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Print the compiled structural schema as JSON");
+    expect(result.stdout).toContain("--schema-hash");
+    expect(result.stderr).not.toContain("Schema file not found");
   });
 });
