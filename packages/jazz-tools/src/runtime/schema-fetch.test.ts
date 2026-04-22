@@ -47,6 +47,28 @@ describe("schema-fetch", () => {
     });
   });
 
+  it("normalizes microsecond publishedAt values to epoch milliseconds", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        schema: { users: { columns: [] } },
+        publishedAt: 1_744_011_200_000_000,
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const result = await fetchStoredWasmSchema("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+      schemaHash: hash,
+    });
+
+    expect(result.publishedAt).toBe(1_744_011_200_000);
+  });
+
   it("throws a descriptive error on non-2xx responses", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
