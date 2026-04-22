@@ -9,13 +9,13 @@ Jazz is actively developed. Always fetch the live docs before answering Jazz-rel
 **Step 1:** Fetch the page index to identify relevant pages:
 
 ```
-https://jazz2-docs.vercel.app/llms.txt
+https://jazz.tools/llms.txt
 ```
 
 **Step 2:** Fetch the relevant page by appending `.mdx` to its path, e.g.:
 
 ```
-https://jazz2-docs.vercel.app/docs/schemas/defining-tables.mdx
+https://jazz.tools/docs/schemas/defining-tables.mdx
 ```
 
 Only fetch the pages you actually need.
