@@ -47,6 +47,27 @@ describe("jazzPlugin", () => {
     expect(plugin.name).toBe("jazz");
   });
 
+  it("config hook injects worker format and optimizeDeps exclude", () => {
+    const plugin = jazzPlugin();
+    const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+    const result = config!({}) as {
+      worker?: { format?: string };
+      optimizeDeps?: { exclude?: string[] };
+    };
+    expect(result.worker?.format).toBe("es");
+    expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
+  });
+
+  it("config hook preserves existing optimizeDeps excludes", () => {
+    const plugin = jazzPlugin();
+    const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
+    const result = config!({ optimizeDeps: { exclude: ["some-dep"] } }) as {
+      optimizeDeps?: { exclude?: string[] };
+    };
+    expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
+    expect(result.optimizeDeps?.exclude).toContain("some-dep");
+  });
+
   it("starts a server and pushes schema via configureServer hook", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
@@ -60,7 +81,11 @@ describe("jazzPlugin", () => {
 
     const closeHandlers: (() => Promise<void> | void)[] = [];
     const fakeViteServer = {
-      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
       httpServer: {
         once(_event: string, cb: () => void) {
           closeHandlers.push(cb);
@@ -144,7 +169,11 @@ describe("jazzPlugin", () => {
 
     const closeHandlers: (() => Promise<void> | void)[] = [];
     const fakeViteServer = {
-      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
       httpServer: {
         once(_event: string, cb: () => void) {
           closeHandlers.push(cb);
