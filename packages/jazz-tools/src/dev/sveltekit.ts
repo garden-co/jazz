@@ -18,7 +18,10 @@ export interface JazzServerOptions extends BaseJazzServerOptions {
   backendSecret?: string;
 }
 
-export interface JazzPluginOptions extends Omit<BaseJazzPluginOptions, "server"> {
+export interface JazzPluginOptions extends Omit<
+  BaseJazzPluginOptions,
+  "server"
+> {
   server?: boolean | string | JazzServerOptions;
 }
 
@@ -43,32 +46,41 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   return {
     name: "jazz-sveltekit",
 
-    config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
+    config(config: {
+      build?: { target?: string | string[] };
+      ssr?: { external?: string[] };
+      optimizeDeps?: { exclude?: string[] };
+    }) {
       const existingSsr = config.ssr?.external ?? [];
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
-        build: { target: "es2020" },
+        build: { target: config.build?.target ?? "es2020" },
         worker: { format: "es" as const },
-        optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
+        optimizeDeps: {
+          exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
+        },
         ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
       };
     },
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
-      if (viteServer.config.command !== "serve" || options.server === false) return;
+      if (viteServer.config.command !== "serve" || options.server === false)
+        return;
 
       // Vite (and SvelteKit-via-Vite) doesn't populate process.env from .env
       // for unprefixed keys, so the managed runtime's env-driven cloud-mode check
       // would otherwise never fire. Backfill before reading.
       loadEnvFileIntoProcessEnv(viteServer.config.root);
 
-      const schemaDir = options.schemaDir ?? join(viteServer.config.root, "src", "lib");
+      const schemaDir =
+        options.schemaDir ?? join(viteServer.config.root, "src", "lib");
       const serverOpt = options.server ?? true;
 
       // Extract backendSecret from the server config object (SvelteKit-only option).
       const serverConfig: JazzServerOptions =
         typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
-      const backendSecret = serverConfig.backendSecret ?? process.env.BACKEND_SECRET;
+      const backendSecret =
+        serverConfig.backendSecret ?? process.env.BACKEND_SECRET;
 
       // Pre-resolve jwksUrl from Vite's configured host/port when starting a
       // local server. Precedence: explicit option → APP_ORIGIN env → Vite config
@@ -134,8 +146,12 @@ function resolveServerWithJwks(
   const serverConfig: JazzServerOptions =
     typeof serverOpt === "object" && serverOpt !== null ? serverOpt : {};
 
-  if (serverConfig.jwksUrl !== undefined) return serverConfig as BaseJazzServerOptions;
+  if (serverConfig.jwksUrl !== undefined)
+    return serverConfig as BaseJazzServerOptions;
 
   const appOrigin = process.env.APP_ORIGIN ?? resolveViteOrigin(viteServer);
-  return { ...serverConfig, jwksUrl: `${appOrigin}/api/auth/jwks` } as BaseJazzServerOptions;
+  return {
+    ...serverConfig,
+    jwksUrl: `${appOrigin}/api/auth/jwks`,
+  } as BaseJazzServerOptions;
 }

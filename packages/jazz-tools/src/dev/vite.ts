@@ -40,7 +40,10 @@ export interface ViteDevServer {
   };
   httpServer: { once(event: string, cb: () => void): void } | null;
   ws: {
-    send(payload: { type: string; err?: { message: string; stack?: string } }): void;
+    send(payload: {
+      type: string;
+      err?: { message: string; stack?: string };
+    }): void;
   };
 }
 
@@ -56,12 +59,17 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: { optimizeDeps?: { exclude?: string[] } }) {
+    config(config: {
+      build?: { target?: string | string[] };
+      optimizeDeps?: { exclude?: string[] };
+    }) {
       const existing = config.optimizeDeps?.exclude ?? [];
       return {
-        build: { target: "es2020" },
+        build: { target: config.build?.target ?? "es2020" },
         worker: { format: "es" as const },
-        optimizeDeps: { exclude: Array.from(new Set([...existing, "jazz-wasm"])) },
+        optimizeDeps: {
+          exclude: Array.from(new Set([...existing, "jazz-wasm"])),
+        },
       };
     },
 
