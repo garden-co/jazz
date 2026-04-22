@@ -58,8 +58,8 @@ function Router() {
   return <GenerateData />;
 }
 
-const appId = import.meta.env.JAZZ_APP_ID;
-const serverUrl = import.meta.env.JAZZ_SERVER_URL;
+const appId = import.meta.env.VITE_JAZZ_APP_ID;
+const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
 
 if (!appId) {
   throw new Error("JAZZ_APP_ID is required");
