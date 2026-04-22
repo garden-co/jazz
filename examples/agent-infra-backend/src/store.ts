@@ -43,6 +43,12 @@ const COMMIT_TURN_AGENT_ID = "commit";
 const COMMIT_TURN_CONTROL_RUN_ID = "commit-turn-control";
 const COMMIT_TURN_OPERATION_EVENT_TYPE = "commit_turn_operation";
 const COMMIT_TURN_RESULT_EVENT_TYPE = "commit_turn_result";
+const AGENT_CLAIM_AGENT_ID = "ops-claim";
+const AGENT_CLAIM_CONTROL_RUN_ID = "ops-claim-control";
+const AGENT_CLAIM_STATE_EVENT_TYPE = "agent_claim_state";
+const CONTEXT_DIGEST_AGENT_ID = "context-distill";
+const CONTEXT_DIGEST_CONTROL_RUN_ID = "context-digest-control";
+const CONTEXT_DIGEST_EVENT_TYPE = "context_digest";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "error"]);
 const TERMINAL_CURSOR_REVIEW_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
 const TERMINAL_COMMIT_TURN_RESULT_STATUSES = new Set(["completed", "failed", "ignored"]);
@@ -324,9 +330,13 @@ export interface RecordCommitTurnResultInput {
   repoRoot?: string;
   message?: string;
   classification?: string;
+  title?: string;
+  description?: string;
   commitMessage?: string;
   todoItems?: string[];
   notes?: string;
+  snapshotCommitId?: string;
+  reviewJobId?: string;
   conversationHash?: string;
   processedAt?: TimestampInput;
 }
@@ -348,9 +358,13 @@ export interface CommitTurnResultRecord {
   repoRoot?: string;
   message?: string;
   classification?: string;
+  title?: string;
+  description?: string;
   commitMessage?: string;
   todoItems?: string[];
   notes?: string;
+  snapshotCommitId?: string;
+  reviewJobId?: string;
   conversationHash?: string;
   processedAt: Date;
 }
@@ -373,6 +387,118 @@ export interface CommitTurnOperationRecord {
   sourceChatKind?: string;
   createdAt: Date;
   latestResult?: CommitTurnResultRecord;
+}
+
+export type AgentClaimStatus = "active" | "released" | "expired";
+
+export interface RecordAgentClaimInput {
+  claimId?: string;
+  scope: string;
+  owner: string;
+  ownerSession?: string;
+  mode?: string;
+  note?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  startedAt?: TimestampInput;
+  expiresAt?: TimestampInput;
+  heartbeatAt?: TimestampInput;
+  releasedAt?: TimestampInput;
+  status?: AgentClaimStatus;
+}
+
+export interface RenewAgentClaimInput {
+  claimId: string;
+  expiresAt?: TimestampInput;
+  heartbeatAt?: TimestampInput;
+}
+
+export interface ReleaseAgentClaimInput {
+  claimId: string;
+  releasedAt?: TimestampInput;
+}
+
+export interface ListAgentClaimsInput {
+  scopePrefix?: string;
+  ownerSession?: string;
+  includeReleased?: boolean;
+  includeExpired?: boolean;
+  limit?: number;
+}
+
+export interface AgentClaimRecord {
+  eventId: string;
+  claimId: string;
+  scope: string;
+  owner: string;
+  ownerSession?: string;
+  mode?: string;
+  note?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  startedAt: Date;
+  expiresAt: Date;
+  heartbeatAt: Date;
+  releasedAt?: Date;
+  status: AgentClaimStatus;
+}
+
+export type ContextDigestStatus = "ready" | "superseded" | "expired" | "error";
+
+export interface RecordContextDigestInput {
+  digestId?: string;
+  targetProvider: string;
+  targetSession: string;
+  targetTurnOrdinal: number;
+  targetConversation: string;
+  targetConversationHash: string;
+  sourceSession: string;
+  sourceWatermarkKind: string;
+  sourceWatermarkValue: string;
+  sourceConversationHash?: string;
+  kind: string;
+  digestText: string;
+  modelUsed?: string;
+  score?: number;
+  confidence?: string;
+  reason?: string;
+  generatedAt?: TimestampInput;
+  expiresAt?: TimestampInput;
+  status?: ContextDigestStatus;
+}
+
+export interface ListContextDigestsInput {
+  targetSession?: string;
+  targetConversation?: string;
+  targetConversationHash?: string;
+  targetTurnOrdinal?: number;
+  sourceSession?: string;
+  kind?: string;
+  includeExpired?: boolean;
+  limit?: number;
+}
+
+export interface ContextDigestRecord {
+  eventId: string;
+  digestId: string;
+  targetProvider: string;
+  targetSession: string;
+  targetTurnOrdinal: number;
+  targetConversation: string;
+  targetConversationHash: string;
+  sourceSession: string;
+  sourceWatermarkKind: string;
+  sourceWatermarkValue: string;
+  sourceConversationHash?: string;
+  kind: string;
+  digestText: string;
+  modelUsed?: string;
+  score?: number;
+  confidence?: string;
+  reason?: string;
+  generatedAt: Date;
+  expiresAt?: Date;
+  status: ContextDigestStatus;
 }
 
 export interface AgentRunSummary {
@@ -439,6 +565,26 @@ function readObjectStringArray(
   return items.length > 0 ? items : undefined;
 }
 
+function readObjectNumber(
+  value: Record<string, JsonValue> | null,
+  key: string,
+): number | undefined {
+  const raw = value?.[key];
+  return typeof raw === "number" ? raw : undefined;
+}
+
+function readObjectDate(
+  value: Record<string, JsonValue> | null,
+  key: string,
+): Date | undefined {
+  const raw = value?.[key];
+  if (typeof raw !== "string" && typeof raw !== "number") {
+    return undefined;
+  }
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 function asDate(value?: TimestampInput): Date {
   if (value instanceof Date) return value;
   if (typeof value === "string" || typeof value === "number") {
@@ -454,6 +600,10 @@ function pruneUndefined<T extends Record<string, unknown>>(input: T): Partial<T>
 
 function clampLimit(limit: number | undefined, fallback = 20): number {
   return Math.max(1, Math.min(limit ?? fallback, 200));
+}
+
+function isExpired(expiresAt: Date | undefined, now: Date): boolean {
+  return Boolean(expiresAt && expiresAt.getTime() <= now.getTime());
 }
 
 export class AgentDataStore {
@@ -1174,9 +1324,13 @@ export class AgentDataStore {
           repoRoot: input.repoRoot,
           message: input.message,
           classification: input.classification,
+          title: input.title,
+          description: input.description,
           commitMessage: input.commitMessage,
           todoItems: input.todoItems,
           notes: input.notes,
+          snapshotCommitId: input.snapshotCommitId,
+          reviewJobId: input.reviewJobId,
           conversationHash: input.conversationHash,
         }) as JsonValue,
         occurredAt: input.processedAt,
@@ -1238,6 +1392,254 @@ export class AgentDataStore {
       .slice(0, clampLimit(input.limit));
 
     return operations;
+  }
+
+  async recordAgentClaim(
+    input: RecordAgentClaimInput,
+    session?: Session,
+  ): Promise<AgentClaimRecord> {
+    const db = this.getDb(session);
+    await this.ensureAgentClaimControlRun(db);
+    const startedAt = asDate(input.startedAt);
+    const expiresAt = input.expiresAt
+      ? asDate(input.expiresAt)
+      : new Date(startedAt.getTime() + 2 * 60 * 60 * 1000);
+    const heartbeatAt = input.heartbeatAt ? asDate(input.heartbeatAt) : startedAt;
+    const releasedAt = input.releasedAt ? asDate(input.releasedAt) : undefined;
+    const claimId = input.claimId ?? randomUUID();
+    const status = input.status ?? (releasedAt ? "released" : "active");
+    const event = await this.appendSemanticEvent(
+      {
+        runId: AGENT_CLAIM_CONTROL_RUN_ID,
+        eventId: claimId,
+        eventType: AGENT_CLAIM_STATE_EVENT_TYPE,
+        summaryText: input.note ?? `${input.scope} ${status}`,
+        payloadJson: pruneUndefined({
+          claimId,
+          scope: input.scope,
+          owner: input.owner,
+          ownerSession: input.ownerSession,
+          mode: input.mode,
+          note: input.note,
+          repoRoot: input.repoRoot,
+          workspaceRoot: input.workspaceRoot,
+          startedAt: startedAt.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+          heartbeatAt: heartbeatAt.toISOString(),
+          releasedAt: releasedAt?.toISOString(),
+          status,
+        }) as JsonValue,
+        occurredAt: heartbeatAt,
+      },
+      session,
+    );
+    const claim = this.agentClaimFromEvent(event);
+    if (!claim) {
+      throw new Error(`agent claim ${event.event_id} failed to parse`);
+    }
+    return claim;
+  }
+
+  async renewAgentClaim(
+    input: RenewAgentClaimInput,
+    session?: Session,
+  ): Promise<AgentClaimRecord> {
+    const db = this.getDb(session);
+    await this.ensureAgentClaimControlRun(db);
+    const existing = await this.getLatestAgentClaimByID(db, input.claimId);
+    if (!existing) {
+      throw new Error(`agent claim ${input.claimId} not found`);
+    }
+    if (existing.status === "released") {
+      throw new Error(`agent claim ${input.claimId} has already been released`);
+    }
+    const heartbeatAt = input.heartbeatAt ? asDate(input.heartbeatAt) : new Date();
+    const expiresAt = input.expiresAt ? asDate(input.expiresAt) : existing.expiresAt;
+    return this.recordAgentClaim(
+      {
+        claimId: existing.claimId,
+        scope: existing.scope,
+        owner: existing.owner,
+        ownerSession: existing.ownerSession,
+        mode: existing.mode,
+        note: existing.note,
+        repoRoot: existing.repoRoot,
+        workspaceRoot: existing.workspaceRoot,
+        startedAt: existing.startedAt,
+        expiresAt,
+        heartbeatAt,
+        status: "active",
+      },
+      session,
+    );
+  }
+
+  async releaseAgentClaim(
+    input: ReleaseAgentClaimInput,
+    session?: Session,
+  ): Promise<AgentClaimRecord> {
+    const db = this.getDb(session);
+    await this.ensureAgentClaimControlRun(db);
+    const existing = await this.getLatestAgentClaimByID(db, input.claimId);
+    if (!existing) {
+      throw new Error(`agent claim ${input.claimId} not found`);
+    }
+    const releasedAt = input.releasedAt ? asDate(input.releasedAt) : new Date();
+    return this.recordAgentClaim(
+      {
+        claimId: existing.claimId,
+        scope: existing.scope,
+        owner: existing.owner,
+        ownerSession: existing.ownerSession,
+        mode: existing.mode,
+        note: existing.note,
+        repoRoot: existing.repoRoot,
+        workspaceRoot: existing.workspaceRoot,
+        startedAt: existing.startedAt,
+        expiresAt: existing.expiresAt,
+        heartbeatAt: releasedAt,
+        releasedAt,
+        status: "released",
+      },
+      session,
+    );
+  }
+
+  async listAgentClaims(
+    input: ListAgentClaimsInput = {},
+    session?: Session,
+  ): Promise<AgentClaimRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: AGENT_CLAIM_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 8),
+    );
+
+    const latestClaims = new Map<string, AgentClaimRecord>();
+    for (const row of rows) {
+      if (row.event_type !== AGENT_CLAIM_STATE_EVENT_TYPE) continue;
+      const claim = this.agentClaimFromEvent(row);
+      if (!claim || latestClaims.has(claim.claimId)) continue;
+      latestClaims.set(claim.claimId, claim);
+    }
+
+    const now = new Date();
+    return [...latestClaims.values()]
+      .map((claim) => {
+        if (claim.status === "active" && isExpired(claim.expiresAt, now)) {
+          return { ...claim, status: "expired" as const };
+        }
+        return claim;
+      })
+      .filter((claim) => {
+        if (input.scopePrefix && !claim.scope.startsWith(input.scopePrefix)) return false;
+        if (input.ownerSession && claim.ownerSession !== input.ownerSession) return false;
+        if (!input.includeReleased && claim.status === "released") return false;
+        if (!input.includeExpired && claim.status === "expired") return false;
+        return true;
+      })
+      .sort((left, right) => right.heartbeatAt.getTime() - left.heartbeatAt.getTime())
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async recordContextDigest(
+    input: RecordContextDigestInput,
+    session?: Session,
+  ): Promise<ContextDigestRecord> {
+    const db = this.getDb(session);
+    await this.ensureContextDigestControlRun(db);
+    const digestId = input.digestId ?? randomUUID();
+    const generatedAt = asDate(input.generatedAt);
+    const expiresAt = input.expiresAt ? asDate(input.expiresAt) : undefined;
+    const event = await this.appendSemanticEvent(
+      {
+        runId: CONTEXT_DIGEST_CONTROL_RUN_ID,
+        eventId: digestId,
+        eventType: CONTEXT_DIGEST_EVENT_TYPE,
+        summaryText: input.reason ?? input.kind,
+        payloadJson: pruneUndefined({
+          digestId,
+          targetProvider: input.targetProvider,
+          targetSession: input.targetSession,
+          targetTurnOrdinal: input.targetTurnOrdinal,
+          targetConversation: input.targetConversation,
+          targetConversationHash: input.targetConversationHash,
+          sourceSession: input.sourceSession,
+          sourceWatermarkKind: input.sourceWatermarkKind,
+          sourceWatermarkValue: input.sourceWatermarkValue,
+          sourceConversationHash: input.sourceConversationHash,
+          kind: input.kind,
+          digestText: input.digestText,
+          modelUsed: input.modelUsed,
+          score: input.score,
+          confidence: input.confidence,
+          reason: input.reason,
+          generatedAt: generatedAt.toISOString(),
+          expiresAt: expiresAt?.toISOString(),
+          status: input.status ?? "ready",
+        }) as JsonValue,
+        occurredAt: generatedAt,
+      },
+      session,
+    );
+    const digest = this.contextDigestFromEvent(event);
+    if (!digest) {
+      throw new Error(`context digest ${event.event_id} failed to parse`);
+    }
+    return digest;
+  }
+
+  async listContextDigests(
+    input: ListContextDigestsInput = {},
+    session?: Session,
+  ): Promise<ContextDigestRecord[]> {
+    const db = this.getDb(session);
+    const limit = Math.max(clampLimit(input.limit), 50);
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: CONTEXT_DIGEST_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(limit * 8),
+    );
+
+    const latestDigests = new Map<string, ContextDigestRecord>();
+    for (const row of rows) {
+      if (row.event_type !== CONTEXT_DIGEST_EVENT_TYPE) continue;
+      const digest = this.contextDigestFromEvent(row);
+      if (!digest || latestDigests.has(digest.digestId)) continue;
+      latestDigests.set(digest.digestId, digest);
+    }
+
+    const now = new Date();
+    return [...latestDigests.values()]
+      .map((digest) => {
+        if (digest.status === "ready" && isExpired(digest.expiresAt, now)) {
+          return { ...digest, status: "expired" as const };
+        }
+        return digest;
+      })
+      .filter((digest) => {
+        if (input.targetSession && digest.targetSession !== input.targetSession) return false;
+        if (input.targetConversation && digest.targetConversation !== input.targetConversation) return false;
+        if (input.targetConversationHash && digest.targetConversationHash !== input.targetConversationHash) {
+          return false;
+        }
+        if (
+          input.targetTurnOrdinal !== undefined
+          && digest.targetTurnOrdinal !== input.targetTurnOrdinal
+        ) {
+          return false;
+        }
+        if (input.sourceSession && digest.sourceSession !== input.sourceSession) return false;
+        if (input.kind && digest.kind !== input.kind) return false;
+        if (!input.includeExpired && digest.status === "expired") return false;
+        return true;
+      })
+      .sort((left, right) => right.generatedAt.getTime() - left.generatedAt.getTime())
+      .slice(0, clampLimit(input.limit));
   }
 
   async listRecentRuns(limit?: number, session?: Session): Promise<AgentRun[]> {
@@ -1345,6 +1747,46 @@ export class AgentDataStore {
     run = await this.getRunByExternalId(db, COMMIT_TURN_CONTROL_RUN_ID);
     if (!run) {
       throw new Error("commit turn control run not found after creation");
+    }
+    return run;
+  }
+
+  private async ensureAgentClaimControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(db, AGENT_CLAIM_CONTROL_RUN_ID);
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: AGENT_CLAIM_CONTROL_RUN_ID,
+      agentId: AGENT_CLAIM_AGENT_ID,
+      requestSummary: "Workflow advisory claim control plane",
+      status: "running",
+      agent: {
+        lane: "ops-claim",
+        promptSurface: "ops-claim",
+      },
+    });
+    run = await this.getRunByExternalId(db, AGENT_CLAIM_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error("agent claim control run not found after creation");
+    }
+    return run;
+  }
+
+  private async ensureContextDigestControlRun(db: Db): Promise<AgentRun> {
+    let run = await this.getRunByExternalId(db, CONTEXT_DIGEST_CONTROL_RUN_ID);
+    if (run) return run;
+    await this.recordRunStarted({
+      runId: CONTEXT_DIGEST_CONTROL_RUN_ID,
+      agentId: CONTEXT_DIGEST_AGENT_ID,
+      requestSummary: "Context digest control plane",
+      status: "running",
+      agent: {
+        lane: "context-digest",
+        promptSurface: "context-digest",
+      },
+    });
+    run = await this.getRunByExternalId(db, CONTEXT_DIGEST_CONTROL_RUN_ID);
+    if (!run) {
+      throw new Error("context digest control run not found after creation");
     }
     return run;
   }
@@ -1457,12 +1899,125 @@ export class AgentDataStore {
       repoRoot: readObjectString(payload, "repoRoot"),
       message: readObjectString(payload, "message") ?? event.summary_text ?? undefined,
       classification: readObjectString(payload, "classification"),
+      title: readObjectString(payload, "title"),
+      description: readObjectString(payload, "description"),
       commitMessage: readObjectString(payload, "commitMessage"),
       todoItems: readObjectStringArray(payload, "todoItems"),
       notes: readObjectString(payload, "notes"),
+      snapshotCommitId: readObjectString(payload, "snapshotCommitId"),
+      reviewJobId: readObjectString(payload, "reviewJobId"),
       conversationHash: readObjectString(payload, "conversationHash"),
       processedAt: event.occurred_at,
     };
+  }
+
+  private agentClaimFromEvent(event: SemanticEvent): AgentClaimRecord | null {
+    if (event.event_type !== AGENT_CLAIM_STATE_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const claimId = readObjectString(payload, "claimId") ?? event.event_id;
+    const scope = readObjectString(payload, "scope");
+    const owner = readObjectString(payload, "owner");
+    const startedAt = readObjectDate(payload, "startedAt");
+    const expiresAt = readObjectDate(payload, "expiresAt");
+    const heartbeatAt = readObjectDate(payload, "heartbeatAt") ?? event.occurred_at;
+    const releasedAt = readObjectDate(payload, "releasedAt");
+    const status = readObjectString(payload, "status");
+    if (!scope || !owner || !startedAt || !expiresAt || !heartbeatAt) return null;
+    if (status !== "active" && status !== "released" && status !== "expired") return null;
+    return {
+      eventId: event.event_id,
+      claimId,
+      scope,
+      owner,
+      ownerSession: readObjectString(payload, "ownerSession"),
+      mode: readObjectString(payload, "mode"),
+      note: readObjectString(payload, "note") ?? event.summary_text ?? undefined,
+      repoRoot: readObjectString(payload, "repoRoot"),
+      workspaceRoot: readObjectString(payload, "workspaceRoot"),
+      startedAt,
+      expiresAt,
+      heartbeatAt,
+      releasedAt,
+      status,
+    };
+  }
+
+  private contextDigestFromEvent(event: SemanticEvent): ContextDigestRecord | null {
+    if (event.event_type !== CONTEXT_DIGEST_EVENT_TYPE) return null;
+    const payload = asObjectRecord(event.payload_json);
+    const digestId = readObjectString(payload, "digestId") ?? event.event_id;
+    const targetProvider = readObjectString(payload, "targetProvider");
+    const targetSession = readObjectString(payload, "targetSession");
+    const targetTurnOrdinal = readObjectNumber(payload, "targetTurnOrdinal");
+    const targetConversation = readObjectString(payload, "targetConversation");
+    const targetConversationHash = readObjectString(payload, "targetConversationHash");
+    const sourceSession = readObjectString(payload, "sourceSession");
+    const sourceWatermarkKind = readObjectString(payload, "sourceWatermarkKind");
+    const sourceWatermarkValue = readObjectString(payload, "sourceWatermarkValue");
+    const kind = readObjectString(payload, "kind");
+    const digestText = readObjectString(payload, "digestText");
+    const generatedAt = readObjectDate(payload, "generatedAt") ?? event.occurred_at;
+    const status = readObjectString(payload, "status");
+    if (
+      !targetProvider
+      || !targetSession
+      || targetTurnOrdinal === undefined
+      || !targetConversation
+      || !targetConversationHash
+      || !sourceSession
+      || !sourceWatermarkKind
+      || !sourceWatermarkValue
+      || !kind
+      || !digestText
+      || !generatedAt
+    ) {
+      return null;
+    }
+    if (status !== "ready" && status !== "superseded" && status !== "expired" && status !== "error") {
+      return null;
+    }
+    return {
+      eventId: event.event_id,
+      digestId,
+      targetProvider,
+      targetSession,
+      targetTurnOrdinal,
+      targetConversation,
+      targetConversationHash,
+      sourceSession,
+      sourceWatermarkKind,
+      sourceWatermarkValue,
+      sourceConversationHash: readObjectString(payload, "sourceConversationHash"),
+      kind,
+      digestText,
+      modelUsed: readObjectString(payload, "modelUsed"),
+      score: readObjectNumber(payload, "score"),
+      confidence: readObjectString(payload, "confidence"),
+      reason: readObjectString(payload, "reason") ?? event.summary_text ?? undefined,
+      generatedAt,
+      expiresAt: readObjectDate(payload, "expiresAt"),
+      status,
+    };
+  }
+
+  private async getLatestAgentClaimByID(
+    db: Db,
+    claimId: string,
+  ): Promise<AgentClaimRecord | null> {
+    const rows = await db.all(
+      app.semantic_events
+        .where({ run_id: AGENT_CLAIM_CONTROL_RUN_ID })
+        .orderBy("occurred_at", "desc")
+        .limit(200),
+    );
+    for (const row of rows) {
+      if (row.event_type !== AGENT_CLAIM_STATE_EVENT_TYPE) continue;
+      const claim = this.agentClaimFromEvent(row);
+      if (claim?.claimId === claimId) {
+        return claim;
+      }
+    }
+    return null;
   }
 
   private async requireItemByExternalId(db: Db, runId: string, itemId: string): Promise<RunItem> {

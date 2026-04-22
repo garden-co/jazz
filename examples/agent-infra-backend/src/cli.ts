@@ -6,17 +6,23 @@ import {
   type AgentRun,
   type AgentRunSummary,
   type AgentStateSnapshot,
+  type AgentClaimRecord,
   type Artifact,
   type CommitTurnOperationRecord,
   type CommitTurnResultRecord,
+  type ContextDigestRecord,
   type CursorReviewOperationRecord,
   type CursorReviewOperationResultRecord,
   createAgentDataStore,
+  type ListAgentClaimsInput,
   type ListCommitTurnOperationsInput,
+  type ListContextDigestsInput,
   type ListCursorReviewOperationsInput,
   type ListTaskRecordsInput,
+  type RecordAgentClaimInput,
   type RecordCommitTurnOperationInput,
   type RecordCommitTurnResultInput,
+  type RecordContextDigestInput,
   type RecordCursorReviewOperationInput,
   type RecordCursorReviewResultInput,
   type MemoryLink,
@@ -26,7 +32,9 @@ import {
   type RecordRunCompletedInput,
   type RecordRunStartedInput,
   type RecordWorkspaceSnapshotInput,
+  type ReleaseAgentClaimInput,
   type RunItem,
+  type RenewAgentClaimInput,
   type SemanticEvent,
   type SourceFile,
   type TaskRecord,
@@ -196,9 +204,13 @@ interface SerializedCommitTurnResult {
   repoRoot: string | null;
   message: string | null;
   classification: string | null;
+  title: string | null;
+  description: string | null;
   commitMessage: string | null;
   todoItems: string[] | null;
   notes: string | null;
+  snapshotCommitId: string | null;
+  reviewJobId: string | null;
   conversationHash: string | null;
   processedAt: string;
 }
@@ -221,6 +233,46 @@ interface SerializedCommitTurnOperation {
   sourceChatKind: string | null;
   createdAt: string;
   latestResult: SerializedCommitTurnResult | null;
+}
+
+interface SerializedAgentClaim {
+  eventId: string;
+  claimId: string;
+  scope: string;
+  owner: string;
+  ownerSession: string | null;
+  mode: string | null;
+  note: string | null;
+  repoRoot: string | null;
+  workspaceRoot: string | null;
+  startedAt: string;
+  expiresAt: string;
+  heartbeatAt: string;
+  releasedAt: string | null;
+  status: string;
+}
+
+interface SerializedContextDigest {
+  eventId: string;
+  digestId: string;
+  targetProvider: string;
+  targetSession: string;
+  targetTurnOrdinal: number;
+  targetConversation: string;
+  targetConversationHash: string;
+  sourceSession: string;
+  sourceWatermarkKind: string;
+  sourceWatermarkValue: string;
+  sourceConversationHash: string | null;
+  kind: string;
+  digestText: string;
+  modelUsed: string | null;
+  score: number | null;
+  confidence: string | null;
+  reason: string | null;
+  generatedAt: string;
+  expiresAt: string | null;
+  status: string;
 }
 
 interface SerializedAgentRunSummary {
@@ -499,9 +551,13 @@ function serializeCommitTurnResult(
     repoRoot: result.repoRoot ?? null,
     message: result.message ?? null,
     classification: result.classification ?? null,
+    title: result.title ?? null,
+    description: result.description ?? null,
     commitMessage: result.commitMessage ?? null,
     todoItems: result.todoItems ?? null,
     notes: result.notes ?? null,
+    snapshotCommitId: result.snapshotCommitId ?? null,
+    reviewJobId: result.reviewJobId ?? null,
     conversationHash: result.conversationHash ?? null,
     processedAt: result.processedAt.toISOString(),
   };
@@ -530,6 +586,52 @@ function serializeCommitTurnOperation(
     latestResult: operation.latestResult
       ? serializeCommitTurnResult(operation.latestResult)
       : null,
+  };
+}
+
+function serializeAgentClaim(claim: AgentClaimRecord): SerializedAgentClaim {
+  return {
+    eventId: claim.eventId,
+    claimId: claim.claimId,
+    scope: claim.scope,
+    owner: claim.owner,
+    ownerSession: claim.ownerSession ?? null,
+    mode: claim.mode ?? null,
+    note: claim.note ?? null,
+    repoRoot: claim.repoRoot ?? null,
+    workspaceRoot: claim.workspaceRoot ?? null,
+    startedAt: claim.startedAt.toISOString(),
+    expiresAt: claim.expiresAt.toISOString(),
+    heartbeatAt: claim.heartbeatAt.toISOString(),
+    releasedAt: serializeNullableDate(claim.releasedAt),
+    status: claim.status,
+  };
+}
+
+function serializeContextDigest(
+  digest: ContextDigestRecord,
+): SerializedContextDigest {
+  return {
+    eventId: digest.eventId,
+    digestId: digest.digestId,
+    targetProvider: digest.targetProvider,
+    targetSession: digest.targetSession,
+    targetTurnOrdinal: digest.targetTurnOrdinal,
+    targetConversation: digest.targetConversation,
+    targetConversationHash: digest.targetConversationHash,
+    sourceSession: digest.sourceSession,
+    sourceWatermarkKind: digest.sourceWatermarkKind,
+    sourceWatermarkValue: digest.sourceWatermarkValue,
+    sourceConversationHash: digest.sourceConversationHash ?? null,
+    kind: digest.kind,
+    digestText: digest.digestText,
+    modelUsed: digest.modelUsed ?? null,
+    score: digest.score ?? null,
+    confidence: digest.confidence ?? null,
+    reason: digest.reason ?? null,
+    generatedAt: digest.generatedAt.toISOString(),
+    expiresAt: serializeNullableDate(digest.expiresAt),
+    status: digest.status,
   };
 }
 
@@ -733,6 +835,60 @@ async function main(): Promise<void> {
         );
         const result = await store.recordCommitTurnResult(input);
         renderJson(serializeCommitTurnResult(result));
+        break;
+      }
+      case "record-agent-claim": {
+        const input = readJsonInput<RecordAgentClaimInput>("record-agent-claim");
+        const claim = await store.recordAgentClaim(input);
+        renderJson(serializeAgentClaim(claim));
+        break;
+      }
+      case "renew-agent-claim": {
+        const input = readJsonInput<RenewAgentClaimInput>("renew-agent-claim");
+        const claim = await store.renewAgentClaim(input);
+        renderJson(serializeAgentClaim(claim));
+        break;
+      }
+      case "release-agent-claim": {
+        const input = readJsonInput<ReleaseAgentClaimInput>("release-agent-claim");
+        const claim = await store.releaseAgentClaim(input);
+        renderJson(serializeAgentClaim(claim));
+        break;
+      }
+      case "list-agent-claims": {
+        const limitRaw = readFlag("--limit");
+        const query: ListAgentClaimsInput = {
+          scopePrefix: readFlag("--scope-prefix"),
+          ownerSession: readFlag("--owner-session"),
+          includeReleased: hasFlag("--include-released"),
+          includeExpired: hasFlag("--include-expired"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const claims = await store.listAgentClaims(query);
+        renderJson(claims.map(serializeAgentClaim));
+        break;
+      }
+      case "record-context-digest": {
+        const input = readJsonInput<RecordContextDigestInput>("record-context-digest");
+        const digest = await store.recordContextDigest(input);
+        renderJson(serializeContextDigest(digest));
+        break;
+      }
+      case "list-context-digests": {
+        const limitRaw = readFlag("--limit");
+        const turnOrdinalRaw = readFlag("--target-turn-ordinal");
+        const query: ListContextDigestsInput = {
+          targetSession: readFlag("--target-session"),
+          targetConversation: readFlag("--target-conversation"),
+          targetConversationHash: readFlag("--target-conversation-hash"),
+          targetTurnOrdinal: turnOrdinalRaw ? Number.parseInt(turnOrdinalRaw, 10) : undefined,
+          sourceSession: readFlag("--source-session"),
+          kind: readFlag("--kind"),
+          includeExpired: hasFlag("--include-expired"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const digests = await store.listContextDigests(query);
+        renderJson(digests.map(serializeContextDigest));
         break;
       }
       case "list-commit-turn-ops": {
