@@ -12,14 +12,10 @@ founder of Garden Computing
 building Jazz
 
 <Notes>
-Hey everyone! My name is Anselm.
+Hey everyone! My name is Anselm. I run a little company called Garden
+Computing, and we're building a database called Jazz.
 
-I run a little company called Garden Computing.
-
-And we're building a database called Jazz.
-
-The first thing you should know about me is
-that I believe that...
+The first thing you should know about me is that I believe that...
 
 </Notes>
 </Slide>
@@ -44,9 +40,9 @@ More accurate:
 - LLMs are great at complicated things
 
 <Notes>
-In fact when people say "LLMs are bad at frontend" I like
-to ask them: "are they really bad at frontend?"
-"or does this just mean that frontend is harder"
+In fact when people say "LLMs are bad at frontend" I like to ask:
+"are they really bad at frontend?" Or does this just mean that
+frontend is harder?
 </Notes>
 </Slide>
 
@@ -54,8 +50,8 @@ to ask them: "are they really bad at frontend?"
 # Frontend is harder than backend
 
 <Notes>
-The reason I believe frontend is harder than backend is
-because of my many years in the SaaS mines
+The reason I believe frontend is harder than backend is because of my
+many years in the SaaS mines.
 </Notes>
 </Slide>
 
@@ -65,12 +61,9 @@ because of my many years in the SaaS mines
 <Notes>
 Let me explain.
 
-In a time long long ago, when we were still writing
-code by hand.
-
-I was churning out one full-stack app after another.
-
-And I kept going through the same motions over and over again.
+In a time long long ago, when we were still writing code by hand, I was
+churning out one full-stack app after another and kept going through the
+same motions over and over again.
 
 </Notes>
 </Slide>
@@ -81,9 +74,8 @@ And I kept going through the same motions over and over again.
 1. map out domain model
 
 <Notes>
-You start by mapping out the domain model - what is this app
-actually about. That's hard and usually most of the conceptual
-work.
+You start by mapping out the domain model, what the app is actually
+about. That's hard and usually most of the conceptual work.
 
 </Notes>
 </Slide>
@@ -95,10 +87,10 @@ work.
 2. build the UI
 
 <Notes>
-Then you come up with the user interface and the build the frontend
+Then you come up with the user interface and build the frontend.
 
-This is also hard because you have to have empathy with users
-_and_ with the people who invent the CSS standard
+This is also hard because you need empathy with users _and_ with the
+people who invent the CSS standard.
 
 </Notes>
 </Slide>
@@ -111,8 +103,8 @@ _and_ with the people who invent the CSS standard
 3. impress everyone with flashy demo around local state
 
 <Notes>
-Then I usually built a quick mostly working demo around local
-UI state, because that's easy to iterate on
+Then I usually built a quick mostly working demo around local UI state,
+because that's easy to iterate on.
 
 </Notes>
 </Slide>
@@ -127,17 +119,16 @@ UI state, because that's easy to iterate on
 5. deploy a database
 
 <Notes>
-But then of course you have to "make it actually work". But
-it always felt like this was now just busywork.
+But then of course you have to "make it actually work", and it always
+felt like this was now just busywork.
 
-Even if the
-backend needed some complicated business logic and had to integrate
-with arcane external systems. Everything was already
-mostly determined by the first two steps.
+Even if the backend needed complicated business logic and integrations
+with arcane external systems, everything was already mostly determined
+by the first two steps.
 
-The database schema was clear from the domain model.
-And the backend mostly needed to make the data available
-to the frontend, and do some auth and checks.
+The database schema was clear from the domain model, and the backend
+mostly needed to make data available to the frontend and do some auth
+and checks.
 
 </Notes>
 </Slide>
@@ -146,9 +137,8 @@ to the frontend, and do some auth and checks.
 # Backends: 90% shuffling data around?
 
 <Notes>
-It really felt like all the backend did was shuffle around
-data between the database and the frontend. And seeing this
-again and again really got boring.
+It really felt like all the backend did was shuffle data between the
+database and the frontend, and seeing that again and again got boring.
 </Notes>
 </Slide>
 
@@ -173,13 +163,12 @@ again and again really got boring.
 ...but suspiciously, for me
 frontend was also the fun part.
 
-And if the fun part solves most of the problems, why is
-the rest such a drag? Again and again?
+And if the fun part solves most of the problems, why is the rest such a
+drag, again and again?
 
-This tragic situation sent me into an existential crisis,
-and, you know, when you're in an existential crisis, you
-gotta think some new thoughts and build some new stuff,
-even just to prove to yourself that a better world is
+This tragic situation sent me into an existential crisis, and when
+you're in an existential crisis, you gotta think some new thoughts and
+build some new stuff, even just to prove that a better world is
 possible.
 
 </Notes>
@@ -197,15 +186,12 @@ possible.
 <Notes>
 So I got fixated on one fact.
 
-Building the flashy demo around local state felt fun
-and meaningful, right?
+Building the flashy demo around local state felt fun and meaningful,
+right? What if it was fun because local state was easy?
 
-What if it was fun because local state was easy?
-
-Thinking new thoughts is often very childlike.
-
-So like a toddler I wanted the most immediate unrealistic
-solution that would instantly magically fix everything.
+Thinking new thoughts is often very childlike, so like a toddler I
+wanted the most immediate unrealistic solution that would instantly
+magically fix everything.
 
 </Notes>
 </Slide>
@@ -216,7 +202,7 @@ solution that would instantly magically fix everything.
 <Notes>
 What if my database "simply" looked like useState()?
 
-And that's what I started building. And that's what became Jazz.
+That's what I started building, and that's what became Jazz.
 
 </Notes>
 </Slide>
@@ -232,17 +218,17 @@ And that's what I started building. And that's what became Jazz.
 - Jazz
 
 <Notes>
-Turns out other people had similar ideas and also really wanted
-to simplify the stack.
+Turns out other people had similar ideas and also wanted to simplify
+the stack.
 
-This is the now well-established category of real-time databases
-and sync engines.
+This is the now well-established category of real-time databases and
+sync engines.
 
-I'll first describe what these new roughly have in common - because
-the most important idea is what this general new stack looks like.
+I'll first describe what these technologies roughly have in common, because
+the most important idea is what this new general stack looks like.
 
-After that we can dive into some unique Jazz things, but for now
-the main message is: you deserve a better stack.
+After that we can dive into the unique Jazz things, but for now the
+main message is: you deserve a better stack.
 
 </Notes>
 </Slide>
@@ -255,16 +241,15 @@ the main message is: you deserve a better stack.
 - Light-milliseconds
 
 <Notes>
-And the three metrics I want you to keep in mind when
-you judge a stack are
+And the three metrics I want you to keep in mind when you judge a stack
+are:
 
-Lines of code, especially the ones that don't have anything to
-do with what makes your app unique.
+Lines of code, especially the lines that do not make your app unique.
 
-Layers of infra bullshit, meaning how many things you have to
-deploy and integrate with each other.
+Layers of infra bullshit, meaning how many things you have to deploy and
+integrate with each other.
 
-Light-milliseconds that user edits have to travel before they
+And light-milliseconds that user edits have to travel before they
 become visible.
 
 </Notes>
@@ -274,11 +259,11 @@ become visible.
 # Putting your backend on ozempic
 
 <Notes>
-Now that that we know the metrics, let's get to work.
+Now that we know the metrics, let's get to work.
 
-I'll take you on a journey where we start with a traditional
-stack and watch as layer by layer gets subsumed by some or all
-of the more modern alternatives
+I'll take you on a journey where we start with a traditional stack and
+watch layer by layer get subsumed by some or all of the more modern
+alternatives.
 
 </Notes>
 </Slide>
@@ -306,8 +291,8 @@ Light milliseconds:
 - full: 100ms -> backend -> 30ms db (auth) -> 30ms db (data) -> 100ms client
 
 <Notes>
-This is our starting situation, and this is exactly what makes
-the backend part so unfun:
+This is our starting situation, and this is exactly what makes the
+backend part so unfun:
 
 _list everything in the diagram_
 
@@ -344,22 +329,15 @@ Light milliseconds:
 The first thing these modern systems usually collapse is the frontend
 sync glue.
 
-Data fetching disappears as a concept.
+Data fetching and the websocket client disappear as concepts, and the
+query cache plus optimistic update layer start getting absorbed into
+one database-shaped client abstraction.
 
-The websocket client disappears as a concept.
+So the first great thing is that frontend starts feeling like it
+is working with reactive data instead of orchestrating remote state.
 
-The query cache and the optimistic update layer start getting absorbed
-into one database-shaped client abstraction.
-
-So the first win is not even mostly about infrastructure.
-
-It is that the frontend starts feeling like it is working with
-reactive data again instead of doing orchestration around remote state.
-
-Lines of code go down immediately.
-
-And on the light-milliseconds metric, we get the first huge win:
-optimistic preview goes to zero.
+Lines of code go down immediately, and on the light-milliseconds metric
+we get the first huge win: optimistic preview goes to zero.
 
 </Notes>
 </Slide>
@@ -391,18 +369,15 @@ Light milliseconds:
 <Notes>
 Next, the backend's database access story starts simplifying too.
 
-The ORM or classic DB wrapper stops being the obvious center of the
-world, and a more capable DB client starts showing up on both sides.
+The ORM or classic DB wrapper gets replaced by a more integrated
+DB client.
 
-This does not always save a dramatic amount of code by itself, because
-one abstraction is often replacing another.
-
-But it simplifies the shape of the system.
+This only saves a little amount of code, because
+one abstraction is replacing another, but it simplifies the shape
+of the system.
 
 You stop having one database model on the server and a completely
-different data access model on the client.
-
-And psychologically this is an important step, because it normalizes
+different access model on the client, and it normalizes
 the idea that yes, a database client can live in the frontend too.
 
 </Notes>
@@ -433,16 +408,13 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-Then some of the scale and performance barnacles start falling off.
+Then some of the scale and performance crutches start falling off.
 
-One obvious example is the connection pooler.
+One obvious example is the connection pooler, because traditional
+databases didn't assume lots of clients or backend function instances
+connecting directly.
 
-In the classic stack we keep adding infrastructure whose job is mostly
-to compensate for the shape of the rest of the stack.
-
-Modern systems start internalizing more of that.
-
-So we may not yet be deleting dramatic amounts of product code here,
+We're not removing much product code here,
 but we are deleting operational surface area, which matters a lot.
 
 </Notes>
@@ -475,17 +447,11 @@ Light milliseconds:
 <Notes>
 Then you start seeing the messaging and fanout layer move inward too.
 
-Queues, pubsub, realtime distribution, durable streams:
-different products pick off different pieces here, but the pattern is
-the same.
+Queues, pubsub, realtime distribution, durable streams: different
+products pick off different pieces here, but the pattern is the same.
 
-The database is no longer just passive storage.
-
-It starts becoming the thing that also moves and distributes changes.
-
-That is a meaningful simplification, because every time one of those
-edge systems disappears, both your operational graph and your mental
-graph get smaller.
+The database is no longer just passive storage. It starts being a
+real-time coordination system.
 
 </Notes>
 </Slide>
@@ -517,13 +483,10 @@ Light milliseconds:
 <Notes>
 Some systems go further and also absorb files or blob storage.
 
-Again, not every product does every one of these steps.
+Again, not every tool does every one of these steps. This is not
+a perfect consensus feature list.
 
-I am not trying to claim a perfect consensus feature list.
-
-I am trying to show the direction of travel.
-
-The direction is that more and more of the app's data surface gets
+But the direction is that more and more of the app's data surface gets
 pulled back under one roof.
 
 </Notes>
@@ -556,18 +519,15 @@ Light milliseconds:
 - optimistic preview: 0ms
 
 <Notes>
-And then permissions start moving inward too.
+And then permissions move inward too.
 
 Instead of auth being something the backend wraps around every query,
 the database itself starts understanding auth policies.
 
-That means a whole chunk of backend auth glue disappears.
+That means a whole chunk of backend auth glue disappears, along with
+that extra auth roundtrip between the backend and the database.
 
-It also means one of the weirdest parts of the full request path
-disappears: that extra auth roundtrip between the backend and the
-database.
-
-At this point the stack is already much, much cleaner than the one we
+At this point the stack is already much cleaner than the one we
 started with.
 
 </Notes>
@@ -599,23 +559,14 @@ Light milliseconds:
 <Notes>
 So let us pause here and look at what is left.
 
-This is already pretty clean.
-
-Not every product in the category lands on exactly this picture.
-
-But I do think this is roughly the zone modern real-time databases and
-sync engines are converging on.
+This is already pretty clean. This is roughly the shape modern
+real-time databases and sync engines are converging on.
 
 And that alone is already a huge improvement over the traditional stack.
 
-Now comes the interesting part.
-
-Everything from here on is going to be more Jazz-specific.
-
-Because our ambition is not just to make the backend slimmer.
-
-Our ambition is to get as close as possible to the feeling that
-`useState()` is your database.
+Now comes the Jazz-specific part, because our ambition is not just to
+make the backend slimmer. It is to get as close as possible to the
+feeling that `useState()` is your database.
 
 </Notes>
 </Slide>
@@ -651,20 +602,20 @@ we do?
 
 One answer is that we can get much more aggressive about latency.
 
-So Jazz adds built-in regional edges for caching and for very low-latency
+So Jazz adds built-in regional edges for caching and very low-latency
 collaboration between nearby users.
 
-That gives us another mode on the light-milliseconds metric:
-not just full remote and not just optimistic preview, but genuinely
-short regional paths.
+That gives us another mode on the light-milliseconds metric: not just
+full remote and not just optimistic preview, but genuinely short
+regional paths.
 
 And unlike a normal cache bolted onto the side, this thing is aware of
-the data model and the auth model.
+the data model and auth model, which matters because otherwise these
+low-latency layers quickly turn into yet another source of glue and
+inconsistency.
 
-That matters, because otherwise these low-latency layers quickly turn
-into yet another source of glue and inconsistency.
-
-TODO: us-east-1 joke
+You can get actually approximate this with traditional stacks,
+but only if you live in us-east-1.
 
 </Notes>
 </Slide>
@@ -695,24 +646,14 @@ Light milliseconds:
 - **durable local state**: 0ms
 
 <Notes>
-And this is where it gets really interesting.
+Now it gets really interesting.
 
-We stop treating the client as just a fancy cache with optimism.
-
-Instead, we introduce a truly durable local-first database on the client.
+We stop treating the client as just a fancy cache with optimism and
+introduce a truly durable local-first database on the client.
 
 At that point the dream of `useState()` as your database starts becoming
-real in a much stronger sense.
-
-Not just reactive.
-
-Not just optimistic.
-
-Actually durable.
-
-Actually queryable.
-
-Actually part of the real system.
+real in a much stronger sense: not just reactive, not just optimistic,
+but actually durable, queryable offline, and part of the real system.
 
 </Notes>
 </Slide>
@@ -739,7 +680,7 @@ to uber for robot teleoperation,
 to social networks
 Figma killers
 and just a ton of personal software
-with way too high production value for
+with insane production value for
 single devs, because they could actually
 focus on the frontend and their product
 </Notes>
@@ -750,8 +691,7 @@ focus on the frontend and their product
 
 <Notes>
 But that is the moment where the easy story ends and the hard story begins.
-
-Because once the database is truly local-first, a whole new class of
+Once the database is truly local-first, a whole new class of
 problems shows up.
 
 </Notes>
@@ -766,23 +706,19 @@ problems shows up.
 
 <Notes>
 And these problems point at ways in which durable databases
-that many users read from and write to
-are simply truly different from ephemeral local state.
+simply truly different from ephemeral local state,
+because now you've got multiple users writing to the same data.
 
-Like what if eventual consistency isn't enough and you
-need global transactions? Should you use a second database?
-Yuck!
+Like what if eventual consistency isn't enough and you need global
+transactions? Should you use a second database? Yuck.
 
-And then it's usually pretty easy to enforce permissions
-using a centralized API in front of a database, but the
-crazy system we came up with for local-first permissions
-was way too confusing
+And it's usually pretty easy to enforce permissions using a centralized
+API in front of a database, but the crazy system we came up with for
+local-first permissions was way too confusing.
 
-Same for schema evolution: what if you want to change the
-shape of stored data? No problem for ephemeral useState(),
-but once you've got data persisted on different devices
-things get tricky unleass you're extremely careful with
-only changing your schema in backwards compatible ways.
+Same for schema evolution: changing the shape of ephemeral `useState()`
+is easy, but once data is persisted on different devices things get
+tricky unleass you're extremely careful to stay backwards compatible.
 
 </Notes>
 </Slide>
@@ -792,15 +728,15 @@ only changing your schema in backwards compatible ways.
 
 <Notes>
 And more and more our adopters kept asking us about exactly
-these challenges. And it's not like we didn't have any answers
+these challenges. And it's not like we didn't have *any* answers
 to those in our API. They just felt much worse than the how
-great it felt to have local-first state to build your app around.
+great the rest of our API felt.
 
-And once again I found myself in a situation where some things
-were really good, and others felt really unnecessarily hard.
+So once again I found myself in a situation where some things
+were really good, and others felt unnecessarily hard.
 
-By end of last December it had turned into another existential
-crisis, this time with a company and a team attached.
+By the end of last December it had turned into another existential
+crisis.
 
 </Notes>
 </Slide>
@@ -812,14 +748,8 @@ crisis, this time with a company and a team attached.
 It was time for some fresh ideas again. To unreasonably ask
 for the impossible like a toddler again.
 
-I considered taking quite radical changes. I told my team
-about the forbidden crazy ideas from the back of my head
-that had been screaming at me that they might solve our
-problems. They looked at me like I went completely nuts.
-
-But they do that often, so all was fine, really.
-To their credit, they actually were immediately on board
-to take a big swing.
+And because we're all roughly equally insane, they were
+immediately on board to take a big swing.
 
 </Notes>
 </Slide>
@@ -828,12 +758,12 @@ to take a big swing.
 # Very little time for some fresh ideas.
 
 <Notes>
-The problem is that we didn't have much time. Our talk
-that promised a database that worked like useState was
-already accepted to React Miami.
+The problem is that we didn't have much time. You see,
+React Miami already accepted this talk that promised a
+database that worked like useState.
 
-And we couldn't in good conscience present something to
-you that didn't have all the answers.
+And we knew we couldn't present something to
+you where we didn't have all the answers.
 
 But in four short months, we pulled through, and today
 I'm very happy to announce that
@@ -875,12 +805,11 @@ Jazz version two...
 
 <Notes>
 Thank you!
-
 Let's take a look at the four fresh ideas that went
-into Jazz v2 that will actually make local-first work.
+into Jazz v2 to actually make local-first work.
 
-You'll see that they eerily correspond to all the ways
-in which shared state is actually different from local state.
+You'll see that they correspond to all the ways shared state is
+actually different from local state.
 
 </Notes>
 </Slide>
@@ -889,29 +818,25 @@ in which shared state is actually different from local state.
 # Fresh Idea 1: Tunable consistency
 
 <Notes>
-The first idea is a simple compromise. In the old version
-of Jazz, which I'll call classic Jazz from now on, we made
-learned again and again through our adopters that, surprisingly,
-in most apps, eventual consistency is fine 90% of the time.
+The first idea is a simple compromise. In classic Jazz we learned again
+and again through adopters that, surprisingly, eventual consistency is
+fine for 90% of interactions in most apps.
 
-Like it's OK if for a short moment, we see different versions
-of shared data.
+It is usually OK if, for a short moment, different users see slightly
+different versions of shared data.
 
-But the exceptions where it's not OK are important! like only one
-user being able to buy the last ticket for an React Miami,
-or wanting to take resources away here and deposit
-them over there in an all-or-nothing way.
+But the exceptions matter: like only one user should be able to buy the
+last ticket for React Miami.
 
-And again, we don't want to use a whole extra database just because
-some corners of our app need global consistency like that, yuck!
+And we don't want a whole second database just because some corners of
+the app need global consistency.
 
-So we found a clean way to just let you choose, for each part of your
-app, for each table in your schema, whether it needs to be globally
-consistent, or whether eventual consistency is OK. And like that you,
-as the app developer can granularly trade off latency and offline support
-with consistency. Because you as the app developer know best, and you
-deserver something better than whole systems that force you into one
-or the other for your whole app.
+So Jazz lets you choose, per table, whether **eventual** consistency is OK
+or whether it needs **global** consistency, so you can trade latency and
+offline support against consistency where it actually matters.
+
+You as the app developer know best, and you shouldn't be limited to one
+kind of consistency.
 
 </Notes>
 </Slide>
@@ -923,20 +848,19 @@ or the other for your whole app.
 The next idea is even more essential for making local-first work:
 permissions.
 
-In traditional backends, the boundary to enforce permissions is clear,
-you do it at the API that sits in front of the database.
+In traditional backends, the boundary is clear: you enforce permissions
+at the API in front of the database.
 
-But here, we have local state, and we sync directly to the database.
-So the database itself needs to be really good at understanding permissions.
+But here we have local state and direct sync, so the database itself has
+to understand permissions.
 
-For this we decided to rely on a proven concept: row-level security.
-This lets you define permissions based on queries that look just like
-your normal queries, in a nice, centralized, llm-friendly, testable place.
+For this we rely on a proven concept: row-level security. It lets you
+define permissions as queries that look like your normal queries, in one
+centralized, testable place.
 
-This means that the database knows how permissions work and enforces them
-for you at sync time. Even better, the local client also knows how permissions
-work and give you a much better preview of what the current user can and can't
-do, even before the sync roundtrip.
+That means the database can enforce permissions at sync time. Even
+better, the local client also knows how permissions work and can preview
+what the current user can and can't do before the roundtrip.
 
 This is why I think row-level security is a good idea...
 
@@ -956,18 +880,14 @@ _lots of twitter controversy around RLS_
 
 <Notes>
 Oh wait whats this? "Emergency alert"?
-
 "Your normal take is now a hot take"??
 
-So this happened a couple days ago...
-After a decade of using row level security
-in postgres, I'm learning that many people have
-a much more mixed experience with it.
+So this happened a couple days ago. After a decade of using row-level
+security in Postgres, I learned that many people have had a much more
+mixed experience with it.
 
-And a large part seems to be that they're
-super hard to get right in Postgres
-And in Supabase they default to everything being
-public????
+A big part of that seems to be that it's hard to get right in Postgres,
+and in Supabase people often start from everything being public.
 
 </Notes>
 </Slide>
@@ -996,28 +916,24 @@ with row-level security in Jazz is
 <Notes>
 Moving on, let me show you the most unique fresh idea of Jazz.
 
-This has to do with the hardest part of local-first data:
-When you want to change the shape of your data as you evolve your app,
-you can't do a good old stop-the-world migration of a central
-database anymore, because there might be old clients that still
-expect the old shape.
+This is about the hardest part of local-first data:
+changing the shape of your data as the app evolves.
 
-Usually, backwards compatibility is the job of the API.
-See a pattern here? Again, if we have clients syncing directly
-to the database, the database needs to understand backwards
-compatibility.
+You can't do a good old stop-the-world migration of a central database,
+because there might still be old clients expecting the old shape.
 
-So in Jazz, we took the idea of migrations and turned them
-into something slightly different. Instead of a one-time
-"change the shape of all the data at once" event, in Jazz
-migrations describe a mapping between two schema versions.
+Usually backwards compatibility is the API's job. See a pattern?
+If clients sync directly to the database, the database needs to
+understand backwards compatibility too.
 
-And it's a two-directional mapping, so we can translate
-both old data into the new shape for new clients
-_and_ new data into the old shape for old clients.
+So in Jazz we turned migrations into something slightly different.
+Instead of a one-time event, migrations describe a mapping between two
+schema versions.
 
-And Jazz does this for you just-in-time instead of
-having to stop the world.
+And it's bidirectional, so we can translate both old data into the new
+shape for new clients _and_ new data into the old shape for old clients.
+
+Jazz does this just in time instead of making you stop the world.
 
 </Notes>
 </Slide>
@@ -1026,23 +942,16 @@ having to stop the world.
 # Fresh Idea 3: Fluid schema evolution
 
 <Notes>
-And here I we realized something important:
+And then we realized something important:
 
-The two-directional migrations aren't just a solution
-we needed to make schema evolution work for local-first data.
+Bidirectional migrations are not just a solution for local-first data.
+They also make it much easier to deploy schema changes for _any_ app.
 
-They also mean that it's suddenly much easier to
-deploy schema changes for _any_ kind of app.
+This same idea lets you work on ten features at once with your horde of
+Claudes, or removes a central release bottleneck in a large company with
+many teams launching different features behind flags.
 
-This same idea lets you manically work on 10 app features
-at once with your horde of claudes.
-
-Or removes a central release bottleneck in a large company with
-many teams that launch different features, maybe even behind
-feature flags.
-
-Making all of that automatically compatible with each other
-is now much easier.
+Making all of that automatically compatible is suddenly much easier.
 
 </Notes>
 </Slide>
@@ -1056,7 +965,7 @@ Now, to summarize the fresh ideas,
 one way I like to visualize how these ideas make Jazz different
 is to ask, "which dimensions are we adding here?"
 
-A normal database table with columns and rows is clearly 2D
+A normal database table with columns and rows is clearly 2D.
 
 </Notes>
 </Slide>
@@ -1081,8 +990,8 @@ this one extra dimension.
 
 <Notes>
 And then we have our fluid schema evolution, where multiple shapes
-of tables can coexist compatibly at the same time, which I would
-consider another dimension.
+of tables can coexist compatibly at the same time, which I consider
+another dimension.
 </Notes>
 </Slide>
 
@@ -1140,15 +1049,13 @@ And this one I'm most exited about...
 Because in Jazz, every row in your database actually
 has automatic history.
 
-And with that, precise edit metadata of when each row
-was last updated, and by whom. Automatically captured.
+And it auto-captures precise edit metadata of when each
+row was last updated, and by whom.
 
-This makes it super easy to build all kinds of complex
-collaborative features, while your UI still only does
-what looks like a simple local state update.
+This makes it much easier to build complex collaborative features while
+your UI still only does what looks like a simple local state update.
 
-But it gets even better! Because it's each row has not
-just linear history...
+But it gets even better, because each row has not just linear history...
 
 </Notes>
 </Slide>
@@ -1161,21 +1068,17 @@ just linear history...
 - per-row branching history 5D
 
 <Notes>
-But branching history, like git? In the simplest case
+But branching history, like git. In the simplest case
 this makes the tricky problem of people editing data
 at the same time actually tractible.
 
-It's actually even better than git, because it lets you
-choose a custom, precise merge strategy per column,
-whether that's a simple last-writer wins, or a deep json
-merge, or a smart rich-text merge.
+It's actually even better than git, because it lets you choose a
+precise merge strategy per column, whether that's last-writer-wins,
+a deep JSON merge, or a smart rich-text merge.
 
-This is another example where if you wanted any of this,
-you would need to combine a bunch of different libraries
-for collaboration, each of which would kind of force you
-into one model. Here, you get everything in one system,
-and you as the app developer who understands the best
-collaboration behavior for your app can choose in detail.
+Again, if you wanted any of this before, you would combine a bunch of
+collaboration libraries, each nudging you into one model. Here you get
+it in one system, and you can choose the behavior in detail.
 
 </Notes>
 </Slide>
@@ -1193,14 +1096,12 @@ app is kind of rare. Maybe it's a slower paced app where
 many people and their agents interact with shared data over
 a longer time horizon.
 
-Well wouldn't it be cool if you could expose the full
-expressiveness of this "better than git model" to your users
-through personal-draft flows, or full on branching like us
-nerds do?
+Wouldn't it be cool if you could expose this
+"better than git" model to your users?
 
-In Jazz it's baked into how data works. This is what I think
-will enable the most interesting new kinds of apps, and this
-is why this is my favorite dimension.
+In Jazz it's baked into the data itself. This is what I think will
+enable the most interesting new kinds of apps, and that's why this
+is my favorite dimension.
 
 </Notes>
 </Slide>
@@ -1210,9 +1111,8 @@ is why this is my favorite dimension.
 <Notes>
 Alright, you wanna see what this looks like in action?
 Let's take a quick look at a super simple Jazz v2 app.
-
 Let's build a shared canvas with multiplayer cursors
-where everyone can add letters and drag them around
+where everyone can add letters and drag them around.
 
 </Notes>
 </Slide>
@@ -1239,12 +1139,11 @@ we just use the useAll hook, which reactively subscribes
 a component to a query, with some filters, like for
 the canvas we care about.
 
-Under the hood, this will read local data, and trigger
-sync from the Jazz database server upstream, which will
-send us existing state that we don't have yet, and live
-updates from other users.
+Under the hood, this reads local data and triggers sync from the Jazz
+database upstream, which sends us any existing state we don't have yet
+plus live updates from other users.
 
-But to us it really just looks like reactive state
+But to us it really just looks like reactive state.
 
 </Notes>
 </Slide>
@@ -1272,20 +1171,17 @@ All of this is typesafe from our schema by the way.
 <Notes>
 And last, but most importantly, we have permissions.
 
-Jazz actually makes you define those and fails closed otherwise.
-We also tried to make the permission DSL as readable as possible
-so its easy to see at a glance whether you set them up correctly
+Jazz actually makes you define them and fails closed otherwise. We also
+tried to make the DSL readable enough that you can see at a glance
+whether you set them up correctly.
 
-For our app, everyone can create a canvas.
-Everyone can add letters and move them around.
-But cursors can only be updated by the user that created them.
-Makes sense, right?
+For our app, everyone can create a canvas. Everyone can add letters and
+move them around. But cursors can only be updated by the user that
+created them. Makes sense, right?
 
-Of course this is a super simple app. For more complex app
-Jazz gives you a full permission testing framework that makes
-it really fast to set up all kinds of complicated situations
-and edge cases and make sure your permissions work as expected,
-without having to end-to-end test your entire app.
+And for more complex apps, Jazz gives you a permission testing framework
+so you can set up tricky situations and edge cases without end-to-end
+testing your whole app.
 
 </Notes>
 </Slide>
@@ -1300,11 +1196,9 @@ without having to end-to-end test your entire app.
 But wait! Didn't we say we don't need to capture edit metadata
 ourselves? Why should we maintain the owner of a cursor.
 
-You're absolutely right! We can just use the builtin magic column
-$createdBy instead. This makes our mutations even easier, it really
-just looks like a local update now.
-
-And the permissions can and often do use the edit metadata as well.
+You're absolutely right. We can just use the builtin magic column
+`$createdBy` instead. That makes the mutation even simpler, and the
+permissions can use the same edit metadata too.
 
 But let's say we realized this too late and already shipped our
 letter app to millions of users...
@@ -1323,14 +1217,13 @@ letter app to millions of users...
 Well, no problem, let's just create a fluid migration. Jazz
 actually helps you scaffold one whenever you change your schema.
 
-And you can see that it reads pretty cleanly, with the only
-special bit being that the migration is bidirectional, but this
-gives us perfect backwards-compatibility with old clients, who
-can keep reading a user column that we fake for them even on
-new data.
+And you can see that it reads pretty cleanly. The only special bit is
+that the migration is bidirectional, which gives us backwards
+compatibility with old clients that still read a user column we now fake
+for them on new data.
 
-And all of this is typechecked as well, so you get instant
-feedback if you got the migration shape right.
+And all of this is typechecked, so you get instant feedback if the
+migration shape is right.
 
 </Notes>
 </Slide>
@@ -1342,19 +1235,17 @@ Ok! Do you actually want to try it?
 
 Here it is as an actual Jazz app.
 
-Well, this slide is a Jazz app.
-My whole slide deck is just a nextjs app, it doesn't have any
-backend components, and this slide happens to have a
-whole multiplayer database in it.
+This slide is a Jazz app. My whole slide deck is just a Next.js app with
+no backend components, and this slide happens to have a whole
+multiplayer database in it.
 
-Now, I actually had promised to myself to not do a demo in my talk this time.
-And if I did to definitely not do one that relied on conference wifi.
-And if I did that, to definitely not do one where the audience interaction
-is presented directly on a giant screen and recorded where people might
-do silly things _demo gentle profanity_
+I had promised myself not to do a demo in this talk. And if I did, not
+one that relied on conference wifi. And if I did that, definitely not
+one where audience interaction was projected on a giant recorded screen
+where people might do silly things _demo gentle profanity_.
 
-Anyways, here is the join code (QR code), lets put this through the paces,
-but please be wholesome.
+Anyways, here is the join code. Let's put this through the paces, but
+please be wholesome.
 
 </Notes>
 </Slide>
@@ -1365,7 +1256,6 @@ but please be wholesome.
 <Notes>
 So now you've seen the theory and a tiny bit of practiec
 around Jazz you might seriously be wondering...
-
 What would it actually feel like if useState was _your_ database?
 
 </Notes>
@@ -1389,14 +1279,11 @@ Join our Discord!
 The best way to find out is to
 Simply run npm create jazz.
 
-It'll scaffold an app for you,
-set up a free jazz api key on jazz cloud
-without you having to create an account.
-
-Wires it up for you and you have a running,
+It'll scaffold an app, set up a free Jazz Cloud API key
+for you and wire everything up so you have a running,
 durable, local-first multi-user app.
 
-As easy as starting a new purely-frontend project.
+As easy as starting a new purely frontend project.
 
 </Notes>
 </Slide>
@@ -1413,13 +1300,11 @@ and would love to hear what you think. Especially if
 you've got strong opinions and if you've tried some
 of the alternative and love or hate specific aspects.
 
-I'm around
-all day today and tomorrow and most of Saturday, as are
+I'm around all day today and tomorrow and most of Saturday, as are
 Guido, Gio and Nico, who you'll recognize by their Jazz shirts.
 
-Allright, I really hope you learned something new.
-Long live React!
-Thank you!
+Alright, I really hope you learned something new.
+Long live React. Thank you!
 
 </Notes>
 </Slide>

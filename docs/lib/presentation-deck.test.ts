@@ -154,7 +154,7 @@ test("estimates speaking duration from note text length and structure", () => {
     estimatePresentationSpeakingDurationSeconds(
       "This slide sets up the overall motivation for Jazz and frames the rest of the talk. We want to explain what changed, why now, and what people should listen for.",
     ),
-    14,
+    11,
   );
   assert.equal(
     estimatePresentationSpeakingDurationSeconds("First paragraph.\n\nSecond paragraph."),

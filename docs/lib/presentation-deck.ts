@@ -62,7 +62,7 @@ export function estimatePresentationSpeakingDurationSeconds(notesText: string) {
 
   const words = normalized.split(/\s+/).filter(Boolean).length;
   const paragraphBreaks = Math.max(0, normalized.split(/\n{2,}/).length - 1);
-  const rawSeconds = (words / 130) * 60;
+  const rawSeconds = (words / 160) * 60;
 
   return Math.max(4, Math.round(rawSeconds)) + paragraphBreaks * 2;
 }
