@@ -1,5 +1,20 @@
 # jazz-tools
 
+## 2.0.0-alpha.37
+
+### Patch Changes
+
+- c825970: Re-apply stored Rejected batch settlements on runtime startup so that a crash between persisting a rejection and deleting its visible row no longer causes the lingering row to flash into queries on reload before being retracted.
+- a4b83ea: `jazz-tools deploy` now warns about tables that have no explicit permission policy, matching the behaviour of `jazz-tools validate`.
+- f8981c6: Fix `jazz-tools deploy` so apps without a `permissions.ts` file still publish their structural schema. The CLI now skips the permissions publish step instead of failing when no current permissions are defined.
+- 751eff9: Fall back to ephemeral in-memory storage when OPFS is blocked by a SecurityError (Firefox private browsing, Safari private mode). Jazz now initialises successfully without persistence instead of failing to load entirely.
+- 961361c: Treat reconnect row-history replay as idempotent only when the incoming row exactly matches the stored history member. This avoids spuriously reclassifying replayed inserts as updates on insert-only tables while still allowing same-batch corrections to propagate their final payload.
+- 0fc5388: Add `jazz-tools schema hash` command to print the short hash of the current `schema.ts` without hitting the server or writing a local snapshot.
+- efa67bf: Admin-secret clients now bypass local row-policy enforcement so writes still reach the sync server, where permissions are actually checked.
+- fd3bd95: `Transaction.commit()` now returns a write handle, which allows waiting for ack from a given durability tier
+  - jazz-wasm@2.0.0-alpha.37
+  - jazz-rn@2.0.0-alpha.37
+
 ## 2.0.0-alpha.36
 
 ### Patch Changes
