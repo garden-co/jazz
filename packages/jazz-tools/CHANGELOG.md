@@ -1,5 +1,13 @@
 # jazz-tools
 
+## 2.0.0-alpha.38
+
+### Patch Changes
+
+- a4453e0: `jazzPlugin` and `jazzSvelteKit` now inject `worker.format: "es"` and `optimizeDeps.exclude: ["jazz-wasm"]` via a Vite `config` hook. Consumers no longer need to set these manually in their `vite.config.ts`.
+  - jazz-wasm@2.0.0-alpha.38
+  - jazz-rn@2.0.0-alpha.38
+
 ## 2.0.0-alpha.37
 
 ### Patch Changes
