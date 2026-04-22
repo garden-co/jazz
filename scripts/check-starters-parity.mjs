@@ -35,6 +35,10 @@ const HORIZONTAL_FILES = {
   react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
 };
 
+// Files that must be byte-identical across all nine starters regardless of
+// framework or auth variant.
+const ALL_STARTERS_FILES = ["AGENTS.md"];
+
 // Files that should be byte-identical across both frameworks (a "vertical"
 // parity rule on top of the horizontal one). We resolve them per framework
 // via HORIZONTAL_FILES — the logical name is the dict key.
@@ -186,8 +190,32 @@ function checkSharedReadmeBlocks() {
   }
 }
 
+function checkAllStartersParity() {
+  const allDirs = Object.values(STARTERS).flat();
+  for (const rel of ALL_STARTERS_FILES) {
+    const hashes = new Map();
+    for (const dir of allDirs) {
+      const content = read(`${dir}/${rel}`);
+      if (content === null) {
+        errors.push(`Missing file: ${dir}/${rel}`);
+        continue;
+      }
+      const h = hash(content);
+      if (!hashes.has(h)) hashes.set(h, []);
+      hashes.get(h).push(`${dir}/${rel}`);
+    }
+    if (hashes.size > 1) {
+      const groups = [...hashes.entries()]
+        .map(([h, files]) => `  ${h.slice(0, 12)}  ${files.join(", ")}`)
+        .join("\n");
+      errors.push(`All-starters drift: ${rel} disagrees across starters\n${groups}`);
+    }
+  }
+}
+
 checkHorizontalParity();
 checkCrossFrameworkParity();
+checkAllStartersParity();
 checkReadmeStructure();
 checkSharedReadmeBlocks();
 
