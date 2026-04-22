@@ -12,6 +12,7 @@ import { createRelativeLink } from "fumadocs-ui/mdx";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import type { ComponentProps } from "react";
+import { cwd } from "node:process";
 
 export default async function PresentationSlidePage(
   props: PageProps<"/presentations/[deck]/[slide]">,
@@ -50,6 +51,7 @@ export default async function PresentationSlidePage(
 }
 
 export async function generateStaticParams() {
+  console.log("CWD", cwd());
   const decks = await getPresentationDecks();
 
   return (
