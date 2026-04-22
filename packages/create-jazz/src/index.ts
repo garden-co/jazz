@@ -6,7 +6,7 @@ import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
 
-type Framework = "next" | "sveltekit";
+type Framework = "next" | "sveltekit" | "nuxt";
 type Hosting = "hosted" | "selfhosted";
 type Auth = "localfirst" | "hybrid" | "betterauth";
 
@@ -23,6 +23,11 @@ const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
     hybrid: "sveltekit-hybrid",
     betterauth: "sveltekit-betterauth",
   },
+  nuxt: {
+    localfirst: "nuxt-localfirst",
+    hybrid: "nuxt-hybrid",
+    betterauth: "nuxt-betterauth",
+  },
 };
 
 const VALID_HOSTING_VALUES: Hosting[] = ["hosted", "selfhosted"];
@@ -36,6 +41,12 @@ interface HostedEnvKeys {
 }
 
 const ENV_KEYS_BY_FRAMEWORK: Record<Framework | "react", HostedEnvKeys> = {
+  nuxt: {
+    appId: "NUXT_PUBLIC_JAZZ_APP_ID",
+    serverUrl: "NUXT_PUBLIC_JAZZ_SERVER_URL",
+    adminSecret: "JAZZ_ADMIN_SECRET",
+    backendSecret: "BACKEND_SECRET",
+  },
   next: {
     appId: "NEXT_PUBLIC_JAZZ_APP_ID",
     serverUrl: "NEXT_PUBLIC_JAZZ_SERVER_URL",
@@ -59,6 +70,7 @@ const ENV_KEYS_BY_FRAMEWORK: Record<Framework | "react", HostedEnvKeys> = {
 export function envKeysForStarter(starter: string): HostedEnvKeys | null {
   if (starter.startsWith("next-")) return ENV_KEYS_BY_FRAMEWORK.next;
   if (starter.startsWith("sveltekit-")) return ENV_KEYS_BY_FRAMEWORK.sveltekit;
+  if (starter.startsWith("nuxt-")) return ENV_KEYS_BY_FRAMEWORK.nuxt;
   if (starter.startsWith("react-")) return ENV_KEYS_BY_FRAMEWORK.react;
   return null;
 }
@@ -138,6 +150,7 @@ async function main() {
       options: [
         { value: "next", label: "React (Next.js)" },
         { value: "sveltekit", label: "Svelte (SvelteKit)" },
+        { value: "nuxt", label: "Vue (Nuxt)" },
       ],
     });
     if (isCancel(framework)) process.exit(0);
