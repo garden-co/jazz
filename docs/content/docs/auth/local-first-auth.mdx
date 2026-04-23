@@ -15,7 +15,7 @@ This secret (and therefore the account) lives wherever the user uses the app. To
 
 ## When to use local-first auth
 
-If you want users to be able start immediately, local-first ([client setup](#client-setup)) is a great option, but any user who clears site data (intentionally or otherwise) loses their account.
+If you want users to be able to start immediately, local-first ([client setup](#client-setup)) is a great option, but any user who clears site data (intentionally or otherwise) loses their account.
 
 You can add a [recovery passphrase](#recovery-passphrase) or [passkey backup](#passkey-backup) which allows users to more easily log in on multiple devices or recover their accounts if they delete them. However, these are often less familiar and can add UX friction.
 
@@ -27,7 +27,7 @@ You can also combine modes: let local-first users read and experiment, but requi
 
 ## Client setup
 
-Fetch or create a persistent secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
+Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
 <Tabs
   groupId="jazz-framework"
@@ -153,7 +153,7 @@ The parser is case-insensitive and tolerant of extra whitespace between words. I
 <Callout type="info">
   In React and Expo, `useLocalFirstAuth().login()` updates the mounted `JazzProvider` immediately.
   Other frameworks use `BrowserAuthSecretStore.saveSecret()` directly, which doesn't notify the live
-  client. The snippets above reload the page so the new secret is picked up on next boot.
+  client — the snippets above reload the page so the new secret is picked up on the next load.
 </Callout>
 
 ### Passkey backup
@@ -275,7 +275,7 @@ Before calling your sign-up endpoint, the client generates a short-lived proof t
   ../examples/auth-betterauth-chat/src/docs/local-first-proof-snippet.tsx#local-first-proof-signup
 </include>
 
-The `audience` can be anything, but match what the server expects when verifying. The `ttlSeconds` keeps the window short. 60 seconds should be enough for a sign-up round-trip.
+`audience` is application-defined; the string only needs to match what the server passes when verifying. `ttlSeconds` keeps the window short — 60 seconds is usually enough for a sign-up round-trip.
 
 ### Verifying on sign-up
 
@@ -312,7 +312,9 @@ The BetterAuth example above uses a framework-specific middleware hook. With any
 3. Stores the proven Jazz user ID linked to the new user account
 4. Issues JWTs with `sub: jazzId`
 
-```ts title="server.ts"
+Sketched in pseudo-Express (`db.users.create` and `issueJwt` stand in for whatever your stack provides):
+
+```ts title="Illustrative — not a runnable example"
 import { verifyLocalFirstIdentityProof } from "jazz-napi";
 
 // POST /signup
@@ -339,12 +341,6 @@ app.post("/signup", async (req, res) => {
 The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
 
 Jazz reads the JWT `sub` claim verbatim as `session.user_id` — no custom-claim fallback — so your provider needs to emit the Jazz ID as `sub`. If it doesn't let you override `sub` (e.g. it pins it to its own user ID), you'll need to mint the JWT yourself rather than using the provider's issuer.
-
-## How it works
-
-Local-first auth derives an Ed25519 keypair from a 32-byte seed, then takes the user ID to be a deterministic function of the public key (UUIDv5, namespace `jazz-auth-key-v1`). The client authenticates by minting a self-signed JWT that embeds its public key; the server verifies the signature and checks that the embedded key hashes to the claimed user ID. No external key store is involved — the token is fully self-contained.
-
-For the byte-level token format, proof-token structure, and further information, see [Local-first auth internals](/docs/reference/local-first-auth-internals).
 
 ## Next steps
 

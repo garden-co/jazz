@@ -18,10 +18,7 @@ public key, so holding the secret is the same thing as being the account: it let
 the keypair on demand and self-certify as that identity. Signing in is reconstructing the keypair
 from the stored secret; signing up is generating a new one.
 
-This is why the design doesn't need a server-side user registry. The public key embedded in a
-token, paired with its signature, is everything the server needs to confirm the claimed account. Verification reuses the JWT-checking path the server already runs for
-external-auth tokens; only the source of the signing key differs (embedded in the token for
-local-first, fetched from a JWKS endpoint for external auth).
+This is why the design doesn't need a server-side user registry: the public key embedded in a token, paired with its signature, is everything the server needs to confirm the claimed account. Verification reuses the JWT-checking path the server already runs for external-auth tokens — only the source of the signing key differs (embedded in the token for local-first, fetched from a JWKS endpoint for external auth).
 
 ## Identity derivation
 
@@ -48,7 +45,7 @@ The key claims are:
 | `jazz_pub_key` | Public key (base64url)   | Embedded so the server can verify without a lookup   |
 | `aud`          | App ID                   | Scopes the token to a specific app                   |
 
-Because the public key is embedded in the JWT itself, and signed using the private key, there is no need for a separate key-distribution step or a shared secret between the server and the client.
+The public key travels inside the JWT and the whole JWT is signed with the matching private key, so the server doesn't need a separate key-distribution step or a shared secret with the client.
 
 ## Server verification
 
