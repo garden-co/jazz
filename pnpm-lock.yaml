@@ -1380,9 +1380,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -1438,9 +1435,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -1484,9 +1478,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -1521,9 +1512,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       svelte:
         specifier: ^5.0.0
         version: 5.53.6
@@ -1561,9 +1549,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       svelte:
         specifier: ^5.0.0
         version: 5.53.6
@@ -1595,9 +1580,6 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
-      jazz-wasm:
-        specifier: workspace:*
-        version: link:../../crates/jazz-wasm
       svelte:
         specifier: ^5.0.0
         version: 5.53.6

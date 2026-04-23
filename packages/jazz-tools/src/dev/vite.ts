@@ -1,6 +1,23 @@
+import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+
+// jazz-tools contains a dynamic `import("jazz-wasm")` that we intentionally
+// keep out of Vite's dep optimizer (wasm-bindgen output breaks esbuild's
+// pre-bundling). With pnpm's strict install layout, a bare `jazz-wasm`
+// specifier left in a consumer bundle won't resolve at runtime because the
+// package isn't hoisted to the project root. We resolve jazz-wasm from this
+// module's location — where it IS a direct dependency of jazz-tools — and
+// return it as an absolute path, so the plugin can alias the bare specifier
+// without forcing the consumer to add jazz-wasm to their own package.json.
+export function resolveJazzWasmEntry(): string | null {
+  try {
+    return createRequire(import.meta.url).resolve("jazz-wasm");
+  } catch {
+    return null;
+  }
+}
 
 export interface JazzServerOptions {
   port?: number;
@@ -58,11 +75,15 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
 
     config(config: { optimizeDeps?: { exclude?: string[] } }) {
       const existing = config.optimizeDeps?.exclude ?? [];
+      const jazzWasmEntry = resolveJazzWasmEntry();
       return {
         worker: { format: "es" as const },
         optimizeDeps: {
           exclude: Array.from(new Set([...existing, "jazz-wasm"])),
         },
+        ...(jazzWasmEntry
+          ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
+          : {}),
       };
     },
 
