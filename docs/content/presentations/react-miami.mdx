@@ -677,7 +677,40 @@ and local-first state.
 </Slide>
 
 <Slide className="justify-start">
-## Adopter success stories
+## Classic jazz app successes
+
+<div className="relative mt-[2vh] h-[56vh] w-full">
+  <img
+    src="/presentations/react-miami/adopters/invoice-radar.webp"
+    alt="Invoice Radar"
+    className="absolute left-[2%] top-[5%] w-[31%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-7deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/opacity.webp"
+    alt="Opacity"
+    className="absolute right-[2%] top-[1%] w-[38%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[4deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/spicy-golf.webp"
+    alt="Spicy Golf"
+    className="absolute left-[34%] top-[10%] w-[29%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-1deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/learn-anything.webp"
+    alt="Learn Anything"
+    className="absolute left-[13%] bottom-[4%] w-[27%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[6deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/wageso.webp"
+    alt="Wageso"
+    className="absolute left-[39%] bottom-[7%] w-[29%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-2deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/hend.webp"
+    alt="Hend"
+    className="absolute right-[5%] bottom-[0%] w-[24%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-5deg]"
+  />
+</div>
 
 <Notes>
 And they built the coolest stuff,
@@ -685,6 +718,46 @@ from language-learning apps
 to uber for robot teleoperation,
 to social networks
 Figma killers
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Classic jazz app successes
+
+<div className="relative mt-[2vh] h-[56vh] w-full">
+  <img
+    src="/presentations/react-miami/adopters/motley.webp"
+    alt="Motley"
+    className="absolute left-[38%] top-[0%] w-[28%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-2deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/alkalye.webp"
+    alt="Alkalye"
+    className="absolute left-[2%] top-[2%] w-[32%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-4deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/cuppl.webp"
+    alt="Cuppl"
+    className="absolute right-[4%] top-[4%] w-[27%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[5deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/tilly-screen.webp"
+    alt="Tilly"
+    className="absolute left-[18%] top-[18%] w-[31%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[3deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/mtor.webp"
+    alt="Mtor"
+    className="absolute left-[45%] bottom-[2%] w-[26%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-3deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/hifz-garden.webp"
+    alt="Hifz Garden"
+    className="absolute right-[2%] bottom-[4%] w-[28%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[7deg]"
+  />
+</div>
+
+<Notes>
 and just a ton of personal software
 with insane production value for
 single devs, because they could actually
@@ -1199,48 +1272,6 @@ testing your whole app.
 </Notes>
 </Slide>
 
-<Slide className="justify-start">
-## Example: Letters app
-- data model (updated)
-- rendering (updated)
-- mutation (updated)
-- permissions (updated)
-<Notes>
-But wait! Didn't we say we don't need to capture edit metadata
-ourselves? Why should we maintain the owner of a cursor.
-
-You're absolutely right. We can just use the builtin magic column
-`$createdBy` instead. That makes the mutation even simpler, and the
-permissions can use the same edit metadata too.
-
-But let's say we realized this too late and already shipped our
-letter app to millions of users...
-
-</Notes>
-</Slide>
-
-<Slide className="justify-start">
-## Example: Letters app
-- data model (updated)
-- rendering (updated)
-- mutation (updated)
-- permissions (updated)
-- migrations
-<Notes>
-Well, no problem, let's just create a fluid migration. Jazz
-actually helps you scaffold one whenever you change your schema.
-
-And you can see that it reads pretty cleanly. The only special bit is
-that the migration is bidirectional, which gives us backwards
-compatibility with old clients that still read a user column we now fake
-for them on new data.
-
-And all of this is typechecked, so you get instant feedback if the
-migration shape is right.
-
-</Notes>
-</Slide>
-
 <Slide>
 # Demo time
 <Notes>
@@ -1255,7 +1286,7 @@ multiplayer database in it.
 I had promised myself not to do a demo in this talk. And if I did, not
 one that relied on conference wifi. And if I did that, definitely not
 one where audience interaction was projected on a giant recorded screen
-where people might do silly things _demo gentle profanity_.
+where people might do silly things
 
 Anyways, here is the join code. Let's put this through the paces, but
 please be wholesome.
@@ -1263,7 +1294,7 @@ please be wholesome.
 </Notes>
 </Slide>
 
-<Slide className="justify-center items-center">
+<Slide className="justify-center items-center [&_h2]:leading-[1.025]">
 ## What if `useState()` was your database?
 
 <Notes>
@@ -1274,8 +1305,8 @@ What would it actually feel like if useState was _your_ database?
 </Notes>
 </Slide>
 
-<Slide className="justify-center items-center">
-<h2>What if <JazzLogo className="inline h-[0.98em] w-auto shrink-0 relative top-[0.04em]" /> was your database?</h2>
+<Slide className="justify-center">
+<h2>What if <JazzLogo className="inline h-[0.98em] w-auto shrink-0 relative top-[0.04em]" /><br/>was your database?</h2>
 
 <Notes>
 What if *jazz* was your database?
