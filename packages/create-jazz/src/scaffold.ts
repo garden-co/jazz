@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { resolveLocalDeps, resolveRemoteDeps, type PackageManifest } from "./deps.js";
+import {
+  resolveLocalDeps,
+  resolveRemoteDeps,
+  type PackageManifest,
+  type ResolveProgressCallback,
+} from "./deps.js";
 
 const REPO = "garden-co/jazz2";
 const BRANCH = "main";
@@ -68,12 +73,15 @@ async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
   await emitter.clone(dir);
 }
 
-async function resolveManifest(manifest: PackageManifest): Promise<PackageManifest> {
+async function resolveManifest(
+  manifest: PackageManifest,
+  onProgress?: ResolveProgressCallback,
+): Promise<PackageManifest> {
   const localPath = process.env.JAZZ_STARTER_PATH;
   if (localPath) {
-    return resolveLocalDeps(manifest, path.resolve(localPath, "../.."));
+    return resolveLocalDeps(manifest, path.resolve(localPath, "../.."), onProgress);
   }
-  return resolveRemoteDeps(manifest, { repo: REPO, branch: BRANCH });
+  return resolveRemoteDeps(manifest, { repo: REPO, branch: BRANCH }, onProgress);
 }
 
 export async function scaffold(options: ScaffoldOptions): Promise<void> {
@@ -104,7 +112,9 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
     options.onStep?.("Resolving dependencies");
     const pkgJsonPath = path.join(options.targetDir, "package.json");
     const rawManifest = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8")) as PackageManifest;
-    const resolved = await resolveManifest(rawManifest);
+    const resolved = await resolveManifest(rawManifest, (done, total) => {
+      options.onStep?.(`Resolving dependencies (${done}/${total})`);
+    });
     const finalManifest = { ...resolved, name: options.appName };
     fs.writeFileSync(pkgJsonPath, JSON.stringify(finalManifest, null, 2) + "\n", "utf-8");
 
