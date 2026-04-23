@@ -14,6 +14,41 @@ export type PresentationSlideIdentity = {
 
 const notesTagPattern = /<Notes\b[^>]*>([\s\S]*?)<\/Notes>/g;
 const slideTagPattern = /<Slide\b([\s\S]*?)>([\s\S]*?)<\/Slide>/g;
+const slideHashPrefix = "slide=";
+const letterCanvasArrowMessageType = "jazz-letter-canvas:arrow-key";
+
+export function createPresentationSlideHref(basePath: string, slideSlug: string) {
+  return `${basePath}#${slideHashPrefix}${encodeURIComponent(slideSlug)}`;
+}
+
+export function readPresentationSlideSlugFromHash(hash: string) {
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+
+  if (!fragment) return null;
+
+  const value = fragment.startsWith(slideHashPrefix)
+    ? fragment.slice(slideHashPrefix.length)
+    : fragment;
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function readLetterCanvasArrowNavigationDirection(message: unknown) {
+  if (!message || typeof message !== "object") return null;
+
+  const data = message as { key?: unknown; type?: unknown };
+
+  if (data.type !== letterCanvasArrowMessageType) return null;
+
+  if (data.key === "ArrowRight") return "next";
+  if (data.key === "ArrowLeft") return "previous";
+
+  return null;
+}
 
 export function parsePresentationSlidesFromMdx(
   deckSlug: string,
@@ -40,9 +75,9 @@ export function parsePresentationSlidesFromMdx(
 
     slides.push({
       estimatedDurationSeconds: estimatePresentationSpeakingDurationSeconds(notesText),
-      href: `/presentations/${deckSlug}/${normalizedSlug}`,
+      href: createPresentationSlideHref(`/presentations/${deckSlug}`, normalizedSlug),
       notesText,
-      notesHref: `/presenter/${deckSlug}/${normalizedSlug}`,
+      notesHref: createPresentationSlideHref(`/presenter/${deckSlug}`, normalizedSlug),
       slug: normalizedSlug,
       title: normalizedTitle,
     });
