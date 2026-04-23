@@ -215,13 +215,13 @@ export function JazzProvider({
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
 
+  const configKey = JSON.stringify(config);
+
   const [clientPromise, setClientPromise] = useState(() => {
-    const configKey = JSON.stringify(config);
     return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
   });
 
   useEffect(() => {
-    const configKey = JSON.stringify(config);
     const clientPromise = acquireClient<CoreJazzClient>(
       configKey,
       config,
@@ -234,7 +234,7 @@ export function JazzProvider({
     return () => {
       releaseClient(configKey, holder);
     };
-  }, [config, createJazzClient, holder]);
+  }, [configKey, createJazzClient, holder]);
 
   return (
     <React.Suspense fallback={fallback}>
