@@ -126,17 +126,19 @@ describe("agent-infra backend CLI run commands", () => {
     () => {
       const operation = runCliJson("record-cursor-review-op", {
         operationId: "cursor-op-2",
-        operationType: "prepare-branch-review",
+        operationType: "delete-branch-path",
         repoRoot: "/Users/nikitavoloboev/code/prom",
         workspaceRoot: "/Users/nikitavoloboev/code/prom",
-        bookmark: "review/nikiv-designer-telemetry-pr1-main",
-        note: "prepare review",
+        bookmark: "review/nikiv-ai-proxy-opus-4-7-thinking",
+        relPath: "tests",
+        note: "remove failing branch tests",
         sourceSessionId: "cursor:session-2",
         sourceChatKind: "cursor",
       });
 
       expect(operation.operationId).toBe("cursor-op-2");
-      expect(operation.operationType).toBe("prepare-branch-review");
+      expect(operation.operationType).toBe("delete-branch-path");
+      expect(operation.relPath).toBe("tests");
 
       const pending = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",
@@ -144,7 +146,7 @@ describe("agent-infra backend CLI run commands", () => {
       ]);
       expect(pending).toHaveLength(1);
       expect(pending[0]?.bookmark).toBe(
-        "review/nikiv-designer-telemetry-pr1-main",
+        "review/nikiv-ai-proxy-opus-4-7-thinking",
       );
 
       const result = runCliJson("record-cursor-review-result", {

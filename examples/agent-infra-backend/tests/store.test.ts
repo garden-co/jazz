@@ -212,11 +212,12 @@ describe("AgentDataStore", () => {
   it("records cursor review operations and hides processed entries by default", async () => {
     const operation = await store.recordCursorReviewOperation({
       operationId: "cursor-op-1",
-      operationType: "prepare-branch-review",
+      operationType: "delete-branch-path",
       repoRoot: "/Users/nikitavoloboev/code/prom",
       workspaceRoot: "/Users/nikitavoloboev/code/prom",
-      bookmark: "review/nikiv-designer-telemetry-pr1-main",
-      note: "prepare Flow review",
+      bookmark: "review/nikiv-ai-proxy-opus-4-7-thinking",
+      relPath: "tests",
+      note: "remove failing branch tests",
       sourceSessionId: "cursor:session-1",
       sourceChatKind: "cursor",
     });
@@ -226,9 +227,10 @@ describe("AgentDataStore", () => {
     });
 
     expect(operation.operationId).toBe("cursor-op-1");
+    expect(operation.relPath).toBe("tests");
     expect(pending).toHaveLength(1);
     expect(pending[0]?.bookmark).toBe(
-      "review/nikiv-designer-telemetry-pr1-main",
+      "review/nikiv-ai-proxy-opus-4-7-thinking",
     );
     expect(pending[0]?.latestResult).toBeUndefined();
 

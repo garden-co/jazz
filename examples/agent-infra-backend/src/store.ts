@@ -269,7 +269,10 @@ export type CursorReviewOperationType =
   | "refresh-branch-review"
   | "copy-branch-review-prompt"
   | "open-branch-review-chat"
+  | "open-branch-workspace"
+  | "open-branch-commit-chat"
   | "show-branch-diff"
+  | "delete-branch-path"
   | "open-branch-file"
   | "open-branch-file-diff";
 
@@ -2663,7 +2666,10 @@ export class AgentDataStore {
       operationType !== "refresh-branch-review" &&
       operationType !== "copy-branch-review-prompt" &&
       operationType !== "open-branch-review-chat" &&
+      operationType !== "open-branch-workspace" &&
+      operationType !== "open-branch-commit-chat" &&
       operationType !== "show-branch-diff" &&
+      operationType !== "delete-branch-path" &&
       operationType !== "open-branch-file" &&
       operationType !== "open-branch-file-diff"
     ) {
