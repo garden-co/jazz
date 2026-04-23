@@ -1,7 +1,15 @@
 "use client";
 
 import { cn } from "@/lib/cn";
-import { createContext, useContext, type ReactNode } from "react";
+import { readPresentationSlideSlugFromHash } from "@/lib/presentation-deck";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useState,
+  type ReactNode,
+} from "react";
 
 const PresentationSlideContext = createContext<string | null>(null);
 const PresentationRenderModeContext = createContext<"slide" | "notes">("slide");
@@ -14,9 +22,9 @@ const PresentationNotesContext = createContext<{
 } | null>(null);
 
 type PresentationDeckViewProps = {
-  activeSlide: string;
   children: ReactNode;
   mode?: "slide" | "notes";
+  slides: PresentationSlideState[];
 };
 
 type SlideProps = {
@@ -28,18 +36,24 @@ type SlideProps = {
 
 type PresentationNotesProviderProps = {
   children: ReactNode;
-  cumulativeDurationSeconds: number;
-  currentDurationSeconds: number;
-  slideCount: number;
-  slideNumber: number;
-  slideTitle: string;
+  slides: PresentationSlideState[];
+};
+
+export type PresentationSlideState = {
+  estimatedDurationSeconds: number;
+  href: string;
+  notesHref: string;
+  slug: string;
+  title: string;
 };
 
 export function PresentationDeckView({
-  activeSlide,
   children,
   mode = "slide",
+  slides,
 }: PresentationDeckViewProps) {
+  const activeSlide = useActivePresentationSlide(slides);
+
   return (
     <PresentationSlideContext.Provider value={activeSlide}>
       <PresentationRenderModeContext.Provider value={mode}>
@@ -49,22 +63,56 @@ export function PresentationDeckView({
   );
 }
 
-export function PresentationNotesProvider({
-  children,
-  cumulativeDurationSeconds,
-  currentDurationSeconds,
-  slideCount,
-  slideNumber,
-  slideTitle,
-}: PresentationNotesProviderProps) {
+export function PresentationNotesProvider({ children, slides }: PresentationNotesProviderProps) {
+  const activeIndex = useActivePresentationSlideIndex(slides);
+  const currentSlide = slides[activeIndex] ?? slides[0];
+  const currentDurationSeconds = currentSlide?.estimatedDurationSeconds ?? 0;
+  const cumulativeDurationSeconds = slides
+    .slice(0, activeIndex + 1)
+    .reduce((total, deckSlide) => total + deckSlide.estimatedDurationSeconds, 0);
+  const navigateTo = useEffectEvent((index: number) => {
+    const target = slides[index];
+
+    if (!target || index === activeIndex) return;
+
+    const notesHash = new URL(target.notesHref, window.location.href).hash;
+    const slideHash = new URL(target.href, window.location.href).hash;
+
+    window.location.hash = notesHash;
+
+    try {
+      if (window.opener && !window.opener.closed) {
+        window.opener.location.hash = slideHash;
+      }
+    } catch {
+      // If the opener is unavailable or cross-origin, the notes window can still navigate itself.
+    }
+  });
+  const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    const targetIndex = getPresentationNavigationTargetIndex(event, activeIndex, slides.length);
+
+    if (targetIndex === null) return;
+
+    event.preventDefault();
+    navigateTo(targetIndex);
+  });
+
+  useEffect(() => {
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onKeyDown]);
+
   return (
     <PresentationNotesContext.Provider
       value={{
         cumulativeDurationSeconds,
         currentDurationSeconds,
-        slideCount,
-        slideNumber,
-        slideTitle,
+        slideCount: slides.length,
+        slideNumber: activeIndex + 1,
+        slideTitle: currentSlide?.title ?? "",
       }}
     >
       {children}
@@ -210,4 +258,65 @@ function formatDuration(totalSeconds: number) {
   const seconds = totalSeconds % 60;
 
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+export function useActivePresentationSlideIndex(slides: PresentationSlideState[]) {
+  const [activeSlug, setActiveSlug] = useState<string | null>(null);
+
+  useEffect(() => {
+    function syncActiveSlide() {
+      setActiveSlug(readPresentationSlideSlugFromHash(window.location.hash));
+    }
+
+    syncActiveSlide();
+    window.addEventListener("hashchange", syncActiveSlide);
+
+    return () => {
+      window.removeEventListener("hashchange", syncActiveSlide);
+    };
+  }, []);
+
+  const requestedIndex = slides.findIndex((slide) => slide.slug === activeSlug);
+
+  return requestedIndex === -1 ? 0 : requestedIndex;
+}
+
+function useActivePresentationSlide(slides: PresentationSlideState[]) {
+  return slides[useActivePresentationSlideIndex(slides)]?.slug ?? null;
+}
+
+export function getPresentationNavigationTargetIndex(
+  event: KeyboardEvent,
+  activeIndex: number,
+  slideCount: number,
+) {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return null;
+
+  const target = event.target;
+
+  if (
+    target instanceof HTMLElement &&
+    (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))
+  ) {
+    return null;
+  }
+
+  switch (event.key) {
+    case "ArrowRight":
+    case "ArrowDown":
+    case "PageDown":
+    case " ":
+      return Math.min(activeIndex + 1, slideCount - 1);
+    case "ArrowLeft":
+    case "ArrowUp":
+    case "PageUp":
+    case "Backspace":
+      return Math.max(activeIndex - 1, 0);
+    case "Home":
+      return 0;
+    case "End":
+      return slideCount - 1;
+    default:
+      return null;
+  }
 }

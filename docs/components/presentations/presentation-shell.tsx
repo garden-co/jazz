@@ -1,43 +1,44 @@
 "use client";
 
-import { usePathname, useRouter } from "next/navigation";
 import {
-  startTransition,
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+  getPresentationNavigationTargetIndex,
+  useActivePresentationSlideIndex,
+} from "@/components/presentations/slide";
+import { readLetterCanvasArrowNavigationDirection } from "@/lib/presentation-deck";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 
 type SlideLink = {
   estimatedDurationSeconds: number;
   href: string;
   notesHref: string;
+  slug: string;
   title: string;
 };
 
 type PresentationShellProps = {
   children: ReactNode;
   deckTitle: string;
+  preloadImageSrcs?: string[];
   slides: SlideLink[];
 };
 
 const NOTES_WINDOW_NAME = "jazz-presentation-notes";
 const NOTES_WINDOW_FEATURES =
   "popup=yes,width=960,height=1080,left=80,top=80,resizable=yes,scrollbars=yes";
+const LETTER_CANVAS_IFRAME_ID = "letter-canvas";
 
-export function PresentationShell({ children, deckTitle, slides }: PresentationShellProps) {
-  const pathname = usePathname();
-  const router = useRouter();
+export function PresentationShell({
+  children,
+  deckTitle,
+  preloadImageSrcs = [],
+  slides,
+}: PresentationShellProps) {
+  const preloadedImagesRef = useRef<HTMLImageElement[]>([]);
   const notesWindowRef = useRef<Window | null>(null);
   const [showNotesWindow, setShowNotesWindow] = useState(false);
 
-  const currentIndex = slides.findIndex((slide) => slide.href === pathname);
-  const activeIndex = currentIndex === -1 ? 0 : currentIndex;
+  const activeIndex = useActivePresentationSlideIndex(slides);
   const currentSlide = slides[activeIndex] ?? slides[0];
-  const previousSlide = slides[activeIndex - 1];
-  const nextSlide = slides[activeIndex + 1];
 
   const syncNotesWindow = useEffectEvent((notesHref: string, focus = false) => {
     const notesWindow = notesWindowRef.current;
@@ -48,7 +49,9 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
       return;
     }
 
-    if (notesWindow.location.pathname !== notesHref) {
+    const currentNotesHref = `${notesWindow.location.pathname}${notesWindow.location.hash}`;
+
+    if (currentNotesHref !== notesHref) {
       notesWindow.location.replace(notesHref);
     }
 
@@ -63,10 +66,7 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
     if (!target || index === activeIndex) return;
 
     syncNotesWindow(target.notesHref);
-
-    startTransition(() => {
-      router.push(target.href);
-    });
+    window.location.hash = new URL(target.href, window.location.href).hash;
   });
 
   const closeNotesWindow = useEffectEvent(() => {
@@ -117,46 +117,54 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
   });
 
   const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (!event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const target = event.target;
 
-    const target = event.target;
-    if (
-      target instanceof HTMLElement &&
-      (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))
-    ) {
-      return;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))
+      ) {
+        return;
+      }
+
+      switch (event.key) {
+        case "s":
+        case "S":
+          event.preventDefault();
+          toggleNotesWindow();
+          return;
+      }
     }
 
-    switch (event.key) {
-      case "ArrowRight":
-      case "ArrowDown":
-      case "PageDown":
-      case " ":
-        event.preventDefault();
-        navigateTo(activeIndex + 1);
-        return;
-      case "ArrowLeft":
-      case "ArrowUp":
-      case "PageUp":
-      case "Backspace":
-        event.preventDefault();
-        navigateTo(activeIndex - 1);
-        return;
-      case "Home":
-        event.preventDefault();
-        navigateTo(0);
-        return;
-      case "End":
-        event.preventDefault();
-        navigateTo(slides.length - 1);
-        return;
-      case "s":
-      case "S":
-        event.preventDefault();
-        toggleNotesWindow();
-        return;
-      default:
-        return;
+    const targetIndex = getPresentationNavigationTargetIndex(event, activeIndex, slides.length);
+
+    if (targetIndex === null) return;
+
+    event.preventDefault();
+    navigateTo(targetIndex);
+  });
+
+  const onMessage = useEffectEvent((event: MessageEvent<unknown>) => {
+    const iframe = document.querySelector<HTMLIFrameElement>(`#${LETTER_CANVAS_IFRAME_ID}`);
+
+    if (!iframe || event.source !== iframe.contentWindow) return;
+
+    const iframeSrc = iframe.getAttribute("src");
+
+    if (!iframeSrc) return;
+
+    const iframeOrigin = new URL(iframeSrc, window.location.href).origin;
+
+    if (event.origin !== iframeOrigin) return;
+
+    const direction = readLetterCanvasArrowNavigationDirection(event.data);
+
+    if (direction === "next") {
+      navigateTo(Math.min(activeIndex + 1, slides.length - 1));
+    }
+
+    if (direction === "previous") {
+      navigateTo(Math.max(activeIndex - 1, 0));
     }
   });
 
@@ -169,16 +177,31 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
   }, [onKeyDown]);
 
   useEffect(() => {
-    router.prefetch(currentSlide.notesHref);
-    if (previousSlide) {
-      router.prefetch(previousSlide.href);
-      router.prefetch(previousSlide.notesHref);
-    }
-    if (nextSlide) {
-      router.prefetch(nextSlide.href);
-      router.prefetch(nextSlide.notesHref);
-    }
-  }, [currentSlide.notesHref, nextSlide, previousSlide, router]);
+    preloadedImagesRef.current = preloadImageSrcs.map((src) => {
+      const image = new Image();
+
+      image.decoding = "sync";
+      image.loading = "eager";
+      image.src = src;
+      void image.decode?.().catch(() => {
+        // The mounted hidden <img> below still keeps the resource warm if decode() is unavailable.
+      });
+
+      return image;
+    });
+
+    return () => {
+      preloadedImagesRef.current = [];
+    };
+  }, [preloadImageSrcs]);
+
+  useEffect(() => {
+    window.addEventListener("message", onMessage);
+
+    return () => {
+      window.removeEventListener("message", onMessage);
+    };
+  }, [onMessage]);
 
   useEffect(() => {
     if (!showNotesWindow) return;
@@ -217,6 +240,14 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
       className="min-h-screen bg-fd-background text-fd-foreground"
       aria-label={`${deckTitle} slide ${activeIndex + 1} of ${slides.length}`}
     >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed left-[-9999px] top-0 h-px w-px overflow-hidden opacity-0"
+      >
+        {preloadImageSrcs.map((src) => (
+          <img key={src} src={src} alt="" decoding="sync" loading="eager" />
+        ))}
+      </div>
       <main className="w-screen h-screen">{children}</main>
     </div>
   );

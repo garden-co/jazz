@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   estimatePresentationSpeakingDurationSeconds,
   parsePresentationSlidesFromMdx,
+  readLetterCanvasArrowNavigationDirection,
   resolvePresentationSlideIdentity,
 } from "./presentation-deck.ts";
 
@@ -26,17 +27,17 @@ test("parses slide order from the MDX file in source order", () => {
   assert.deepEqual(slides, [
     {
       estimatedDurationSeconds: 4,
-      href: "/presentations/react-miami/intro",
+      href: "/presentations/react-miami#slide=intro",
       notesText: "Welcome everyone.",
-      notesHref: "/presenter/react-miami/intro",
+      notesHref: "/presenter/react-miami#slide=intro",
       slug: "intro",
       title: "Jazz at React Miami",
     },
     {
       estimatedDurationSeconds: 0,
-      href: "/presentations/react-miami/why-jazz",
+      href: "/presentations/react-miami#slide=why-jazz",
       notesText: "",
-      notesHref: "/presenter/react-miami/why-jazz",
+      notesHref: "/presenter/react-miami#slide=why-jazz",
       slug: "why-jazz",
       title: "Why Jazz?",
     },
@@ -68,33 +69,33 @@ test("defaults missing slug and title to the 1-based slide index", () => {
   assert.deepEqual(slides, [
     {
       estimatedDurationSeconds: 0,
-      href: "/presentations/react-miami/1",
+      href: "/presentations/react-miami#slide=1",
       notesText: "",
-      notesHref: "/presenter/react-miami/1",
+      notesHref: "/presenter/react-miami#slide=1",
       slug: "1",
       title: "1",
     },
     {
       estimatedDurationSeconds: 0,
-      href: "/presentations/react-miami/2",
+      href: "/presentations/react-miami#slide=2",
       notesText: "",
-      notesHref: "/presenter/react-miami/2",
+      notesHref: "/presenter/react-miami#slide=2",
       slug: "2",
       title: "Custom title",
     },
     {
       estimatedDurationSeconds: 0,
-      href: "/presentations/react-miami/custom-slug",
+      href: "/presentations/react-miami#slide=custom-slug",
       notesText: "",
-      notesHref: "/presenter/react-miami/custom-slug",
+      notesHref: "/presenter/react-miami#slide=custom-slug",
       slug: "custom-slug",
       title: "3",
     },
     {
       estimatedDurationSeconds: 0,
-      href: "/presentations/react-miami/4",
+      href: "/presentations/react-miami#slide=4",
       notesText: "",
-      notesHref: "/presenter/react-miami/4",
+      notesHref: "/presenter/react-miami#slide=4",
       slug: "4",
       title: "4",
     },
@@ -160,4 +161,29 @@ test("estimates speaking duration from note text length and structure", () => {
     estimatePresentationSpeakingDurationSeconds("First paragraph.\n\nSecond paragraph."),
     6,
   );
+});
+
+test("reads slide navigation from letter canvas arrow messages", () => {
+  assert.equal(
+    readLetterCanvasArrowNavigationDirection({
+      key: "ArrowRight",
+      type: "jazz-letter-canvas:arrow-key",
+    }),
+    "next",
+  );
+  assert.equal(
+    readLetterCanvasArrowNavigationDirection({
+      key: "ArrowLeft",
+      type: "jazz-letter-canvas:arrow-key",
+    }),
+    "previous",
+  );
+  assert.equal(
+    readLetterCanvasArrowNavigationDirection({
+      key: "ArrowUp",
+      type: "jazz-letter-canvas:arrow-key",
+    }),
+    null,
+  );
+  assert.equal(readLetterCanvasArrowNavigationDirection({ key: "ArrowRight" }), null);
 });

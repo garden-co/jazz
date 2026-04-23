@@ -1,6 +1,7 @@
 import { PresentationShell } from "@/components/presentations/presentation-shell";
 import { getPresentationDeckPage, getPresentationSlidesForPage } from "@/lib/presentations";
 import { notFound } from "next/navigation";
+import { Suspense } from "react";
 
 export default async function PresentationDeckLayout(props: LayoutProps<"/presentations/[deck]">) {
   const params = await props.params;
@@ -11,8 +12,14 @@ export default async function PresentationDeckLayout(props: LayoutProps<"/presen
   const slides = await getPresentationSlidesForPage(deck);
 
   return (
-    <PresentationShell deckTitle={deck.data.title} slides={slides}>
-      {props.children}
-    </PresentationShell>
+    <Suspense>
+      <PresentationShell
+        deckTitle={deck.data.title}
+        slides={slides}
+        preloadImageSrcs={["/presentations/react-miami/overlays/saas-mines-photo.png"]}
+      >
+        {props.children}
+      </PresentationShell>
+    </Suspense>
   );
 }

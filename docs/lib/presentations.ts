@@ -18,7 +18,6 @@ export type PresentationSlide = PresentationSlideDefinition;
 
 type PresentationDeck = {
   description: string | undefined;
-  firstSlideUrl: string;
   slideCount: number;
   slug: string;
   title: string;
@@ -80,7 +79,6 @@ export async function getPresentationDecks(): Promise<PresentationDeck[]> {
 
       return {
         description: page.data.description,
-        firstSlideUrl: slides[0].href,
         slideCount: slides.length,
         slug: getDeckSlug(page),
         title: page.data.title,
@@ -89,10 +87,4 @@ export async function getPresentationDecks(): Promise<PresentationDeck[]> {
   );
 
   return decks.sort(sortDecks);
-}
-
-export async function getPresentationSlide(deck: string, slideSlug: string) {
-  const slides = await getPresentationDeckSlides(deck);
-
-  return slides.find((slide) => slide.slug === slideSlug);
 }
