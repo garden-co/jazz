@@ -212,11 +212,11 @@ describe("AgentDataStore", () => {
   it("records cursor review operations and hides processed entries by default", async () => {
     const operation = await store.recordCursorReviewOperation({
       operationId: "cursor-op-1",
-      operationType: "show-branch-diff",
+      operationType: "prepare-branch-review",
       repoRoot: "/Users/nikitavoloboev/code/prom",
       workspaceRoot: "/Users/nikitavoloboev/code/prom",
       bookmark: "review/nikiv-designer-telemetry-pr1-main",
-      note: "show diff in Flow review",
+      note: "prepare Flow review",
       sourceSessionId: "cursor:session-1",
       sourceChatKind: "cursor",
     });

@@ -126,17 +126,17 @@ describe("agent-infra backend CLI run commands", () => {
     () => {
       const operation = runCliJson("record-cursor-review-op", {
         operationId: "cursor-op-2",
-        operationType: "open-branch-review-chat",
+        operationType: "prepare-branch-review",
         repoRoot: "/Users/nikitavoloboev/code/prom",
         workspaceRoot: "/Users/nikitavoloboev/code/prom",
         bookmark: "review/nikiv-designer-telemetry-pr1-main",
-        note: "open review chat",
+        note: "prepare review",
         sourceSessionId: "cursor:session-2",
         sourceChatKind: "cursor",
       });
 
       expect(operation.operationId).toBe("cursor-op-2");
-      expect(operation.operationType).toBe("open-branch-review-chat");
+      expect(operation.operationType).toBe("prepare-branch-review");
 
       const pending = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",

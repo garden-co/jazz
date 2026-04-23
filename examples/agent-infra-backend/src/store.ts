@@ -264,11 +264,13 @@ export interface ListTaskRecordsInput {
 }
 
 export type CursorReviewOperationType =
+  | "prepare-branch-review"
   | "focus-branch-review"
   | "refresh-branch-review"
   | "copy-branch-review-prompt"
   | "open-branch-review-chat"
   | "show-branch-diff"
+  | "open-branch-file"
   | "open-branch-file-diff";
 
 export type CursorReviewOperationResultStatus =
@@ -2656,11 +2658,13 @@ export class AgentDataStore {
       readObjectString(payload, "operationId") ?? event.event_id;
     const operationType = readObjectString(payload, "operationType");
     if (
+      operationType !== "prepare-branch-review" &&
       operationType !== "focus-branch-review" &&
       operationType !== "refresh-branch-review" &&
       operationType !== "copy-branch-review-prompt" &&
       operationType !== "open-branch-review-chat" &&
       operationType !== "show-branch-diff" &&
+      operationType !== "open-branch-file" &&
       operationType !== "open-branch-file-diff"
     ) {
       return null;
