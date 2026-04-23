@@ -1,5 +1,3 @@
-export function jwtPayload({ user }: { user: { id: string } }): Record<string, unknown> {
-  return {
-    jazz_principal_id: user.id,
-  };
+export function jwtPayload(_: { user: { id: string } }): Record<string, unknown> {
+  return {};
 }
