@@ -11,9 +11,11 @@
  * Fix: gate the composer on membershipReady (true only after chatMembers insert
  * is acknowledged at edge-tier), not just userId + myProfile.
  *
- * Test contract: when Bob lands on a chat he is not yet a member of, the
- * composer MUST be disabled until auto-join completes server-side.  Sending
- * immediately after the composer first enables must always deliver the message.
+ * Test contract:
+ *   A. The composer MUST transition through a disabled state before enabling
+ *      (i.e. it must not start enabled immediately).
+ *   B. Sending a message the moment the composer first enables must always
+ *      deliver the message to other participants (no permission error).
  */
 import { expect, test, type Page } from "@playwright/test";
 import { newUserContext, createChatAndGetId, waitForComposer, waitForMessage } from "./helpers";
@@ -29,46 +31,80 @@ test.describe("auto-join race on first message send", () => {
     const { page: alice } = await newUserContext(browser, "alice");
     const chatId = await createChatAndGetId(alice);
 
-    // ── Bob: open the chat directly (he is not yet a member) ─────────────────
-    const { page: bob } = await newUserContext(browser, "bob");
+    // ── Bob: open the chat directly via a fresh browser context ─────────────
+    // We do NOT use newUserContext here (which navigates to the root first),
+    // because navigating to the chat hash URL from the root is a client-side
+    // hash change that won't trigger a page reload — meaning addInitScript
+    // wouldn't re-run.  Instead we navigate directly to the final URL so that
+    // the very first page load includes the observer script.
+    const bobContext = await browser.newContext();
+    const bob = await bobContext.newPage();
 
     const consoleErrors: string[] = [];
     bob.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(msg.text());
     });
 
+    // Install the observer before the first (and only) navigation.
+    await bob.addInitScript(() => {
+      (window as typeof window & { __editorHistory: string[] }).__editorHistory = [];
+
+      // Poll until the ProseMirror editor appears, then record its state.
+      const poll = setInterval(() => {
+        const pm = document.querySelector("#messageEditor .ProseMirror");
+        if (!pm) return;
+        clearInterval(poll);
+
+        const initial = pm.getAttribute("contenteditable") ?? "missing";
+        (window as typeof window & { __editorHistory: string[] }).__editorHistory.push(
+          `initial:${initial}`,
+        );
+
+        new MutationObserver((mutations) => {
+          for (const m of mutations) {
+            if (m.attributeName === "contenteditable") {
+              const val = (m.target as Element).getAttribute("contenteditable") ?? "missing";
+              (window as typeof window & { __editorHistory: string[] }).__editorHistory.push(
+                `change:${val}`,
+              );
+            }
+          }
+        }).observe(pm, { attributes: true });
+      }, 5);
+    });
+
     await bob.goto(`http://127.0.0.1:5183/#/chat/${chatId}`);
 
-    // ── Assert 1: composer must be initially disabled ─────────────────────────
+    // ── Assert A: composer must transition through disabled before enabling ───
     //
-    // With the buggy code composerReady = !!userId && !!myProfile — both are
-    // available almost immediately from local state — so the composer is enabled
-    // before the chatMembers insert reaches the server.  The fix adds a
-    // membershipReady gate, so the composer starts disabled.
+    // With the fix, the editor starts as contenteditable="false" and transitions
+    // to "true" after the chatMembers insert is server-acknowledged.
     //
-    // We check within a short window (500 ms) immediately after navigation.
-    // If the composer is already enabled at this point, the test fails: the UI
-    // is allowing sends before membership is confirmed.
-    const composerEnabledImmediately = await isComposerEnabled(bob);
-    expect(
-      composerEnabledImmediately,
-      "composer must not be enabled immediately on landing — it should wait for membership confirmation",
-    ).toBe(false);
-
-    // ── Assert 2: composer eventually becomes enabled ─────────────────────────
+    // With the buggy code, composerReady = !!userId && !!myProfile skips the
+    // membership gate, so the editor starts as contenteditable="true" directly.
     //
-    // After the chatMembers insert is acknowledged at the server, membership is
-    // confirmed and the composer should unlock.
+    // We wait until the editor is enabled, then inspect the recorded history.
     await waitForComposer(bob, 20_000);
 
-    // ── Assert 3: sending the first message succeeds ──────────────────────────
-    //
-    // Now that the composer is enabled (membership confirmed), a send must
-    // succeed.  Bob's message must appear in Alice's tab.
+    const editorHistory = await bob.evaluate(
+      () => (window as typeof window & { __editorHistory: string[] }).__editorHistory ?? [],
+    );
+
+    // The history must include an initial or change event showing "false",
+    // meaning the editor was disabled before it became enabled.
+    const wasEverDisabled = editorHistory.some(
+      (entry) => entry === "initial:false" || entry === "change:false",
+    );
+    expect(
+      wasEverDisabled,
+      `composer must have been disabled before enabling — history: ${JSON.stringify(editorHistory)}`,
+    ).toBe(true);
+
+    // ── Assert B: message sent the moment composer enables is delivered ───────
     await sendImmediately(bob, bobMessage);
     await waitForMessage(alice, bobMessage, 20_000);
 
-    // ── Assert 4: no permission errors ───────────────────────────────────────
+    // ── Assert C: no permission errors ───────────────────────────────────────
     await bob.waitForTimeout(1_000);
     const permissionErrors = consoleErrors.filter(
       (e) =>
@@ -79,23 +115,6 @@ test.describe("auto-join race on first message send", () => {
     expect(permissionErrors, "expected no permission errors on Bob's page").toHaveLength(0);
   });
 });
-
-/**
- * Returns true if the ProseMirror editor is currently editable (not disabled).
- *
- * Waits for the editor element to mount first, then reads its initial
- * contenteditable state.  This avoids a false-negative when the editor hasn't
- * rendered yet.
- */
-async function isComposerEnabled(page: Page): Promise<boolean> {
-  const editorLocator = page.locator("#messageEditor .ProseMirror");
-  // Wait for the element to be in the DOM before reading its attribute.
-  await editorLocator.waitFor({ state: "attached", timeout: 10_000 }).catch(() => {});
-  const attr = await editorLocator
-    .getAttribute("contenteditable", { timeout: 1_000 })
-    .catch(() => null);
-  return attr === "true";
-}
 
 /**
  * Send a message without waiting for any network idle — as fast as possible.
