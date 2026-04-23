@@ -374,7 +374,7 @@ describe("condition translation", () => {
       type: "Cmp",
       left: { scope: "todos", column: "$updatedAt" },
       op: "Ge",
-      right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      right: { type: "Literal", value: { Timestamp: Date.parse(iso) * 1_000 } },
     });
   });
 
