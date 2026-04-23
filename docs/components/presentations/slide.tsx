@@ -141,11 +141,11 @@ export function Slide({ children, className, slug }: SlideProps) {
         }
         
         .presentation-slide :global(ol > li::before) {
-          content: counter(slide-item);
+          content: counter(slide-item) ".";
           left: 0;
           font-variant-numeric: tabular-nums;
           font-feature-settings: "tnum";
-          min-width: 1.6em;
+          min-width: 1.9em;
           position: absolute;
           text-align: right;
           top: 0;

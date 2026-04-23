@@ -1227,22 +1227,95 @@ where everyone can add letters and drag them around.
 </Notes>
 </Slide>
 
-<Slide className="justify-start">
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
 ## Example: Letters app
-- data model
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+</div>
 <Notes>
 The data model is simple enough: we have canvasses,
 and then cursors and letters associated with them.
 
 And each cursor belongs to a user.
 
+Note how we don't have to add a column for that,
+We'll be able to use the built-in edit metadata
+for that.
+
 </Notes>
 </Slide>
 
-<Slide className="justify-start">
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
 ## Example: Letters app
-- data model
-- rendering
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+</div>
+
 <Notes>
 How do we render this state now? It's very simple,
 we just use the useAll hook, which reactively subscribes
@@ -1258,11 +1331,81 @@ But to us it really just looks like reactive state.
 </Notes>
 </Slide>
 
-<Slide className="justify-start">
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
 ## Example: Letters app
-- data model
-- rendering
-- mutation
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Mutation">
+
+```ts
+const db = useDb();
+
+function addLetter(char, pos) {
+  db.insert(app.letters, {
+    canvasId,
+    char,
+    x: pos.x,
+    y: pos.y,
+  });
+}
+
+function dragLetter(letterId, pos) {
+  db.update(app.letters, letterId, pos);
+}
+
+function moveCursor(pos) {
+  db.update(app.cursors, myCursor.id, pos);
+}
+```
+
+  </SlideCodeCell>
+</div>
+
 <Notes>
 Mutation is also super simple: just get a database handle
 from useDb and then insert or update data.
@@ -1272,12 +1415,102 @@ All of this is typesafe from our schema by the way.
 </Notes>
 </Slide>
 
-<Slide className="justify-start">
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
 ## Example: Letters app
-- data model
-- rendering
-- mutation
-- permissions
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Mutation">
+
+```ts
+const db = useDb();
+
+function addLetter(char, pos) {
+  db.insert(app.letters, {
+    canvasId,
+    char,
+    x: pos.x,
+    y: pos.y,
+  });
+}
+
+function dragLetter(letterId, pos) {
+  db.update(app.letters, letterId, pos);
+}
+
+function moveCursor(pos) {
+  db.update(app.cursors, myCursor.id, pos);
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Permissions">
+
+```ts
+export default s.definePermissions(app, ({ policy, session }) => {
+  policy.canvases.allowRead.always();
+  policy.canvases.allowInsert.always();
+
+  policy.letters.allowRead.always();
+  policy.letters.allowInsert.always();
+  policy.letters.allowUpdate.always();
+
+  policy.cursors.allowRead.always();
+  policy.cursors.allowInsert.always();
+  policy.cursors.allowUpdate.where({
+    $createdBy: session.user_id,
+  });
+});
+```
+
+  </SlideCodeCell>
+</div>
+
 <Notes>
 And last, but most importantly, we have permissions.
 
