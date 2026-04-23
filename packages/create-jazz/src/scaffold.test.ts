@@ -127,6 +127,29 @@ describe("scaffold() — next-betterauth e2e via JAZZ_STARTER_PATH", () => {
     expect(fs.existsSync(path.join(tmpDir, "package.json"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(false);
   });
+
+  it("reports per-package progress during dep resolution", { timeout: 30_000 }, async () => {
+    tmpDir = path.join(os.tmpdir(), `scaffold-progress-${Date.now()}`);
+    const steps: string[] = [];
+
+    await scaffold({
+      appName: "carol-progress",
+      targetDir: tmpDir,
+      pm: null,
+      starter: "next-betterauth",
+      git: false,
+      onStep: (label) => steps.push(label),
+    });
+
+    const progressSteps = steps.filter((s) => s.startsWith("Resolving dependencies ("));
+    expect(progressSteps.length).toBeGreaterThan(0);
+    for (const step of progressSteps) {
+      expect(step).toMatch(/^Resolving dependencies \(\d+\/\d+\)$/);
+    }
+    const last = progressSteps.at(-1)!;
+    const [, resolved, total] = last.match(/\((\d+)\/(\d+)\)/)!;
+    expect(Number(resolved)).toBe(Number(total));
+  });
 });
 
 describe("scaffold() — next-localfirst e2e via JAZZ_STARTER_PATH", () => {
