@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+import { resolveJazzWasmEntry } from "./vite.js";
 import type {
   JazzServerOptions as BaseJazzServerOptions,
   JazzPluginOptions as BaseJazzPluginOptions,
@@ -46,12 +47,16 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
       const existingSsr = config.ssr?.external ?? [];
       const existingExclude = config.optimizeDeps?.exclude ?? [];
+      const jazzWasmEntry = resolveJazzWasmEntry();
       return {
         worker: { format: "es" as const },
         optimizeDeps: {
           exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])),
         },
         ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
+        ...(jazzWasmEntry
+          ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
+          : {}),
       };
     },
 
