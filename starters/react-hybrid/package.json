@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/ensure-env.js && concurrently --kill-others-on-fail --names vite,server \"pnpm dev:vite\" \"pnpm dev:server\"",
+    "dev": "concurrently --kill-others-on-fail --names vite,server \"pnpm dev:vite\" \"pnpm dev:server\"",
     "dev:vite": "vite",
     "dev:server": "wait-on --timeout 30000 tcp:5173 && tsx watch --env-file=.env server/index.ts",
-    "prebuild": "node scripts/ensure-env.js",
     "build": "vite build && tsc -p tsconfig.server.json",
+    "postinstall": "node scripts/ensure-env.js",
     "start": "node server-dist/index.js",
     "test:e2e": "playwright test"
   },
