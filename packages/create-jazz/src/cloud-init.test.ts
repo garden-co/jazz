@@ -248,6 +248,81 @@ describe("runHostedInit", () => {
     });
   });
 
+  describe("spinner-safe progress and logging", () => {
+    it("calls onStep with a provisioning label before the HTTP request fires", async () => {
+      const events: string[] = [];
+
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockImplementation(async () => {
+        events.push("fetch");
+        return { appId: "app-eve", adminSecret: "admin-eve", backendSecret: "backend-eve" };
+      });
+
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onStep: (label) => events.push(`step:${label}`),
+      });
+
+      const firstStepIdx = events.findIndex((e) => e.startsWith("step:"));
+      const fetchIdx = events.indexOf("fetch");
+      expect(firstStepIdx).toBeGreaterThanOrEqual(0);
+      expect(fetchIdx).toBeGreaterThan(firstStepIdx);
+      expect(events[firstStepIdx]).toMatch(/provision/i);
+    });
+
+    it("routes success output through onLog and does not call console.log", async () => {
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
+        appId: "app-frank",
+        adminSecret: "admin-frank",
+        backendSecret: "backend-frank",
+      });
+
+      const logs: { kind: string; message: string }[] = [];
+
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (kind, message) => logs.push({ kind, message }),
+      });
+
+      expect(logSpy).not.toHaveBeenCalled();
+
+      const allInfo = logs
+        .filter((l) => l.kind === "info")
+        .map((l) => l.message)
+        .join("\n");
+      expect(allInfo).toContain("app-frank");
+      expect(allInfo).toContain("NEXT_PUBLIC_JAZZ_APP_ID=app-frank");
+      expect(allInfo).toContain("BACKEND_SECRET=backend-frank");
+      expect(allInfo).toContain("https://v2.dashboard.jazz.tools");
+    });
+
+    it("routes failure warnings through onLog and does not call console.warn", async () => {
+      vi.spyOn(cloudProvision, "provisionHostedApp").mockRejectedValue(
+        new cloudProvision.ProvisionHttpError(API_URL, 503),
+      );
+
+      const logs: { kind: string; message: string }[] = [];
+
+      await runHostedInit({
+        dir,
+        cloudSyncUrl: CLOUD_SYNC_URL,
+        envKeys: NEXT_KEYS,
+        apiUrl: API_URL,
+        onLog: (kind, message) => logs.push({ kind, message }),
+      });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      const warnMessages = logs.filter((l) => l.kind === "warn").map((l) => l.message);
+      expect(warnMessages.some((m) => m.includes("ProvisionHttpError"))).toBe(true);
+    });
+  });
+
   describe("writeHostedEnv throws (outer catch)", () => {
     it("best-effort writes empty placeholder and returns successfully without throwing", async () => {
       vi.spyOn(cloudProvision, "provisionHostedApp").mockResolvedValue({
