@@ -119,6 +119,109 @@ CREATE TABLE source_files (
     created_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE daemon_log_sources (
+    source_id TEXT NOT NULL,
+    manager TEXT NOT NULL,
+    daemon_name TEXT NOT NULL,
+    stream TEXT NOT NULL,
+    host_id TEXT,
+    log_path TEXT NOT NULL,
+    config_path TEXT,
+    repo_root TEXT,
+    workspace_root TEXT,
+    owner_agent TEXT,
+    flow_daemon_name TEXT,
+    launchd_label TEXT,
+    retention_class TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE daemon_log_chunks (
+    chunk_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_row_id UUID REFERENCES daemon_log_sources NOT NULL,
+    daemon_name TEXT NOT NULL,
+    stream TEXT NOT NULL,
+    host_id TEXT,
+    log_path TEXT NOT NULL,
+    file_fingerprint TEXT NOT NULL,
+    start_offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
+    first_line_no INTEGER NOT NULL,
+    last_line_no INTEGER NOT NULL,
+    line_count INTEGER NOT NULL,
+    byte_count INTEGER NOT NULL,
+    first_at TIMESTAMP,
+    last_at TIMESTAMP,
+    sha256 TEXT NOT NULL,
+    body_ref TEXT,
+    body_preview TEXT,
+    compression TEXT NOT NULL,
+    ingested_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE daemon_log_events (
+    event_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_row_id UUID REFERENCES daemon_log_sources NOT NULL,
+    chunk_id TEXT NOT NULL,
+    chunk_row_id UUID REFERENCES daemon_log_chunks NOT NULL,
+    daemon_name TEXT NOT NULL,
+    stream TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    line_no INTEGER NOT NULL,
+    at TIMESTAMP,
+    level TEXT NOT NULL,
+    message TEXT NOT NULL,
+    fields_json JSON,
+    repo_root TEXT,
+    workspace_root TEXT,
+    conversation TEXT,
+    conversation_hash TEXT,
+    run_id TEXT,
+    job_id TEXT,
+    trace_id TEXT,
+    span_id TEXT,
+    error_kind TEXT,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE daemon_log_checkpoints (
+    checkpoint_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_row_id UUID REFERENCES daemon_log_sources NOT NULL,
+    host_id TEXT,
+    log_path TEXT NOT NULL,
+    file_fingerprint TEXT NOT NULL,
+    inode TEXT,
+    device TEXT,
+    offset INTEGER NOT NULL,
+    line_no INTEGER NOT NULL,
+    last_chunk_id TEXT,
+    last_event_id TEXT,
+    last_seen_at TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE daemon_log_summaries (
+    summary_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_row_id UUID REFERENCES daemon_log_sources NOT NULL,
+    daemon_name TEXT NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    window_end TIMESTAMP NOT NULL,
+    level_counts_json JSON NOT NULL,
+    error_count INTEGER NOT NULL,
+    warning_count INTEGER NOT NULL,
+    first_error_event_id TEXT,
+    last_error_event_id TEXT,
+    top_error_kinds_json JSON,
+    summary_text TEXT,
+    created_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE task_records (
     task_id TEXT NOT NULL,
     context TEXT NOT NULL,

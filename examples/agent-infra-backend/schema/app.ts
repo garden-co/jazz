@@ -1,12 +1,16 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
+
+// Regenerate via: node scripts/generate-app.mjs
+
+// AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
 export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
-  $canRead: boolean | null;
-  $canEdit: boolean | null;
-  $canDelete: boolean | null;
+  $canRead: boolean;
+  $canEdit: boolean;
+  $canDelete: boolean;
 }
 
 export interface Agent {
@@ -137,6 +141,114 @@ export interface SourceFile {
   file_kind: string;
   absolute_path: string;
   checksum?: string;
+  created_at: Date;
+}
+
+export interface DaemonLogSource {
+  id: string;
+  source_id: string;
+  manager: string;
+  daemon_name: string;
+  stream: string;
+  host_id?: string;
+  log_path: string;
+  config_path?: string;
+  repo_root?: string;
+  workspace_root?: string;
+  owner_agent?: string;
+  flow_daemon_name?: string;
+  launchd_label?: string;
+  retention_class: string;
+  status: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DaemonLogChunk {
+  id: string;
+  chunk_id: string;
+  source_id: string;
+  source_row_id: string;
+  daemon_name: string;
+  stream: string;
+  host_id?: string;
+  log_path: string;
+  file_fingerprint: string;
+  start_offset: number;
+  end_offset: number;
+  first_line_no: number;
+  last_line_no: number;
+  line_count: number;
+  byte_count: number;
+  first_at?: Date;
+  last_at?: Date;
+  sha256: string;
+  body_ref?: string;
+  body_preview?: string;
+  compression: string;
+  ingested_at: Date;
+}
+
+export interface DaemonLogEvent {
+  id: string;
+  event_id: string;
+  source_id: string;
+  source_row_id: string;
+  chunk_id: string;
+  chunk_row_id: string;
+  daemon_name: string;
+  stream: string;
+  seq: number;
+  line_no: number;
+  at?: Date;
+  level: string;
+  message: string;
+  fields_json?: JsonValue;
+  repo_root?: string;
+  workspace_root?: string;
+  conversation?: string;
+  conversation_hash?: string;
+  run_id?: string;
+  job_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  error_kind?: string;
+  created_at: Date;
+}
+
+export interface DaemonLogCheckpoint {
+  id: string;
+  checkpoint_id: string;
+  source_id: string;
+  source_row_id: string;
+  host_id?: string;
+  log_path: string;
+  file_fingerprint: string;
+  inode?: string;
+  device?: string;
+  offset: number;
+  line_no: number;
+  last_chunk_id?: string;
+  last_event_id?: string;
+  last_seen_at?: Date;
+  updated_at: Date;
+}
+
+export interface DaemonLogSummary {
+  id: string;
+  summary_id: string;
+  source_id: string;
+  source_row_id: string;
+  daemon_name: string;
+  window_start: Date;
+  window_end: Date;
+  level_counts_json: JsonValue;
+  error_count: number;
+  warning_count: number;
+  first_error_event_id?: string;
+  last_error_event_id?: string;
+  top_error_kinds_json?: JsonValue;
+  summary_text?: string;
   created_at: Date;
 }
 
@@ -285,6 +397,109 @@ export interface SourceFileInit {
   file_kind: string;
   absolute_path: string;
   checksum?: string | null;
+  created_at: Date;
+}
+
+export interface DaemonLogSourceInit {
+  source_id: string;
+  manager: string;
+  daemon_name: string;
+  stream: string;
+  host_id?: string | null;
+  log_path: string;
+  config_path?: string | null;
+  repo_root?: string | null;
+  workspace_root?: string | null;
+  owner_agent?: string | null;
+  flow_daemon_name?: string | null;
+  launchd_label?: string | null;
+  retention_class: string;
+  status: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DaemonLogChunkInit {
+  chunk_id: string;
+  source_id: string;
+  source_row_id: string;
+  daemon_name: string;
+  stream: string;
+  host_id?: string | null;
+  log_path: string;
+  file_fingerprint: string;
+  start_offset: number;
+  end_offset: number;
+  first_line_no: number;
+  last_line_no: number;
+  line_count: number;
+  byte_count: number;
+  first_at?: Date | null;
+  last_at?: Date | null;
+  sha256: string;
+  body_ref?: string | null;
+  body_preview?: string | null;
+  compression: string;
+  ingested_at: Date;
+}
+
+export interface DaemonLogEventInit {
+  event_id: string;
+  source_id: string;
+  source_row_id: string;
+  chunk_id: string;
+  chunk_row_id: string;
+  daemon_name: string;
+  stream: string;
+  seq: number;
+  line_no: number;
+  at?: Date | null;
+  level: string;
+  message: string;
+  fields_json?: JsonValue | null;
+  repo_root?: string | null;
+  workspace_root?: string | null;
+  conversation?: string | null;
+  conversation_hash?: string | null;
+  run_id?: string | null;
+  job_id?: string | null;
+  trace_id?: string | null;
+  span_id?: string | null;
+  error_kind?: string | null;
+  created_at: Date;
+}
+
+export interface DaemonLogCheckpointInit {
+  checkpoint_id: string;
+  source_id: string;
+  source_row_id: string;
+  host_id?: string | null;
+  log_path: string;
+  file_fingerprint: string;
+  inode?: string | null;
+  device?: string | null;
+  offset: number;
+  line_no: number;
+  last_chunk_id?: string | null;
+  last_event_id?: string | null;
+  last_seen_at?: Date | null;
+  updated_at: Date;
+}
+
+export interface DaemonLogSummaryInit {
+  summary_id: string;
+  source_id: string;
+  source_row_id: string;
+  daemon_name: string;
+  window_start: Date;
+  window_end: Date;
+  level_counts_json: JsonValue;
+  error_count: number;
+  warning_count: number;
+  first_error_event_id?: string | null;
+  last_error_event_id?: string | null;
+  top_error_kinds_json?: JsonValue | null;
+  summary_text?: string | null;
   created_at: Date;
 }
 
@@ -475,6 +690,129 @@ export interface SourceFileWhereInput {
   $canDelete?: boolean;
 }
 
+export interface DaemonLogSourceWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  manager?: string | { eq?: string; ne?: string; contains?: string };
+  daemon_name?: string | { eq?: string; ne?: string; contains?: string };
+  stream?: string | { eq?: string; ne?: string; contains?: string };
+  host_id?: string | { eq?: string; ne?: string; contains?: string };
+  log_path?: string | { eq?: string; ne?: string; contains?: string };
+  config_path?: string | { eq?: string; ne?: string; contains?: string };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_root?: string | { eq?: string; ne?: string; contains?: string };
+  owner_agent?: string | { eq?: string; ne?: string; contains?: string };
+  flow_daemon_name?: string | { eq?: string; ne?: string; contains?: string };
+  launchd_label?: string | { eq?: string; ne?: string; contains?: string };
+  retention_class?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DaemonLogChunkWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  chunk_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_row_id?: string | { eq?: string; ne?: string };
+  daemon_name?: string | { eq?: string; ne?: string; contains?: string };
+  stream?: string | { eq?: string; ne?: string; contains?: string };
+  host_id?: string | { eq?: string; ne?: string; contains?: string };
+  log_path?: string | { eq?: string; ne?: string; contains?: string };
+  file_fingerprint?: string | { eq?: string; ne?: string; contains?: string };
+  start_offset?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  end_offset?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  first_line_no?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  last_line_no?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  line_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  byte_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  first_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  last_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  sha256?: string | { eq?: string; ne?: string; contains?: string };
+  body_ref?: string | { eq?: string; ne?: string; contains?: string };
+  body_preview?: string | { eq?: string; ne?: string; contains?: string };
+  compression?: string | { eq?: string; ne?: string; contains?: string };
+  ingested_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DaemonLogEventWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  event_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_row_id?: string | { eq?: string; ne?: string };
+  chunk_id?: string | { eq?: string; ne?: string; contains?: string };
+  chunk_row_id?: string | { eq?: string; ne?: string };
+  daemon_name?: string | { eq?: string; ne?: string; contains?: string };
+  stream?: string | { eq?: string; ne?: string; contains?: string };
+  seq?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  line_no?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  level?: string | { eq?: string; ne?: string; contains?: string };
+  message?: string | { eq?: string; ne?: string; contains?: string };
+  fields_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_root?: string | { eq?: string; ne?: string; contains?: string };
+  conversation?: string | { eq?: string; ne?: string; contains?: string };
+  conversation_hash?: string | { eq?: string; ne?: string; contains?: string };
+  run_id?: string | { eq?: string; ne?: string; contains?: string };
+  job_id?: string | { eq?: string; ne?: string; contains?: string };
+  trace_id?: string | { eq?: string; ne?: string; contains?: string };
+  span_id?: string | { eq?: string; ne?: string; contains?: string };
+  error_kind?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DaemonLogCheckpointWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  checkpoint_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_row_id?: string | { eq?: string; ne?: string };
+  host_id?: string | { eq?: string; ne?: string; contains?: string };
+  log_path?: string | { eq?: string; ne?: string; contains?: string };
+  file_fingerprint?: string | { eq?: string; ne?: string; contains?: string };
+  inode?: string | { eq?: string; ne?: string; contains?: string };
+  device?: string | { eq?: string; ne?: string; contains?: string };
+  offset?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  line_no?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  last_chunk_id?: string | { eq?: string; ne?: string; contains?: string };
+  last_event_id?: string | { eq?: string; ne?: string; contains?: string };
+  last_seen_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DaemonLogSummaryWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  summary_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_row_id?: string | { eq?: string; ne?: string };
+  daemon_name?: string | { eq?: string; ne?: string; contains?: string };
+  window_start?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  window_end?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  level_counts_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  error_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  warning_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  first_error_event_id?: string | { eq?: string; ne?: string; contains?: string };
+  last_error_event_id?: string | { eq?: string; ne?: string; contains?: string };
+  top_error_kinds_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  summary_text?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 export interface TaskRecordWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   task_id?: string | { eq?: string; ne?: string; contains?: string };
@@ -515,6 +853,11 @@ type AnyAgentStateSnapshotQueryBuilder<T = any> = { readonly _table: "agent_stat
 type AnyWorkspaceSnapshotQueryBuilder<T = any> = { readonly _table: "workspace_snapshots" } & QueryBuilder<T>;
 type AnyMemoryLinkQueryBuilder<T = any> = { readonly _table: "memory_links" } & QueryBuilder<T>;
 type AnySourceFileQueryBuilder<T = any> = { readonly _table: "source_files" } & QueryBuilder<T>;
+type AnyDaemonLogSourceQueryBuilder<T = any> = { readonly _table: "daemon_log_sources" } & QueryBuilder<T>;
+type AnyDaemonLogChunkQueryBuilder<T = any> = { readonly _table: "daemon_log_chunks" } & QueryBuilder<T>;
+type AnyDaemonLogEventQueryBuilder<T = any> = { readonly _table: "daemon_log_events" } & QueryBuilder<T>;
+type AnyDaemonLogCheckpointQueryBuilder<T = any> = { readonly _table: "daemon_log_checkpoints" } & QueryBuilder<T>;
+type AnyDaemonLogSummaryQueryBuilder<T = any> = { readonly _table: "daemon_log_summaries" } & QueryBuilder<T>;
 type AnyTaskRecordQueryBuilder<T = any> = { readonly _table: "task_records" } & QueryBuilder<T>;
 
 export interface AgentInclude {
@@ -567,6 +910,31 @@ export interface MemoryLinkInclude {
 
 export interface SourceFileInclude {
   run_row?: true | AgentRunInclude | AnyAgentRunQueryBuilder<any>;
+}
+
+export interface DaemonLogSourceInclude {
+  daemon_log_chunksViaSource_row?: true | DaemonLogChunkInclude | AnyDaemonLogChunkQueryBuilder<any>;
+  daemon_log_eventsViaSource_row?: true | DaemonLogEventInclude | AnyDaemonLogEventQueryBuilder<any>;
+  daemon_log_checkpointsViaSource_row?: true | DaemonLogCheckpointInclude | AnyDaemonLogCheckpointQueryBuilder<any>;
+  daemon_log_summariesViaSource_row?: true | DaemonLogSummaryInclude | AnyDaemonLogSummaryQueryBuilder<any>;
+}
+
+export interface DaemonLogChunkInclude {
+  source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
+  daemon_log_eventsViaChunk_row?: true | DaemonLogEventInclude | AnyDaemonLogEventQueryBuilder<any>;
+}
+
+export interface DaemonLogEventInclude {
+  source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
+  chunk_row?: true | DaemonLogChunkInclude | AnyDaemonLogChunkQueryBuilder<any>;
+}
+
+export interface DaemonLogCheckpointInclude {
+  source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
+}
+
+export interface DaemonLogSummaryInclude {
+  source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
 }
 
 export type AgentIncludedRelations<I extends AgentInclude = {}, R extends boolean = false> = {
@@ -839,6 +1207,131 @@ export type SourceFileIncludedRelations<I extends SourceFileInclude = {}, R exte
     : never;
 };
 
+export type DaemonLogSourceIncludedRelations<I extends DaemonLogSourceInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "daemon_log_chunksViaSource_row"
+      ? NonNullable<I["daemon_log_chunksViaSource_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DaemonLogChunk[]
+          : RelationInclude extends AnyDaemonLogChunkQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DaemonLogChunkInclude
+              ? DaemonLogChunkWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "daemon_log_eventsViaSource_row"
+      ? NonNullable<I["daemon_log_eventsViaSource_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DaemonLogEvent[]
+          : RelationInclude extends AnyDaemonLogEventQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DaemonLogEventInclude
+              ? DaemonLogEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "daemon_log_checkpointsViaSource_row"
+      ? NonNullable<I["daemon_log_checkpointsViaSource_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DaemonLogCheckpoint[]
+          : RelationInclude extends AnyDaemonLogCheckpointQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DaemonLogCheckpointInclude
+              ? DaemonLogCheckpointWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "daemon_log_summariesViaSource_row"
+      ? NonNullable<I["daemon_log_summariesViaSource_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DaemonLogSummary[]
+          : RelationInclude extends AnyDaemonLogSummaryQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DaemonLogSummaryInclude
+              ? DaemonLogSummaryWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DaemonLogChunkIncludedRelations<I extends DaemonLogChunkInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "source_row"
+      ? NonNullable<I["source_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DaemonLogSource : DaemonLogSource | undefined
+          : RelationInclude extends AnyDaemonLogSourceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DaemonLogSourceInclude
+              ? R extends true ? DaemonLogSourceWithIncludes<RelationInclude, false> : DaemonLogSourceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "daemon_log_eventsViaChunk_row"
+      ? NonNullable<I["daemon_log_eventsViaChunk_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DaemonLogEvent[]
+          : RelationInclude extends AnyDaemonLogEventQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DaemonLogEventInclude
+              ? DaemonLogEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DaemonLogEventIncludedRelations<I extends DaemonLogEventInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "source_row"
+      ? NonNullable<I["source_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DaemonLogSource : DaemonLogSource | undefined
+          : RelationInclude extends AnyDaemonLogSourceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DaemonLogSourceInclude
+              ? R extends true ? DaemonLogSourceWithIncludes<RelationInclude, false> : DaemonLogSourceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "chunk_row"
+      ? NonNullable<I["chunk_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DaemonLogChunk : DaemonLogChunk | undefined
+          : RelationInclude extends AnyDaemonLogChunkQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DaemonLogChunkInclude
+              ? R extends true ? DaemonLogChunkWithIncludes<RelationInclude, false> : DaemonLogChunkWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DaemonLogCheckpointIncludedRelations<I extends DaemonLogCheckpointInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "source_row"
+      ? NonNullable<I["source_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DaemonLogSource : DaemonLogSource | undefined
+          : RelationInclude extends AnyDaemonLogSourceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DaemonLogSourceInclude
+              ? R extends true ? DaemonLogSourceWithIncludes<RelationInclude, false> : DaemonLogSourceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DaemonLogSummaryIncludedRelations<I extends DaemonLogSummaryInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "source_row"
+      ? NonNullable<I["source_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DaemonLogSource : DaemonLogSource | undefined
+          : RelationInclude extends AnyDaemonLogSourceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DaemonLogSourceInclude
+              ? R extends true ? DaemonLogSourceWithIncludes<RelationInclude, false> : DaemonLogSourceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
 export interface AgentRelations {
   agent_runsViaAgent_row: AgentRun[];
   agent_state_snapshotsViaAgent_row: AgentStateSnapshot[];
@@ -891,6 +1384,31 @@ export interface SourceFileRelations {
   run_row: AgentRun | undefined;
 }
 
+export interface DaemonLogSourceRelations {
+  daemon_log_chunksViaSource_row: DaemonLogChunk[];
+  daemon_log_eventsViaSource_row: DaemonLogEvent[];
+  daemon_log_checkpointsViaSource_row: DaemonLogCheckpoint[];
+  daemon_log_summariesViaSource_row: DaemonLogSummary[];
+}
+
+export interface DaemonLogChunkRelations {
+  source_row: DaemonLogSource | undefined;
+  daemon_log_eventsViaChunk_row: DaemonLogEvent[];
+}
+
+export interface DaemonLogEventRelations {
+  source_row: DaemonLogSource | undefined;
+  chunk_row: DaemonLogChunk | undefined;
+}
+
+export interface DaemonLogCheckpointRelations {
+  source_row: DaemonLogSource | undefined;
+}
+
+export interface DaemonLogSummaryRelations {
+  source_row: DaemonLogSource | undefined;
+}
+
 export type AgentWithIncludes<I extends AgentInclude = {}, R extends boolean = false> = Agent & AgentIncludedRelations<I, R>;
 
 export type AgentRunWithIncludes<I extends AgentRunInclude = {}, R extends boolean = false> = AgentRun & AgentRunIncludedRelations<I, R>;
@@ -910,6 +1428,16 @@ export type WorkspaceSnapshotWithIncludes<I extends WorkspaceSnapshotInclude = {
 export type MemoryLinkWithIncludes<I extends MemoryLinkInclude = {}, R extends boolean = false> = MemoryLink & MemoryLinkIncludedRelations<I, R>;
 
 export type SourceFileWithIncludes<I extends SourceFileInclude = {}, R extends boolean = false> = SourceFile & SourceFileIncludedRelations<I, R>;
+
+export type DaemonLogSourceWithIncludes<I extends DaemonLogSourceInclude = {}, R extends boolean = false> = DaemonLogSource & DaemonLogSourceIncludedRelations<I, R>;
+
+export type DaemonLogChunkWithIncludes<I extends DaemonLogChunkInclude = {}, R extends boolean = false> = DaemonLogChunk & DaemonLogChunkIncludedRelations<I, R>;
+
+export type DaemonLogEventWithIncludes<I extends DaemonLogEventInclude = {}, R extends boolean = false> = DaemonLogEvent & DaemonLogEventIncludedRelations<I, R>;
+
+export type DaemonLogCheckpointWithIncludes<I extends DaemonLogCheckpointInclude = {}, R extends boolean = false> = DaemonLogCheckpoint & DaemonLogCheckpointIncludedRelations<I, R>;
+
+export type DaemonLogSummaryWithIncludes<I extends DaemonLogSummaryInclude = {}, R extends boolean = false> = DaemonLogSummary & DaemonLogSummaryIncludedRelations<I, R>;
 
 export type AgentSelectableColumn = keyof Agent | PermissionIntrospectionColumn | "*";
 export type AgentOrderableColumn = keyof Agent | PermissionIntrospectionColumn;
@@ -980,6 +1508,41 @@ export type SourceFileOrderableColumn = keyof SourceFile | PermissionIntrospecti
 export type SourceFileSelected<S extends SourceFileSelectableColumn = keyof SourceFile> = ("*" extends S ? SourceFile : Pick<SourceFile, Extract<S | "id", keyof SourceFile>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type SourceFileSelectedWithIncludes<I extends SourceFileInclude = {}, S extends SourceFileSelectableColumn = keyof SourceFile, R extends boolean = false> = SourceFileSelected<S> & SourceFileIncludedRelations<I, R>;
+
+export type DaemonLogSourceSelectableColumn = keyof DaemonLogSource | PermissionIntrospectionColumn | "*";
+export type DaemonLogSourceOrderableColumn = keyof DaemonLogSource | PermissionIntrospectionColumn;
+
+export type DaemonLogSourceSelected<S extends DaemonLogSourceSelectableColumn = keyof DaemonLogSource> = ("*" extends S ? DaemonLogSource : Pick<DaemonLogSource, Extract<S | "id", keyof DaemonLogSource>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DaemonLogSourceSelectedWithIncludes<I extends DaemonLogSourceInclude = {}, S extends DaemonLogSourceSelectableColumn = keyof DaemonLogSource, R extends boolean = false> = DaemonLogSourceSelected<S> & DaemonLogSourceIncludedRelations<I, R>;
+
+export type DaemonLogChunkSelectableColumn = keyof DaemonLogChunk | PermissionIntrospectionColumn | "*";
+export type DaemonLogChunkOrderableColumn = keyof DaemonLogChunk | PermissionIntrospectionColumn;
+
+export type DaemonLogChunkSelected<S extends DaemonLogChunkSelectableColumn = keyof DaemonLogChunk> = ("*" extends S ? DaemonLogChunk : Pick<DaemonLogChunk, Extract<S | "id", keyof DaemonLogChunk>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DaemonLogChunkSelectedWithIncludes<I extends DaemonLogChunkInclude = {}, S extends DaemonLogChunkSelectableColumn = keyof DaemonLogChunk, R extends boolean = false> = DaemonLogChunkSelected<S> & DaemonLogChunkIncludedRelations<I, R>;
+
+export type DaemonLogEventSelectableColumn = keyof DaemonLogEvent | PermissionIntrospectionColumn | "*";
+export type DaemonLogEventOrderableColumn = keyof DaemonLogEvent | PermissionIntrospectionColumn;
+
+export type DaemonLogEventSelected<S extends DaemonLogEventSelectableColumn = keyof DaemonLogEvent> = ("*" extends S ? DaemonLogEvent : Pick<DaemonLogEvent, Extract<S | "id", keyof DaemonLogEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DaemonLogEventSelectedWithIncludes<I extends DaemonLogEventInclude = {}, S extends DaemonLogEventSelectableColumn = keyof DaemonLogEvent, R extends boolean = false> = DaemonLogEventSelected<S> & DaemonLogEventIncludedRelations<I, R>;
+
+export type DaemonLogCheckpointSelectableColumn = keyof DaemonLogCheckpoint | PermissionIntrospectionColumn | "*";
+export type DaemonLogCheckpointOrderableColumn = keyof DaemonLogCheckpoint | PermissionIntrospectionColumn;
+
+export type DaemonLogCheckpointSelected<S extends DaemonLogCheckpointSelectableColumn = keyof DaemonLogCheckpoint> = ("*" extends S ? DaemonLogCheckpoint : Pick<DaemonLogCheckpoint, Extract<S | "id", keyof DaemonLogCheckpoint>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DaemonLogCheckpointSelectedWithIncludes<I extends DaemonLogCheckpointInclude = {}, S extends DaemonLogCheckpointSelectableColumn = keyof DaemonLogCheckpoint, R extends boolean = false> = DaemonLogCheckpointSelected<S> & DaemonLogCheckpointIncludedRelations<I, R>;
+
+export type DaemonLogSummarySelectableColumn = keyof DaemonLogSummary | PermissionIntrospectionColumn | "*";
+export type DaemonLogSummaryOrderableColumn = keyof DaemonLogSummary | PermissionIntrospectionColumn;
+
+export type DaemonLogSummarySelected<S extends DaemonLogSummarySelectableColumn = keyof DaemonLogSummary> = ("*" extends S ? DaemonLogSummary : Pick<DaemonLogSummary, Extract<S | "id", keyof DaemonLogSummary>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DaemonLogSummarySelectedWithIncludes<I extends DaemonLogSummaryInclude = {}, S extends DaemonLogSummarySelectableColumn = keyof DaemonLogSummary, R extends boolean = false> = DaemonLogSummarySelected<S> & DaemonLogSummaryIncludedRelations<I, R>;
 
 export type TaskRecordSelectableColumn = keyof TaskRecord | PermissionIntrospectionColumn | "*";
 export type TaskRecordOrderableColumn = keyof TaskRecord | PermissionIntrospectionColumn;
@@ -1661,6 +2224,647 @@ export const wasmSchema: WasmSchema = {
       },
       {
         "name": "checksum",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "daemon_log_sources": {
+    "columns": [
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "manager",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "daemon_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "stream",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "host_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "log_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "config_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "owner_agent",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "flow_daemon_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "launchd_label",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "retention_class",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "daemon_log_chunks": {
+    "columns": [
+      {
+        "name": "chunk_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "daemon_log_sources"
+      },
+      {
+        "name": "daemon_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "stream",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "host_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "log_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "file_fingerprint",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "start_offset",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "end_offset",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "first_line_no",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "last_line_no",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "line_count",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "byte_count",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "first_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "last_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "sha256",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "body_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "body_preview",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "compression",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "ingested_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "daemon_log_events": {
+    "columns": [
+      {
+        "name": "event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "daemon_log_sources"
+      },
+      {
+        "name": "chunk_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "chunk_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "daemon_log_chunks"
+      },
+      {
+        "name": "daemon_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "stream",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "seq",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "line_no",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "level",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "message",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "fields_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "conversation",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "conversation_hash",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "run_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "job_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "trace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "span_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "error_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "daemon_log_checkpoints": {
+    "columns": [
+      {
+        "name": "checkpoint_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "daemon_log_sources"
+      },
+      {
+        "name": "host_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "log_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "file_fingerprint",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "inode",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "device",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "offset",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "line_no",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "last_chunk_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "last_event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "last_seen_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "daemon_log_summaries": {
+    "columns": [
+      {
+        "name": "summary_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "daemon_log_sources"
+      },
+      {
+        "name": "daemon_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "window_start",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "window_end",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "level_counts_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": false
+      },
+      {
+        "name": "error_count",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "warning_count",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "first_error_event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "last_error_event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "top_error_kinds_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "summary_text",
         "column_type": {
           "type": "Text"
         },
@@ -3842,6 +5046,1006 @@ export class SourceFileQueryBuilder<I extends SourceFileInclude = {}, S extends 
   }
 }
 
+export class DaemonLogSourceQueryBuilder<I extends DaemonLogSourceInclude = {}, S extends DaemonLogSourceSelectableColumn = keyof DaemonLogSource, R extends boolean = false> implements QueryBuilder<DaemonLogSourceSelectedWithIncludes<I, S, R>> {
+  readonly _table = "daemon_log_sources";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DaemonLogSourceSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DaemonLogSourceInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DaemonLogSourceInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DaemonLogSourceWhereInput): DaemonLogSourceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DaemonLogSourceSelectableColumn>(...columns: [NewS, ...NewS[]]): DaemonLogSourceQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DaemonLogSourceInclude>(relations: NewI): DaemonLogSourceQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DaemonLogSourceQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DaemonLogSourceOrderableColumn, direction: "asc" | "desc" = "asc"): DaemonLogSourceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DaemonLogSourceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DaemonLogSourceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "daemon_log_chunksViaSource_row" | "daemon_log_eventsViaSource_row" | "daemon_log_checkpointsViaSource_row" | "daemon_log_summariesViaSource_row"): DaemonLogSourceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DaemonLogSourceWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DaemonLogSourceQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DaemonLogSourceInclude = I, CloneS extends DaemonLogSourceSelectableColumn = S, CloneR extends boolean = R>(): DaemonLogSourceQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DaemonLogSourceQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DaemonLogChunkQueryBuilder<I extends DaemonLogChunkInclude = {}, S extends DaemonLogChunkSelectableColumn = keyof DaemonLogChunk, R extends boolean = false> implements QueryBuilder<DaemonLogChunkSelectedWithIncludes<I, S, R>> {
+  readonly _table = "daemon_log_chunks";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DaemonLogChunkSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DaemonLogChunkInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DaemonLogChunkInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DaemonLogChunkWhereInput): DaemonLogChunkQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DaemonLogChunkSelectableColumn>(...columns: [NewS, ...NewS[]]): DaemonLogChunkQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DaemonLogChunkInclude>(relations: NewI): DaemonLogChunkQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DaemonLogChunkQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DaemonLogChunkOrderableColumn, direction: "asc" | "desc" = "asc"): DaemonLogChunkQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DaemonLogChunkQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DaemonLogChunkQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "source_row" | "daemon_log_eventsViaChunk_row"): DaemonLogChunkQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DaemonLogChunkWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DaemonLogChunkQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DaemonLogChunkInclude = I, CloneS extends DaemonLogChunkSelectableColumn = S, CloneR extends boolean = R>(): DaemonLogChunkQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DaemonLogChunkQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DaemonLogEventQueryBuilder<I extends DaemonLogEventInclude = {}, S extends DaemonLogEventSelectableColumn = keyof DaemonLogEvent, R extends boolean = false> implements QueryBuilder<DaemonLogEventSelectedWithIncludes<I, S, R>> {
+  readonly _table = "daemon_log_events";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DaemonLogEventSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DaemonLogEventInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DaemonLogEventInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DaemonLogEventWhereInput): DaemonLogEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DaemonLogEventSelectableColumn>(...columns: [NewS, ...NewS[]]): DaemonLogEventQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DaemonLogEventInclude>(relations: NewI): DaemonLogEventQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DaemonLogEventQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DaemonLogEventOrderableColumn, direction: "asc" | "desc" = "asc"): DaemonLogEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DaemonLogEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DaemonLogEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "source_row" | "chunk_row"): DaemonLogEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DaemonLogEventWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DaemonLogEventQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DaemonLogEventInclude = I, CloneS extends DaemonLogEventSelectableColumn = S, CloneR extends boolean = R>(): DaemonLogEventQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DaemonLogEventQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DaemonLogCheckpointQueryBuilder<I extends DaemonLogCheckpointInclude = {}, S extends DaemonLogCheckpointSelectableColumn = keyof DaemonLogCheckpoint, R extends boolean = false> implements QueryBuilder<DaemonLogCheckpointSelectedWithIncludes<I, S, R>> {
+  readonly _table = "daemon_log_checkpoints";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DaemonLogCheckpointSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DaemonLogCheckpointInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DaemonLogCheckpointInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DaemonLogCheckpointWhereInput): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DaemonLogCheckpointSelectableColumn>(...columns: [NewS, ...NewS[]]): DaemonLogCheckpointQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DaemonLogCheckpointInclude>(relations: NewI): DaemonLogCheckpointQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DaemonLogCheckpointQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DaemonLogCheckpointOrderableColumn, direction: "asc" | "desc" = "asc"): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "source_row"): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DaemonLogCheckpointWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DaemonLogCheckpointQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DaemonLogCheckpointInclude = I, CloneS extends DaemonLogCheckpointSelectableColumn = S, CloneR extends boolean = R>(): DaemonLogCheckpointQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DaemonLogCheckpointQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DaemonLogSummaryQueryBuilder<I extends DaemonLogSummaryInclude = {}, S extends DaemonLogSummarySelectableColumn = keyof DaemonLogSummary, R extends boolean = false> implements QueryBuilder<DaemonLogSummarySelectedWithIncludes<I, S, R>> {
+  readonly _table = "daemon_log_summaries";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DaemonLogSummarySelectedWithIncludes<I, S, R>;
+  readonly _initType!: DaemonLogSummaryInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DaemonLogSummaryInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DaemonLogSummaryWhereInput): DaemonLogSummaryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DaemonLogSummarySelectableColumn>(...columns: [NewS, ...NewS[]]): DaemonLogSummaryQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DaemonLogSummaryInclude>(relations: NewI): DaemonLogSummaryQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DaemonLogSummaryQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DaemonLogSummaryOrderableColumn, direction: "asc" | "desc" = "asc"): DaemonLogSummaryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DaemonLogSummaryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DaemonLogSummaryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "source_row"): DaemonLogSummaryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DaemonLogSummaryWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DaemonLogSummaryQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DaemonLogSummaryInclude = I, CloneS extends DaemonLogSummarySelectableColumn = S, CloneR extends boolean = R>(): DaemonLogSummaryQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DaemonLogSummaryQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export class TaskRecordQueryBuilder<I extends Record<string, never> = {}, S extends TaskRecordSelectableColumn = keyof TaskRecord, R extends boolean = false> implements QueryBuilder<TaskRecordSelected<S>> {
   readonly _table = "task_records";
   readonly _schema: WasmSchema = wasmSchema;
@@ -4035,6 +6239,11 @@ export interface GeneratedApp {
   workspace_snapshots: WorkspaceSnapshotQueryBuilder;
   memory_links: MemoryLinkQueryBuilder;
   source_files: SourceFileQueryBuilder;
+  daemon_log_sources: DaemonLogSourceQueryBuilder;
+  daemon_log_chunks: DaemonLogChunkQueryBuilder;
+  daemon_log_events: DaemonLogEventQueryBuilder;
+  daemon_log_checkpoints: DaemonLogCheckpointQueryBuilder;
+  daemon_log_summaries: DaemonLogSummaryQueryBuilder;
   task_records: TaskRecordQueryBuilder;
   wasmSchema: WasmSchema;
 }
@@ -4050,6 +6259,12 @@ export const app: GeneratedApp = {
   workspace_snapshots: new WorkspaceSnapshotQueryBuilder(),
   memory_links: new MemoryLinkQueryBuilder(),
   source_files: new SourceFileQueryBuilder(),
+  daemon_log_sources: new DaemonLogSourceQueryBuilder(),
+  daemon_log_chunks: new DaemonLogChunkQueryBuilder(),
+  daemon_log_events: new DaemonLogEventQueryBuilder(),
+  daemon_log_checkpoints: new DaemonLogCheckpointQueryBuilder(),
+  daemon_log_summaries: new DaemonLogSummaryQueryBuilder(),
   task_records: new TaskRecordQueryBuilder(),
   wasmSchema,
 };
+

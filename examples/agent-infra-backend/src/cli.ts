@@ -14,6 +14,11 @@ import {
   type ContextDigestRecord,
   type CursorReviewOperationRecord,
   type CursorReviewOperationResultRecord,
+  type DaemonLogCheckpoint,
+  type DaemonLogChunk,
+  type DaemonLogEvent,
+  type DaemonLogSource,
+  type DaemonLogSummary,
   type JobEventRecord,
   type JobRecord,
   createAgentDataStore,
@@ -24,6 +29,9 @@ import {
   type ListCommitTurnOperationsInput,
   type ListContextDigestsInput,
   type ListCursorReviewOperationsInput,
+  type ListDaemonLogEventsInput,
+  type ListDaemonLogSourcesInput,
+  type ListDaemonLogSummariesInput,
   type ListJobsInput,
   type ListTaskRecordsInput,
   type RecordAgentClaimInput,
@@ -33,6 +41,11 @@ import {
   type RecordContextDigestInput,
   type RecordCursorReviewOperationInput,
   type RecordCursorReviewResultInput,
+  type RecordDaemonLogCheckpointInput,
+  type RecordDaemonLogChunkInput,
+  type RecordDaemonLogEventInput,
+  type RecordDaemonLogSourceInput,
+  type RecordDaemonLogSummaryInput,
   type RecordJobInput,
   type MemoryLink,
   type RecordArtifactInput,
@@ -167,6 +180,104 @@ interface SerializedSourceFile {
   fileKind: string;
   absolutePath: string;
   checksum: string | null;
+  createdAt: string;
+}
+
+interface SerializedDaemonLogSource {
+  sourceId: string;
+  manager: string;
+  daemonName: string;
+  stream: string;
+  hostId: string | null;
+  logPath: string;
+  configPath: string | null;
+  repoRoot: string | null;
+  workspaceRoot: string | null;
+  ownerAgent: string | null;
+  flowDaemonName: string | null;
+  launchdLabel: string | null;
+  retentionClass: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface SerializedDaemonLogChunk {
+  chunkId: string;
+  sourceId: string;
+  daemonName: string;
+  stream: string;
+  hostId: string | null;
+  logPath: string;
+  fileFingerprint: string;
+  startOffset: number;
+  endOffset: number;
+  firstLineNo: number;
+  lastLineNo: number;
+  lineCount: number;
+  byteCount: number;
+  firstAt: string | null;
+  lastAt: string | null;
+  sha256: string;
+  bodyRef: string | null;
+  bodyPreview: string | null;
+  compression: string;
+  ingestedAt: string;
+}
+
+interface SerializedDaemonLogEvent {
+  eventId: string;
+  sourceId: string;
+  chunkId: string;
+  daemonName: string;
+  stream: string;
+  seq: number;
+  lineNo: number;
+  at: string | null;
+  level: string;
+  message: string;
+  fieldsJson: unknown | null;
+  repoRoot: string | null;
+  workspaceRoot: string | null;
+  conversation: string | null;
+  conversationHash: string | null;
+  runId: string | null;
+  jobId: string | null;
+  traceId: string | null;
+  spanId: string | null;
+  errorKind: string | null;
+  createdAt: string;
+}
+
+interface SerializedDaemonLogCheckpoint {
+  checkpointId: string;
+  sourceId: string;
+  hostId: string | null;
+  logPath: string;
+  fileFingerprint: string;
+  inode: string | null;
+  device: string | null;
+  offset: number;
+  lineNo: number;
+  lastChunkId: string | null;
+  lastEventId: string | null;
+  lastSeenAt: string | null;
+  updatedAt: string;
+}
+
+interface SerializedDaemonLogSummary {
+  summaryId: string;
+  sourceId: string;
+  daemonName: string;
+  windowStart: string;
+  windowEnd: string;
+  levelCountsJson: unknown | null;
+  errorCount: number;
+  warningCount: number;
+  firstErrorEventId: string | null;
+  lastErrorEventId: string | null;
+  topErrorKindsJson: unknown | null;
+  summaryText: string | null;
   createdAt: string;
 }
 
@@ -559,6 +670,124 @@ function serializeSourceFile(sourceFile: SourceFile): SerializedSourceFile {
   };
 }
 
+function serializeDaemonLogSource(
+  source: DaemonLogSource,
+): SerializedDaemonLogSource {
+  return {
+    sourceId: source.source_id,
+    manager: source.manager,
+    daemonName: source.daemon_name,
+    stream: source.stream,
+    hostId: source.host_id ?? null,
+    logPath: source.log_path,
+    configPath: source.config_path ?? null,
+    repoRoot: source.repo_root ?? null,
+    workspaceRoot: source.workspace_root ?? null,
+    ownerAgent: source.owner_agent ?? null,
+    flowDaemonName: source.flow_daemon_name ?? null,
+    launchdLabel: source.launchd_label ?? null,
+    retentionClass: source.retention_class,
+    status: source.status,
+    createdAt: source.created_at.toISOString(),
+    updatedAt: source.updated_at.toISOString(),
+  };
+}
+
+function serializeDaemonLogChunk(
+  chunk: DaemonLogChunk,
+): SerializedDaemonLogChunk {
+  return {
+    chunkId: chunk.chunk_id,
+    sourceId: chunk.source_id,
+    daemonName: chunk.daemon_name,
+    stream: chunk.stream,
+    hostId: chunk.host_id ?? null,
+    logPath: chunk.log_path,
+    fileFingerprint: chunk.file_fingerprint,
+    startOffset: chunk.start_offset,
+    endOffset: chunk.end_offset,
+    firstLineNo: chunk.first_line_no,
+    lastLineNo: chunk.last_line_no,
+    lineCount: chunk.line_count,
+    byteCount: chunk.byte_count,
+    firstAt: serializeNullableDate(chunk.first_at),
+    lastAt: serializeNullableDate(chunk.last_at),
+    sha256: chunk.sha256,
+    bodyRef: chunk.body_ref ?? null,
+    bodyPreview: chunk.body_preview ?? null,
+    compression: chunk.compression,
+    ingestedAt: chunk.ingested_at.toISOString(),
+  };
+}
+
+function serializeDaemonLogEvent(
+  event: DaemonLogEvent,
+): SerializedDaemonLogEvent {
+  return {
+    eventId: event.event_id,
+    sourceId: event.source_id,
+    chunkId: event.chunk_id,
+    daemonName: event.daemon_name,
+    stream: event.stream,
+    seq: event.seq,
+    lineNo: event.line_no,
+    at: serializeNullableDate(event.at),
+    level: event.level,
+    message: event.message,
+    fieldsJson: event.fields_json ?? null,
+    repoRoot: event.repo_root ?? null,
+    workspaceRoot: event.workspace_root ?? null,
+    conversation: event.conversation ?? null,
+    conversationHash: event.conversation_hash ?? null,
+    runId: event.run_id ?? null,
+    jobId: event.job_id ?? null,
+    traceId: event.trace_id ?? null,
+    spanId: event.span_id ?? null,
+    errorKind: event.error_kind ?? null,
+    createdAt: event.created_at.toISOString(),
+  };
+}
+
+function serializeDaemonLogCheckpoint(
+  checkpoint: DaemonLogCheckpoint,
+): SerializedDaemonLogCheckpoint {
+  return {
+    checkpointId: checkpoint.checkpoint_id,
+    sourceId: checkpoint.source_id,
+    hostId: checkpoint.host_id ?? null,
+    logPath: checkpoint.log_path,
+    fileFingerprint: checkpoint.file_fingerprint,
+    inode: checkpoint.inode ?? null,
+    device: checkpoint.device ?? null,
+    offset: checkpoint.offset,
+    lineNo: checkpoint.line_no,
+    lastChunkId: checkpoint.last_chunk_id ?? null,
+    lastEventId: checkpoint.last_event_id ?? null,
+    lastSeenAt: serializeNullableDate(checkpoint.last_seen_at),
+    updatedAt: checkpoint.updated_at.toISOString(),
+  };
+}
+
+function serializeDaemonLogSummary(
+  summary: DaemonLogSummary,
+): SerializedDaemonLogSummary {
+  return {
+    summaryId: summary.summary_id,
+    sourceId: summary.source_id,
+    daemonName: summary.daemon_name,
+    windowStart: summary.window_start.toISOString(),
+    windowEnd: summary.window_end.toISOString(),
+    levelCountsJson: summary.level_counts_json ?? null,
+    errorCount: summary.error_count,
+    warningCount: summary.warning_count,
+    firstErrorEventId: summary.first_error_event_id ?? null,
+    lastErrorEventId: summary.last_error_event_id ?? null,
+    topErrorKindsJson: summary.top_error_kinds_json ?? null,
+    summaryText: summary.summary_text ?? null,
+    createdAt: summary.created_at.toISOString(),
+  };
+}
+
 function serializeAgentStateSnapshot(
   snapshot: AgentStateSnapshot,
 ): SerializedAgentStateSnapshot {
@@ -920,6 +1149,101 @@ async function main(): Promise<void> {
         );
         const snapshot = await store.recordWorkspaceSnapshot(input);
         renderJson(serializeWorkspaceSnapshot(snapshot));
+        break;
+      }
+      case "record-daemon-log-source": {
+        const input = readJsonInput<RecordDaemonLogSourceInput>(
+          "record-daemon-log-source",
+        );
+        const source = await store.recordDaemonLogSource(input);
+        renderJson(serializeDaemonLogSource(source));
+        break;
+      }
+      case "list-daemon-log-sources": {
+        const limitRaw = readFlag("--limit");
+        const query: ListDaemonLogSourcesInput = {
+          manager: readFlag("--manager"),
+          daemonName: readFlag("--daemon"),
+          stream: readFlag("--stream"),
+          status: readFlag("--status"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const sources = await store.listDaemonLogSources(query);
+        renderJson(sources.map(serializeDaemonLogSource));
+        break;
+      }
+      case "record-daemon-log-chunk": {
+        const input = readJsonInput<RecordDaemonLogChunkInput>(
+          "record-daemon-log-chunk",
+        );
+        const chunk = await store.recordDaemonLogChunk(input);
+        renderJson(serializeDaemonLogChunk(chunk));
+        break;
+      }
+      case "get-daemon-log-chunk": {
+        const chunkId = readFlag("--chunk-id");
+        if (!chunkId) {
+          throw new Error("get-daemon-log-chunk requires --chunk-id");
+        }
+        const chunk = await store.getDaemonLogChunk(chunkId);
+        if (!chunk) {
+          throw new Error(`daemon log chunk ${chunkId} not found`);
+        }
+        renderJson(serializeDaemonLogChunk(chunk));
+        break;
+      }
+      case "record-daemon-log-event": {
+        const input = readJsonInput<RecordDaemonLogEventInput>(
+          "record-daemon-log-event",
+        );
+        const event = await store.recordDaemonLogEvent(input);
+        renderJson(serializeDaemonLogEvent(event));
+        break;
+      }
+      case "list-daemon-log-events": {
+        const limitRaw = readFlag("--limit");
+        const query: ListDaemonLogEventsInput = {
+          sourceId: readFlag("--source-id"),
+          daemonName: readFlag("--daemon"),
+          level: readFlag("--level"),
+          conversation: readFlag("--conversation"),
+          conversationHash: readFlag("--conversation-hash"),
+          runId: readFlag("--run-id"),
+          jobId: readFlag("--job-id"),
+          traceId: readFlag("--trace-id"),
+          since: readFlag("--since"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const events = await store.listDaemonLogEvents(query);
+        renderJson(events.map(serializeDaemonLogEvent));
+        break;
+      }
+      case "record-daemon-log-checkpoint": {
+        const input = readJsonInput<RecordDaemonLogCheckpointInput>(
+          "record-daemon-log-checkpoint",
+        );
+        const checkpoint = await store.recordDaemonLogCheckpoint(input);
+        renderJson(serializeDaemonLogCheckpoint(checkpoint));
+        break;
+      }
+      case "record-daemon-log-summary": {
+        const input = readJsonInput<RecordDaemonLogSummaryInput>(
+          "record-daemon-log-summary",
+        );
+        const summary = await store.recordDaemonLogSummary(input);
+        renderJson(serializeDaemonLogSummary(summary));
+        break;
+      }
+      case "list-daemon-log-summaries": {
+        const limitRaw = readFlag("--limit");
+        const query: ListDaemonLogSummariesInput = {
+          sourceId: readFlag("--source-id"),
+          daemonName: readFlag("--daemon"),
+          since: readFlag("--since"),
+          limit: limitRaw ? Number.parseInt(limitRaw, 10) : 20,
+        };
+        const summaries = await store.listDaemonLogSummaries(query);
+        renderJson(summaries.map(serializeDaemonLogSummary));
         break;
       }
       case "list-recent-runs": {

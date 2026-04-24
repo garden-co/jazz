@@ -17,6 +17,16 @@ import {
   type AgentStateSnapshotInit,
   type Artifact,
   type ArtifactInit,
+  type DaemonLogCheckpoint,
+  type DaemonLogCheckpointInit,
+  type DaemonLogChunk,
+  type DaemonLogChunkInit,
+  type DaemonLogEvent,
+  type DaemonLogEventInit,
+  type DaemonLogSource,
+  type DaemonLogSourceInit,
+  type DaemonLogSummary,
+  type DaemonLogSummaryInit,
   type JsonValue,
   type MemoryLink,
   type MemoryLinkInit,
@@ -227,6 +237,256 @@ export interface RecordSourceFileInput {
   runId?: string;
   checksum?: string;
   createdAt?: TimestampInput;
+}
+
+export type DaemonLogManager = "flow" | "launchd" | "manual" | "systemd" | string;
+export type DaemonLogStream =
+  | "stdout"
+  | "stderr"
+  | "combined"
+  | "health"
+  | "supervisor"
+  | string;
+export type DaemonLogRetentionClass = "debug" | "normal" | "audit" | string;
+export type DaemonLogSourceStatus =
+  | "active"
+  | "paused"
+  | "missing"
+  | "rotated"
+  | "retired"
+  | string;
+export type DaemonLogLevel =
+  | "trace"
+  | "debug"
+  | "info"
+  | "warn"
+  | "error"
+  | "fatal"
+  | "unknown"
+  | string;
+
+export interface RecordDaemonLogSourceInput {
+  sourceId?: string;
+  manager: DaemonLogManager;
+  daemonName: string;
+  stream: DaemonLogStream;
+  hostId?: string;
+  logPath: string;
+  configPath?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  ownerAgent?: string;
+  flowDaemonName?: string;
+  launchdLabel?: string;
+  retentionClass?: DaemonLogRetentionClass;
+  status?: DaemonLogSourceStatus;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface ListDaemonLogSourcesInput {
+  manager?: string;
+  daemonName?: string;
+  stream?: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface DaemonLogSourceRecord {
+  sourceId: string;
+  manager: string;
+  daemonName: string;
+  stream: string;
+  hostId?: string;
+  logPath: string;
+  configPath?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  ownerAgent?: string;
+  flowDaemonName?: string;
+  launchdLabel?: string;
+  retentionClass: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RecordDaemonLogChunkInput {
+  chunkId?: string;
+  sourceId: string;
+  daemonName?: string;
+  stream?: string;
+  hostId?: string;
+  logPath?: string;
+  fileFingerprint: string;
+  startOffset: number;
+  endOffset: number;
+  firstLineNo: number;
+  lastLineNo: number;
+  lineCount: number;
+  byteCount: number;
+  firstAt?: TimestampInput;
+  lastAt?: TimestampInput;
+  sha256: string;
+  bodyRef?: string;
+  bodyPreview?: string;
+  compression?: string;
+  ingestedAt?: TimestampInput;
+}
+
+export interface DaemonLogChunkRecord {
+  chunkId: string;
+  sourceId: string;
+  daemonName: string;
+  stream: string;
+  hostId?: string;
+  logPath: string;
+  fileFingerprint: string;
+  startOffset: number;
+  endOffset: number;
+  firstLineNo: number;
+  lastLineNo: number;
+  lineCount: number;
+  byteCount: number;
+  firstAt?: Date;
+  lastAt?: Date;
+  sha256: string;
+  bodyRef?: string;
+  bodyPreview?: string;
+  compression: string;
+  ingestedAt: Date;
+}
+
+export interface RecordDaemonLogEventInput {
+  eventId?: string;
+  sourceId: string;
+  chunkId: string;
+  daemonName?: string;
+  stream?: string;
+  seq: number;
+  lineNo: number;
+  at?: TimestampInput;
+  level?: DaemonLogLevel;
+  message: string;
+  fieldsJson?: JsonValue;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  conversation?: string;
+  conversationHash?: string;
+  runId?: string;
+  jobId?: string;
+  traceId?: string;
+  spanId?: string;
+  errorKind?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface ListDaemonLogEventsInput {
+  sourceId?: string;
+  daemonName?: string;
+  level?: string;
+  conversation?: string;
+  conversationHash?: string;
+  runId?: string;
+  jobId?: string;
+  traceId?: string;
+  since?: TimestampInput;
+  limit?: number;
+}
+
+export interface DaemonLogEventRecord {
+  eventId: string;
+  sourceId: string;
+  chunkId: string;
+  daemonName: string;
+  stream: string;
+  seq: number;
+  lineNo: number;
+  at?: Date;
+  level: string;
+  message: string;
+  fieldsJson?: JsonValue;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  conversation?: string;
+  conversationHash?: string;
+  runId?: string;
+  jobId?: string;
+  traceId?: string;
+  spanId?: string;
+  errorKind?: string;
+  createdAt: Date;
+}
+
+export interface RecordDaemonLogCheckpointInput {
+  checkpointId?: string;
+  sourceId: string;
+  hostId?: string;
+  logPath?: string;
+  fileFingerprint: string;
+  inode?: string;
+  device?: string;
+  offset: number;
+  lineNo: number;
+  lastChunkId?: string;
+  lastEventId?: string;
+  lastSeenAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface DaemonLogCheckpointRecord {
+  checkpointId: string;
+  sourceId: string;
+  hostId?: string;
+  logPath: string;
+  fileFingerprint: string;
+  inode?: string;
+  device?: string;
+  offset: number;
+  lineNo: number;
+  lastChunkId?: string;
+  lastEventId?: string;
+  lastSeenAt?: Date;
+  updatedAt: Date;
+}
+
+export interface RecordDaemonLogSummaryInput {
+  summaryId?: string;
+  sourceId: string;
+  daemonName?: string;
+  windowStart: TimestampInput;
+  windowEnd: TimestampInput;
+  levelCountsJson: JsonValue;
+  errorCount: number;
+  warningCount: number;
+  firstErrorEventId?: string;
+  lastErrorEventId?: string;
+  topErrorKindsJson?: JsonValue;
+  summaryText?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface ListDaemonLogSummariesInput {
+  sourceId?: string;
+  daemonName?: string;
+  since?: TimestampInput;
+  limit?: number;
+}
+
+export interface DaemonLogSummaryRecord {
+  summaryId: string;
+  sourceId: string;
+  daemonName: string;
+  windowStart: Date;
+  windowEnd: Date;
+  levelCountsJson: JsonValue;
+  errorCount: number;
+  warningCount: number;
+  firstErrorEventId?: string;
+  lastErrorEventId?: string;
+  topErrorKindsJson?: JsonValue;
+  summaryText?: string;
+  createdAt: Date;
 }
 
 export interface UpsertTaskRecordInput {
@@ -1361,6 +1621,419 @@ export class AgentDataStore {
       },
       { tier: this.writeTier },
     );
+  }
+
+  async recordDaemonLogSource(
+    input: RecordDaemonLogSourceInput,
+    session?: Session,
+  ): Promise<DaemonLogSource> {
+    const db = this.getDb(session);
+    const sourceId = input.sourceId ?? randomUUID();
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDaemonLogSourceByExternalId(db, sourceId);
+
+    if (existing) {
+      await this.updateRow(db, app.daemon_log_sources, existing.id, {
+        manager: input.manager,
+        daemon_name: input.daemonName,
+        stream: input.stream,
+        host_id: input.hostId,
+        log_path: input.logPath,
+        config_path: input.configPath,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        owner_agent: input.ownerAgent,
+        flow_daemon_name: input.flowDaemonName,
+        launchd_label: input.launchdLabel,
+        retention_class: input.retentionClass ?? existing.retention_class,
+        status: input.status ?? existing.status,
+        updated_at: now,
+      });
+      return this.requireByQuery(
+        db,
+        app.daemon_log_sources.where({ source_id: sourceId }),
+        "daemon log source",
+      );
+    }
+
+    return db.insertDurable(
+      app.daemon_log_sources,
+      {
+        source_id: sourceId,
+        manager: input.manager,
+        daemon_name: input.daemonName,
+        stream: input.stream,
+        host_id: input.hostId,
+        log_path: input.logPath,
+        config_path: input.configPath,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        owner_agent: input.ownerAgent,
+        flow_daemon_name: input.flowDaemonName,
+        launchd_label: input.launchdLabel,
+        retention_class: input.retentionClass ?? "normal",
+        status: input.status ?? "active",
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async listDaemonLogSources(
+    input: ListDaemonLogSourcesInput = {},
+    session?: Session,
+  ): Promise<DaemonLogSource[]> {
+    const rows = await this.getDb(session).all(
+      app.daemon_log_sources
+        .orderBy("updated_at", "desc")
+        .limit(Math.max(clampLimit(input.limit), 50) * 4),
+    );
+
+    return rows
+      .filter((row) => {
+        if (input.manager && row.manager !== input.manager) return false;
+        if (input.daemonName && row.daemon_name !== input.daemonName)
+          return false;
+        if (input.stream && row.stream !== input.stream) return false;
+        if (input.status && row.status !== input.status) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async recordDaemonLogChunk(
+    input: RecordDaemonLogChunkInput,
+    session?: Session,
+  ): Promise<DaemonLogChunk> {
+    const db = this.getDb(session);
+    const source = await this.requireDaemonLogSourceByExternalId(
+      db,
+      input.sourceId,
+    );
+    const chunkId = input.chunkId ?? randomUUID();
+    const existing = await this.getDaemonLogChunkByExternalId(db, chunkId);
+
+    if (existing) {
+      await this.updateRow(db, app.daemon_log_chunks, existing.id, {
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        stream: input.stream ?? source.stream,
+        host_id: input.hostId ?? source.host_id,
+        log_path: input.logPath ?? source.log_path,
+        file_fingerprint: input.fileFingerprint,
+        start_offset: input.startOffset,
+        end_offset: input.endOffset,
+        first_line_no: input.firstLineNo,
+        last_line_no: input.lastLineNo,
+        line_count: input.lineCount,
+        byte_count: input.byteCount,
+        first_at: input.firstAt ? asDate(input.firstAt) : undefined,
+        last_at: input.lastAt ? asDate(input.lastAt) : undefined,
+        sha256: input.sha256,
+        body_ref: input.bodyRef,
+        body_preview: input.bodyPreview,
+        compression: input.compression ?? existing.compression,
+        ingested_at: input.ingestedAt ? asDate(input.ingestedAt) : undefined,
+      });
+      return this.requireDaemonLogChunkByExternalId(db, chunkId);
+    }
+
+    return db.insertDurable(
+      app.daemon_log_chunks,
+      {
+        chunk_id: chunkId,
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        stream: input.stream ?? source.stream,
+        host_id: input.hostId ?? source.host_id,
+        log_path: input.logPath ?? source.log_path,
+        file_fingerprint: input.fileFingerprint,
+        start_offset: input.startOffset,
+        end_offset: input.endOffset,
+        first_line_no: input.firstLineNo,
+        last_line_no: input.lastLineNo,
+        line_count: input.lineCount,
+        byte_count: input.byteCount,
+        first_at: input.firstAt ? asDate(input.firstAt) : undefined,
+        last_at: input.lastAt ? asDate(input.lastAt) : undefined,
+        sha256: input.sha256,
+        body_ref: input.bodyRef,
+        body_preview: input.bodyPreview,
+        compression: input.compression ?? "none",
+        ingested_at: asDate(input.ingestedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async getDaemonLogChunk(
+    chunkId: string,
+    session?: Session,
+  ): Promise<DaemonLogChunk | null> {
+    return this.getDaemonLogChunkByExternalId(this.getDb(session), chunkId);
+  }
+
+  async recordDaemonLogEvent(
+    input: RecordDaemonLogEventInput,
+    session?: Session,
+  ): Promise<DaemonLogEvent> {
+    const db = this.getDb(session);
+    const source = await this.requireDaemonLogSourceByExternalId(
+      db,
+      input.sourceId,
+    );
+    const chunk = await this.requireDaemonLogChunkByExternalId(
+      db,
+      input.chunkId,
+    );
+    const eventId = input.eventId ?? randomUUID();
+    const existing = await db.one(
+      app.daemon_log_events.where({ event_id: eventId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.daemon_log_events, existing.id, {
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        chunk_id: input.chunkId,
+        chunk_row_id: chunk.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        stream: input.stream ?? source.stream,
+        seq: input.seq,
+        line_no: input.lineNo,
+        at: input.at ? asDate(input.at) : undefined,
+        level: input.level ?? existing.level,
+        message: input.message,
+        fields_json: input.fieldsJson,
+        repo_root: input.repoRoot ?? source.repo_root,
+        workspace_root: input.workspaceRoot ?? source.workspace_root,
+        conversation: input.conversation,
+        conversation_hash: input.conversationHash,
+        run_id: input.runId,
+        job_id: input.jobId,
+        trace_id: input.traceId,
+        span_id: input.spanId,
+        error_kind: input.errorKind,
+        created_at: input.createdAt ? asDate(input.createdAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.daemon_log_events.where({ event_id: eventId }),
+        "daemon log event",
+      );
+    }
+
+    return db.insertDurable(
+      app.daemon_log_events,
+      {
+        event_id: eventId,
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        chunk_id: input.chunkId,
+        chunk_row_id: chunk.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        stream: input.stream ?? source.stream,
+        seq: input.seq,
+        line_no: input.lineNo,
+        at: input.at ? asDate(input.at) : undefined,
+        level: input.level ?? "unknown",
+        message: input.message,
+        fields_json: input.fieldsJson,
+        repo_root: input.repoRoot ?? source.repo_root,
+        workspace_root: input.workspaceRoot ?? source.workspace_root,
+        conversation: input.conversation,
+        conversation_hash: input.conversationHash,
+        run_id: input.runId,
+        job_id: input.jobId,
+        trace_id: input.traceId,
+        span_id: input.spanId,
+        error_kind: input.errorKind,
+        created_at: asDate(input.createdAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async listDaemonLogEvents(
+    input: ListDaemonLogEventsInput = {},
+    session?: Session,
+  ): Promise<DaemonLogEvent[]> {
+    const rows = await this.getDb(session).all(
+      app.daemon_log_events
+        .orderBy("created_at", "desc")
+        .limit(Math.max(clampLimit(input.limit), 50) * 8),
+    );
+    const since = input.since ? asDate(input.since) : undefined;
+
+    return rows
+      .filter((row) => {
+        if (input.sourceId && row.source_id !== input.sourceId) return false;
+        if (input.daemonName && row.daemon_name !== input.daemonName)
+          return false;
+        if (input.level && row.level !== input.level) return false;
+        if (input.conversation && row.conversation !== input.conversation)
+          return false;
+        if (
+          input.conversationHash &&
+          row.conversation_hash !== input.conversationHash
+        ) {
+          return false;
+        }
+        if (input.runId && row.run_id !== input.runId) return false;
+        if (input.jobId && row.job_id !== input.jobId) return false;
+        if (input.traceId && row.trace_id !== input.traceId) return false;
+        if (since) {
+          const eventTime = row.at ?? row.created_at;
+          if (eventTime.getTime() < since.getTime()) return false;
+        }
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async recordDaemonLogCheckpoint(
+    input: RecordDaemonLogCheckpointInput,
+    session?: Session,
+  ): Promise<DaemonLogCheckpoint> {
+    const db = this.getDb(session);
+    const source = await this.requireDaemonLogSourceByExternalId(
+      db,
+      input.sourceId,
+    );
+    const checkpointId = input.checkpointId ?? input.sourceId;
+    const existing = await db.one(
+      app.daemon_log_checkpoints.where({ checkpoint_id: checkpointId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.daemon_log_checkpoints, existing.id, {
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        host_id: input.hostId ?? source.host_id,
+        log_path: input.logPath ?? source.log_path,
+        file_fingerprint: input.fileFingerprint,
+        inode: input.inode,
+        device: input.device,
+        offset: input.offset,
+        line_no: input.lineNo,
+        last_chunk_id: input.lastChunkId,
+        last_event_id: input.lastEventId,
+        last_seen_at: input.lastSeenAt
+          ? asDate(input.lastSeenAt)
+          : undefined,
+        updated_at: asDate(input.updatedAt),
+      });
+      return this.requireByQuery(
+        db,
+        app.daemon_log_checkpoints.where({ checkpoint_id: checkpointId }),
+        "daemon log checkpoint",
+      );
+    }
+
+    return db.insertDurable(
+      app.daemon_log_checkpoints,
+      {
+        checkpoint_id: checkpointId,
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        host_id: input.hostId ?? source.host_id,
+        log_path: input.logPath ?? source.log_path,
+        file_fingerprint: input.fileFingerprint,
+        inode: input.inode,
+        device: input.device,
+        offset: input.offset,
+        line_no: input.lineNo,
+        last_chunk_id: input.lastChunkId,
+        last_event_id: input.lastEventId,
+        last_seen_at: input.lastSeenAt ? asDate(input.lastSeenAt) : undefined,
+        updated_at: asDate(input.updatedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDaemonLogSummary(
+    input: RecordDaemonLogSummaryInput,
+    session?: Session,
+  ): Promise<DaemonLogSummary> {
+    const db = this.getDb(session);
+    const source = await this.requireDaemonLogSourceByExternalId(
+      db,
+      input.sourceId,
+    );
+    const summaryId = input.summaryId ?? randomUUID();
+    const existing = await db.one(
+      app.daemon_log_summaries.where({ summary_id: summaryId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.daemon_log_summaries, existing.id, {
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        window_start: asDate(input.windowStart),
+        window_end: asDate(input.windowEnd),
+        level_counts_json: input.levelCountsJson,
+        error_count: input.errorCount,
+        warning_count: input.warningCount,
+        first_error_event_id: input.firstErrorEventId,
+        last_error_event_id: input.lastErrorEventId,
+        top_error_kinds_json: input.topErrorKindsJson,
+        summary_text: input.summaryText,
+        created_at: input.createdAt ? asDate(input.createdAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.daemon_log_summaries.where({ summary_id: summaryId }),
+        "daemon log summary",
+      );
+    }
+
+    return db.insertDurable(
+      app.daemon_log_summaries,
+      {
+        summary_id: summaryId,
+        source_id: input.sourceId,
+        source_row_id: source.id,
+        daemon_name: input.daemonName ?? source.daemon_name,
+        window_start: asDate(input.windowStart),
+        window_end: asDate(input.windowEnd),
+        level_counts_json: input.levelCountsJson,
+        error_count: input.errorCount,
+        warning_count: input.warningCount,
+        first_error_event_id: input.firstErrorEventId,
+        last_error_event_id: input.lastErrorEventId,
+        top_error_kinds_json: input.topErrorKindsJson,
+        summary_text: input.summaryText,
+        created_at: asDate(input.createdAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async listDaemonLogSummaries(
+    input: ListDaemonLogSummariesInput = {},
+    session?: Session,
+  ): Promise<DaemonLogSummary[]> {
+    const rows = await this.getDb(session).all(
+      app.daemon_log_summaries
+        .orderBy("window_end", "desc")
+        .limit(Math.max(clampLimit(input.limit), 50) * 4),
+    );
+    const since = input.since ? asDate(input.since) : undefined;
+
+    return rows
+      .filter((row) => {
+        if (input.sourceId && row.source_id !== input.sourceId) return false;
+        if (input.daemonName && row.daemon_name !== input.daemonName)
+          return false;
+        if (since && row.window_end.getTime() < since.getTime()) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
   }
 
   async upsertTaskRecord(
@@ -2525,6 +3198,42 @@ export class AgentDataStore {
     taskId: string,
   ): Promise<TaskRecord | null> {
     return db.one(app.task_records.where({ task_id: taskId }));
+  }
+
+  private async getDaemonLogSourceByExternalId(
+    db: Db,
+    sourceId: string,
+  ): Promise<DaemonLogSource | null> {
+    return db.one(app.daemon_log_sources.where({ source_id: sourceId }));
+  }
+
+  private async getDaemonLogChunkByExternalId(
+    db: Db,
+    chunkId: string,
+  ): Promise<DaemonLogChunk | null> {
+    return db.one(app.daemon_log_chunks.where({ chunk_id: chunkId }));
+  }
+
+  private async requireDaemonLogSourceByExternalId(
+    db: Db,
+    sourceId: string,
+  ): Promise<DaemonLogSource> {
+    const source = await this.getDaemonLogSourceByExternalId(db, sourceId);
+    if (!source) {
+      throw new Error(`daemon log source ${sourceId} not found`);
+    }
+    return source;
+  }
+
+  private async requireDaemonLogChunkByExternalId(
+    db: Db,
+    chunkId: string,
+  ): Promise<DaemonLogChunk> {
+    const chunk = await this.getDaemonLogChunkByExternalId(db, chunkId);
+    if (!chunk) {
+      throw new Error(`daemon log chunk ${chunkId} not found`);
+    }
+    return chunk;
   }
 
   private async ensureCursorReviewControlRun(db: Db): Promise<AgentRun> {

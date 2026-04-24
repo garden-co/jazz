@@ -209,6 +209,86 @@ describe("AgentDataStore", () => {
     expect(task?.pr).toBe("https://github.com/fl2024008/prometheus/pull/3296");
   });
 
+  it("records daemon log sources, chunks, events, checkpoints, and summaries", async () => {
+    const source = await store.recordDaemonLogSource({
+      sourceId: "flow:sync:stderr",
+      manager: "flow",
+      daemonName: "sync",
+      stream: "stderr",
+      hostId: "workstation",
+      logPath: "/Users/nikitavoloboev/.config/flow-state/daemons/sync/stderr.log",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      retentionClass: "normal",
+      status: "active",
+      createdAt: "2026-04-24T10:00:00.000Z",
+      updatedAt: "2026-04-24T10:00:00.000Z",
+    });
+    const chunk = await store.recordDaemonLogChunk({
+      chunkId: "chunk-1",
+      sourceId: source.source_id,
+      fileFingerprint: "dev:inode:size:mtime",
+      startOffset: 0,
+      endOffset: 128,
+      firstLineNo: 1,
+      lastLineNo: 2,
+      lineCount: 2,
+      byteCount: 128,
+      sha256: "abc123",
+      bodyPreview: "warn: slow sync",
+      ingestedAt: "2026-04-24T10:01:00.000Z",
+    });
+    await store.recordDaemonLogEvent({
+      eventId: "event-1",
+      sourceId: source.source_id,
+      chunkId: chunk.chunk_id,
+      seq: 1,
+      lineNo: 2,
+      at: "2026-04-24T10:00:30.000Z",
+      level: "warn",
+      message: "sync took longer than expected",
+      fieldsJson: { durationMs: 1250 },
+      conversationHash: "conv-hash",
+      traceId: "trace-1",
+    });
+    const checkpoint = await store.recordDaemonLogCheckpoint({
+      sourceId: source.source_id,
+      fileFingerprint: "dev:inode:size:mtime",
+      offset: 128,
+      lineNo: 2,
+      lastChunkId: chunk.chunk_id,
+      lastEventId: "event-1",
+      lastSeenAt: "2026-04-24T10:01:00.000Z",
+      updatedAt: "2026-04-24T10:01:00.000Z",
+    });
+    const summary = await store.recordDaemonLogSummary({
+      summaryId: "summary-1",
+      sourceId: source.source_id,
+      windowStart: "2026-04-24T10:00:00.000Z",
+      windowEnd: "2026-04-24T10:05:00.000Z",
+      levelCountsJson: { warn: 1 },
+      errorCount: 0,
+      warningCount: 1,
+      summaryText: "one warning",
+    });
+
+    const sources = await store.listDaemonLogSources({ manager: "flow" });
+    const events = await store.listDaemonLogEvents({
+      conversationHash: "conv-hash",
+    });
+    const summaries = await store.listDaemonLogSummaries({
+      daemonName: "sync",
+    });
+
+    expect(sources.map((item) => item.source_id)).toEqual([
+      "flow:sync:stderr",
+    ]);
+    expect(events.map((item) => item.event_id)).toEqual(["event-1"]);
+    expect(events[0]?.repo_root).toBe("/Users/nikitavoloboev/code/prom");
+    expect(checkpoint.checkpoint_id).toBe(source.source_id);
+    expect(summary.summary_id).toBe("summary-1");
+    expect(summaries).toHaveLength(1);
+  });
+
   it("records cursor review operations and hides processed entries by default", async () => {
     const operation = await store.recordCursorReviewOperation({
       operationId: "cursor-op-1",

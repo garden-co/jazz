@@ -6,7 +6,7 @@
   "scripts": {
     "cli": "node dist/src/cli.js",
     "build": "tsc",
-    "build:schema": "node ../../packages/jazz-tools/dist/cli.js build --schema-dir ./schema",
+    "build:schema": "node scripts/generate-app.mjs",
     "smoke": "tsx src/smoke.ts",
     "test": "vitest run tests"
   },
