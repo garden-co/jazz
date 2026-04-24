@@ -1,10 +1,12 @@
-import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
-import { bearer, jwt } from "better-auth/plugins";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { sveltekitCookies } from "better-auth/svelte-kit";
 import { getRequestEvent } from "$app/server";
 import { env } from "$env/dynamic/private";
+import { betterAuth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { bearer, jwt } from "better-auth/plugins";
+import { sveltekitCookies } from "better-auth/svelte-kit";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { app } from "./schema";
+import { authJazzContext } from "./auth-jazz-context";
 
 const APP_ORIGIN = env.APP_ORIGIN ?? "http://localhost:5173";
 
@@ -16,22 +18,13 @@ if (!env.BETTER_AUTH_SECRET) {
 
 const BETTER_AUTH_SECRET = env.BETTER_AUTH_SECRET;
 
-// In-memory store. Each Node process keeps its own copy, so users that sign
-// up in one worker cannot sign in from another: HMR reloads, multi-worker
-// deploys, and serverless invocations all reset state. Good enough for a
-// starter you run locally; swap for a persistent adapter before you ship.
-const authMemoryDb: MemoryDB = {
-  account: [],
-  jwks: [],
-  session: [],
-  user: [],
-  verification: [],
-};
-
 export const auth = betterAuth({
   baseURL: APP_ORIGIN,
   secret: BETTER_AUTH_SECRET,
-  database: memoryAdapter(authMemoryDb),
+  database: jazzAdapter({
+    db: () => authJazzContext().asBackend(app),
+    schema: app.wasmSchema,
+  }),
   trustedOrigins: [APP_ORIGIN],
   emailAndPassword: {
     enabled: true,
