@@ -131,6 +131,32 @@ describe("scaffold() — next-betterauth e2e via JAZZ_STARTER_PATH", () => {
     expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(false);
   });
 
+  it(
+    "passes onStep to preInstall so the spinner advances past git init",
+    { timeout: 30_000 },
+    async () => {
+      tmpDir = path.join(os.tmpdir(), `scaffold-preinstall-${Date.now()}`);
+      const steps: string[] = [];
+
+      await scaffold({
+        appName: "dave-preinstall",
+        targetDir: tmpDir,
+        pm: null,
+        starter: "next-betterauth",
+        git: false,
+        onStep: (label) => steps.push(label),
+        preInstall: async (ctx) => {
+          expect(typeof ctx).toBe("object");
+          expect(typeof ctx.dir).toBe("string");
+          expect(typeof ctx.onStep).toBe("function");
+          ctx.onStep("Provisioning Jazz Cloud app");
+        },
+      });
+
+      expect(steps).toContain("Provisioning Jazz Cloud app");
+    },
+  );
+
   it("reports per-package progress during dep resolution", { timeout: 30_000 }, async () => {
     tmpDir = path.join(os.tmpdir(), `scaffold-progress-${Date.now()}`);
     const steps: string[] = [];
