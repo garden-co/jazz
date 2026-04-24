@@ -262,15 +262,24 @@ describe("jazzSvelteKit", () => {
     );
   });
 
-  it("throws when connecting to an existing server without adminSecret", async () => {
+  it("ignores a bare server URL env var with no adminSecret and starts a fresh local server", async () => {
+    // Simulates the env being populated by a prior initialize() call in the
+    // same process (Vite HMR restarts). A bare env var is our own leftover,
+    // not a request to connect externally.
     process.env.PUBLIC_JAZZ_SERVER_URL = "http://jazz-test-server:4000";
     process.env.PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000010";
 
-    const plugin = jazzSvelteKit({});
-    await expect(
-      (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve")),
-    ).rejects.toThrow("adminSecret is required when connecting to an existing server");
-  });
+    const port = await getAvailablePort();
+    const root = await tempRoots.create("jazz-sveltekit-fallback-");
+    await mkdir(join(root, "src", "lib"), { recursive: true });
+    await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+
+    const plugin = jazzSvelteKit({ server: { port } });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.config.env!.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+  }, 30_000);
 
   it("throws when connecting to an existing server without appId", async () => {
     process.env.PUBLIC_JAZZ_SERVER_URL = "http://jazz-test-server:4000";

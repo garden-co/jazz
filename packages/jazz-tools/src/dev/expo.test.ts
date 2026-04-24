@@ -120,14 +120,22 @@ describe("withJazz", () => {
     expect(pushSchemaCatalogue).toHaveBeenCalledTimes(2);
   }, 30_000);
 
-  it("throws when connecting to an existing server without adminSecret", async () => {
+  it("ignores a bare server URL env var with no adminSecret and starts a fresh local server", async () => {
+    // Simulates the env being populated by a prior initialize() call in the
+    // same process. A bare env var is our own leftover, not a request to
+    // connect externally.
     process.env.EXPO_PUBLIC_JAZZ_SERVER_URL = "http://127.0.0.1:4000";
     process.env.EXPO_PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000111";
 
-    await expect(withJazz({})).rejects.toThrow(
-      "adminSecret is required when connecting to an existing server",
-    );
-  });
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-expo-fallback-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const resolved = await withJazz({}, { server: { port }, schemaDir });
+
+    expect(resolved.extra?.jazzServerUrl).toBe(`http://127.0.0.1:${port}`);
+    expect(process.env.EXPO_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
+  }, 30_000);
 
   it("throws when connecting to an existing server without appId", async () => {
     process.env.EXPO_PUBLIC_JAZZ_SERVER_URL = "http://127.0.0.1:4000";
