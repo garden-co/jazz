@@ -10,7 +10,7 @@
     "prebuild": "node scripts/ensure-env.js",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:e2e": "playwright test"
   },
   "dependencies": {
