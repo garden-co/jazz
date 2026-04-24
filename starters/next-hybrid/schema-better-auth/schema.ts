@@ -1,3 +1,5 @@
+// This file is required to ensure Better Auth tables exist in your database
+
 import { schema as s } from "jazz-tools";
 
 export const schema = {
