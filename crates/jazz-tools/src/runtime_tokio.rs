@@ -104,6 +104,7 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
                     // Core is permanently gone. Leave the flag high so any
                     // stray scheduler clones (e.g. NativeTickNotifier) short-
                     // circuit instead of spawning more doomed tasks.
+                    tracing::debug!("TokioScheduler: core dropped before tick could run; skipping");
                     return;
                 };
                 let Ok(mut core) = core_arc.lock() else {
@@ -111,6 +112,7 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
                     // the flag so we don't leave a stale "tick queued" signal
                     // behind — callers are free to retry (and fail) on their
                     // own terms.
+                    tracing::error!("TokioScheduler: core mutex poisoned; scheduler is unusable");
                     flag.store(false, Ordering::SeqCst);
                     return;
                 };
