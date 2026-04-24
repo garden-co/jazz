@@ -22,7 +22,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --out-dir dist",
     "prepublishOnly": "pnpm build",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm typecheck && vitest run"
   },
   "dependencies": {
     "@clack/prompts": "^0.10.0",
