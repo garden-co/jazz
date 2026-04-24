@@ -6,11 +6,6 @@ function TodoApp() {
   return null;
 }
 
-const passkeyBackup = new BrowserPasskeyBackup({
-  appName: "My App",
-  appHostname: "myapp.com",
-});
-
 // #region auth-localfirst-react
 export function LocalFirstAuthApp() {
   const { secret, isLoading } = useLocalFirstAuth();
@@ -72,6 +67,13 @@ export function useRecoveryPhraseRestore(): (userInput: string) => Promise<void>
 // #endregion auth-localfirst-react-restore
 
 // #region auth-localfirst-react-passkey-backup
+const passkeyBackup = new BrowserPasskeyBackup({
+  appName: "My App",
+  // Pin to your canonical production hostname. If omitted, defaults to `location.hostname`,
+  // which scopes passkeys per preview-deploy URL.
+  appHostname: "myapp.com",
+});
+
 export function usePasskeyBackup(): {
   isLoading: boolean;
   backupWithPasskey: (displayName: string) => Promise<void>;
