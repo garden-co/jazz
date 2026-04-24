@@ -11,10 +11,6 @@ const projectRoot = path.dirname(__filename);
 
 const config = getDefaultConfig(projectRoot);
 
-// So Metro uses our Babel config (babel.config.cjs); it doesn't auto-detect .cjs
-config.transformer = config.transformer || {};
-config.transformer.extendsBabelConfigPath = path.resolve(projectRoot, "babel.config.cjs");
-
 // pnpm uses symlinks for hoisted packages
 config.resolver.unstable_enableSymlinks = true;
 
