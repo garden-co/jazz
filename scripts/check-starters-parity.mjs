@@ -30,9 +30,9 @@ const STARTERS = {
 // Files listed here must be byte-identical across every variant of the
 // same framework (a "horizontal" parity rule).
 const HORIZONTAL_FILES = {
-  next: ["schema.ts", "permissions.ts", "components/todo-widget.tsx"],
-  sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
-  react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
+  next: ["permissions.ts", "components/todo-widget.tsx"],
+  sveltekit: ["src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
+  react: ["permissions.ts", "src/todo-widget.tsx"],
 };
 
 // Files that must be byte-identical across all nine starters regardless of
@@ -43,12 +43,49 @@ const ALL_STARTERS_FILES = ["AGENTS.md"];
 // parity rule on top of the horizontal one). We resolve them per framework
 // via HORIZONTAL_FILES — the logical name is the dict key.
 const CROSS_FRAMEWORK_FILES = [
-  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts", react: "schema.ts" },
   {
     logical: "permissions",
     next: "permissions.ts",
     sveltekit: "src/lib/permissions.ts",
     react: "permissions.ts",
+  },
+];
+
+// Auth-mode groupings. `schema.ts` depends on auth mode — betterauth and
+// hybrid starters ship the BetterAuth tables alongside the domain schema;
+// localfirst starters don't. So the "all variants within a framework share
+// schema.ts" rule doesn't hold across auth modes, and we use per-auth-mode
+// parity instead.
+const AUTH_MODE_GROUPS = {
+  betterauth: [
+    "starters/next-betterauth",
+    "starters/sveltekit-betterauth",
+    "starters/react-betterauth",
+  ],
+  hybrid: ["starters/next-hybrid", "starters/sveltekit-hybrid", "starters/react-hybrid"],
+  localfirst: [
+    "starters/next-localfirst",
+    "starters/sveltekit-localfirst",
+    "starters/react-localfirst",
+  ],
+};
+
+// Files that must be byte-identical across the three framework variants of
+// the same auth mode. The path differs per framework; the logical key is
+// what we report on failure.
+const AUTH_MODE_FILES = [
+  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts", react: "schema.ts" },
+];
+
+// Files that must be byte-identical across every starter that uses the
+// BetterAuth adapter (betterauth + hybrid). Localfirst starters are
+// excluded because they have no BetterAuth tables.
+const ADAPTER_STARTER_FILES = [
+  {
+    logical: "schema-better-auth",
+    next: "schema-better-auth/schema.ts",
+    sveltekit: "src/lib/schema-better-auth/schema.ts",
+    react: "schema-better-auth/schema.ts",
   },
 ];
 
@@ -213,8 +250,72 @@ function checkAllStartersParity() {
   }
 }
 
+function resolveForStarter(dir, entry) {
+  if (dir.startsWith("starters/next-")) return `${dir}/${entry.next}`;
+  if (dir.startsWith("starters/sveltekit-")) return `${dir}/${entry.sveltekit}`;
+  if (dir.startsWith("starters/react-")) return `${dir}/${entry.react}`;
+  return null;
+}
+
+function checkAuthModeParity() {
+  for (const [mode, dirs] of Object.entries(AUTH_MODE_GROUPS)) {
+    for (const entry of AUTH_MODE_FILES) {
+      const hashes = new Map();
+      for (const dir of dirs) {
+        const path = resolveForStarter(dir, entry);
+        if (!path) continue;
+        const content = read(path);
+        if (content === null) {
+          errors.push(`Missing file: ${path}`);
+          continue;
+        }
+        const h = hash(content);
+        if (!hashes.has(h)) hashes.set(h, []);
+        hashes.get(h).push(path);
+      }
+      if (hashes.size > 1) {
+        const groups = [...hashes.entries()]
+          .map(([h, files]) => `  ${h.slice(0, 12)}  ${files.join(", ")}`)
+          .join("\n");
+        errors.push(
+          `Auth-mode drift in ${mode}: ${entry.logical} disagrees across frameworks\n${groups}`,
+        );
+      }
+    }
+  }
+}
+
+function checkAdapterStarterParity() {
+  const adapterDirs = [...AUTH_MODE_GROUPS.betterauth, ...AUTH_MODE_GROUPS.hybrid];
+  for (const entry of ADAPTER_STARTER_FILES) {
+    const hashes = new Map();
+    for (const dir of adapterDirs) {
+      const path = resolveForStarter(dir, entry);
+      if (!path) continue;
+      const content = read(path);
+      if (content === null) {
+        errors.push(`Missing file: ${path}`);
+        continue;
+      }
+      const h = hash(content);
+      if (!hashes.has(h)) hashes.set(h, []);
+      hashes.get(h).push(path);
+    }
+    if (hashes.size > 1) {
+      const groups = [...hashes.entries()]
+        .map(([h, files]) => `  ${h.slice(0, 12)}  ${files.join(", ")}`)
+        .join("\n");
+      errors.push(
+        `Adapter-starter drift: ${entry.logical} disagrees across adapter starters\n${groups}`,
+      );
+    }
+  }
+}
+
 checkHorizontalParity();
 checkCrossFrameworkParity();
+checkAuthModeParity();
+checkAdapterStarterParity();
 checkAllStartersParity();
 checkReadmeStructure();
 checkSharedReadmeBlocks();

@@ -215,15 +215,20 @@ export class ManagedDevRuntime {
           throw new Error(`${LOG_PREFIX} server=false should bypass initialization`);
         }
 
-        if (process.env[this.envKeys.serverUrl]) {
+        // A bare serverUrl env var on its own is treated as our own leftover
+        // from a previous run in the same process (Vite HMR restarts,
+        // `runtime.resetForTests()` in tests, etc., all re-enter initialize
+        // with process.env still set from before). The "external server"
+        // path here means "connect to a Jazz dev server someone else is
+        // running" — that intent only makes sense if the caller explicitly
+        // supplied an adminSecret, so use that as the signal. Otherwise we
+        // ignore the env URL and fall through to starting a fresh local
+        // server below.
+        const explicitAdminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? null;
+        if (process.env[this.envKeys.serverUrl] && explicitAdminSecret) {
           serverUrl = process.env[this.envKeys.serverUrl]!;
-          adminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? "";
+          adminSecret = explicitAdminSecret;
           appId = process.env[this.envKeys.appId] ?? options.appId ?? "";
-          if (!adminSecret) {
-            throw new Error(
-              `${LOG_PREFIX} adminSecret is required when connecting to an existing server`,
-            );
-          }
           if (!appId) {
             throw new Error(
               `${LOG_PREFIX} appId is required when connecting to an existing server`,

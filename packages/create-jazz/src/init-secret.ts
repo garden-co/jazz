@@ -15,17 +15,13 @@ function hasKey(content: string, key: string): boolean {
   return false;
 }
 
-/**
- * Generate a BETTER_AUTH_SECRET and write it to .env if not already set.
- * Idempotent — safe to call multiple times.
- */
-export function writeBetterAuthSecret(dir: string): string | null {
+function writeSecret(dir: string, key: string, generate: () => string): string | null {
   const envPath = join(dir, ".env");
   const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  if (hasKey(existing, "BETTER_AUTH_SECRET")) return null;
+  if (hasKey(existing, key)) return null;
 
-  const secret = randomBytes(32).toString("base64url");
-  const line = `BETTER_AUTH_SECRET=${secret}\n`;
+  const secret = generate();
+  const line = `${key}=${secret}\n`;
   if (existing) {
     const prefix = existing.endsWith("\n") ? "" : "\n";
     appendFileSync(envPath, prefix + line, "utf8");
@@ -33,4 +29,20 @@ export function writeBetterAuthSecret(dir: string): string | null {
     writeFileSync(envPath, line, "utf8");
   }
   return secret;
+}
+
+/**
+ * Generate a BETTER_AUTH_SECRET and write it to .env if not already set.
+ * Idempotent — safe to call multiple times.
+ */
+export function writeBetterAuthSecret(dir: string): string | null {
+  return writeSecret(dir, "BETTER_AUTH_SECRET", () => randomBytes(32).toString("base64url"));
+}
+
+/**
+ * Generate a BACKEND_SECRET and write it to .env if not already set.
+ * Idempotent — safe to call multiple times.
+ */
+export function writeBackendSecret(dir: string): string | null {
+  return writeSecret(dir, "BACKEND_SECRET", () => randomBytes(32).toString("hex"));
 }

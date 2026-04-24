@@ -24,8 +24,9 @@ pnpm dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173) and you'll land on
-the app. Set `BETTER_AUTH_SECRET` in `.env` before running
-(`openssl rand -base64 32` or scaffold via `create-jazz`).
+the app. `pnpm install` seeds `.env` with a random `BETTER_AUTH_SECRET`
+and `BACKEND_SECRET`; the `jazzSvelteKit` plugin spawns a local Jazz dev
+server automatically.
 
 ## Architecture
 
@@ -110,20 +111,20 @@ session on every row and the permission policy scopes reads/writes to it.
 
 ## Environment variables
 
-Scaffold via `create-jazz` to have `.env` populated automatically; otherwise
-write the values below by hand.
+`pnpm install` runs `scripts/ensure-env.js`, which seeds any missing keys
+in `.env` with random values. Override by setting values manually before
+install, or for cloud mode scaffold via `create-jazz --hosting hosted`.
 
-| Variable                 | When       | Purpose                                                           |
-| ------------------------ | ---------- | ----------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`     | always     | BetterAuth session signing. `src/lib/auth.ts` throws if missing.  |
-| `PUBLIC_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it. |
-| `PUBLIC_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://v2.sync.jazz.tools`).               |
-| `JAZZ_ADMIN_SECRET`      | cloud only | Admin credential for schema pushes to the cloud.                  |
-| `BACKEND_SECRET`         | cloud only | Backend signing credential.                                       |
+| Variable                 | When       | Purpose                                                                       |
+| ------------------------ | ---------- | ----------------------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET`     | always     | BetterAuth session signing. `src/lib/auth.ts` throws if missing.              |
+| `PUBLIC_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it.             |
+| `PUBLIC_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://v2.sync.jazz.tools`).                           |
+| `JAZZ_ADMIN_SECRET`      | cloud only | Admin credential for schema pushes to the cloud.                              |
+| `BACKEND_SECRET`         | always     | Persistent identity for the backend's Jazz account. Seeded by the scaffolder. |
 
-Generate a dev `BETTER_AUTH_SECRET` with `openssl rand -base64 32`. In
-self-hosted mode (no cloud env vars), the `jazzSvelteKit` plugin spawns a
-local Jazz dev server and supplies its own credentials.
+In self-hosted mode (no cloud env vars), the `jazzSvelteKit` plugin spawns
+a local Jazz dev server and supplies its own credentials.
 
 ## Deploying to production
 

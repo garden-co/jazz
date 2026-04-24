@@ -211,13 +211,23 @@ describe("withJazz", () => {
     expect(pushSchemaCatalogue).toHaveBeenCalledTimes(2);
   }, 30_000);
 
-  it("throws when connecting to an existing server without adminSecret", async () => {
+  it("ignores a bare server URL env var with no adminSecret and starts a fresh local server", async () => {
+    // Simulates the env being populated by a prior initialize() call in the
+    // same process (Vite HMR restarts, repeated dev sessions in tests). A
+    // bare env var is our own leftover, not a request to connect externally.
     process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = "http://127.0.0.1:4000";
     process.env.NEXT_PUBLIC_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000111";
 
-    await expect(resolveWrappedConfig(withJazz({}), DEVELOPMENT_PHASE)).rejects.toThrow(
-      "adminSecret is required when connecting to an existing server",
+    const schemaDir = await tempRoots.create("jazz-next-fallback-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    const port = await getAvailablePort();
+
+    const resolved = await resolveWrappedConfig(
+      withJazz({}, { server: { port }, schemaDir }),
+      DEVELOPMENT_PHASE,
     );
+
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
   });
 
   it("throws when connecting to an existing server without appId", async () => {

@@ -1,9 +1,11 @@
-import { betterAuth } from "better-auth";
-import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
-import { bearer, jwt } from "better-auth/plugins";
-import { sveltekitCookies } from "better-auth/svelte-kit";
 import { getRequestEvent } from "$app/server";
 import { env } from "$env/dynamic/private";
+import { betterAuth } from "better-auth";
+import { bearer, jwt } from "better-auth/plugins";
+import { sveltekitCookies } from "better-auth/svelte-kit";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { app } from "./schema";
+import { authJazzContext } from "./auth-jazz-context";
 
 const APP_ORIGIN = env.APP_ORIGIN ?? "http://localhost:5173";
 
@@ -15,20 +17,13 @@ if (!env.BETTER_AUTH_SECRET) {
 
 const BETTER_AUTH_SECRET = env.BETTER_AUTH_SECRET;
 
-// In-memory store — wiped on every dev-server restart. Good enough for a
-// starter; swap for a persistent adapter when you wire up a real database.
-const authMemoryDb: MemoryDB = {
-  account: [],
-  jwks: [],
-  session: [],
-  user: [],
-  verification: [],
-};
-
 export const auth = betterAuth({
   baseURL: APP_ORIGIN,
   secret: BETTER_AUTH_SECRET,
-  database: memoryAdapter(authMemoryDb),
+  database: jazzAdapter({
+    db: () => authJazzContext().asBackend(app),
+    schema: app.wasmSchema,
+  }),
   trustedOrigins: [APP_ORIGIN],
   emailAndPassword: {
     enabled: true,

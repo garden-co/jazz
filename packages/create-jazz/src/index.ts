@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { scaffold, validateAppName, type StarterName } from "./scaffold.js";
 import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
-import { writeBetterAuthSecret } from "./init-secret.js";
+import { writeBackendSecret, writeBetterAuthSecret } from "./init-secret.js";
 
 type Framework = "next" | "sveltekit";
 type Hosting = "hosted" | "selfhosted";
@@ -191,6 +191,7 @@ async function main() {
       ? async (dir: string) => {
           if (needsBetterAuthSecret) {
             writeBetterAuthSecret(dir);
+            writeBackendSecret(dir);
           }
           if (hosting === "hosted") {
             const envKeys = envKeysForStarter(starter);
