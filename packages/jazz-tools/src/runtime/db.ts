@@ -472,16 +472,15 @@ export class DbTransaction {
    * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed with {@link DbTransaction.commit}.
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    return this.runtimeTransaction
-      .create(table._table, values)
-      .mapValue((row) => transformRow(row, table._schema, table._table));
+    const row = this.runtimeTransaction.create(table._table, values);
+    return transformRow(row, table._schema, table._table);
   }
 
   /**
@@ -490,14 +489,14 @@ export class DbTransaction {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed with {@link DbTransaction.commit}.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    return this.runtimeTransaction.update(id, updates);
+    this.runtimeTransaction.update(id, updates);
   }
 
   /**
@@ -506,10 +505,10 @@ export class DbTransaction {
    * The delete is scoped to this transaction, and will only be globally visible
    * once it's committed with {@link DbTransaction.commit}.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
-    return this.runtimeTransaction.delete(id);
+    this.runtimeTransaction.delete(id);
   }
 
   /**
@@ -564,6 +563,8 @@ export class DbTransaction {
  * Data written through this direct batch is globally visible immediately.
  */
 export class DbDirectBatch {
+  private committedHandle: WriteHandle | null = null;
+
   constructor(
     private readonly client: JazzClient,
     private readonly runtimeBatch: RuntimeDirectBatch,
@@ -586,29 +587,50 @@ export class DbDirectBatch {
     return this.runtimeBatch.batchId();
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+  private ensureActive(): void {
+    if (this.committedHandle) {
+      throw new Error(`Direct batch ${this.runtimeBatch.batchId()} is already committed`);
+    }
+  }
+
+  /**
+   * Commit the direct batch. Data is visible optimistically immediately and can
+   * be waited on through the returned handle.
+   */
+  commit(): WriteHandle {
+    if (this.committedHandle) {
+      return this.committedHandle;
+    }
+    const handle = this.runtimeBatch.commit();
+    this.committedHandle = handle;
+    return handle;
+  }
+
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    this.ensureActive();
     const values = toInsertRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    return this.runtimeBatch
-      .create(table._table, values)
-      .mapValue((row) => transformRow(row, table._schema, table._table));
+    const row = this.runtimeBatch.create(table._table, values);
+    return transformRow(row, table._schema, table._table);
   }
 
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+    this.ensureActive();
     const updates = toUpdateRecord(
       data as Record<string, unknown>,
       this.resolveInputSchema(table),
       table._table,
     );
-    return this.runtimeBatch.update(id, updates);
+    this.runtimeBatch.update(id, updates);
   }
 
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): WriteHandle {
+  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
+    this.ensureActive();
     this.assertOwnsTable(table, "DbDirectBatch");
-    return this.runtimeBatch.delete(id);
+    this.runtimeBatch.delete(id);
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -2239,8 +2261,9 @@ export class Db {
   /**
    * Begin a new direct batch.
    *
-   * Use a direct batch when you want to group several writes under one batch,
-   * but still have each be auto-committed immediately.
+   * Use a direct batch when several visible writes should settle together.
+   * Call {@link DbDirectBatch.commit} to freeze the batch, then wait on the
+   * returned handle if you need durable confirmation.
    */
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.getClient(table._schema);
@@ -2255,6 +2278,10 @@ export class Db {
           operation,
         ),
     );
+  }
+
+  beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
+    return this.beginDirectBatch(table);
   }
 
   /**
@@ -2739,6 +2766,10 @@ class ClientBackedDb extends Db {
       (candidateTable, operation) =>
         assertTableBelongsToClient(candidateTable, client, () => client, operation),
     );
+  }
+
+  override beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
+    return this.beginDirectBatch(table);
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
