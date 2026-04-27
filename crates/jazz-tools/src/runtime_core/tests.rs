@@ -4011,6 +4011,55 @@ fn rc_same_row_direct_batch_overwrites_in_place() {
 }
 
 #[test]
+fn rc_sealed_direct_batch_rejects_further_writes() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    let ((row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.seal_batch(batch_id).unwrap();
+
+    let record = core
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("sealed direct batch should keep its local record");
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Direct);
+    assert!(record.sealed);
+    assert_eq!(
+        record
+            .sealed_submission
+            .as_ref()
+            .expect("sealed direct batch should persist a submission")
+            .captured_frontier,
+        Vec::<CapturedFrontierMember>::new(),
+        "direct batch seals should not capture transactional frontier state"
+    );
+
+    let err = core
+        .update(
+            row_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            Some(&write_context),
+        )
+        .expect_err("sealed direct batches should be frozen");
+    let err = format!("{err:?}");
+    assert!(
+        err.contains("already sealed"),
+        "expected sealed-batch error, got {err:?}"
+    );
+}
+
+#[test]
 fn rc_worker_direct_batch_retains_all_visible_members() {
     let mut s = create_3tier_rc();
     let batch_id = BatchId::new();
@@ -5821,8 +5870,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         Some(crate::batch_fate::BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch rows must belong to the declared target branch"
-                .to_string(),
+            reason: "sealed batch rows must belong to the declared target branch".to_string(),
         })
     );
     assert_eq!(

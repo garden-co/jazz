@@ -1678,6 +1678,94 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
 }
 
 #[test]
+fn seal_batch_settles_visible_direct_rows_as_durable_direct() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let first_row_id = ObjectId::new();
+    let second_row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let first_row = row_with_batch_state(
+        visible_row(first_row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    let second_row = row_with_batch_state(
+        visible_row(second_row_id, "main", Vec::new(), 1_100, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+
+    for row in [first_row.clone(), second_row.clone()] {
+        sm.process_from_client(
+            &mut io,
+            client_id,
+            SyncPayload::RowBatchCreated {
+                metadata: Some(RowMetadata {
+                    id: row.row_id,
+                    metadata: row_metadata("users"),
+                }),
+                row,
+            },
+        );
+    }
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                "main",
+                vec![
+                    SealedBatchMember {
+                        object_id: first_row_id,
+                        row_digest: first_row.content_digest(),
+                    },
+                    SealedBatchMember {
+                        object_id: second_row_id,
+                        row_digest: second_row.content_digest(),
+                    },
+                ],
+                Vec::new(),
+            ),
+        },
+    );
+
+    let visible_members = vec![
+        VisibleBatchMember {
+            object_id: first_row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        },
+        VisibleBatchMember {
+            object_id: second_row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        },
+    ];
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: visible_members.clone(),
+        })
+    );
+
+    let _ = sm.take_outbox();
+}
+
+#[test]
 fn seal_batch_accepts_all_staged_transactional_rows_as_one_settlement() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
@@ -2364,8 +2452,7 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch rows must belong to the declared target branch"
-                .to_string(),
+            reason: "sealed batch rows must belong to the declared target branch".to_string(),
         })
     );
     assert_eq!(
@@ -2444,7 +2531,7 @@ fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch digest does not match declared members".to_string(),
+            reason: "sealed batch digest does not match declared members".to_string(),
         })
     );
     assert_eq!(
