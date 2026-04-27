@@ -11,17 +11,44 @@ pub struct NativeWsStream {
     inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
 
-// Build a rustls root store that combines the OS trust store (when reachable)
-// with Mozilla's bundled webpki-roots. On Android/iOS the native store is
-// frequently empty or unreadable from a Rust binary, so the bundled roots are
-// what actually let mobile clients reach the cloud/edge over wss://.
+// Build a rustls root store from the OS trust store, falling back to Mozilla's
+// bundled webpki-roots only when the native store yields zero usable anchors.
+//
+// We do NOT union webpki-roots with a populated native store: doing so would
+// silently re-introduce CAs that an administrator or enterprise policy has
+// distrusted, undermining OS-level trust restrictions on desktop.
+//
+// The fallback exists for platforms where `rustls-native-certs` cannot reach
+// the OS trust store at all — most notably Android (anchors live in
+// `AndroidCAStore`, accessible only via JNI), and frequently iOS depending on
+// linkage. Without the fallback, every `wss://` handshake on those platforms
+// fails with `UnknownIssuer`.
 fn root_store() -> rustls::RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
-    for cert in native.certs {
-        let _ = roots.add(cert);
+    let native_error_count = native.errors.len();
+    build_root_store_from_native(native.certs, native_error_count)
+}
+
+fn build_root_store_from_native(
+    native_certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    native_error_count: usize,
+) -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    let mut native_added = 0usize;
+    for cert in native_certs {
+        if roots.add(cert).is_ok() {
+            native_added += 1;
+        }
     }
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    if native_added == 0 {
+        tracing::debug!(
+            errors = native_error_count,
+            "native cert store returned no usable anchors; falling back to bundled webpki-roots"
+        );
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
     roots
 }
 
@@ -81,13 +108,18 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     #[test]
-    fn root_store_includes_bundled_webpki_roots_for_mobile_tls() {
-        let roots = root_store();
-        // The OS trust store is empty/unavailable on Android and iOS from Rust;
-        // we rely on webpki-roots to give us a working set of CAs there. Assert
-        // we have at least every bundled anchor so mobile can validate wss://.
-        assert!(roots.len() >= webpki_roots::TLS_SERVER_ROOTS.len());
+    fn empty_native_store_falls_back_to_bundled_webpki_roots() {
+        // Mobile case: OS trust store unreachable / empty. The fallback must
+        // populate the store with the bundled Mozilla anchors so wss:// works.
+        let roots = build_root_store_from_native(vec![], 3);
+        assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
     }
+
+    // The "populated native store does not pull in webpki-roots" branch is
+    // trivially correct from inspection (the fallback is gated on
+    // `native_added == 0`) and exercising it would require synthesising a
+    // valid X.509 DER cert as a fixture, which adds binary blobs or a
+    // cert-generation dev-dep just to assert a one-line conditional.
 
     #[tokio::test]
     async fn native_ws_stream_send_recv_roundtrip() {
