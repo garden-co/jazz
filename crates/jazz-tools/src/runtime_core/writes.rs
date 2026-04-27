@@ -682,58 +682,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok((batch_id, receiver))
     }
 
-    pub(crate) fn upgrade_legacy_direct_batch_record(
-        &mut self,
-        batch_id: BatchId,
-    ) -> Result<Option<SealedBatchSubmission>, RuntimeError> {
-        let Some(record) = self
-            .storage
-            .load_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-        else {
-            return Ok(None);
-        };
-
-        if record.mode != BatchMode::Direct
-            || record.sealed_submission.is_some()
-            || record.members.is_empty()
-        {
-            return Ok(None);
-        }
-
-        let submission = self.sealed_batch_submission(batch_id)?;
-        let mut upgraded = record;
-        upgraded.mark_sealed(submission.clone());
-        self.storage
-            .upsert_local_batch_record(&upgraded)
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("persist local batch record: {err}"))
-            })?;
-        self.mark_storage_write_pending_flush();
-        Ok(Some(submission))
-    }
-
-    pub(crate) fn upgrade_legacy_direct_batch_records(
-        &mut self,
-    ) -> Result<Vec<SealedBatchSubmission>, RuntimeError> {
-        let records = self
-            .storage
-            .scan_local_batch_records()
-            .map_err(|err| RuntimeError::WriteError(format!("scan local batch records: {err}")))?;
-        let mut submissions = Vec::new();
-        for record in records {
-            if record.mode == BatchMode::Direct
-                && record.sealed_submission.is_none()
-                && !record.members.is_empty()
-                && let Some(submission) =
-                    self.upgrade_legacy_direct_batch_record(record.batch_id)?
-            {
-                submissions.push(submission);
-            }
-        }
-        Ok(submissions)
-    }
-
     /// Load one replayable local batch record by logical batch id.
     pub fn local_batch_record(
         &self,

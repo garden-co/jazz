@@ -4060,68 +4060,6 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
 }
 
 #[test]
-fn rc_startup_upgrades_legacy_direct_batch_records_with_sealed_submission() {
-    let mut core = create_runtime_with_schema(test_schema(), "legacy-direct-upgrade-test");
-    let batch_id = BatchId::new();
-    let write_context = WriteContext::default()
-        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
-        .with_batch_id(batch_id);
-
-    let ((row_id, _), _) = core
-        .insert(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-        )
-        .unwrap();
-
-    let legacy_record = core
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("legacy direct batch should have a retained record");
-    assert_eq!(legacy_record.mode, crate::batch_fate::BatchMode::Direct);
-    assert!(
-        legacy_record.sealed_submission.is_none(),
-        "test setup should match pre-seal direct batch records"
-    );
-
-    let storage = core.into_storage();
-    let upgraded =
-        create_runtime_with_storage(test_schema(), "legacy-direct-upgrade-test", storage);
-    let record = upgraded
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("upgraded direct batch should keep its local record");
-    assert!(record.sealed);
-    let submission = record
-        .sealed_submission
-        .as_ref()
-        .expect("startup should synthesize the missing direct sealed submission");
-    assert_eq!(submission.batch_id, batch_id);
-    assert_eq!(
-        submission.captured_frontier,
-        Vec::<CapturedFrontierMember>::new()
-    );
-    assert_eq!(submission.members.len(), 1);
-    assert_eq!(submission.members[0].object_id, row_id);
-
-    let storage = upgraded.into_storage();
-    let upgraded_again =
-        create_runtime_with_storage(test_schema(), "legacy-direct-upgrade-test", storage);
-    let record_again = upgraded_again
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("upgraded direct batch should remain inspectable");
-    assert_eq!(
-        record_again.sealed_submission, record.sealed_submission,
-        "already-upgraded direct records should be a no-op on later opens"
-    );
-}
-
-#[test]
 fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
