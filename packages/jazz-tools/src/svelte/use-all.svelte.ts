@@ -55,6 +55,7 @@ export class QuerySubscription<T extends { id: string }> {
       if (!resolvedQuery) {
         this.current = undefined;
         this.loading = false;
+        this.error = null;
         return;
       }
 

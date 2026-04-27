@@ -168,6 +168,40 @@ describe("svelte/QuerySubscription", () => {
     cleanup();
   });
 
+  it("clears a stale error when the getter flips back to undefined", async () => {
+    let active = $state(true);
+    const query = makeQuery("inbox");
+
+    let capturedOnError: ((err: unknown) => void) | undefined;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [] },
+      subscribe: (callbacks: any) => {
+        capturedOnError = callbacks.onError;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const sub = (() => {
+      let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+      const cleanup = $effect.root(() => {
+        ref = new QuerySubscription(() => (active ? query : undefined));
+      });
+      return { ref, cleanup };
+    })();
+    await settle();
+
+    capturedOnError!(new Error("boom"));
+    await settle();
+    expect(sub.ref.error).toBeInstanceOf(Error);
+
+    active = false;
+    await settle();
+
+    expect(sub.ref.error).toBeNull();
+
+    sub.cleanup();
+  });
+
   it("options accepts a getter and forwards the resolved value", async () => {
     const query = makeQuery("inbox");
 
