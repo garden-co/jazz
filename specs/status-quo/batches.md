@@ -305,6 +305,11 @@ For direct and transactional batches, `sealed` becomes `true` only after `commit
 `seal_batch()`. Simple one-member direct writes call that seal path immediately, while explicit
 direct batches stay writable until the app calls `commit()`.
 
+Runtimes also perform a local compatibility upgrade when opening existing storage: retained direct
+batch records that predate explicit direct sealing and have members but no sealed submission are
+sealed once by synthesizing the same direct `SealedBatchSubmission` shape. Already-upgraded records
+are skipped, so later opens only pay the normal batch-record scan and field checks.
+
 ### BatchSettlement
 
 `BatchSettlement` is the replayable outcome model for both write modes:
