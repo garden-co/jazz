@@ -64,5 +64,9 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
   ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-permissions-explicit
 </include>
 
+`allowUpdate.whereOld(...)` checks the row before the update, so the current owner can rewrite `owner_id` to transfer the row. Using `.where(...)` instead would also enforce the condition on the post-update row and block transfers. See [Permissions](/docs/auth/permissions) for `whereOld`/`whereNew` semantics.
+
+`allowInsert.always()` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `.where({ owner_id: session.user_id })` so clients can only create rows they own.
+
 </Accordion>
 </Accordions>
