@@ -172,7 +172,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
 
     export default defineConfig({
-      plugins: [jazzSvelteKit(), svelte()],
+      plugins: [svelte(), jazzSvelteKit()],
     });
     ```
 
@@ -186,9 +186,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     import { defineConfig } from "vite";
 
     export default defineConfig({
-      // jazzSvelteKit must come before sveltekit so it populates
-      // process.env before SvelteKit captures $env/dynamic/public.
-      plugins: [jazzSvelteKit(), sveltekit()],
+      plugins: [sveltekit(), jazzSvelteKit()],
     });
     ```
 
