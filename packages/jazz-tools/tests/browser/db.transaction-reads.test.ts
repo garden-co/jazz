@@ -68,7 +68,7 @@ describe("db transaction reads browser integration", () => {
     const aliceTx = db.beginTransaction(todos);
     const bobTx = db.beginTransaction(todos);
 
-    const { value: aliceDraft } = aliceTx.insert(todos, { title: "Alice draft", done: false });
+    const aliceDraft = aliceTx.insert(todos, { title: "Alice draft", done: false });
     bobTx.insert(todos, { title: "Bob draft", done: false });
 
     const aliceRows = await aliceTx.all<Todo>(makeTodoQuery());
