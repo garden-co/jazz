@@ -1,0 +1,566 @@
+use super::*;
+
+#[test]
+fn server_builds_query_graph_on_subscription() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Server has existing data: 3 users, 2 with score > 50
+    let handle1 = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _handle2 = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
+        .unwrap();
+    let handle3 = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    // Add a client
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    // Client sends QuerySubscription for score > 50
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    // Server should send RowBatchNeeded for matching users (Alice, Charlie)
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    let row_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        row_updates.len(),
+        2,
+        "Should send 2 RowBatchNeeded messages for matching users"
+    );
+
+    let sent_ids: std::collections::HashSet<_> = row_updates.into_iter().collect();
+
+    assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
+    assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn server_subscription_reads_visible_region_after_legacy_commit_history_is_removed() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let _branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    writer_qm.process(&mut storage);
+
+    let (mut server_qm, _) = create_query_manager(SyncManager::new(), schema);
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let row_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        row_updates.len(),
+        1,
+        "server subscription should settle from visible rows without legacy object-backed storage"
+    );
+    assert_eq!(row_updates[0], handle.row_id);
+}
+
+#[test]
+fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    {
+        let sub = qm
+            .subscriptions
+            .get_mut(&sub_id)
+            .expect("subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    qm.process(&mut storage);
+
+    assert!(
+        !qm.subscriptions.contains_key(&sub_id),
+        "failed stale recompile should drop the local subscription"
+    );
+
+    let failures = qm.take_failed_subscriptions();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected exactly one reported local subscription failure"
+    );
+    assert_eq!(failures[0].subscription_id, sub_id);
+    assert!(
+        failures[0].reason.contains("no_such_table"),
+        "failure reason should include compile context: {}",
+        failures[0].reason
+    );
+}
+
+#[test]
+fn server_sends_error_for_uncompilable_query_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    // Query references a table that does not exist in schema.
+    let invalid_query = QueryBuilder::new("no_such_table").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(42),
+            query: Box::new(invalid_query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let (code, reason) = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(42) => {
+                Some((code.clone(), reason.clone()))
+            }
+            _ => None,
+        })
+        .expect("Server should send an error payload when query subscription compilation fails");
+    assert_eq!(code, "query_compilation_failed");
+    assert!(
+        reason.contains("query_id 42"),
+        "error reason should include query id context: {reason}"
+    );
+    assert!(
+        reason.contains("no_such_table"),
+        "error reason should include compile error context: {reason}"
+    );
+}
+
+#[test]
+fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, QueryId, ServerId, Source, SyncError, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut server_qm, &storage, upstream_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let valid_query = server_qm.query("users").build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(valid_query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    {
+        let sub = server_qm
+            .server_subscriptions
+            .get_mut(&(client_id, QueryId(7)))
+            .expect("server subscription should exist");
+        sub.query = QueryBuilder::new("no_such_table").build();
+        sub.needs_recompile = true;
+    }
+
+    server_qm.process(&mut storage);
+
+    assert!(
+        !server_qm
+            .server_subscriptions
+            .contains_key(&(client_id, QueryId(7))),
+        "failed stale recompile should drop the server subscription"
+    );
+    assert!(
+        !server_qm
+            .sync_manager()
+            .get_client(client_id)
+            .expect("client should still exist")
+            .queries
+            .contains_key(&QueryId(7)),
+        "client query scope should be cleared after fail-fast drop"
+    );
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let (rejection_code, rejection_reason) = outbox
+        .iter()
+        .find_map(|entry| match (&entry.destination, &entry.payload) {
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::QuerySubscriptionRejected {
+                    query_id,
+                    code,
+                    reason,
+                }),
+            ) if *id == client_id && *query_id == QueryId(7) => {
+                Some((code.clone(), reason.clone()))
+            }
+            _ => None,
+        })
+        .expect("client should receive QuerySubscriptionRejected on stale recompile failure");
+    assert_eq!(rejection_code, "query_recompile_failed");
+    assert!(
+        rejection_reason.contains("query recompilation failed for query_id 7"),
+        "rejection should include query id context: {rejection_reason}"
+    );
+    assert!(
+        rejection_reason.contains("no_such_table"),
+        "rejection should include compile error context: {rejection_reason}"
+    );
+
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Server(id),
+                SyncPayload::QueryUnsubscription { query_id }
+            ) if *id == upstream_id && *query_id == QueryId(7)
+        )),
+        "stale recompile failure should forward QueryUnsubscription upstream"
+    );
+}
+
+#[test]
+fn server_pushes_new_matches() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Server has 1 user initially
+    let _handle1 = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    // Add client and subscribe
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    // Clear initial outbox
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    // Insert new matching user
+    let handle2 = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    // Should send RowBatchNeeded for new matching user
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    let row_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowBatchNeeded { row, .. } => Some(row.row_id),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        row_updates.len(),
+        1,
+        "Should send 1 RowBatchNeeded for new matching user"
+    );
+
+    assert_eq!(
+        row_updates[0], handle2.row_id,
+        "Should send Charlie's ObjectId"
+    );
+}
+
+#[test]
+fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
+    use crate::sync_manager::{
+        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+    };
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let repeated_query = server_qm.query("users").build();
+    let repeated_query_json = serde_json::to_string(&repeated_query).unwrap();
+    let filtered_query = server_qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+    let client_c = ClientId::new();
+    for client_id in [client_a, client_b, client_c] {
+        connect_client(&mut server_qm, &storage, client_id);
+    }
+
+    for (client_id, query_id, query, propagation) in [
+        (
+            client_a,
+            QueryId(1),
+            repeated_query.clone(),
+            QueryPropagation::Full,
+        ),
+        (
+            client_b,
+            QueryId(2),
+            repeated_query.clone(),
+            QueryPropagation::Full,
+        ),
+        (
+            client_c,
+            QueryId(3),
+            repeated_query.clone(),
+            QueryPropagation::LocalOnly,
+        ),
+        (
+            client_c,
+            QueryId(4),
+            filtered_query.clone(),
+            QueryPropagation::Full,
+        ),
+    ] {
+        server_qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id,
+                query: Box::new(query),
+                session: None,
+                propagation,
+                policy_context_tables: vec![],
+            },
+        });
+    }
+
+    server_qm.process(&mut storage);
+
+    let telemetry = server_qm.server_subscription_telemetry();
+    assert_eq!(telemetry.len(), 3);
+    assert!(telemetry.iter().any(|group| {
+        group.count == 2 && group.propagation == QueryPropagation::Full && group.table == "users"
+    }));
+    assert!(
+        telemetry
+            .iter()
+            .any(|group| { group.count == 1 && group.propagation == QueryPropagation::LocalOnly })
+    );
+    assert!(
+        telemetry
+            .iter()
+            .any(|group| { group.count == 1 && group.query.contains("\"name\"") })
+    );
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_b),
+        payload: SyncPayload::QueryUnsubscription {
+            query_id: QueryId(2),
+        },
+    });
+    server_qm.process(&mut storage);
+
+    let telemetry_after_unsubscribe = server_qm.server_subscription_telemetry();
+    assert!(telemetry_after_unsubscribe.iter().any(|group| {
+        group.count == 1
+            && group.propagation == QueryPropagation::Full
+            && group.query == repeated_query_json
+    }));
+}
+
+#[test]
+fn server_does_not_push_non_matching() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Add client and subscribe to score > 50
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    // Insert non-matching user (score = 30)
+    let _handle = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    // Should NOT send RowBatchNeeded for non-matching user
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    let row_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(e.payload, SyncPayload::RowBatchNeeded { .. }))
+        .collect();
+
+    assert_eq!(
+        row_updates.len(),
+        0,
+        "Should NOT send RowBatchNeeded for non-matching user"
+    );
+}
