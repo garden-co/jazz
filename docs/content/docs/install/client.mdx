@@ -90,9 +90,9 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     registerRootComponent(App);
     ```
 
-    Delete the existing `babel.config.js` and replace it with `babel.config.cjs`:
+    Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
 
-    ```js title="babel.config.cjs"
+    ```js title="babel.config.js"
     module.exports = function (api) {
       api.cache(true);
       return {
@@ -104,22 +104,26 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     };
     ```
 
-    ```js title="metro.config.js"
+    Replace `metro.config.js` with `metro.config.mjs` so Metro can top-level `await` the Jazz dev server (it injects `EXPO_PUBLIC_JAZZ_*` env vars that Metro inlines into your bundle):
+
+    ```js title="metro.config.mjs"
     import path from "node:path";
     import { fileURLToPath } from "node:url";
     import { createRequire } from "node:module";
+    import { withJazz } from "jazz-tools/dev/expo";
 
     const require = createRequire(import.meta.url);
     const { getDefaultConfig } = require("expo/metro-config");
 
-    const __filename = fileURLToPath(import.meta.url);
-    const projectRoot = path.dirname(__filename);
+    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
     const config = getDefaultConfig(projectRoot);
 
-    config.transformer = config.transformer || {};
-    config.transformer.extendsBabelConfigPath = path.resolve(projectRoot, "babel.config.cjs");
+    // pnpm uses symlinks for hoisted packages
     config.resolver.unstable_enableSymlinks = true;
+
+    // Start the Jazz dev server and inject EXPO_PUBLIC_JAZZ_* env vars for Metro to inline.
+    await withJazz({}, { schemaDir: projectRoot });
 
     export default config;
     ```
