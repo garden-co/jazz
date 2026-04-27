@@ -172,6 +172,7 @@ Direct visible batches preserve the current local-first shape:
 - they write directly to the visible prefix
 - they may group multiple writes under one live `BatchId`
 - rewriting the same object within a direct batch overwrites that member in place
+- they are finalized by an explicit seal that freezes the batch's final member list
 - they do not require authority-decided multi-object acceptance
 - they still benefit from replayable reconciliation and fixed tier gating
 
@@ -370,7 +371,8 @@ Behavior:
 1. the client creates a new `BatchId` for the visible write
 2. writes append directly to the visible prefix
 3. local optimistic UX behaves as today
-4. the batch remains pending until reconciliation yields one replayable `BatchSettlement`
+4. the client seals the direct batch once the final member set is known
+5. the batch remains pending until reconciliation yields one replayable `BatchSettlement`
 
 For direct visible batches, the relevant settled states are:
 
@@ -495,9 +497,18 @@ For a direct batch, the shape is:
 2. bind one target composed prefix for that batch
 3. write visible batch members carrying that `BatchId`
 4. optionally overwrite any member again in place while keeping the same `BatchId`
-5. receive `BatchSettlement.DurableDirect { batch_id, confirmed_tier, visible_members }`
+5. seal the batch, capturing the final members and their row digests
+6. receive `BatchSettlement.DurableDirect { batch_id, confirmed_tier, visible_members }`
 
-There is intentionally no sealing step for direct batches in the MVP. A direct batch is a dynamic grouping handle, not a frozen submission.
+A sealed direct batch is frozen. Further writes using the same `BatchId` fail, just as they do for sealed transactional batches.
+
+Direct and transactional seals reuse the same stored `SealedBatchSubmission` shape. The submission does not carry a persisted mode field. Receivers infer the sealed mode from the already-stored row states for the declared members:
+
+- `VisibleDirect` rows settle as `DurableDirect`
+- `StagingPending` rows go through transactional acceptance
+- mixed direct/staging rows are invalid
+
+Direct sealed submissions do not use captured transactional frontier state.
 
 ## Batch settlement semantics
 

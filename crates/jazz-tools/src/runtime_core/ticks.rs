@@ -264,11 +264,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .load_local_batch_record(batch_id)
             .ok()
             .flatten()
-            .and_then(|record| {
-                (record.mode == crate::batch_fate::BatchMode::Transactional && record.sealed)
-                    .then_some(record.sealed_submission)
-                    .flatten()
-            });
+            .and_then(|record| record.sealed.then_some(record.sealed_submission).flatten());
 
         let rows_to_retransmit = self
             .local_batch_rows(batch_id)

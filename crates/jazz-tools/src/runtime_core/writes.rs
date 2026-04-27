@@ -30,16 +30,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(DurabilityTier::Local)
     }
 
-    fn ensure_transactional_batch_is_writable(
+    fn ensure_batch_is_writable(
         &self,
         write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
         let Some(write_context) = write_context else {
             return Ok(());
         };
-        if write_context.batch_mode() != BatchMode::Transactional {
-            return Ok(());
-        }
+        let mode = write_context.batch_mode();
         let Some(batch_id) = write_context.batch_id() else {
             return Ok(());
         };
@@ -52,14 +50,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(());
         };
 
-        if record.mode != BatchMode::Transactional {
+        if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
                 "batch {batch_id:?} reused with conflicting modes"
             )));
         }
         if record.sealed {
             return Err(RuntimeError::WriteError(format!(
-                "transactional batch {batch_id:?} is already sealed"
+                "batch {batch_id:?} is already sealed"
             )));
         }
 
@@ -92,9 +90,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .storage
             .load_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-            .unwrap_or_else(|| {
-                LocalBatchRecord::new(batch_id, mode, matches!(mode, BatchMode::Direct), None)
-            });
+            .unwrap_or_else(|| LocalBatchRecord::new(batch_id, mode, false, None));
         if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
                 "batch {batch_id:?} reused with conflicting modes"
@@ -200,7 +196,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         )))
     }
 
-    pub(crate) fn transactional_batch_members(
+    pub(crate) fn sealed_batch_members(
         &self,
         batch_id: BatchId,
     ) -> Result<(crate::object::BranchName, Vec<SealedBatchMember>), RuntimeError> {
@@ -215,7 +211,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         };
         let Some(first_member) = record.members.first() else {
             return Err(RuntimeError::WriteError(format!(
-                "cannot seal empty transactional batch {batch_id:?}"
+                "cannot seal empty batch {batch_id:?}"
             )));
         };
         let target_branch_name = first_member.branch_name;
@@ -225,7 +221,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .any(|member| member.branch_name != target_branch_name)
         {
             return Err(RuntimeError::WriteError(format!(
-                "transactional batch {batch_id:?} spans multiple target branches"
+                "batch {batch_id:?} spans multiple target branches"
             )));
         }
 
@@ -247,17 +243,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok((target_branch_name, members))
     }
 
-    pub(crate) fn transactional_batch_submission(
+    pub(crate) fn sealed_batch_submission(
         &self,
         batch_id: BatchId,
     ) -> Result<SealedBatchSubmission, RuntimeError> {
-        let (target_branch_name, members) = self.transactional_batch_members(batch_id)?;
-        let captured_frontier = self
-            .storage
-            .capture_family_visible_frontier(target_branch_name)
-            .map_err(|err| {
-                RuntimeError::WriteError(format!("capture family visible frontier: {err}"))
-            })?;
+        let (target_branch_name, members) = self.sealed_batch_members(batch_id)?;
+        let captured_frontier = match self.storage.load_local_batch_record(batch_id) {
+            Ok(Some(record)) if record.mode == BatchMode::Transactional => self
+                .storage
+                .capture_family_visible_frontier(target_branch_name)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("capture family visible frontier: {err}"))
+                })?,
+            Ok(Some(_)) => Vec::new(),
+            Ok(None) => {
+                return Err(RuntimeError::WriteError(format!(
+                    "missing local batch record for {batch_id:?}"
+                )));
+            }
+            Err(err) => {
+                return Err(RuntimeError::WriteError(format!(
+                    "load local batch record: {err}"
+                )));
+            }
+        };
         Ok(SealedBatchSubmission::new(
             batch_id,
             target_branch_name,
@@ -278,7 +287,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
             .insert_with_write_context(&mut self.storage, table, values, write_context)
@@ -304,7 +313,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         object_id: Option<ObjectId>,
         write_context: Option<&WriteContext>,
     ) -> Result<DirectInsertResult, RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
             .insert_with_write_context_and_id(
@@ -336,7 +345,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
@@ -360,7 +369,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("upsert", table, %object_id).entered();
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
             .upsert_with_write_context_and_id(
@@ -391,7 +400,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
     ) -> Result<BatchId, RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
@@ -434,7 +443,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
             .insert_with_write_context_and_id(
@@ -486,7 +495,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
             .insert_with_write_context(&mut self.storage, table, values, write_context)
@@ -543,7 +552,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
             .update_with_write_context(&mut self.storage, object_id, &values, write_context)
@@ -596,7 +605,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let batch_id = self
             .schema_manager
             .upsert_with_write_context_and_id(
@@ -641,7 +650,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
-        self.ensure_transactional_batch_is_writable(write_context)?;
+        self.ensure_batch_is_writable(write_context)?;
         let handle = self
             .schema_manager
             .delete(&mut self.storage, object_id, write_context)
@@ -736,13 +745,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             )));
         };
 
-        if record.mode != BatchMode::Transactional {
-            return Err(RuntimeError::WriteError(format!(
-                "batch {batch_id:?} is not transactional"
-            )));
+        if record.sealed {
+            return Ok(());
         }
 
-        let submission = self.transactional_batch_submission(batch_id)?;
+        let submission = self.sealed_batch_submission(batch_id)?;
 
         record.mark_sealed(submission.clone());
         self.storage

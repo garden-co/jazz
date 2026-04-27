@@ -14,6 +14,13 @@ struct AppliedRowBatch {
     row: StoredRowBatch,
     visibility_change: Option<RowVisibilityChange>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealedBatchMode {
+    Direct,
+    Transactional,
+}
+
 impl SyncManager {
     fn validate_sealed_batch_submission(
         &self,
@@ -23,7 +30,7 @@ impl SyncManager {
             return Err(BatchSettlement::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
-                reason: "sealed transactional batch must declare at least one member".to_string(),
+                reason: "sealed batch must declare at least one member".to_string(),
             });
         }
 
@@ -33,8 +40,7 @@ impl SyncManager {
             return Err(BatchSettlement::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
-                reason: "sealed transactional batch digest does not match declared members"
-                    .to_string(),
+                reason: "sealed batch digest does not match declared members".to_string(),
             });
         }
 
@@ -64,12 +70,69 @@ impl SyncManager {
             return Err(BatchSettlement::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
-                reason: "sealed transactional batch rows must belong to the declared target branch"
-                    .to_string(),
+                reason: "sealed batch rows must belong to the declared target branch".to_string(),
             });
         }
 
         Ok(())
+    }
+
+    fn infer_sealed_batch_mode(
+        &self,
+        submission: &SealedBatchSubmission,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> Result<Option<SealedBatchMode>, BatchSettlement> {
+        let mut mode = None;
+        for (_, row) in batch_rows {
+            let row_mode = match row.state {
+                RowState::VisibleDirect => SealedBatchMode::Direct,
+                RowState::StagingPending => SealedBatchMode::Transactional,
+                _ => {
+                    return Err(BatchSettlement::Rejected {
+                        batch_id: submission.batch_id,
+                        code: "invalid_batch_submission".to_string(),
+                        reason: "sealed batch rows must be visible direct or staging pending"
+                            .to_string(),
+                    });
+                }
+            };
+
+            match mode {
+                Some(existing) if existing != row_mode => {
+                    return Err(BatchSettlement::Rejected {
+                        batch_id: submission.batch_id,
+                        code: "invalid_batch_submission".to_string(),
+                        reason: "sealed batch mixes direct and transactional rows".to_string(),
+                    });
+                }
+                Some(_) => {}
+                None => mode = Some(row_mode),
+            }
+        }
+
+        Ok(mode)
+    }
+
+    fn sealed_visible_members(submission: &SealedBatchSubmission) -> Vec<VisibleBatchMember> {
+        let mut visible_members = submission
+            .members
+            .iter()
+            .map(|member| VisibleBatchMember {
+                object_id: member.object_id,
+                branch_name: submission.target_branch_name,
+                batch_id: submission.batch_id,
+            })
+            .collect::<Vec<_>>();
+        visible_members.sort_by(|left, right| {
+            left.object_id
+                .uuid()
+                .as_bytes()
+                .cmp(right.object_id.uuid().as_bytes())
+                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+                .then_with(|| left.batch_id.as_bytes().cmp(right.batch_id.as_bytes()))
+        });
+        visible_members.dedup();
+        visible_members
     }
 
     fn validate_captured_frontier<H: Storage>(
@@ -615,12 +678,13 @@ impl SyncManager {
         );
     }
 
-    fn accept_sealed_transactional_batch<H: Storage>(
+    fn settle_sealed_batch<H: Storage>(
         &mut self,
         storage: &mut H,
         origin_client_id: Option<ClientId>,
         submission: SealedBatchSubmission,
         batch_rows: Vec<(String, StoredRowBatch)>,
+        mode: SealedBatchMode,
     ) {
         let batch_id = submission.batch_id;
         let declared_rows: Vec<_> = submission
@@ -638,6 +702,22 @@ impl SyncManager {
             })
             .collect();
         let settlement = match storage.load_authoritative_batch_settlement(batch_id) {
+            Ok(Some(BatchSettlement::DurableDirect { confirmed_tier, .. }))
+                if mode == SealedBatchMode::Direct =>
+            {
+                let settlement = BatchSettlement::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                    visible_members: Self::sealed_visible_members(&submission),
+                };
+                if self
+                    .persist_authoritative_batch_settlement(storage, &settlement)
+                    .is_err()
+                {
+                    return;
+                }
+                settlement
+            }
             Ok(Some(existing_settlement)) => existing_settlement,
             Ok(None) => {
                 if batch_rows.is_empty() {
@@ -646,19 +726,18 @@ impl SyncManager {
                     let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
                         return;
                     };
-                    let visible_members = submission
-                        .members
-                        .iter()
-                        .map(|member| VisibleBatchMember {
-                            object_id: member.object_id,
-                            branch_name: submission.target_branch_name,
+                    let visible_members = Self::sealed_visible_members(&submission);
+                    let settlement = match mode {
+                        SealedBatchMode::Direct => BatchSettlement::DurableDirect {
                             batch_id,
-                        })
-                        .collect();
-                    let settlement = BatchSettlement::AcceptedTransaction {
-                        batch_id,
-                        confirmed_tier,
-                        visible_members,
+                            confirmed_tier,
+                            visible_members,
+                        },
+                        SealedBatchMode::Transactional => BatchSettlement::AcceptedTransaction {
+                            batch_id,
+                            confirmed_tier,
+                            visible_members,
+                        },
                     };
                     if self
                         .persist_authoritative_batch_settlement(storage, &settlement)
@@ -745,7 +824,22 @@ impl SyncManager {
         }) {
             return;
         }
-        if let Err(rejection) = self.validate_captured_frontier(storage, &submission) {
+        let mode = match self.infer_sealed_batch_mode(&submission, &batch_rows) {
+            Ok(Some(mode)) => mode,
+            Ok(None) => return,
+            Err(rejection) => {
+                self.reject_sealed_transactional_batch(
+                    storage,
+                    Some(client_id),
+                    rejection,
+                    &batch_rows,
+                );
+                return;
+            }
+        };
+        if mode == SealedBatchMode::Transactional
+            && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
+        {
             self.reject_sealed_transactional_batch(
                 storage,
                 Some(client_id),
@@ -755,7 +849,7 @@ impl SyncManager {
             return;
         }
 
-        self.accept_sealed_transactional_batch(storage, Some(client_id), submission, batch_rows);
+        self.settle_sealed_batch(storage, Some(client_id), submission, batch_rows, mode);
     }
 
     pub(crate) fn recover_completed_sealed_batches_with_storage<H: Storage>(
@@ -805,13 +899,24 @@ impl SyncManager {
             }) {
                 continue;
             }
-            if let Err(rejection) = self.validate_captured_frontier(storage, &submission) {
+            let mode = match self.infer_sealed_batch_mode(&submission, &batch_rows) {
+                Ok(Some(mode)) => mode,
+                Ok(None) => continue,
+                Err(rejection) => {
+                    self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
+                    recovered_any = true;
+                    continue;
+                }
+            };
+            if mode == SealedBatchMode::Transactional
+                && let Err(rejection) = self.validate_captured_frontier(storage, &submission)
+            {
                 self.reject_sealed_transactional_batch(storage, None, rejection, &batch_rows);
                 recovered_any = true;
                 continue;
             }
 
-            self.accept_sealed_transactional_batch(storage, None, submission, batch_rows);
+            self.settle_sealed_batch(storage, None, submission, batch_rows, mode);
             recovered_any = true;
         }
 
