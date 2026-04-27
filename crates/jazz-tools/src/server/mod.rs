@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
@@ -11,6 +11,11 @@ use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
+use crate::sync_payload_telemetry::{
+    FieldDerivation, SyncPayloadTelemetryDecodeFailureInput, SyncPayloadTelemetryDirection,
+    SyncPayloadTelemetryMessageEncoding, SyncPayloadTelemetryRecord,
+    SyncPayloadTelemetryRecordInput, SyncPayloadTelemetryScope, SyncPayloadTelemetrySink,
+};
 
 mod builder;
 mod hosted;
@@ -23,6 +28,17 @@ pub use hosted::HostedServer;
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncPayloadTelemetryConfig {
+    pub collector_url: String,
+}
+
+#[derive(Clone)]
+pub struct SyncPayloadTelemetryState {
+    pub config: SyncPayloadTelemetryConfig,
+    pub sink: Arc<dyn SyncPayloadTelemetrySink>,
+}
 
 #[derive(Debug, Clone)]
 pub struct SequencedSyncUpdate {
@@ -183,6 +199,7 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    pub sync_payload_telemetry: Option<SyncPayloadTelemetryState>,
 }
 
 /// State for a single SSE connection.
@@ -311,11 +328,25 @@ impl ServerState {
     pub async fn process_ws_client_frame(
         &self,
         client_id: ClientId,
+        connection_id: Option<u64>,
         payload: &[u8],
     ) -> Result<(), String> {
+        let source_frame_id = uuid::Uuid::now_v7().to_string();
+        let source_frame_bytes = payload.len() as u64;
         if let Ok(entry) =
             serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
         {
+            self.emit_ws_payload_telemetry(WsPayloadTelemetryInput {
+                direction: SyncPayloadTelemetryDirection::ClientToServer,
+                client_id,
+                connection_id,
+                source_frame_id: source_frame_id.clone(),
+                source_payload_index: Some(0),
+                source_payload_count: Some(1),
+                source_frame_bytes,
+                payload: &entry.payload,
+                sequence: None,
+            });
             let inbox = InboxEntry {
                 source: Source::Client(client_id),
                 payload: entry.payload,
@@ -328,7 +359,19 @@ impl ServerState {
 
         match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
             Ok(batch) => {
-                for p in batch.payloads {
+                let source_payload_count = batch.payloads.len();
+                for (source_payload_index, p) in batch.payloads.into_iter().enumerate() {
+                    self.emit_ws_payload_telemetry(WsPayloadTelemetryInput {
+                        direction: SyncPayloadTelemetryDirection::ClientToServer,
+                        client_id,
+                        connection_id,
+                        source_frame_id: source_frame_id.clone(),
+                        source_payload_index: Some(source_payload_index),
+                        source_payload_count: Some(source_payload_count),
+                        source_frame_bytes,
+                        payload: &p,
+                        sequence: None,
+                    });
                     let inbox = InboxEntry {
                         source: Source::Client(client_id),
                         payload: p,
@@ -339,9 +382,113 @@ impl ServerState {
                 }
                 Ok(())
             }
-            Err(e) => Err(format!("invalid ws payload: {e}")),
+            Err(e) => {
+                self.emit_ws_decode_failure_telemetry(WsDecodeFailureTelemetryInput {
+                    direction: SyncPayloadTelemetryDirection::ClientToServer,
+                    client_id,
+                    connection_id,
+                    source_frame_id,
+                    source_frame_bytes,
+                    message_bytes: payload.len() as u64,
+                    decode_error: format!("invalid ws payload: {e}"),
+                });
+                Err(format!("invalid ws payload: {e}"))
+            }
         }
     }
+
+    pub(crate) fn emit_ws_payload_telemetry(&self, input: WsPayloadTelemetryInput<'_>) {
+        let Some(telemetry) = self.sync_payload_telemetry.as_ref() else {
+            return;
+        };
+
+        for record in
+            SyncPayloadTelemetryRecord::records_from_input(SyncPayloadTelemetryRecordInput {
+                app_id: self.app_id.to_string(),
+                scope: SyncPayloadTelemetryScope::Websocket,
+                direction: input.direction,
+                client_id: Some(input.client_id.to_string()),
+                connection_id: input.connection_id.map(|id| id.to_string()),
+                sequence: input.sequence,
+                source_frame_id: Some(input.source_frame_id.clone()),
+                source_payload_index: input.source_payload_index,
+                source_payload_count: input.source_payload_count,
+                source_frame_bytes: Some(input.source_frame_bytes),
+                message_bytes: sync_payload_message_bytes(input.payload),
+                message_encoding: SyncPayloadTelemetryMessageEncoding::Utf8,
+                recorded_at: unix_timestamp_millis(),
+                decode_error: None,
+                payload: input.payload,
+                derivations: FieldDerivation::default().into(),
+            })
+        {
+            telemetry.sink.emit(record);
+        }
+    }
+
+    fn emit_ws_decode_failure_telemetry(&self, input: WsDecodeFailureTelemetryInput) {
+        let Some(telemetry) = self.sync_payload_telemetry.as_ref() else {
+            return;
+        };
+
+        telemetry
+            .sink
+            .emit(SyncPayloadTelemetryRecord::decode_failure(
+                SyncPayloadTelemetryDecodeFailureInput {
+                    app_id: Some(self.app_id.to_string()),
+                    scope: SyncPayloadTelemetryScope::Websocket,
+                    direction: input.direction,
+                    client_id: Some(input.client_id.to_string()),
+                    connection_id: input.connection_id.map(|id| id.to_string()),
+                    sequence: None,
+                    source_frame_id: Some(input.source_frame_id),
+                    source_payload_index: None,
+                    source_payload_count: None,
+                    source_frame_bytes: Some(input.source_frame_bytes),
+                    message_bytes: input.message_bytes,
+                    message_encoding: SyncPayloadTelemetryMessageEncoding::Utf8,
+                    recorded_at: unix_timestamp_millis(),
+                    decode_error: input.decode_error,
+                },
+            ));
+    }
+}
+
+pub(crate) struct WsPayloadTelemetryInput<'a> {
+    pub direction: SyncPayloadTelemetryDirection,
+    pub client_id: ClientId,
+    pub connection_id: Option<u64>,
+    pub source_frame_id: String,
+    pub source_payload_index: Option<usize>,
+    pub source_payload_count: Option<usize>,
+    pub source_frame_bytes: u64,
+    pub payload: &'a SyncPayload,
+    pub sequence: Option<u64>,
+}
+
+struct WsDecodeFailureTelemetryInput {
+    direction: SyncPayloadTelemetryDirection,
+    client_id: ClientId,
+    connection_id: Option<u64>,
+    source_frame_id: String,
+    source_frame_bytes: u64,
+    message_bytes: u64,
+    decode_error: String,
+}
+
+fn sync_payload_message_bytes(payload: &SyncPayload) -> u64 {
+    payload
+        .to_json()
+        .map(|json| json.len() as u64)
+        .unwrap_or_default()
+}
+
+fn unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

@@ -15,7 +15,10 @@ use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
-use crate::server::{CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState};
+use crate::server::{
+    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState,
+    SyncPayloadTelemetryConfig, SyncPayloadTelemetryState,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -64,6 +67,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_mode: ServerStorageMode,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    sync_payload_telemetry: Option<SyncPayloadTelemetryState>,
 }
 
 impl ServerBuilder {
@@ -80,12 +84,43 @@ impl ServerBuilder {
                 data_dir: "./data".to_string(),
             },
             sync_tracer: None,
+            sync_payload_telemetry: None,
         }
     }
 
     pub fn with_sync_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
         self
+    }
+
+    pub fn with_sync_payload_telemetry_sink(
+        mut self,
+        config: SyncPayloadTelemetryConfig,
+        sink: impl crate::sync_payload_telemetry::SyncPayloadTelemetrySink,
+    ) -> Self {
+        self.sync_payload_telemetry = Some(SyncPayloadTelemetryState {
+            config,
+            sink: Arc::new(sink),
+        });
+        self
+    }
+
+    #[cfg(feature = "otel-logs")]
+    pub fn with_sync_payload_telemetry_collector_url(
+        mut self,
+        collector_url: impl Into<String>,
+    ) -> Result<Self, String> {
+        let collector_url = collector_url.into();
+        let sink =
+            crate::sync_payload_telemetry::otel_logs::bounded_otel_logs_sink(&collector_url, 1024)
+                .map_err(|e| {
+                    format!("failed to initialize sync payload telemetry exporter: {e}")
+                })?;
+        self.sync_payload_telemetry = Some(SyncPayloadTelemetryState {
+            config: SyncPayloadTelemetryConfig { collector_url },
+            sink: Arc::new(sink),
+        });
+        Ok(self)
     }
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
@@ -169,6 +204,7 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
+            sync_payload_telemetry: self.sync_payload_telemetry.clone(),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits

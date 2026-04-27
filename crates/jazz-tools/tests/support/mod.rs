@@ -403,7 +403,7 @@ fn build_catalogue_runtime(
                     payload,
                 })
                 .expect("serialize OutboxEntry");
-                if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
+                if let Err(error) = state.process_ws_client_frame(client_id, None, &frame).await {
                     if let Ok(mut errors) = push_errors.lock() {
                         errors.push(error);
                     }

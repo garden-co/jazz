@@ -109,7 +109,7 @@ async fn create_note_with_backend_attribution(
         .ensure_client_as_backend(client_id)
         .expect("register backend client");
     let result = state
-        .process_ws_client_frame(client_id, &frame_payload)
+        .process_ws_client_frame(client_id, None, &frame_payload)
         .await;
     assert!(
         result.is_ok(),

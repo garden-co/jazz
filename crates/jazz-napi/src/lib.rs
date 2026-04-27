@@ -1834,6 +1834,16 @@ impl DevServer {
             .with_auth_config(auth_config)
             .with_catalogue_authority(catalogue_authority);
 
+        if let Some(sync_payload_telemetry) = opts.sync_payload_telemetry.as_ref() {
+            let collector_url = sync_payload_telemetry
+                .collector_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:4317".to_string());
+            server_builder = server_builder
+                .with_sync_payload_telemetry_collector_url(collector_url)
+                .map_err(napi::Error::from_reason)?;
+        }
+
         if in_memory {
             server_builder = server_builder.with_in_memory_storage();
         } else {
