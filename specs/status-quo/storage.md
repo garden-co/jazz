@@ -81,7 +81,7 @@ Replayable write state is also durable storage state now. Storage persists:
 - branch ord registry in `__branch_ord_registry`
 - local batch records in `__local_batch_record`
 - authoritative settlements in `__authoritative_batch_settlement`
-- sealed transactional submissions in `__sealed_batch_submission`
+- sealed batch submissions in `__sealed_batch_submission`
 
 The branch ord registry is one durable row that stores:
 
