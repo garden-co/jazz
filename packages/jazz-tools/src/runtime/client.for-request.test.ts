@@ -44,6 +44,7 @@ function mockMutation(batchId = "batch-id"): DirectMutationResult {
 const runtimeBatchRecordStubs = {
   loadLocalBatchRecord: () => null,
   loadLocalBatchRecords: () => [],
+  sealBatch: vi.fn(),
   insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
   updateDurable: async () => {},
   deleteDurable: async () => {},

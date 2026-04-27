@@ -311,6 +311,22 @@ describe("JazzClient transactions", () => {
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
+
+  it("returns a write handle from direct batch commit so callers can wait on the batch", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const committed = client.beginDirectBatch().commit();
+
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBeDefined();
+    await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+  });
 });
 
 describe("JazzClient mutation error handling", () => {
