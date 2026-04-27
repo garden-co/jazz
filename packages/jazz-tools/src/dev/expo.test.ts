@@ -89,6 +89,29 @@ describe("withJazz", () => {
     expect(resolved.extra?.jazzServerUrl).toBe(`http://127.0.0.1:${port}`);
   }, 30_000);
 
+  it("seeds the managed server's adminSecret from the root option when no server.adminSecret is given", async () => {
+    const port = await getAvailablePort();
+    const schemaDir = await tempRoots.create("jazz-expo-root-secret-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const resolved = await withJazz(
+      { name: "my-app" },
+      {
+        server: { port },
+        adminSecret: "expo-root-admin",
+        schemaDir,
+      },
+    );
+
+    const schemasResponse = await fetch(
+      `http://127.0.0.1:${port}/apps/${resolved.extra?.jazzAppId}/schemas`,
+      {
+        headers: { "X-Jazz-Admin-Secret": "expo-root-admin" },
+      },
+    );
+    expect(schemasResponse.ok).toBe(true);
+  }, 30_000);
+
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-expo-retry-");
