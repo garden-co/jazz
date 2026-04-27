@@ -1,5 +1,12 @@
 # create-jazz
 
+## 2.0.0-alpha.40
+
+### Patch Changes
+
+- 206f0a9: The "Resolving dependencies" spinner now updates as each package resolves (e.g. `Resolving dependencies (2/5)`), so `npm create jazz` no longer appears frozen during that step.
+- b988375: chore: expand scaffold test coverage to all six self-hosted starters
+
 ## 2.0.0
 
 ### Patch Changes

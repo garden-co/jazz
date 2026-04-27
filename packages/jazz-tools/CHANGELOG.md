@@ -1,5 +1,36 @@
 # jazz-tools
 
+## 2.0.0-alpha.40
+
+### Patch Changes
+
+- bca35a7: Use output schema from JSON standard schema for the stored schema of `json` columns
+- 3e9780a: `jazz-tools` CLI now accepts framework-prefixed env vars (`PUBLIC_`, `VITE_`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`) as fallbacks for `JAZZ_SERVER_URL` and `JAZZ_APP_ID`, matching the names the SvelteKit, Vite, Next.js and Expo plugins already write. `JAZZ_ADMIN_SECRET` remains unprefixed.
+- 72e8727: Docs/example: document the correct Expo setup for `jazz-tools`.
+
+  `jazz-tools` emits `import.meta.url` from its runtime, so Expo apps must enable `unstable_transformImportMeta` in `babel-preset-expo` or Hermes fails to parse the bundle. `@expo/metro-config` only auto-detects `.babelrc`, `.babelrc.js`, and `babel.config.js` — `.cjs`/`.mjs` variants are silently ignored, and `config.transformer.extendsBabelConfigPath` is a no-op on Expo's pipeline. The Expo install docs and the `todo-client-localfirst-expo` example now use a plain CJS `babel.config.js` with `unstable_transformImportMeta: true`, drop the stray `.babelrc` shim, and stop declaring `"type": "module"`. `metro.config.mjs` stays ESM so it can top-level `await withJazz(...)`.
+
+- 4f017af: Honor the root `adminSecret` option in `ManagedDevRuntime` (used by the `vite`, `next`, `sveltekit`, and `expo` dev plugins). The managed local-server branch previously read only `server.adminSecret` and silently fell back to a random `jazz-dev-XXXXXXXX` when the root option was set; it now falls through to root `adminSecret`, mirroring the precedence already used for `appId`. The startup banner also surfaces the resolved admin secret, and the Expo plugin now logs the inspector link the same way `vite` and `next` do.
+- c882c89: Fix `$createdAt` and `$updatedAt` provenance magic columns in `jazz-tools` so they round-trip as real JavaScript dates instead of far-future timestamps.
+
+  Queries now convert JS millisecond `Date` and numeric filter values to the internal provenance timestamp format consistently, so selecting and filtering on those magic columns uses the same time scale.
+
+- 19ab5c4: Fix JazzProvider re-initialising when an inline config object is passed on every render. The useEffect dep array previously included `config` (the object reference); it now uses `configKey` (the JSON-stringified value) so that structurally identical config objects no longer trigger a cleanup→reacquire cycle.
+- c5f0807: Wrap React `use` inside `JazzClientProvider` so it remains compatible with React 18 while preserving behavior on newer React versions.
+- 0103d1c: Fix the SvelteKit dev plugin so the first-ever cold start no longer needs a manual restart. The plugin now triggers a Vite restart immediately after allocating a fresh app ID, so SvelteKit's `$env/*` capture re-reads the now-populated `.env` on the second pass. Plugin order in `vite.config.ts` is no longer load-bearing.
+- 9329dbe: `jazzPlugin` now adds `jazz-napi` to `ssr.external` so that SSR builds on Vite-based frameworks (e.g. SvelteKit) don't attempt to bundle the native add-on. Also tightens error handling in `persistAppIdToEnv` to only swallow `ENOENT`; other I/O errors now propagate correctly.
+- 3ea24ed: Fixed the flood of ws messages by stop forwarding client-origin `RowBatchStateChanged` acknowledgements to other subscribers. This keeps per-client row-batch durability bookkeeping local to the server/client pair and avoids leaking `BatchSettlement` echoes to unrelated WebSocket clients.
+- ff2eb8a: Preserve column defaults and counter merge strategies when loading typed-app schemas through the CLI schema loader, keeping the AST and wasm schema round-trip lossless for fields both representations support.
+- acc7d89: Fix native WebSocket TLS handshakes failing on mobile (Expo/React Native) when the OS root certificate store is empty or unavailable, by falling back to bundled `webpki` roots only when no native roots are loaded.
+- f0260e0: Prevent TokioScheduler task pileup under contention.
+
+  `schedule_batched_tick` used to clear the debounce flag at the start of the spawned task, before acquiring the core lock. When the lock was held, every caller arriving during that window saw `scheduled=false` and spawned another task, piling up behind the same mutex. The flag is now cleared after the lock is acquired, immediately before `batched_tick` runs, capping the pending queue at one tick while preserving the lost-wakeup fix.
+
+- bee22ff: `QuerySubscription` in the Svelte bindings now accepts a getter for both the query and the options, e.g. `new QuerySubscription(() => filter ? app.todos.where({ title: { contains: filter } }) : undefined)`. Reactive reads inside the getter are tracked, so the subscription re-runs when its dependencies change. The bare-value forms continue to work unchanged.
+- 402d104: `jazzPlugin` and `jazzSvelteKit` now alias `jazz-wasm` to an absolute path resolved from `jazz-tools`'s own install location. This removes the need for Vite/SvelteKit consumers on pnpm to add `jazz-wasm` as a direct dependency just to work around pnpm's strict-isolation layout.
+  - jazz-wasm@2.0.0-alpha.40
+  - jazz-rn@2.0.0-alpha.40
+
 ## 2.0.0-alpha.39
 
 ### Patch Changes
