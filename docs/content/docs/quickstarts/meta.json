@@ -1,6 +1,0 @@
-{
-  "title": "Quickstarts",
-  "defaultOpen": false,
-  "collapsible": true,
-  "pages": ["client", "typescript-server"]
-}

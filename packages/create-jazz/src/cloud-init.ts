@@ -33,18 +33,6 @@ function readEnvValues(envPath: string): Record<string, string> {
   return values;
 }
 
-/**
- * Compose the per-app server URL. The Jazz Cloud proxy routes requests
- * under `/apps/<appId>/…`, so the value we write to .env must already carry
- * the app-specific prefix — otherwise the plugin's schema-push would hit
- * the cloud root and 404.
- */
-function composeAppServerUrl(cloudSyncUrl: string, appId: string): string {
-  const base = cloudSyncUrl.replace(/\/+$/, "");
-  const suffix = `/apps/${appId}`;
-  return base.endsWith(suffix) ? `${base}/` : `${base}${suffix}/`;
-}
-
 export async function runHostedInit(options: RunHostedInitOptions): Promise<void> {
   const { dir, cloudSyncUrl, envKeys, apiUrl } = options;
   const keys = [envKeys.appId, envKeys.serverUrl, envKeys.adminSecret, envKeys.backendSecret];
@@ -70,13 +58,12 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
     }
 
     const { appId, adminSecret, backendSecret } = provisioned;
-    const appServerUrl = composeAppServerUrl(cloudSyncUrl, appId);
 
     writeHostedEnv({
       dir,
       values: {
         [envKeys.appId]: appId,
-        [envKeys.serverUrl]: appServerUrl,
+        [envKeys.serverUrl]: cloudSyncUrl,
         [envKeys.adminSecret]: adminSecret,
         [envKeys.backendSecret]: backendSecret,
       },
@@ -85,7 +72,7 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
 
     console.log("Jazz app provisioned successfully and written to .env:");
     console.log(`  ${envKeys.appId}=${appId}`);
-    console.log(`  ${envKeys.serverUrl}=${appServerUrl}`);
+    console.log(`  ${envKeys.serverUrl}=${cloudSyncUrl}`);
     console.log(`  ${envKeys.adminSecret}=${adminSecret}`);
     console.log(`  ${envKeys.backendSecret}=${backendSecret}`);
     console.log("");

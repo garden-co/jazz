@@ -2,7 +2,8 @@
   "title": "Jazz 2",
   "pages": [
     "index",
-    "quickstarts",
+    "quickstart",
+    "install",
     "---Getting Started---",
     "getting-started/client-setup",
     "getting-started/server-setup",
@@ -13,14 +14,11 @@
     "writing",
     "auth",
     "---Recipes---",
-    "recipes/user-owned-data",
-    "recipes/shared-access",
-    "recipes/real-time-collaborative-list",
-    "recipes/nested-data",
-    "recipes/auth-provider-integration",
-    "guides/better-auth-adapter",
-    "faq",
+    "recipes/access-control",
+    "recipes/data-patterns",
+    "recipes/auth",
     "---Reference---",
-    "reference"
+    "reference",
+    "faq"
   ]
 }

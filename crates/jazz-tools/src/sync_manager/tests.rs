@@ -950,6 +950,76 @@ fn row_batch_state_changed_relays_to_clients_that_received_row_batch_needed() {
 }
 
 #[test]
+fn client_row_batch_state_ack_does_not_leak_to_other_subscribers() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    let row_id = ObjectId::new();
+    let mut row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice-todo");
+    row.confirmed_tier = Some(DurabilityTier::GlobalServer);
+    let batch_id = row.batch_id;
+
+    add_client(&mut sm, &io, alice);
+    add_client(&mut sm, &io, bob);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    persist_visible_row_settlement(&mut io, row_id, &row);
+
+    for (client_id, query_id) in [(alice, QueryId(1)), (bob, QueryId(2))] {
+        set_client_query_scope(
+            &mut sm,
+            &io,
+            client_id,
+            query_id,
+            HashSet::from([(row_id, BranchName::new("main"))]),
+            None,
+        );
+    }
+
+    let initial = sm.take_outbox();
+    assert!(initial.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::RowBatchNeeded { row: needed, .. },
+        } if *id == alice && needed.row_id == row_id
+    )));
+    assert!(initial.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::RowBatchNeeded { row: needed, .. },
+        } if *id == bob && needed.row_id == row_id
+    )));
+
+    sm.process_from_client(
+        &mut io,
+        bob,
+        SyncPayload::RowBatchStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Local),
+        },
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload:
+                    SyncPayload::RowBatchStateChanged { .. } | SyncPayload::BatchSettlement { .. },
+            } if *id == alice
+        )),
+        "alice should not receive bob's per-client row-batch ack: {outbox:#?}"
+    );
+}
+
+#[test]
 fn initial_query_sync_replays_current_direct_batch_settlement() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
@@ -2934,6 +3004,65 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
             payload: SyncPayload::RowBatchCreated { row, metadata, .. },
         } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_none()
     ));
+}
+
+#[test]
+fn add_server_with_storage_skips_rows_already_confirmed_upstream() {
+    let mut io = MemoryStorage::new();
+    let row_id = ObjectId::new();
+    let local_pending = visible_row(row_id, "main", Vec::new(), 1_000, b"local-pending");
+    let upstream_confirmed = row_with_state(
+        visible_row(
+            row_id,
+            "main",
+            vec![local_pending.batch_id()],
+            2_000,
+            b"upstream",
+        ),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+
+    seed_users_schema(&mut io);
+    io.put_row_locator(
+        row_id,
+        Some(
+            &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                .expect("row metadata should produce a row locator"),
+        ),
+    )
+    .unwrap();
+    io.append_history_region_rows(
+        "users",
+        &[local_pending.clone(), upstream_confirmed.clone()],
+    )
+    .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&VisibleRowEntry::rebuild(
+            upstream_confirmed.clone(),
+            &[local_pending.clone(), upstream_confirmed.clone()],
+        )),
+    )
+    .unwrap();
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    let outbox = sm.take_outbox();
+    let pushed_batch_ids: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowBatchCreated { row, .. },
+            } if *id == server_id => Some(row.batch_id()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(pushed_batch_ids, vec![local_pending.batch_id()]);
 }
 
 fn push_query_subscription(

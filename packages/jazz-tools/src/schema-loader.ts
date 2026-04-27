@@ -6,7 +6,13 @@ import { build } from "esbuild";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
-import type { ColumnDescriptor, ColumnType, TableSchema, WasmSchema } from "./drivers/types.js";
+import type {
+  ColumnDescriptor,
+  ColumnType,
+  TableSchema,
+  Value,
+  WasmSchema,
+} from "./drivers/types.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { CompiledPermissionsMap } from "./schema-permissions.js";
 import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
@@ -86,12 +92,56 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
   }
 }
 
+function wasmValueToDefault(value: Value, columnType: ColumnType): unknown {
+  switch (value.type) {
+    case "Null":
+      return null;
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+    case "Text":
+    case "Timestamp":
+    case "Uuid":
+      if (columnType.type === "Json") {
+        return JSON.parse(String(value.value));
+      }
+      return value.value;
+    case "Bytea":
+      return new Uint8Array(value.value);
+    case "Array": {
+      if (columnType.type !== "Array") {
+        throw new Error("Array default does not match column type.");
+      }
+      return value.value.map((inner) => wasmValueToDefault(inner, columnType.element));
+    }
+    case "Row":
+      throw new Error("Root schema loading does not yet support row-valued defaults.");
+  }
+}
+
+function columnMergeStrategyToAst(
+  strategy: ColumnDescriptor["merge_strategy"],
+): Column["mergeStrategy"] {
+  switch (strategy) {
+    case undefined:
+      return undefined;
+    case "Counter":
+      return "counter";
+  }
+}
+
 function wasmColumnToAst(column: ColumnDescriptor): Column {
   return {
     name: column.name,
     sqlType: columnTypeToSqlType(column.column_type),
     nullable: column.nullable,
+    default:
+      column.default === undefined
+        ? undefined
+        : wasmValueToDefault(column.default, column.column_type),
     references: column.references,
+    mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
   };
 }
 
