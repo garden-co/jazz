@@ -68,6 +68,13 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       // would otherwise never fire. Backfill before reading.
       loadEnvFileIntoProcessEnv(viteServer.config.root);
 
+      // SvelteKit's vite-plugin captures env in its `config: { order: 'pre' }`
+      // hook, before configureServer ever runs. If this is the first-ever start
+      // (no persisted appId yet), SvelteKit's captured env is empty when we
+      // allocate one below. Trigger a restart so its config hook re-runs and
+      // re-reads the now-populated .env. No-ops on warm starts.
+      const wasColdStart = !process.env.PUBLIC_JAZZ_APP_ID;
+
       const schemaDir = options.schemaDir ?? join(viteServer.config.root, "src", "lib");
       const serverOpt = options.server ?? true;
 
@@ -118,11 +125,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       viteServer.config.env.PUBLIC_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.PUBLIC_JAZZ_SERVER_URL = managed.serverUrl;
 
-      viteServer.httpServer?.once("close", () => {
-        runtime.dispose().catch((error) => {
-          console.error(`${LOG_PREFIX} dispose failed:`, error);
-        });
-      });
+      if (wasColdStart && managed.appId) {
+        console.log(
+          `${LOG_PREFIX} initial appId allocated, restarting dev server so SvelteKit's $env captures it`,
+        );
+        void viteServer.restart?.();
+      }
     },
   };
 }

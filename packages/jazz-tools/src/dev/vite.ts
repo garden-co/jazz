@@ -59,6 +59,7 @@ export interface ViteDevServer {
   ws: {
     send(payload: { type: string; err?: { message: string; stack?: string } }): void;
   };
+  restart?(forceOptimize?: boolean): Promise<void>;
 }
 
 export function jazzPlugin(options: JazzPluginOptions = {}) {
