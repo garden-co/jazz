@@ -1,0 +1,3 @@
+name: Issues
+description: Use Jazz Cloud-backed issue and idea tracking through the repo-local skill-issues CLI.
+instructions: ../SKILL.md

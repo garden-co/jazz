@@ -8207,7 +8207,7 @@ fn rc_delete_old_schema_row_after_evolution_hides_row_from_queries() {
     );
 }
 
-/// FIXME: this is an undesired behavior. See `/todo/ideas/1_mvp/lens-hardening.md`
+/// FIXME: this is an undesired behavior. See skill issue `lens-hardening`.
 #[test]
 fn rc_old_client_update_removes_unseen_newer_fields() {
     let v1 = schema_evolution_v1();

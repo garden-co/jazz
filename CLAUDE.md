@@ -24,42 +24,8 @@ Communicate tersely without losing precision or warmth.
 
 Repo-local skills live in `.agents/skills/`. Check them proactively.
 
-## Quick Capture: Ideas & Issues
+## Ideas & Issues
 
-Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `todo/`, run `bash scripts/update-todo.sh`.
+Use the `issues` skill for ideas, bugs, and focused problems. Jazz Cloud-backed skill state is the source of truth.
 
-### Ideas → `todo/ideas/{priority}/{idea-name}.md`
-
-Use `1_mvp/`, `2_launch/`, or `3_later/`. Default to `1_mvp/`.
-
-Template:
-
-```markdown
-# {Idea Title}
-
-## What
-
-## Notes
-```
-
-After saving, list ideas by bucket with their `What` line. Plain English only. Ideas are uncommitted.
-
-### Issues → `todo/issues/{issue-name}.md`
-
-For bugs and focused problems, not feature ideas. Use kebab-case filenames. Prefix `test_` for test-related issues.
-
-Template:
-
-```markdown
-# {Issue Title}
-
-## What
-
-## Priority
-
-[critical / high / medium / low / unknown]
-
-## Notes
-```
-
-After saving, list issues with their `What` line. Do not investigate or fix.
+Capture only unless the user asks for shaping or implementation. Track work with `open`, `in_progress`, and `done` status.

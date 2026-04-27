@@ -247,6 +247,8 @@ export interface VerifiedUser {
 }
 ```
 
+`users.jazzUserId` is a persisted policy key, not part of the public `VerifiedUser` DTO. The repository derives `users.jazzUserId = VerifiedUser.id` when writing a user row and strips it when returning a `VerifiedUser`.
+
 Create `examples/skill-issues/src/domain/slugs.ts`:
 
 ```ts
@@ -471,6 +473,7 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   users: s.table({
+    jazzUserId: s.string(),
     githubUserId: s.string(),
     githubLogin: s.string(),
     verifiedAt: s.string(),
@@ -507,7 +510,7 @@ export default s.definePermissions(app, ({ policy, session }) => {
   policy.items.allowRead.always();
   policy.itemStates.allowRead.always();
 
-  const isVerifiedUser = policy.users.exists.where({ id: session.user_id });
+  const isVerifiedUser = policy.users.exists.where({ jazzUserId: session.user_id });
 
   policy.items.allowInsert.where(isVerifiedUser);
   policy.items.allowUpdate.where(isVerifiedUser);
@@ -539,12 +542,21 @@ export interface ListFilters {
 }
 
 export function createIssueRepository(db: Db, app: App<any>) {
+  function toVerifiedUser(row: App["users"]["_rowType"]): VerifiedUser {
+    return {
+      id: row.id,
+      githubUserId: row.githubUserId,
+      githubLogin: row.githubLogin,
+      verifiedAt: row.verifiedAt,
+    };
+  }
+
   async function currentUser(): Promise<VerifiedUser> {
     const session = db.getAuthState().session;
     if (!session?.user_id) throw new Error("A local-first Jazz identity is required.");
-    const user = await db.one(app.users.where({ id: session.user_id }));
+    const user = await db.one(app.users.where({ jazzUserId: session.user_id }));
     if (!user) throw new Error("A verified GitHub identity is required. Run issues auth github.");
-    return user as VerifiedUser;
+    return toVerifiedUser(user);
   }
 
   async function stateFor(slug: string): Promise<ItemState> {
@@ -556,9 +568,24 @@ export function createIssueRepository(db: Db, app: App<any>) {
     async upsertVerifiedUser(user: VerifiedUser): Promise<void> {
       const existing = await db.one(app.users.where({ id: user.id }));
       if (existing) {
-        await db.update(app.users, user.id, user).wait({ tier: "local" });
+        await db
+          .update(app.users, user.id, {
+            jazzUserId: user.id,
+            githubUserId: user.githubUserId,
+            githubLogin: user.githubLogin,
+            verifiedAt: user.verifiedAt,
+          })
+          .wait({ tier: "local" });
       } else {
-        await db.insert(app.users, { id: user.id, ...user }).wait({ tier: "local" });
+        await db
+          .insert(app.users, {
+            id: user.id,
+            jazzUserId: user.id,
+            githubUserId: user.githubUserId,
+            githubLogin: user.githubLogin,
+            verifiedAt: user.verifiedAt,
+          })
+          .wait({ tier: "local" });
       }
     },
 
@@ -1562,15 +1589,15 @@ Do not create or edit `todo/ideas/**/*.md` or `todo/issues/**/*.md` as source fi
 
 ## Commands
 
-- Initialize local auth: `pnpm --filter skill-issues exec issues auth init`
-- Verify GitHub identity: `pnpm --filter skill-issues exec issues auth github --verifier-url <url>`
-- Add issue: `pnpm --filter skill-issues exec issues add issue <slug> --title "<title>" --description "<description>"`
-- Add idea: `pnpm --filter skill-issues exec issues add idea <slug> --title "<title>" --description "<description>"`
-- List: `pnpm --filter skill-issues exec issues list`
-- Show: `pnpm --filter skill-issues exec issues show <slug>`
-- Self-assign: `pnpm --filter skill-issues exec issues assign <slug> --me`
-- Set status: `pnpm --filter skill-issues exec issues status <slug> <open|in_progress|done>`
-- Export Markdown: `pnpm --filter skill-issues exec issues export todo`
+- Initialize local auth: `pnpm --filter skill-issues cli auth init`
+- Verify GitHub identity: `pnpm --filter skill-issues cli auth github --verifier-url <url>`
+- Add issue: `pnpm --filter skill-issues cli add issue <slug> --title "<title>" --description "<description>"`
+- Add idea: `pnpm --filter skill-issues cli add idea <slug> --title "<title>" --description "<description>"`
+- List: `pnpm --filter skill-issues cli list`
+- Show: `pnpm --filter skill-issues cli show <slug>`
+- Self-assign: `pnpm --filter skill-issues cli assign <slug> --me`
+- Set status: `pnpm --filter skill-issues cli status <slug> <open|in_progress|done>`
+- Export Markdown: `pnpm --filter skill-issues cli export todo`
 
 ## Workflow
 
@@ -1692,8 +1719,8 @@ Record the conversion decisions in the implementation PR description. Do not sil
 After `issues auth init` and `issues auth github` are configured for the target Jazz Cloud app, run:
 
 ```bash
-pnpm --filter skill-issues exec issues import todo
-pnpm --filter skill-issues exec issues list
+pnpm --filter skill-issues cli import todo
+pnpm --filter skill-issues cli list
 ```
 
 Expected: list includes current ideas and issues, including `explicit-indices` and `better-auth-generalize-unique-field-enforcement`.
@@ -1713,7 +1740,7 @@ If any `todo/projects/` document was moved in Step 3, include the destination do
 Run:
 
 ```bash
-pnpm --filter skill-issues exec issues export todo
+pnpm --filter skill-issues cli export todo
 git status --short --ignored todo
 rm -rf todo
 ```
@@ -1784,12 +1811,12 @@ Expected: PASS.
 With a configured dev Jazz Cloud app and verifier URL:
 
 ```bash
-pnpm --filter skill-issues exec issues auth init
-pnpm --filter skill-issues exec issues auth github --verifier-url "$SKILL_ISSUES_VERIFIER_URL"
-pnpm --filter skill-issues exec issues add issue smoke-test --title "Smoke test" --description "Verify CLI write path."
-pnpm --filter skill-issues exec issues assign smoke-test --me
-pnpm --filter skill-issues exec issues status smoke-test done
-pnpm --filter skill-issues exec issues show smoke-test
+pnpm --filter skill-issues cli auth init
+pnpm --filter skill-issues cli auth github --verifier-url "$SKILL_ISSUES_VERIFIER_URL"
+pnpm --filter skill-issues cli add issue smoke-test --title "Smoke test" --description "Verify CLI write path."
+pnpm --filter skill-issues cli assign smoke-test --me
+pnpm --filter skill-issues cli status smoke-test done
+pnpm --filter skill-issues cli show smoke-test
 ```
 
 Expected: `show` prints `issue smoke-test done Smoke test`.
