@@ -1,4 +1,5 @@
 import { createDb, type DbConfig } from "jazz-tools";
+import { createJazzContext } from "jazz-tools/backend";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
 import { readConfig } from "./config.js";
@@ -36,4 +37,27 @@ export async function openRepository(
   const db = await createDb(dbConfig);
 
   return createIssueRepository(db, app);
+}
+
+function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
+  if (!value) {
+    throw new Error(`${name} is required.`);
+  }
+  return value;
+}
+
+export async function openBackendRepository(env: NodeJS.ProcessEnv = process.env) {
+  const context = createJazzContext({
+    app,
+    permissions,
+    driver: { type: "memory" },
+    appId: requiredEnv(env, "SKILL_ISSUES_APP_ID"),
+    serverUrl: requiredEnv(env, "SKILL_ISSUES_SERVER_URL"),
+    backendSecret: requiredEnv(env, "SKILL_ISSUES_BACKEND_SECRET"),
+    env: "dev",
+    userBranch: "main",
+  });
+
+  return createIssueRepository(context.db(), app);
 }

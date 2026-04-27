@@ -1,14 +1,22 @@
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { writeConfig } from "./config.js";
+import { readConfig, writeConfig } from "./config.js";
 import { openRepository as defaultOpenRepository } from "./db.js";
 import { exportMarkdownTodo, importMarkdownTodo } from "./domain/markdown.js";
 import type { IssueItem, ItemKind, ItemStatus, ListedItem, ListFilters } from "./repository.js";
-import { generateLocalFirstSecret } from "./local-auth.js";
+import {
+  createLocalFirstProof as defaultCreateLocalFirstProof,
+  generateLocalFirstSecret,
+} from "./local-auth.js";
+import {
+  startDeviceAuthorization as defaultStartDeviceAuthorization,
+  type GitHubDeviceStart,
+} from "./server/github.js";
 
 export interface CliRuntime {
   cwd: string;
   env: NodeJS.ProcessEnv;
+  writeStdout?: (text: string) => void;
 }
 
 export interface CliResult {
@@ -19,6 +27,13 @@ export interface CliResult {
 
 export interface CliDependencies {
   openRepository?: typeof defaultOpenRepository;
+  startDeviceAuthorization?: (clientId: string) => Promise<GitHubDeviceStart>;
+  waitForGitHubAuthorization?: (device: GitHubDeviceStart) => Promise<void>;
+  createLocalFirstProof?: (secret: string) => string;
+  completeGitHubVerification?: (
+    verifierUrl: string,
+    payload: { deviceCode: string; jazzProof: string },
+  ) => Promise<{ id: string; githubLogin: string }>;
 }
 
 const KINDS = ["idea", "issue"] as const;
@@ -83,6 +98,95 @@ async function initAuth(runtime: CliRuntime): Promise<CliResult> {
   return {
     exitCode: 0,
     stdout: "Initialized skill issues auth.\n",
+    stderr: "",
+  };
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+async function defaultCompleteGitHubVerification(
+  verifierUrl: string,
+  payload: { deviceCode: string; jazzProof: string },
+): Promise<{ id: string; githubLogin: string }> {
+  const response = await fetch(`${trimTrailingSlash(verifierUrl)}/auth/github/complete`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const body: unknown = await response.json();
+
+  if (!response.ok) {
+    const message =
+      typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
+        ? body.error
+        : "GitHub verification failed.";
+    throw new Error(message);
+  }
+
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("id" in body) ||
+    typeof body.id !== "string" ||
+    !("githubLogin" in body) ||
+    typeof body.githubLogin !== "string"
+  ) {
+    throw new Error("Verifier returned an invalid response.");
+  }
+
+  return {
+    id: body.id,
+    githubLogin: body.githubLogin,
+  };
+}
+
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function defaultWaitForGitHubAuthorization(device: GitHubDeviceStart): Promise<void> {
+  await sleep(device.interval * 1000);
+}
+
+async function authGitHub(
+  args: string[],
+  runtime: CliRuntime,
+  deps: CliDependencies,
+): Promise<CliResult> {
+  const config = await readConfig(runtime.cwd, runtime.env);
+  const verifierUrl = valueAfter(args, "--verifier-url") ?? config.verifierUrl;
+  const clientId = runtime.env.GITHUB_CLIENT_ID;
+
+  if (!verifierUrl) {
+    throw new Error("--verifier-url or SKILL_ISSUES_VERIFIER_URL is required.");
+  }
+  if (!clientId) {
+    throw new Error("GITHUB_CLIENT_ID is required.");
+  }
+
+  const startDeviceAuthorization = deps.startDeviceAuthorization ?? defaultStartDeviceAuthorization;
+  const waitForGitHubAuthorization =
+    deps.waitForGitHubAuthorization ?? defaultWaitForGitHubAuthorization;
+  const createLocalFirstProof = deps.createLocalFirstProof ?? defaultCreateLocalFirstProof;
+  const completeGitHubVerification =
+    deps.completeGitHubVerification ?? defaultCompleteGitHubVerification;
+  const deviceStart = await startDeviceAuthorization(clientId);
+  const authPrompt = `Open ${deviceStart.verification_uri} and enter code ${deviceStart.user_code}.\n`;
+  runtime.writeStdout?.(authPrompt);
+  await waitForGitHubAuthorization(deviceStart);
+  const jazzProof = createLocalFirstProof(config.localFirstSecret);
+  const verified = await completeGitHubVerification(verifierUrl, {
+    deviceCode: deviceStart.device_code,
+    jazzProof,
+  });
+
+  return {
+    exitCode: 0,
+    stdout: `${runtime.writeStdout ? "" : authPrompt}Verified GitHub user ${verified.githubLogin}.\n`,
     stderr: "",
   };
 }
@@ -272,6 +376,9 @@ export async function runCli(
     if (command === "auth" && subcommand === "init") {
       return await initAuth(runtime);
     }
+    if (command === "auth" && subcommand === "github") {
+      return await authGitHub(args, runtime, deps);
+    }
 
     if (command === "add") return await addItem(args, runtime, deps);
     if (command === "list") return await listItems(args, runtime, deps);
@@ -297,7 +404,11 @@ export async function runCli(
 
 export async function main(
   args = process.argv.slice(2),
-  runtime: CliRuntime = { cwd: process.cwd(), env: process.env },
+  runtime: CliRuntime = {
+    cwd: process.cwd(),
+    env: process.env,
+    writeStdout: (text) => process.stdout.write(text),
+  },
 ): Promise<void> {
   const result = await runCli(args, runtime);
 
