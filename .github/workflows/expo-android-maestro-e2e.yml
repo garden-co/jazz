@@ -254,6 +254,19 @@ jobs:
           echo "$HEALTH_BODY"
           echo "$HEALTH_BODY" | grep -F '"status":"healthy"'
 
+      - name: Push schema and permissions to sandbox server
+        # In dev, the Expo Metro plugin (`withJazz` in metro.config.mjs) publishes
+        # schema.ts and permissions.ts on every Metro start. The release APK never
+        # runs Metro, so we have to publish them out-of-band before the app can
+        # connect — otherwise the server has no schema and every client request
+        # fails.
+        working-directory: examples/todo-client-localfirst-expo
+        env:
+          JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
+          JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
+          JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
+        run: pnpm exec jazz-tools deploy "$JAZZ_APP_ID"
+
       - name: Build release APK
         working-directory: examples/todo-client-localfirst-expo/android
         env:
