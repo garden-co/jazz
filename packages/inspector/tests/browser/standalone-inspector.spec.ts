@@ -7,12 +7,20 @@ const STORAGE_KEY = "jazz-inspector-standalone-config";
 
 function storedConfig() {
   return {
-    serverUrl: SERVER_URL,
-    appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
-    env: TEST_ENV,
-    branch: TEST_BRANCH,
-    schemaHash: SCHEMA_HASH,
+    version: 2,
+    activeConnectionId: "test-connection",
+    connections: [
+      {
+        id: "test-connection",
+        name: "Browser test",
+        serverUrl: SERVER_URL,
+        appId: APP_ID,
+        adminSecret: ADMIN_SECRET,
+        env: TEST_ENV,
+        branch: TEST_BRANCH,
+        schemaHash: SCHEMA_HASH,
+      },
+    ],
   };
 }
 
@@ -97,26 +105,26 @@ test.describe("connection page", () => {
     await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
   });
 
-  test("edit connection opens a prefilled form and reset returns to onboarding", async ({
-    page,
-  }) => {
+  test("connection manager opens a prefilled edit screen", async ({ page }) => {
     await page.goto("/");
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("button", { name: "Edit connection" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Connections" })).toBeVisible();
 
-    await page.getByRole("button", { name: "Edit connection" }).click();
+    await page.getByRole("button", { name: "Connections" }).click();
+
+    await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
+    await expect(page.getByText("Browser test")).toBeVisible();
+
+    await page.getByRole("button", { name: "Edit Browser test" }).click();
 
     await expect(page.getByRole("heading", { name: "Edit connection" })).toBeVisible();
+    await expect(page.getByLabel("Name")).toHaveValue("Browser test");
     await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
     await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
     await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
-    await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible();
-
-    await page.getByRole("button", { name: "Reset connection" }).click();
-    await expect(page.getByRole("heading", { name: "Connect to Jazz server" })).toBeVisible();
-    await expect(page.getByLabel("Server URL")).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
   });
 });
 
