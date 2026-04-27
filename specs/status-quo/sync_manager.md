@@ -16,7 +16,7 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row batch entries, explicit transactional seals, replayable batch fate, and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch entries, explicit batch seals, replayable batch fate, and catalogue updates so the server can build the same relational view and answer forwarded queries.
 
 ### Downward, toward clients
 
@@ -78,7 +78,7 @@ That payload set matches the table-first runtime model:
 
 - new row batch entries travel as row batch entries
 - initial query fill can explicitly ask for needed row batch entries
-- transactional batches are explicitly sealed upstream
+- direct and transactional batches are explicitly sealed upstream
 - replayable whole-batch fate travels separately from concrete row entries
 - row-state and durability progression travel as row-state changes
 - schemas and lenses travel as catalogue entries
@@ -90,8 +90,9 @@ That payload set matches the table-first runtime model:
 1. A runtime appends a new row batch entry locally.
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
-4. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
-5. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
+4. The writer seals the direct batch, sending `SealBatch` upstream. Simple write APIs do this immediately.
+5. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
+6. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
 
 ### Transactional write
 

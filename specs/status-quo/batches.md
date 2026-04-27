@@ -30,7 +30,7 @@ stored row shape and the same sync identity. The difference lives in:
 
 The two modes are:
 
-- `Direct`: visible immediately, no explicit seal step, settles as `DurableDirect`
+- `Direct`: visible immediately, explicitly sealed/frozen, settles as `DurableDirect`
 - `Transactional`: staged first, explicitly sealed, authority-decided, settles as `AcceptedTransaction`, `Rejected`, or `Missing`
 
 ## Core Invariants
@@ -301,8 +301,9 @@ Each `LocalBatchMember` carries:
 That means reconnect/rejection/retransmit can address the exact history raw table for each member
 directly instead of rediscovering batch membership from ambient row-history scans.
 
-For direct batches, `sealed` is immediately `true` because no explicit seal step is required. For
-transactional batches, `sealed` becomes `true` only after `commit()` / `seal_batch()`.
+For direct and transactional batches, `sealed` becomes `true` only after `commit()` /
+`seal_batch()`. Simple one-member direct writes call that seal path immediately, while explicit
+direct batches stay writable until the app calls `commit()`.
 
 ### BatchSettlement
 
@@ -318,13 +319,13 @@ reason about one logical batch without inventing a separate per-row completion s
 
 ### SealedBatchSubmission
 
-`SealedBatchSubmission` is the manifest a transactional batch sends to the authority:
+`SealedBatchSubmission` is the manifest a sealed batch sends to the authority:
 
 - batch id
 - target branch name
 - `batch_digest`
 - current member set as `SealedBatchMember { object_id, row_digest }`
-- captured family-visible frontier
+- captured family-visible frontier, empty for direct batches
 
 ### RowBatchKey
 
@@ -346,7 +347,7 @@ A direct batch can start in two ways:
 - implicitly, through ordinary `insert` / `update` / `delete`
 - explicitly, through `beginDirectBatch()` / `begin_direct_batch()`
 
-Implicit writes simply create a fresh one-member direct batch.
+Implicit writes create a fresh one-member direct batch and seal it immediately.
 
 ### 2. Local write
 
@@ -372,16 +373,30 @@ The row-history reducer updates:
 `RuntimeCore` upserts a `LocalBatchRecord` for the batch. For direct batches:
 
 - `mode = Direct`
-- `sealed = true`
+- `sealed = false` until the direct batch is sealed
 - `members` is updated in place as rows in that batch are overwritten
-- the local runtime can immediately synthesize a `DurableDirect` settlement up to its max local tier
+- the local runtime can synthesize a `DurableDirect` settlement up to its max local tier once the
+  batch is sealed
 
-### 5. Sync and remote durability
+### 5. Seal
+
+`commit()` on the direct batch handle, or `seal_batch(batch_id)` at the client/runtime layer:
+
+- reads the current member set from the replayable `LocalBatchRecord`
+- computes one `batch_digest` over the sorted member set
+- persists a `SealedBatchSubmission` with an empty captured frontier
+- emits `SyncPayload::SealBatch`
+
+After this point the direct batch is no longer writable. Simple `insert` / `update` / `delete`
+calls perform this step immediately before returning their write handle.
+
+### 6. Sync and remote durability
 
 Direct batches flow over sync as:
 
 - `RowBatchCreated` for newly learned entries
 - `RowBatchStateChanged` for tier/state progression
+- `SealBatch` for the frozen final member set
 - `BatchSettlement` for replayable fate
 
 Because the batch record and settlement are durable, a missed live ack no longer strands the write.
@@ -457,7 +472,7 @@ Accepted transactional rows do not get a second visible identity. They keep the 
 The sync layer now uses three batch-specific payload families:
 
 - row entry movement: `RowBatchCreated`, `RowBatchNeeded`, `RowBatchStateChanged`
-- transactional sealing: `SealBatch`
+- batch sealing: `SealBatch`
 - replayable fate: `BatchSettlement`, `BatchSettlementNeeded`
 
 That is the important separation to keep in mind:
@@ -481,12 +496,15 @@ The batch-aware TS surface lives in:
 Important APIs:
 
 - `client.beginDirectBatch()`
+- `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
 - `client.localBatchRecords()`
 - `client.acknowledgeRejectedBatch(batchId)`
 - `tx.commit()`
+- `batch.commit()`
 - `db.beginDirectBatch(table)`
+- `db.beginBatch(table)`
 - `db.beginTransaction(table)`
 
 The `Db` batch handles are intentionally seeded by a table: that first table chooses the runtime
@@ -498,6 +516,13 @@ Transactional handles also support transaction-scoped reads before commit:
 - `Transaction.query(...)`
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
+
+Open explicit batch writes are not individually waitable:
+
+- `Transaction.create(...)` and `DirectBatch.create(...)` return the row
+- `Transaction.update(...)`, `Transaction.delete(...)`, `DirectBatch.update(...)`, and
+  `DirectBatch.delete(...)` return `void`
+- `Transaction.commit()` and `DirectBatch.commit()` return the waitable batch handle
 
 `PersistedWrite` also stays batch-shaped:
 
