@@ -23,7 +23,7 @@ window.__jazz.listLiveStorageNamespaces();
 await window.__jazz.clearStorage("my-app::alice");
 ```
 
-If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API.
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset) for how this differs from logout and local-first identity storage.
 
 - Browser persistent storage only.
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.

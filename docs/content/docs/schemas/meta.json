@@ -1,4 +1,4 @@
 {
   "title": "Schemas",
-  "pages": ["defining-tables", "migrations"]
+  "pages": ["defining-tables", "column-types", "migrations"]
 }
