@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import {
   col,
   getCollectedMigration,
@@ -66,6 +67,32 @@ describe("bytes DSL API", () => {
     expect(col.bytes()._sqlType).toBe("BYTEA");
     expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
     expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+  });
+});
+
+describe("json DSL API", () => {
+  it("stores the Standard Schema output JSON schema", () => {
+    resetCollectedState();
+    const taskEstimateSchema = {
+      "~standard": {
+        version: 1,
+        vendor: "jazz-test",
+        jsonSchema: {
+          input: () => ({ type: "string" }),
+          output: () => ({ type: "number" }),
+        },
+      },
+    } satisfies StandardJSONSchemaV1<string, number>;
+
+    table("tasks", {
+      estimate: col.json(taskEstimateSchema),
+    });
+
+    expect(getCollectedSchema().tables[0]?.columns[0]).toEqual({
+      name: "estimate",
+      sqlType: { kind: "JSON", schema: { type: "number" } },
+      nullable: false,
+    });
   });
 });
 
