@@ -1,6 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as devServer from "./dev-server.js";
+import * as schemaWatcher from "./schema-watcher.js";
 import { jazzPlugin } from "./vite.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
@@ -21,6 +23,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await tempRoots.cleanup();
+  vi.restoreAllMocks();
 
   if (originalJazzServerUrl === undefined) {
     delete process.env.VITE_JAZZ_SERVER_URL;
@@ -212,6 +215,47 @@ describe("jazzPlugin", () => {
       await handler();
     }
   }, 30_000);
+
+  it("passes server telemetry through the managed runtime", async () => {
+    const schemaDir = await tempRoots.create("jazz-vite-telemetry-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000001",
+      port: 19993,
+      url: "http://127.0.0.1:19993",
+      dataDir: "/tmp/jazz-vite-telemetry-test",
+      adminSecret: "vite-telemetry-admin",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const plugin = jazzPlugin({
+      server: {
+        port: 19993,
+        adminSecret: "vite-telemetry-admin",
+        telemetry: { collectorUrl: "http://localhost:4317" },
+      },
+      schemaDir,
+    });
+    const fakeViteServer = {
+      config: { root: schemaDir, command: "serve" as const, env: {} as Record<string, string> },
+      httpServer: { once() {} },
+      ws: { send() {} },
+    };
+
+    await (plugin.configureServer as (server: typeof fakeViteServer) => Promise<void>)(
+      fakeViteServer,
+    );
+
+    expect(startSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: { collectorUrl: "http://localhost:4317" },
+      }),
+    );
+  });
 
   it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {
     const port = await getAvailablePort();

@@ -19,6 +19,8 @@ export function resolveJazzWasmEntry(): string | null {
   }
 }
 
+export type TelemetryOptions = boolean | { collectorUrl?: string };
+
 export interface JazzServerOptions {
   port?: number;
   adminSecret?: string;
@@ -30,6 +32,7 @@ export interface JazzServerOptions {
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
+  telemetry?: TelemetryOptions;
 }
 
 export interface JazzPluginOptions {

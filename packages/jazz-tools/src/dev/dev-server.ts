@@ -9,6 +9,7 @@ import {
   publishStoredPermissions,
   publishStoredSchema,
 } from "../runtime/schema-fetch.js";
+import type { TelemetryOptions } from "./vite.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;
@@ -17,6 +18,10 @@ const AUTO_PORT_RANGE = 20_000;
 const autoAllocatedPorts = new Set<number>();
 
 let nextAutoPort = AUTO_PORT_MIN + Math.floor(Math.random() * AUTO_PORT_RANGE);
+
+type DevServerStartOptions = Parameters<typeof DevServer.start>[0] & {
+  telemetry?: TelemetryOptions;
+};
 
 export interface StartLocalJazzServerOptions {
   appId?: string;
@@ -30,6 +35,7 @@ export interface StartLocalJazzServerOptions {
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
+  telemetry?: TelemetryOptions;
   enableLogs?: boolean;
 }
 
@@ -40,6 +46,7 @@ export interface LocalJazzServerHandle {
   dataDir: string;
   adminSecret?: string;
   backendSecret?: string;
+  syncPayloadTelemetryIngestUrl?: string;
   stop: () => Promise<void>;
 }
 
@@ -100,7 +107,7 @@ export async function startLocalJazzServer(
 
   let server;
   try {
-    server = await DevServer.start({
+    const startOptions: DevServerStartOptions = {
       appId,
       port,
       dataDir,
@@ -112,7 +119,9 @@ export async function startLocalJazzServer(
       catalogueAuthority: options.catalogueAuthority,
       catalogueAuthorityUrl: options.catalogueAuthorityUrl,
       catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
-    });
+      telemetry: options.telemetry,
+    };
+    server = await DevServer.start(startOptions);
   } catch (error) {
     if (ownsPort) {
       autoAllocatedPorts.delete(port);
@@ -156,6 +165,7 @@ export async function startLocalJazzServer(
     dataDir: server.dataDir,
     adminSecret: server.adminSecret ?? undefined,
     backendSecret: server.backendSecret ?? undefined,
+    syncPayloadTelemetryIngestUrl: server.syncPayloadTelemetryIngestUrl ?? undefined,
     stop,
   };
 }
