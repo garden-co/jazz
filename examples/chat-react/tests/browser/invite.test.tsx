@@ -197,6 +197,14 @@ describe("Invite Flow E2E", () => {
       10000,
       "Secret message should appear for user A",
     );
+    await waitFor(
+      () =>
+        aliceContainer
+          .querySelector('[data-testid="message-composer"]')
+          ?.getAttribute("data-pending-sends") === "0",
+      10000,
+      "Secret message send should reach the configured durability tier",
+    );
 
     // Open the ChatSettings sheet via the gear icon in the header
     await waitFor(
