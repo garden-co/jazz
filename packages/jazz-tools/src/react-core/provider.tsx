@@ -9,7 +9,7 @@ import React, {
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
-import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
+import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -157,6 +157,29 @@ function useAuthSubscription(
   return authRev;
 }
 
+// Wrap React.use to make it compatible with React 18 and 19
+function usePromise<T extends object>(promise: Promise<T> | T): T {
+  if (!("then" in promise)) {
+    return promise;
+  }
+
+  if (React.use !== undefined) {
+    return React.use(promise);
+  }
+
+  const tracked = trackPromise(promise);
+
+  if (tracked.status === "pending") {
+    throw tracked;
+  }
+
+  if (tracked.status === "rejected") {
+    throw tracked.reason;
+  }
+
+  return tracked.value as T;
+}
+
 /**
  * Makes a Jazz client available to children components through a React context.
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
@@ -166,7 +189,7 @@ export function JazzClientProvider({
   onJWTExpired,
   children,
 }: JazzClientProviderProps) {
-  const client = "then" in clientPromise ? React.use(clientPromise) : clientPromise;
+  const client = usePromise(clientPromise);
 
   const authRev = useAuthSubscription(client, onJWTExpired);
 
@@ -192,13 +215,13 @@ export function JazzProvider({
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
 
+  const configKey = JSON.stringify(config);
+
   const [clientPromise, setClientPromise] = useState(() => {
-    const configKey = JSON.stringify(config);
     return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
   });
 
   useEffect(() => {
-    const configKey = JSON.stringify(config);
     const clientPromise = acquireClient<CoreJazzClient>(
       configKey,
       config,
@@ -211,7 +234,7 @@ export function JazzProvider({
     return () => {
       releaseClient(configKey, holder);
     };
-  }, [config, createJazzClient, holder]);
+  }, [configKey, createJazzClient, holder]);
 
   return (
     <React.Suspense fallback={fallback}>

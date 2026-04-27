@@ -1172,3 +1172,16 @@ jobs:
           else
             pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
           fi
+
+      - name: Build create-jazz
+        run: pnpm --filter create-jazz build
+
+      - name: Publish create-jazz (alpha tag)
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          if npm view "create-jazz@${CREATE_JAZZ_VERSION}" version >/dev/null 2>&1; then
+            echo "create-jazz@${CREATE_JAZZ_VERSION} already exists on npm; skipping publish."
+          else
+            pnpm --filter create-jazz publish --tag alpha --access public --no-git-checks
+          fi

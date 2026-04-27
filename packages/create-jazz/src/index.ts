@@ -26,7 +26,7 @@ const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
 };
 
 const VALID_HOSTING_VALUES: Hosting[] = ["hosted", "selfhosted"];
-const CLOUD_SYNC_URL = "https://prod.v2.aws.cloud.jazz.tools/";
+const CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
 
 interface HostedEnvKeys {
   appId: string;

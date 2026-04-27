@@ -1,6 +1,6 @@
 {
   "name": "jazz-napi",
-  "version": "2.0.0-alpha.38",
+  "version": "2.0.0-alpha.39",
   "description": "Native Node.js bindings for Jazz runtime",
   "license": "MIT",
   "repository": {

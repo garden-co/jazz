@@ -256,15 +256,141 @@ function App() {
 ```
 
   The secret is the user's identity. If it's lost (e.g. `localStorage` cleared), the identity is
-  gone and any data owned by that user becomes inaccessible. For durable identity, upgrade to an
-  external provider.
+  gone and any data owned by that user becomes inaccessible unless you restore it from a recovery
+  passphrase, a passkey backup, or an external provider you linked earlier.
+
+## Backing up and restoring the secret
+
+You can keep local-first auth fully serverless and still make it recoverable. Jazz ships two backup
+helpers for the same 32-byte secret:
+
+| Method                      | Platforms     | Best for                                       | Trade-offs                                           |
+| --------------------------- | ------------- | ---------------------------------------------- | ---------------------------------------------------- |
+| `jazz-tools/passphrase`     | Browser, Expo | Manual backup users can carry anywhere         | User must safely store a 24-word recovery passphrase |
+| `jazz-tools/passkey-backup` | Browser only  | Fast recovery on devices that support passkeys | Requires WebAuthn and a stable relying-party ID      |
+
+### Recovery passphrase
+
+`jazz-tools/passphrase` converts the local-first secret into a 24-word English recovery
+passphrase. Restoring that passphrase produces the exact same secret, so the user keeps the same
+Jazz identity.
+
+    ```tsx
+
+  isLoading: boolean;
+  recoveryPhrase: string | null;
+} {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  return {
+    isLoading,
+    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
+  };
+}
+```
+
+    ```tsx
+
+  isLoading: boolean;
+  recoveryPhrase: string | null;
+} {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  return {
+    isLoading,
+    recoveryPhrase: secret ? RecoveryPhrase.fromSecret(secret) : null,
+  };
+}
+```
+
+To restore, decode the user-provided passphrase back into a secret and hand it back to your
+local-first auth flow:
+
+    ```tsx
+
+  const { login } = useLocalFirstAuth();
+
+  return async (userInput: string) => {
+    const restoredSecret = RecoveryPhrase.toSecret(userInput);
+    await login(restoredSecret);
+  };
+}
+```
+
+    ```tsx
+
+  const { login } = useLocalFirstAuth();
+
+  return async (userInput: string) => {
+    const restoredSecret = RecoveryPhrase.toSecret(userInput);
+    await login(restoredSecret);
+  };
+}
+```
+
+The parser accepts upper-case input and extra whitespace. Invalid input throws
+`RecoveryPhraseError` with codes like `invalid-length`, `invalid-word`, and
+`invalid-checksum`.
+
+  In React and Expo, prefer `useLocalFirstAuth()` for backup and restore so the mounted
+  `JazzProvider` updates immediately. The lower-level `BrowserAuthSecretStore` and
+  `ExpoAuthSecretStore` APIs are still useful outside React-based UIs.
+
+### Passkey backup
+
+For browser apps, `jazz-tools/passkey-backup` stores the same secret in a resident WebAuthn
+credential. That gives users passkey-style recovery without adding a server-side auth provider.
+
+Create the passkey from the current local-first secret:
+
+```tsx
+
+  isLoading: boolean;
+  backupWithPasskey: (displayName: string) => Promise<void>;
+} {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  return {
+    isLoading,
+    backupWithPasskey: async (displayName: string) => {
+      if (!secret) {
+        throw new Error("Local-first secret is not ready yet");
+      }
+
+      await passkeyBackup.backup(secret, displayName);
+    },
+  };
+}
+```
+
+Restore from the passkey by reading the secret back and passing it to `login(...)` from
+`useLocalFirstAuth()`:
+
+```tsx
+
+  const { login } = useLocalFirstAuth();
+
+  return async () => {
+    const restoredSecret = await passkeyBackup.restore();
+    await login(restoredSecret);
+  };
+}
+```
+
+Use a stable `appHostname` everywhere you want passkey recovery to work. It becomes the WebAuthn
+relying-party ID, so changing it creates a different passkey namespace. `backup(secret,
+displayName)` also needs a user-visible name for the platform passkey sheet.
+
+Handle `PasskeyBackupError` in your UI to surface cases like unsupported browsers, no saved
+credential, or missing user verification. Keep a recovery passphrase or external sign-in as a
+fallback if the user might lose access to their passkey provider.
 
 ## Server configuration
 
 Local-first auth is enabled by default in development. In production, enable it explicitly:
 
 ```bash
-jazz-tools server  --allow-local-first-auth
+pnpm dlx jazz-tools@alpha server  --allow-local-first-auth
 ```
 
 No JWKS endpoint is needed — the token is self-contained and the server can verify it on its own.
@@ -565,7 +691,7 @@ We can define permissions in `permissions.ts`:
 
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha deploy <appId>`.
+Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface warnings about tables with no explicit permission policy. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
 
 Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
 
@@ -1367,79 +1493,109 @@ DESCRIPTION:Set up Jazz in your app — works out of the box with most framework
 
 ## Zero-config client setup
 
-Every client needs an `appId`. Add a `serverUrl` to enable sync. For login and authentication options, see [Authentication](/docs/auth/authentication).
+Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
     ```tsx
 
-  return (
+  const { secret, isLoading } = useLocalFirstAuth();
 
-      <h1>Todos</h1>
+  if (isLoading || !secret) return null;
+
+  return (
 
   );
 }
 ```
 
-    ```vue
-<script setup lang="ts">
+    `useLocalFirstAuth()` from `jazz-tools/react` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
-const client = createJazzClient({
-  appId: "my-todo-app",
-});
-</script>
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+    import { BrowserAuthSecretStore } from "jazz-tools";
+    import TodoList from "./TodoList.vue";
 
-<template>
+    const secret = await BrowserAuthSecretStore.getOrCreateSecret();
 
-    <h1>Todos</h1>
+    const client = createJazzClient({
+      appId: "<your-app-id>",
+      secret,
+    });
+    </script>
 
-    <template #fallback>
-      <p>Loading...</p>
+    <template>
+
+        <h1>Todos</h1>
+
     </template>
+    ```
 
-</template>
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import {
+        createJazzClient,
+        JazzSvelteProvider,
+        BrowserAuthSecretStore,
+      } from 'jazz-tools/svelte';
+      import TodoList from './TodoList.svelte';
 
-```
+      let client = $state | null>(null);
 
-    ```svelte
+      BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
+        client = createJazzClient({ appId: '<your-app-id>', secret });
+      });
+    </script>
 
-<script lang="ts">
-  import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
-  import TodoList from './TodoList.svelte';
+    {#if client}
 
-  const client = createJazzClient({
-    appId: 'my-todo-app',
-  });
-</script>
+        {#snippet children()}
+          <h1>Todos</h1>
 
-  {#snippet children()}
-    <h1>Todos</h1>
+        {/snippet}
+        {#snippet fallback()}
+          <p>Loading...</p>
+        {/snippet}
 
-  {/snippet}
-  {#snippet fallback()}
-    <p>Loading...</p>
-  {/snippet}
-
-```
+    {/if}
+    ```
 
     ```tsx
 
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return null;
+
   return (
 
-          Todos
+        My App
 
   );
 }
 ```
+
+    `ExpoAuthSecretStore` persists the secret in the device's secure storage. Or use `useLocalFirstAuth()` from `jazz-tools/expo` for a hook-based API.
 
     ```ts
-  const db = await createDb({
-    appId: readEnvAppId() ?? "todo-client-example",
+
+  const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId: "my-app" });
+
+  return createDb({
+    appId: "my-app",
     env: "dev",
     userBranch: "main",
-    ...config,
+    secret,
   });
+}
 ```
 
-Without auth configuration, Jazz creates a local-first identity automatically. To use Jazz completely offline, don't set a `serverUrl`.
+The secret is generated on first load, persisted locally (`localStorage` in the browser, secure storage on Expo), and reused on every subsequent run — the same device keeps the same Jazz identity.
+
+  Using Jazz completely offline? Leave out `serverUrl` and everything above still works — writes
+  stay on the device until a server is reachable.
+
+  The local-first secret **is** the user's identity. If it's lost (e.g. cleared `localStorage`), the
+  identity is gone and any data owned by that user becomes inaccessible. Plan for recovery with
+  [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret).
 
 Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Runtime source overrides](#runtime-source-overrides) below.
 
@@ -1450,6 +1606,127 @@ For React Native and Expo clients, make sure `serverUrl` points to a host your r
 ### Storage driver
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+## Dev plugins
+
+Jazz ships bundler plugins that remove boilerplate in development. They start a local Jazz dev server, watch `schema.ts` and `permissions.ts`, auto-push both on change, and inject the app ID and server URL as framework-appropriate env vars so `createJazzClient({ appId, serverUrl })` picks them up without any manual wiring.
+
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import react from "@vitejs/plugin-react";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
+
+    export default defineConfig({
+      plugins: [react(), jazzPlugin()],
+    });
+    ```
+
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
+
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import vue from "@vitejs/plugin-vue";
+    import { jazzPlugin } from "jazz-tools/dev/vite";
+
+    export default defineConfig({
+      plugins: [vue(), jazzPlugin()],
+    });
+    ```
+
+    Injects `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` into `import.meta.env`.
+
+    ```ts title="vite.config.ts"
+    import { defineConfig } from "vite";
+    import { svelte } from "@sveltejs/vite-plugin-svelte";
+    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
+
+    export default defineConfig({
+      plugins: [svelte(), jazzSvelteKit()],
+    });
+    ```
+
+    Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`. Use `jazzSvelteKit` for both Vite+Svelte and SvelteKit projects.
+
+    ```ts title="vite.config.ts"
+    import { sveltekit } from "@sveltejs/kit/vite";
+    import { jazzSvelteKit } from "jazz-tools/dev/sveltekit";
+    import { defineConfig } from "vite";
+
+    export default defineConfig({
+      // jazzSvelteKit must come before sveltekit so it populates
+      // process.env before SvelteKit captures $env/dynamic/public.
+      plugins: [jazzSvelteKit(), sveltekit()],
+    });
+    ```
+
+    Defaults `schemaDir` to `src/lib/`. Injects `PUBLIC_JAZZ_APP_ID` and `PUBLIC_JAZZ_SERVER_URL`.
+
+    ```ts title="next.config.ts"
+    import { withJazz } from "jazz-tools/dev/next";
+
+    export default withJazz({});
+    ```
+
+    Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
+
+    ```js title="metro.config.js"
+    import { getDefaultConfig } from "expo/metro-config";
+    import { withJazz } from "jazz-tools/dev/expo";
+
+    const config = getDefaultConfig(__dirname);
+
+    await withJazz(config, { schemaDir: __dirname });
+
+    export default config;
+    ```
+
+    Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
+
+On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
+
+### Env var names
+
+Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix its bundler uses to expose env vars to the client bundle. SvelteKit's `PUBLIC_*` prefix also covers Svelte+Vite via `jazzSvelteKit`. Secrets are always unprefixed — they're server-only: `JAZZ_ADMIN_SECRET` and `BACKEND_SECRET`.
+
+| Bundler   | App ID                    | Server URL                    |
+| --------- | ------------------------- | ----------------------------- |
+| Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
+| Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
+| SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
+| Expo      | `EXPO_PUBLIC_JAZZ_APP_ID` | `EXPO_PUBLIC_JAZZ_SERVER_URL` |
+
+Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.
+
+### Plugin options
+
+All plugins accept the same base options:
+
+| Option        | Description                                                                                                                                                                       |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`      | `true` (default) starts an embedded local server. `false` disables the plugin. A URL string connects to an existing server. An object configures the embedded server (see below). |
+| `schemaDir`   | Directory containing `schema.ts` and `permissions.ts`. Defaults to the project root, or `src/lib/` for SvelteKit.                                                                 |
+| `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                          |
+| `adminSecret` | Required when `server` is a URL. Ignored for the embedded server (a random secret is generated).                                                                                  |
+
+When `server` is an object, the embedded server accepts: `port` (default: random), `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, `jwksUrl`, and the catalogue authority forwarding fields. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
+
+### Connecting to an existing server
+
+Pass a URL to point the plugin at a server you already run — hosted cloud, staging, or a shared self-hosted instance. You must also provide `adminSecret` (or set `JAZZ_ADMIN_SECRET`) so the plugin can push schema and permissions.
+
+```ts title="vite.config.ts"
+jazzPlugin({
+  server: "https://my-jazz-server.example.com",
+  adminSecret: process.env.JAZZ_ADMIN_SECRET,
+  appId: process.env.VITE_JAZZ_APP_ID,
+});
+```
+
+### What auto-pushes
+
+On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the server's admin secret (generated for the embedded server, supplied by you for a remote server).
+
+  Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).
 
 ## Runtime source overrides
 
@@ -1570,10 +1847,7 @@ DESCRIPTION:Hosted and self-hosted database server configuration, app provisioni
 
 ## Hosted database server
 
-App IDs are provisioned on request. Ask in the `jazz2-adopters` Discord channel with your app name and JWKS endpoint.
-
-  This manual provisioning process is temporary while Jazz 2 is under heavy development.
-  Self-service onboarding is planned.
+Your app ID namespaces your data for storage and sync. Click below to generate one on the Jazz hosted cloud&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later.
 
 ## Self-hosted database server
 
@@ -1587,7 +1861,7 @@ npx jazz-tools@alpha server "$JAZZ_APP_ID" \
 
 ```
 
-`jazz-tools server ` currently supports:
+`jazz-tools@alpha server ` currently supports:
 
 | Option                              | Purpose                                                                                                                                  | Environment variable          | Default                   |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------- |
@@ -1694,6 +1968,105 @@ pub async fn list_todos_for_request(
 }
 ```
 
+===PAGE:guides/better-auth-adapter===
+TITLE:Better Auth Adapter
+DESCRIPTION:Use Better Auth with Jazz as the database adapter.
+
+The Jazz Better Auth adapter lets Better Auth store its tables in Jazz. For general Better Auth setup (route handlers, client, plugins), see the [Better Auth documentation](https://www.better-auth.com/docs).
+
+## Schema Workflow
+
+Better Auth tables live in a generated `schema-better-auth/` module that your app schema spreads into its own table map. This keeps Better Auth's tables in the same Jazz app as your own data, so a single backend context handles both.
+
+```bash
+# Generate the Better Auth schema module into schema-better-auth/
+npx @better-auth/cli@latest generate \
+  --config ./src/lib/auth.ts \
+  --output ./schema-better-auth/schema.ts
+
+# Validate the generated schema source alongside your own
+pnpm dlx jazz-tools@alpha validate
+```
+
+Import the generated tables in your app's `schema.ts` and merge them into the app definition:
+
+```ts title="schema.ts"
+
+const schema = {
+  ...betterauthSchema,
+  messages: s.table({
+    author_name: s.string(),
+    chat_id: s.string(),
+    text: s.string(),
+    sent_at: s.timestamp(),
+  }),
+  // ...your own tables
+};
+
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely.
+
+## Database Adapter
+
+Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
+
+```ts title="src/lib/auth.ts"
+
+const jazzContext = createJazzContext({
+  appId: process.env.APP_ID!,
+  driver: { type: "memory" },
+  serverUrl: process.env.SYNC_SERVER_URL!,
+  env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+  userBranch: "main",
+  backendSecret: process.env.BACKEND_SECRET!,
+});
+
+  database: jazzAdapter({
+    db: () => jazzContext.asBackend(app),
+    schema: app.wasmSchema,
+  }),
+  // ...your Better Auth config
+});
+```
+
+| Option      | Description                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| `db`        | A function returning a `Db` handle via `context.asBackend(app)`. Use the merged app, not `authSchema`. |
+| `schema`    | Typically `app.wasmSchema` from your merged schema. A raw `s.App` is also accepted.                    |
+| `debugLogs` | Better Auth adapter debug logging controls.                                                            |
+| `usePlural` | Whether Better Auth model names should use plural table names.                                         |
+| `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                      |
+
+  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
+  `experimental.joins`.
+
+### Publishing to a sync server
+
+Because Better Auth tables are merged into your app schema, they ride on the same deploy as everything else — no separate push for `schema-better-auth/`. Publish schema, permissions, and migrations through the normal workflow:
+
+```bash
+pnpm dlx jazz-tools@alpha deploy <appId>
+```
+
+See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
+
+## Compatibility
+
+The adapter is currently aligned with Better Auth `1.5.5`.
+
+| Plugin/Feature        | Compatibility |
+| --------------------- | :-----------: |
+| Email & Password auth |      ✅       |
+| Social Provider auth  |      ✅       |
+| Email OTP             |      ✅       |
+
+  This section reflects the adapter behavior currently covered by this repo's Better Auth
+  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
+  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
+
 ===PAGE:index===
 TITLE:Overview
 DESCRIPTION:The database that syncs.
@@ -1722,13 +2095,17 @@ db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
 
 Jazz works with React, Vue, Expo/React Native, Svelte, plain TypeScript, and Rust.
 
-## Quickstarts
+(Looking for [classic Jazz docs?](https://classic.jazz.tools/docs))
+
+## Quickstart
+
+## Install
 
 ## Setup
 
 ## Reference
 
-===PAGE:quickstarts/client===
+===PAGE:install/client===
 TITLE:Client
 DESCRIPTION:Build a local-first to-do app with Jazz, step by step.
 
@@ -1770,19 +2147,19 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 ## Install
 
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
 
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
 
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
 
     ```bash title="Terminal"
-    pnpm add jazz-tools jazz-rn expo
+    pnpm add jazz-tools@alpha jazz-rn expo
     pnpm add -D @babel/plugin-transform-flow-strip-types
     ```
 
@@ -1830,8 +2207,12 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     ```
 
     ```bash title="Terminal"
-    pnpm add jazz-tools
+    pnpm add jazz-tools@alpha
     ```
+
+## Get an app ID
+
+Your app ID namespaces your data for storage and sync. Click below to generate one on [Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`)&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later.
 
 ## Define your schema
 
@@ -1865,7 +2246,9 @@ Create the basic structure for your app with Jazz and a to-do list.
     ```tsx
 
   return (
-
+    ",
+      }}
+    >
       <h1>Todos</h1>
 
   );
@@ -1876,7 +2259,7 @@ Create the basic structure for your app with Jazz and a to-do list.
 <script setup lang="ts">
 
 const client = createJazzClient({
-  appId: "my-todo-app",
+  appId: "<your-app-id>",
 });
 </script>
 
@@ -1899,7 +2282,7 @@ const client = createJazzClient({
   import TodoList from './TodoList.svelte';
 
   const client = createJazzClient({
-    appId: 'my-todo-app',
+    appId: '<your-app-id>',
   });
 </script>
 
@@ -1916,6 +2299,9 @@ const client = createJazzClient({
     ```tsx
 
   return (
+    ",
+      }}
+    >
 
           Todos
 
@@ -1939,13 +2325,15 @@ const client = createJazzClient({
     ```ts
 
 const db = await createDb({
-  appId: "my-todo-app",
+  appId: "<your-app-id>",
 });
 // use db.shutdown() to clean up when finished
 ```
 
-    `appId` identifies your app for storage and sync. For all client config options and runtime
-    source overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
+    `appId` identifies your app for storage and sync. Use the UUID you generated
+    above&hairsp;—&hairsp;not a human-readable name&hairsp;—&hairsp;so your local data is already
+    correctly namespaced when you add a server. For all client config options and runtime source
+    overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
 
 ## Add a to-do
 
@@ -2264,22 +2652,7 @@ Framework hooks return `undefined` while loading, then an array of matching rows
 
 ## Enable sync
 
-So far, your to-do list only works locally. To sync across devices, you need a server, permissions, and an app ID.
-
-### Start a server
-
-Generate an app ID:
-
-```bash title="Terminal"
-npx jazz-tools@alpha create app
-# outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
-```
-
-Start the server with that ID. In development mode, clients auto-publish the schema when they connect, so you don't need an admin secret just to sync schema changes. The default port is 1625.
-
-```bash title="Terminal"
-npx jazz-tools@alpha server <your-app-id> --admin-secret secret
-```
+So far, your to-do list only works locally. To sync across devices, you need permissions published to the server.
 
 ### Add permissions
 
@@ -2294,33 +2667,17 @@ The server rejects all reads and writes unless you define [permissions](/docs/au
 });
 ```
 
-Then publish the permissions bundle:
-
-```bash title="Terminal"
-npx jazz-tools@alpha deploy \
-  <your-app-id> \
-  --server-url http://127.0.0.1:1625 \
-  --admin-secret secret
-```
+Then publish the permissions bundle using the app ID and admin secret from above:
 
 ### Connect the client
 
-Update your client config to use the same app ID, and add `serverUrl`:
-
-```ts title="Client config"
-{
-  appId: "<your-app-id>",
-  // Use your machine's LAN IP for mobile devices.
-  serverUrl: "http://127.0.0.1:1625",
-}
-```
+Update your client config to add `serverUrl` — Jazz Cloud is at `https://v2.sync.jazz.tools/`. If you generated an app ID above, these values are already filled in:
 
 Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
 
-Permissions can be updated without adding a new schema by using
-`npx jazz-tools@alpha deploy <your-app-id>`.
+Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy`.
 
-For production deployment and hosting options, see [Server Setup](/docs/getting-started/server-setup).
+For self-hosted deployments, see [Server Setup](/docs/getting-started/server-setup).
 
 ## Next steps
 
@@ -2331,11 +2688,11 @@ For production deployment and hosting options, see [Server Setup](/docs/getting-
 
 ## Example apps
 
-- [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/docs/examples/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
-- [File upload (React)](https://github.com/garden-co/jazz2/tree/main/docs/examples/file-upload-react)&hairsp;—&hairsp;image upload and rendering with Jazz
-- [Wequencer (Svelte)](https://github.com/garden-co/jazz2/tree/main/docs/examples/wequencer)&hairsp;—&hairsp;collaborative real-time music sequencer
+- [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
+- [File upload (React)](https://github.com/garden-co/jazz2/tree/main/examples/file-upload-react)&hairsp;—&hairsp;image upload and rendering with Jazz
+- [Wequencer (Svelte)](https://github.com/garden-co/jazz2/tree/main/examples/wequencer)&hairsp;—&hairsp;collaborative real-time music sequencer
 
-===PAGE:quickstarts/typescript-server===
+===PAGE:install/typescript-server===
 TITLE:TypeScript Server
 DESCRIPTION:Build a server-side to-do API with Jazz and Hono, step by step.
 
@@ -2353,7 +2710,7 @@ pnpm init
 `jazz-napi` is the native runtime for Jazz on Node.js. It bundles the query engine, storage, and sync layer as a Rust binary via NAPI. `jazz-tools` detects it automatically at runtime, but it must be listed as an explicit dependency.
 
 ```bash title="Terminal"
-pnpm add jazz-tools jazz-napi hono @hono/node-server
+pnpm add jazz-tools@alpha jazz-napi@alpha hono @hono/node-server
 pnpm add -D typescript tsx
 ```
 
@@ -2403,7 +2760,7 @@ The server rejects all reads and writes unless you define [permissions](/docs/au
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha create app
+pnpm dlx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
@@ -2553,6 +2910,30 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 - [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Server Setup](/docs/getting-started/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment
+
+===PAGE:quickstart===
+TITLE:Quickstart
+DESCRIPTION:Scaffold a synced local-first app in one command.
+
+## Scaffold a new Jazz app
+
+```bash title="Terminal"
+pnpm create jazz
+```
+
+Pick a framework, hosting mode, and auth style when prompted. The scaffolder installs dependencies and — if you chose hosted — provisions an app on Jazz Cloud with env vars filled in for you.
+
+## What you get
+
+- `schema.ts` — the source of truth for your data. Tables, types, and queries all flow from here. See [Schemas](/docs/schemas/defining-tables).
+- `permissions.ts` — row-level access, pre-wired. See [Permissions](/docs/auth/permissions).
+- A Jazz provider and a todo UI you can reshape into your own app.
+
+## Next steps
+
+- **Model your own data** — edit `schema.ts`, then use `db.insert` and `db.subscribeAll` from your components. See [Writing Data](/docs/writing/writing-data) and [Queries](/docs/reading/queries).
+- **Add auth** — see [Authentication](/docs/auth/authentication) to go beyond an anonymous identity.
+- **Install into an existing app** — see [Install → Client](/docs/install/client) or [Install → TypeScript Server](/docs/install/typescript-server).
 
 ===PAGE:reading/filters-and-sorting===
 TITLE:Filters, Sorting & Pagination
@@ -3283,10 +3664,10 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at your Better Auth JWKS endpoint:
 
     ```bash
-    jazz-tools server  --jwks-url https://your-app.example.com/api/auth/jwks
+    pnpm dlx jazz-tools@alpha server  --jwks-url https://your-app.example.com/api/auth/jwks
     ```
 
-    For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
+    For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat).
 
       If your users start unauthenticated and sign up later, see [Local-first auth](/docs/auth/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
 
@@ -3324,10 +3705,10 @@ function JazzWithWorkOS() {
     Point the Jazz server at the WorkOS JWKS endpoint:
 
     ```bash
-    jazz-tools server  --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    pnpm dlx jazz-tools@alpha server  --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
     ```
 
-    For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
+    For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).
 
 See [Server setup](/docs/getting-started/server-setup) for the full set of server flags.
 
@@ -3359,7 +3740,7 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 
 Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub` fixed to its own user ID, mint the JWT with `sub` set to the Jazz user ID yourself — either via a custom `getSubject` hook on the provider or by issuing the JWT directly from your server.
 
-Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).
+Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).
 
 ===PAGE:recipes/nested-data===
 TITLE:"Nested data with permission inheritance"
@@ -3833,11 +4214,11 @@ See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detail
 
 Read durability controls when the **first result** of a query or subscription is delivered.
 
-| Option         | Values                              | Default        | What it does                                                                                                                                                                                                                                                                     |
-| -------------- | ----------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tier`         | `"local"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
-| `localUpdates` | `"immediate"` \| `"deferred"`       | `"immediate"`  | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
-| `propagation`  | `"full"` \| `"local-only"`          | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
+| Option         | Values                              | Default                                                | What it does                                                                                                                                                                                                                                                                     |
+| -------------- | ----------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tier`         | `"local"` \| `"edge"` \| `"global"` | `"local"` (browser/client) / `"edge"` (backend/server) | How far the first result must come from before the query delivers.                                                                                                                                                                                                               |
+| `localUpdates` | `"immediate"` \| `"deferred"`       | `"immediate"`                                          | With `"immediate"`, your own local writes appear in the subscription while still waiting for the tier to confirm the initial snapshot. This only takes effect after the subscription has settled at least once. With `"deferred"`, all delivery is held until the tier confirms. |
+| `propagation`  | `"full"` \| `"local-only"`          | `"full"`                                               | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                                                                          |
 
 These options apply to:
 
@@ -4086,6 +4467,66 @@ const session = useSession(); // ShallowRef<{ user_id: string } | null>
     ```ts
   const session = getSession(); // { user_id: string } | null
 ```
+
+===PAGE:reference/inspector===
+TITLE:Inspector
+DESCRIPTION:Standalone admin client for exploring Jazz sync servers, schemas, permissions, and live queries.
+
+The [Jazz Inspector](https://v2.inspector.jazz.tools/) is a standalone client for inspecting a Jazz
+app through any reachable sync server. It is not tied to Jazz Cloud: if you have a server URL, app
+ID, and admin credential, you can connect to that app's sync server directly.
+
+  The inspector uses `adminSecret`, not an end-user session token. On the sync connection, that
+  authenticates the client as the backend, so normal permission policies are bypassed. Treat it like
+  production infrastructure access and never expose it to end users.
+
+## Connecting
+
+Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
+
+- **Server URL**&hairsp;—&hairsp;base URL of the sync server
+- **App ID**&hairsp;—&hairsp;Jazz app namespace to inspect
+- **Admin secret**&hairsp;—&hairsp;app admin credential
+- **Env**&hairsp;—&hairsp;logical environment such as `dev`, `staging`, or `prod`
+- **Branch**&hairsp;—&hairsp;logical branch, usually `main`
+
+After connecting, choose the published schema hash you want to inspect. The inspector stores the
+connection locally so you can reopen it without re-entering everything each time.
+
+## Features
+
+### Data Explorer
+
+Browse every table in the selected schema, inspect rows reactively, sort columns, and add typed
+filters. Relation cells link to the referenced table, so you can follow relations without manually
+rebuilding the query.
+
+The explorer also supports admin writes: edit cells inline, open a row sidebar for full-row edits,
+insert new rows, and delete existing ones.
+
+### Schema and permissions view
+
+Each table includes a schema view showing the stored structural schema for that table. In standalone
+mode, the same page also shows the currently published sync-server permissions for that table, which
+is useful when you want to confirm what policy bundle the server is enforcing.
+
+### Live Query
+
+The Live Query tab shows active server-managed subscriptions grouped by query on the connected sync
+server. You can inspect the table, propagation mode, branches, and compiled query JSON, then jump
+straight into the matching table view in Data Explorer.
+
+### Schema switching
+
+If an app has multiple published schema hashes, the inspector lets you switch between them without
+reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
+that still lives on older schema branches.
+
+## DevTools panel
+
+The same inspector UI also exists as a browser DevTools panel for local debugging. The hosted
+client at [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect
+a remote or self-hosted sync server directly.
 
 ===PAGE:reference/internals===
 TITLE:Advanced Internals
@@ -4338,14 +4779,14 @@ uses that catalogue state to resolve schema context on demand.
 
 Jazz separates two durability questions:
 
-| Signal                  | Gates                    | Question it answers                        |
-| ----------------------- | ------------------------ | ------------------------------------------ |
-| `QuerySettled`          | First read delivery      | "Has the query result settled at tier T?"  |
-| Write tier confirmation | Durable write completion | "Has this write been confirmed at tier T?" |
+| Signal                  | Gates                                | Question it answers                        |
+| ----------------------- | ------------------------------------ | ------------------------------------------ |
+| `QuerySettled`          | First read delivery                  | "Has the query result settled at tier T?"  |
+| Write tier confirmation | `.wait({ tier })` promise completion | "Has this write been confirmed at tier T?" |
 
 Both use the same tier lattice (`local` < `edge` < `global`), but they answer different
 questions. A query's first callback is held until `QuerySettled` reaches the requested tier. A
-durable write promise resolves when the requested tier confirms the write.
+`.wait({ tier })` promise resolves when the requested tier confirms the write.
 
   The read durability tier only gates the **first** delivery of a subscription. After the initial
   snapshot arrives at the requested tier, later updates are delivered as they reach the local node.
@@ -4361,7 +4802,7 @@ exposes the Jazz docs as tools any MCP-compatible AI assistant can call during a
 
 The docs served are always matched to the version of `jazz-tools` you install, so your
 assistant is reading documentation for the exact API you have available. To use a different
-version's docs, specify a version in the npx command (e.g. `npx jazz-tools@2.0.0 mcp`).
+version's docs, specify a version tag instead (e.g. `pnpm dlx jazz-tools@2.0.0 mcp`).
 
   Node 22.13 or later is recommended for the best search results. Earlier versions fall back to
   basic keyword search.
@@ -4453,7 +4894,7 @@ get_doc(slug: string)
 ```
 
 Slugs match the URL path under `/docs/` — for example `schemas/defining-tables`, `reading/queries`, or
-`quickstarts/client`. Use `list_pages` to discover available slugs.
+`install/client`. Use `list_pages` to discover available slugs.
 
 ===PAGE:reference/where-operators===
 TITLE:WHERE Operators
@@ -4704,34 +5145,34 @@ Traditional migration systems run a linear sequence and require peers to converg
 1. If this is the first migration you are creating, run:
 
    ```bash
-   npx jazz-tools@alpha migrations create
+   pnpm dlx jazz-tools@alpha migrations create
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools@alpha validate` to catch authoring errors
-   before connecting.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to ensure policies
+   are valid before they are deployed. `deploy` does not run these checks.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
-   npx jazz-tools@alpha migrations create --name <your-migration-name>
+   pnpm dlx jazz-tools@alpha migrations create --name <your-migration-name>
    ```
 
    By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
-5. **Review and customise**&hairsp;—&hairsp; the migration, if needed (see below).
+5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
 6. **Publish**&hairsp;—&hairsp;push the migration to the server:
 
    ```bash
-   npx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
+   pnpm dlx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
    ```
 
    If you also want to publish the current schema, the migration and permissions in one step, you can run:
 
    ```bash
-   npx jazz-tools@alpha deploy <appId>
+   pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
    `deploy` publishes the current schema if the server does not already know it, checks whether the
@@ -4739,7 +5180,7 @@ Traditional migration systems run a linear sequence and require peers to converg
    if needed, and then publishes the current permissions.
 
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
-`npx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
+`pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
 ## Generated stub
 
@@ -4878,8 +5319,8 @@ The Jazz server will detect when there are rows that are not reachable from the 
 In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
-npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
-npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
+pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -4887,13 +5328,13 @@ server and saves a snapshot in `migrations/snapshots/`.
 
 ## Exporting the compiled schema
 
-`npx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
+`pnpm dlx jazz-tools@alpha schema export` prints the compiled structural schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
-npx jazz-tools@alpha schema export
-npx jazz-tools@alpha schema export --schema-dir ./packages/app
-npx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
+pnpm dlx jazz-tools@alpha schema export
+pnpm dlx jazz-tools@alpha schema export --schema-dir ./packages/app
+pnpm dlx jazz-tools@alpha schema export <appId> --schema-hash <hash> --server-url http://localhost:4200 --admin-secret <secret>
 ```
 
 Without `--schema-hash`, Jazz exports the current local `schema.ts`. With `--schema-hash`, it
@@ -5003,14 +5444,13 @@ policies.
 
   const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
-  return db.insert(
-    app.uploads,
-    {
+  return db
+    .insert(app.uploads, {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Profile photo",
       fileId: file.id,
-    },
-  ).wait({ tier: "edge" });
+    })
+    .wait({ tier: "edge" });
 }
 ```
 
@@ -5084,14 +5524,13 @@ Returns the file row; store its id on your own table.
     mimeType: "application/octet-stream",
   });
 
-  return db.insert(
-    app.uploads,
-    {
+  return db
+    .insert(app.uploads, {
       owner_id: EXAMPLE_OWNER_ID,
       label: "Camera import",
       fileId: file.id,
-    }
-  ).wait({ tier: "edge" });
+    })
+    .wait({ tier: "edge" });
 }
 ```
 
@@ -5377,7 +5816,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 
 ### Partial updates and nullable fields
 
-`update(...)` only modify the keys you pass.
+`update(...)` only modifies the keys you pass.
 Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
@@ -5408,23 +5847,22 @@ pub async fn clear_nullable_fields(
 
 When using `insert(...).wait({ tier })`, `update(...).wait({ tier })`, or `delete(...).wait({ tier })`, the tier controls how far the mutation must propagate before the promise resolves: locally on the client (`local`), the nearest edge server (`edge`), or the global core (`global`).
 
-| Tier     | Resolves when                       | 
-| -------- | ----------------------------------- | 
-| `local`  | Persisted to local OPFS             | 
-| `edge`   | Acknowledged by nearest sync server | 
-| `global` | Propagated to global core           | 
+| Tier     | Resolves when                       | Default for    |
+| -------- | ----------------------------------- | -------------- |
+| `local`  | Persisted to local OPFS             | Browser/client |
+| `edge`   | Acknowledged by nearest sync server | Backend/server |
+| `global` | Propagated to global core           | —              |
 
     ```ts
 
-  const { id } = await db.insert(
-    app.todos,
-    {
+  const { id } = await db
+    .insert(app.todos, {
       title: "Write docs with durability tier",
       done: false,
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
-    },
-  ).wait({ tier: "edge" });
+    })
+    .wait({ tier: "edge" });
 
   await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
   await db.delete(app.todos, id).wait({ tier: "global" });
@@ -5452,9 +5890,7 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
 
-## Write handles
-
-Write handles let you wait for a write to persisted up to a specific durability tier, and also access the value (in the case of inserts).
+`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
 ```ts
 const pending = db.insert(app.todos, {
@@ -5474,7 +5910,13 @@ try {
 }
 ```
 
-`wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+You can also set a global `onMutationError` handler that will be notified anytime a write that was not explicitly awaited fails:
+
+```ts
+db.onMutationError((error) => {
+  console.error("DB mutation failed: ", error);
+});
+```
 
 ## Explicit batches
 

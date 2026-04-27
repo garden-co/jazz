@@ -11,9 +11,11 @@ import { DurabilityTier } from "jazz-tools";
 
 interface MessageComposerProps {
   chatId: string;
+  /** When true, the composer is locked regardless of internal readiness. */
+  disabled?: boolean;
 }
 
-export function MessageComposer({ chatId }: MessageComposerProps) {
+export function MessageComposer({ chatId, disabled = false }: MessageComposerProps) {
   const editorRef = useRef<EditorHandle>(null);
   const db = useDb();
   const session = useSession();
@@ -27,7 +29,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
 
   const myProfile = useMyProfile();
   const [pendingSends, setPendingSends] = useState(0);
-  const composerReady = !!userId && !!myProfile && pendingSends === 0;
+  const composerReady = !!userId && !!myProfile && !disabled && pendingSends === 0;
 
   const handleSend = useCallback(
     (html: string) => {
