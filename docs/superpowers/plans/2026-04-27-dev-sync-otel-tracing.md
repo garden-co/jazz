@@ -168,11 +168,13 @@ Forward it in `DevServer.start({...})`:
 syncTracing: options.syncTracing,
 ```
 
-In `packages/jazz-tools/src/dev/managed-runtime.ts`, include `syncTracing` in `normalizeServerOption(...)` automatically by reading object keys, and pass it to `startLocalJazzServer`:
+In `packages/jazz-tools/src/dev/managed-runtime.ts`, forward `syncTracing` explicitly in the `startLocalJazzServer(...)` call:
 
 ```ts
 syncTracing: serverConfig.syncTracing,
 ```
+
+Keep `normalizeServerOption(...)` explicit: add `syncTracing` as a known `JazzServerOptions` field and include only that known field, matching the existing `appId`, `port`, and auth option pattern.
 
 - [ ] **Step 4: Run tests to verify green**
 
@@ -538,7 +540,29 @@ pub trait SyncTraceSink: Send + Sync + 'static {
 }
 ```
 
-Define `SyncTraceRecord` with all top-level fields from the spec, including `payload_json: serde_json::Value` and `message_base64` for failures.
+Define `SyncTraceRecord` as the exported/serialized shape and flatten `SyncTraceFields` into it. Do not duplicate field definitions in multiple structs.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncTraceRecord {
+    pub app_id: Option<String>,
+    pub scope: SyncTraceScope,
+    pub direction: SyncTraceDirection,
+    pub client_id: Option<String>,
+    pub connection_id: Option<String>,
+    pub sequence: Option<u64>,
+    pub payload_json: Option<serde_json::Value>,
+    pub message_bytes: usize,
+    pub recorded_at: u64,
+    pub decode_error: Option<String>,
+    pub message_base64: Option<String>,
+    #[serde(flatten)]
+    pub fields: SyncTraceFields,
+}
+```
+
+Successful records set `payload_json` and flattened `fields`. Decode-failure records set `decode_error`, `message_base64`, and leave `fields` at `SyncTraceFields::default()`.
 
 In `server/mod.rs`, add to `ServerState`:
 
@@ -577,6 +601,10 @@ otel-logs = [
 ```
 
 Build a `SyncTraceSink` implementation behind `#[cfg(feature = "otel-logs")]` that uses OTLP logs and the configured collector URL. Do not use `opentelemetry-stdout`.
+
+`SyncTraceSink::emit(...)` must be fire-and-forget. Implement the OTel sink as a bounded in-memory queue drained by a background task; if the queue is full, drop the trace record and increment an internal dropped counter rather than blocking the WebSocket handler.
+
+The `otel-logs` feature must be independent from the existing `otel` feature. Enabling sync tracing must not transitively enable `opentelemetry-stdout`; if both features are enabled in a build, sync-tracing records still use only the OTel logs exporter path.
 
 - [ ] **Step 5: Run tests to verify green**
 
@@ -674,13 +702,20 @@ async fn sync_trace_ingest_handler(
         }
     }
     record.app_id = Some(route_app_id);
-    let Some(sink) = state.sync_trace_sink.as_ref() else {
+    if state.sync_trace_config.is_none() {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(sink) = state.sync_trace_sink.as_ref() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     sink.emit(record);
     StatusCode::ACCEPTED.into_response()
 }
 ```
+
+The server builder must enforce the invariant that `sync_trace_config` and `sync_trace_sink` are either both `Some` or both `None`. If tracing config is present and sink construction fails, server startup fails before routes are served.
+
+The existing router already applies `CorsLayer::permissive()` to all routes in `create_router`. Keep `/dev/sync-traces` inside that router so cross-origin POSTs from the host dev server origin are allowed. Add a route test with an `Origin` header and `OPTIONS` preflight or POST assertion that the CORS headers are present for `/dev/sync-traces`.
 
 - [ ] **Step 4: Run tests to verify green**
 
@@ -713,7 +748,7 @@ git commit -m "feat: add sync trace ingest route"
 
 Add a route unit test that calls `process_ws_client_frame(...)` with a `SyncBatchRequest` containing a row payload and asserts the sink receives `direction = client_to_server`, `payload_variant = RowBatchCreated`, plus `table_name` and `schema_hash` or visible derivation error fields.
 
-Add a test for server-to-client by injecting a `ConnectionEventHub` update and asserting `direction = server_to_client` with the same decoded payload JSON.
+Add a test for server-to-client by exercising `handle_ws_connection(...)` far enough for its `sync_rx.recv()` branch to send a `ServerEvent::SyncUpdate`. Assert the sink receives `direction = server_to_client` with the same decoded payload JSON.
 
 - [ ] **Step 2: Run tests to verify red**
 
@@ -734,12 +769,22 @@ state.emit_sync_trace_payload(crate::sync_trace::SyncTraceEnvelope {
     scope: SyncTraceScope::Websocket,
     direction: SyncTraceDirection::ClientToServer,
     client_id: Some(client_id.to_string()),
-    connection_id: state.connection_id_for_client(client_id).await,
+    connection_id: Some(connection_id.to_string()),
     sequence: None,
     payload,
     message_bytes: inner.len(),
 });
 ```
+
+Change `process_ws_client_frame(...)` to accept the active connection id:
+
+```rust
+state
+    .process_ws_client_frame(connection_id, client_id, &inner)
+    .await
+```
+
+and update unit tests that call it directly.
 
 Add helper methods on `ServerState` to derive `table_name` and `schema_hash` from storage/schema context and to set `table_name_error` or `schema_hash_error` fields when derivation fails.
 
@@ -939,13 +984,22 @@ In `worker-bridge.test.ts`, add:
 ```ts
 it("posts main_to_worker trace records without blocking sync", async () => {
   const posted: unknown[] = [];
-  const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime, {
+  const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+  const initPromise = bridge.init({
+    schemaJson: "{}",
+    appId: "app-1",
+    env: "dev",
+    userBranch: "main",
+    dbName: "test-db",
     syncTracing: {
       appId: "app-1",
       ingestUrl: "http://127.0.0.1:1234/apps/app-1/dev/sync-traces",
       post: async (_url, body) => posted.push(body),
     },
   });
+  worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+  await initPromise;
 
   runtimeMock.emitSyncPayload(
     "server",
@@ -985,7 +1039,13 @@ In `WorkerBridgeOptions`, add the same `syncTracing` shape.
 
 - [ ] **Step 4: Instrument main-thread bridge**
 
-In `worker-bridge.ts`, accept optional tracing config in the constructor or init options. Before `enqueueSyncMessageForWorker(payload)` and before `runtime.onSyncMessageReceived(payload)`, call `buildSyncTraceRecord(...)` and `postSyncTraceRecord(...)`.
+In `worker-bridge.ts`, keep the constructor signature unchanged:
+
+```ts
+constructor(worker: Worker, runtime: Runtime)
+```
+
+Store tracing config from `WorkerBridge.init(options.syncTracing)`. The trace point for main-to-worker messages is inside the private `enqueueSyncMessageForWorker(payload)` method before pushing to `pendingSyncPayloadsForWorker`. The trace point for worker-to-main messages is in the `this.worker.onmessage` `"sync"` branch before `this.runtime.onSyncMessageReceived(payload)`.
 
 `postSyncTraceRecord` must catch and ignore fetch failures without console logging:
 
@@ -1042,6 +1102,7 @@ git commit -m "feat: trace worker bridge sync messages"
 - Test: `packages/jazz-tools/src/dev/vite.test.ts`
 - Test: `packages/jazz-tools/src/dev/next.test.ts`
 - Test: `packages/jazz-tools/src/dev/sveltekit.test.ts`
+- Test: `packages/jazz-tools/src/runtime/db.worker-bootstrap.test.ts`
 
 - [ ] **Step 1: Write failing config injection tests**
 
@@ -1065,12 +1126,12 @@ PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL;
 Run:
 
 ```bash
-pnpm --filter jazz-tools test -- src/dev/vite.test.ts src/dev/next.test.ts src/dev/sveltekit.test.ts
+pnpm --filter jazz-tools test -- src/dev/vite.test.ts src/dev/next.test.ts src/dev/sveltekit.test.ts src/runtime/db.worker-bootstrap.test.ts
 ```
 
 Expected: FAIL because env vars are missing.
 
-- [ ] **Step 3: Return ingest URL from managed runtime**
+- [ ] **Step 3: Return ingest URL from managed runtime and inject public env**
 
 Extend `ManagedRuntime`:
 
@@ -1100,6 +1161,24 @@ viteServer.config.env.PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL = managed.syncTraceInges
 
 - [ ] **Step 4: Connect runtime config to WorkerBridgeOptions**
 
+Add a small resolver near `DbConfig` in `packages/jazz-tools/src/runtime/db.ts`:
+
+```ts
+function defaultSyncTraceIngestUrlFromEnv(): string | undefined {
+  if (typeof import.meta !== "undefined") {
+    const viteUrl = (import.meta as any).env?.VITE_JAZZ_SYNC_TRACE_INGEST_URL;
+    const svelteUrl = (import.meta as any).env?.PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL;
+    if (typeof viteUrl === "string" && viteUrl.length > 0) return viteUrl;
+    if (typeof svelteUrl === "string" && svelteUrl.length > 0) return svelteUrl;
+  }
+  if (typeof process !== "undefined" && process.env) {
+    const nextUrl = process.env.NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL;
+    if (typeof nextUrl === "string" && nextUrl.length > 0) return nextUrl;
+  }
+  return undefined;
+}
+```
+
 In `packages/jazz-tools/src/runtime/db.ts`, extend `DbConfig`:
 
 ```ts
@@ -1107,20 +1186,28 @@ In `packages/jazz-tools/src/runtime/db.ts`, extend `DbConfig`:
 syncTraceIngestUrl?: string;
 ```
 
-In `Db.buildWorkerBridgeOptions(schemaJson)`, add:
+In `Db.buildWorkerBridgeOptions(schemaJson)`, compute:
 
 ```ts
-syncTracing: this.config.syncTraceIngestUrl
-  ? { appId: this.config.appId, ingestUrl: this.config.syncTraceIngestUrl }
+const syncTraceIngestUrl = this.config.syncTraceIngestUrl ?? defaultSyncTraceIngestUrlFromEnv();
+```
+
+and include:
+
+```ts
+syncTracing: syncTraceIngestUrl
+  ? { appId: this.config.appId, ingestUrl: syncTraceIngestUrl }
   : undefined,
 ```
+
+Add a `db.worker-bootstrap.test.ts` assertion that `buildWorkerBridgeOptions("{}")` uses `NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL` when `config.syncTraceIngestUrl` is absent, mirroring the existing `NEXT_PUBLIC_JAZZ_WASM_URL` pattern.
 
 - [ ] **Step 5: Run tests to verify green**
 
 Run:
 
 ```bash
-pnpm --filter jazz-tools test -- src/dev/vite.test.ts src/dev/next.test.ts src/dev/sveltekit.test.ts
+pnpm --filter jazz-tools test -- src/dev/vite.test.ts src/dev/next.test.ts src/dev/sveltekit.test.ts src/runtime/db.worker-bootstrap.test.ts
 ```
 
 Expected: PASS.
@@ -1217,4 +1304,4 @@ git commit -m "docs: document dev sync otel tracing"
 - [ ] Run `cargo test -p jazz-napi dev_server_option_tests`.
 - [ ] Run `cargo check -p jazz-tools --features otel-logs`.
 - [ ] Run `cargo check -p jazz-wasm`.
-- [ ] Start `dev/observability/docker compose up -d`, run one example app with `server.syncTracing`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing full `payload_json`, `table_name`, and `schema_hash`.
+- [ ] Start `dev/observability/docker compose up -d`, run one example app with `server.syncTracing`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing full `payload_json` and either `table_name`/`schema_hash` or the corresponding `table_name_error`/`schema_hash_error` derivation field.
