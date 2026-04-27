@@ -21,12 +21,22 @@ jazzPlugin({
 });
 ```
 
-The same `server.syncTracing` option is supported by:
+The same `server.syncTracing` option is supported by plugin setup APIs:
 
 - `jazzPlugin(...)`
 - `withJazz(...)`
 - `jazzSvelteKit(...)`
-- `startLocalJazzServer(...)`
+
+The lower-level server API uses the flat equivalent:
+
+```ts
+startLocalJazzServer({
+  syncTracing: {
+    collectorUrl: "http://localhost:4317",
+    payload: "structured",
+  },
+});
+```
 
 `collectorUrl` defaults to `http://localhost:4317` when `syncTracing` is enabled and no URL is provided. `payload` defaults to `"structured"` and can be set to `"full"` for deeper local debugging.
 
@@ -75,7 +85,12 @@ Each successfully decoded message produces one log record with:
 - `sequence`, when known
 - `payload_variant`
 - `message_bytes`
+- `message_encoding`: `binary` or `utf8`
 - `recorded_at`
+- `source_frame_id`, when the observation came from a frame or bridge message that carried multiple payloads
+- `source_payload_index`, when the source carried multiple payloads
+- `source_payload_count`, when the source carried multiple payloads
+- `source_frame_bytes`, when different from `message_bytes`
 
 The record also includes searchable fields extracted or derived from the decoded payload:
 
@@ -88,6 +103,8 @@ The record also includes searchable fields extracted or derived from the decoded
 - `durability_tier`
 - `error_variant`
 - `error_code`, when the `SyncError` variant carries a `code` field
+- `member_index`, when a sync payload expands into multiple per-member records
+- `member_count`, when a sync payload expands into multiple per-member records
 
 When `payload: "full"` is explicitly enabled, successful records also include:
 
@@ -97,13 +114,15 @@ When `payload: "full"` is explicitly enabled, successful records also include:
 
 ### Derived Fields
 
-`table_name` and `schema_hash` are required top-level searchable fields in v1 whenever a sync payload refers to row data, query data, schema diagnostics, or catalogue/schema data.
+`table_name` and `schema_hash` are required top-level searchable fields in v1 whenever a sync payload record refers to row data, query data, schema diagnostics, or catalogue/schema data.
 
 Some payloads carry these fields directly, such as `SchemaWarning`, `ConnectionSchemaDiagnostics`, query payloads, and catalogue/schema payloads. Row-oriented payloads such as `RowBatchCreated`, `RowBatchNeeded`, `RowBatchStateChanged`, `BatchSettlement`, and `SealBatch` require derivation from the row id, branch, metadata, schema catalogue, storage, or connection schema context available to the local runtime/server.
 
+For multi-member payloads, the implementation emits one log record per member rather than collapsing multiple tables or schema hashes into one arbitrary top-level value. Each expanded record includes `member_index` and `member_count`. If derivation fails for one member, only that member record gets the corresponding `table_name_error` or `schema_hash_error`.
+
 If the implementation cannot derive a required field for a payload that should have it, it must still export the message and set a derivation error field, for example `table_name_error` or `schema_hash_error`. Missing derivation must be visible in OTel, not silently omitted.
 
-Decode failures are traced too. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, decode error, and a capped `message_base64` containing the raw undecoded message bytes. It does not silently degrade to an opaque byte-only success record. The cap is implementation-defined in v1 but must be documented near the option and applied before export.
+Decode failures are traced too. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, message encoding, decode error, and a capped `message_base64` containing the undecoded message bytes. For string payloads, `message_base64` is the capped UTF-8 bytes of the string. It does not silently degrade to an opaque byte-only success record. The cap is implementation-defined in v1 but must be documented near the option and applied before export.
 
 ## No Stdout Fallback
 
@@ -138,14 +157,19 @@ The dev plugin also exposes browser-readable runtime configuration for worker br
 
 - `*_JAZZ_SYNC_TRACE_INGEST_URL`
 - `*_JAZZ_SYNC_TRACE_PAYLOAD`
+- `*_JAZZ_SYNC_TRACE_TOKEN`
 
-The browser runtime mirrors the server option. When the mode is `"structured"`, it must not request or emit `payload_json`.
+The browser runtime mirrors the server option through `DbConfig` and `WorkerBridgeOptions`. Worker bridge tracing is disabled unless both an ingest URL and trace token are present. When the mode is `"structured"`, it must not request or emit `payload_json`.
+
+`startLocalJazzServer(...)` returns the trace ingest URL, trace payload mode, and generated trace token on its server handle so framework plugins can inject the public env values.
 
 ### Rust NAPI Dev Server
 
 Parse the new `syncTracing` option in `DevServerStartOptions`.
 
 When enabled, initialize a dev-server OTel exporter against the configured collector URL before starting the hosted server. Store the exporter/provider with the dev server lifetime and shut it down when the server stops.
+
+Generate a random per-server dev trace token when sync tracing is enabled. Store only the active token in server state and expose it to the plugin runtime so the browser can authenticate ingest requests.
 
 ### Trace Ingest Route
 
@@ -159,13 +183,15 @@ The route is available only when sync tracing is enabled. When sync tracing is d
 
 Browser-ingested observations do not need to include `app_id` in the request body. The route attaches the `:app_id` path value server-side. If the body does include `app_id`, the handler must validate that it matches `:app_id` and reject mismatches with `400`.
 
+Browser-ingested observations must include the generated dev trace token in an `x-jazz-sync-trace-token` header. Missing or invalid tokens return `401` and perform no export. This token is browser-visible dev configuration, not a production secret, but it prevents unrelated local origins from injecting records by only guessing an app id. The route must either use route-scoped CORS that allows the configured app origin and this header, or document that permissive CORS is acceptable only because the token is still required.
+
 Browser trace delivery is best-effort and lossy in v1. Failed ingest requests must not log to console and must not affect sync. Retry buffers are out of scope for the first version.
 
 ### TypeScript Sync Payload Decoder
 
-Add a TypeScript sync-payload decoder for browser-side instrumentation. This is new runtime infrastructure: today worker bridge payloads are `Uint8Array` values and there is no shared TypeScript decoder at that layer.
+Add a TypeScript sync-payload decoder for browser-side instrumentation. This is new runtime infrastructure: today worker bridge payloads can be `Uint8Array` or string values and there is no shared TypeScript decoder at that layer.
 
-The decoder must turn the worker-bridge payload bytes into structured trace fields that match the Rust `SyncPayload` extractors, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a decode-failure result with capped `message_base64` when decoding fails. It only materializes and returns full decoded JSON when the tracing config requests `payload: "full"`.
+The decoder must turn the worker-bridge `Uint8Array` or string payload into structured trace fields that match the Rust `SyncPayload` extractors, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a decode-failure result with capped `message_base64` when decoding fails. `message_bytes` is the byte length of the binary payload or the UTF-8 byte length of the string payload. It only materializes and returns full decoded JSON when the tracing config requests `payload: "full"`.
 
 ### Worker Bridge Instrumentation
 
@@ -174,7 +200,7 @@ Instrument the browser worker bridge in both directions:
 - main runtime outgoing sync payloads before they are sent to the worker
 - worker sync payloads before they are delivered to the main runtime
 
-Decode each payload with the new TypeScript sync-payload decoder. Send the trace observation to the dev-server ingest endpoint using `fetch` without logging failures to the console. Failed trace delivery must not break sync.
+Decode each payload with the new TypeScript sync-payload decoder. Send the trace observation to the dev-server ingest endpoint using `fetch` with the `x-jazz-sync-trace-token` header and without logging failures to the console. Failed trace delivery must not break sync.
 
 ### WebSocket Instrumentation
 
@@ -185,18 +211,21 @@ Instrument the embedded Rust WebSocket server in both directions:
 
 Decode the typed sync payload and export the same trace observation fields used by browser-ingested events.
 
+Inbound WebSocket frames can contain multiple sync payloads. The server emits one observation per inner sync payload, or one observation per member when an inner payload expands into multiple row/member records. `message_bytes` is the size of the inner payload when available; `source_frame_bytes` carries the full frame size. `source_frame_id`, `source_payload_index`, and `source_payload_count` correlate records back to source order.
+
 ## Testing
 
 Implementation should be test-driven. The first tests should cover:
 
-- `jazzPlugin`, `withJazz`, `jazzSvelteKit`, and `startLocalJazzServer` accept and forward `syncTracing.collectorUrl`.
+- `jazzPlugin`, `withJazz`, and `jazzSvelteKit` accept `server.syncTracing`; `startLocalJazzServer` accepts flat `syncTracing`; all forward `collectorUrl`, `payload`, and generated browser ingest token configuration.
 - `DevServer.start` parses `syncTracing` and rejects invalid shapes.
 - The generated NAPI TypeScript declaration includes `syncTracing`.
 - The dev OTel exporter path emits OTel logs through the configured collector URL and never configures stdout export for sync tracing.
 - The TypeScript sync-payload decoder returns `payload_variant`, `table_name`, `schema_hash`, other searchable fields, optional decoded JSON only when `payload: "full"`, and decode-failure records with capped `message_base64`.
-- The worker bridge emits decoded trace observations for `main_to_worker` and `worker_to_main`.
-- The trace ingest route attaches or validates `app_id`, accepts decoded observations without printing them, and rejects body/path app id mismatches.
+- The worker bridge emits decoded trace observations for `main_to_worker` and `worker_to_main` only when ingest URL and token are configured.
+- The trace ingest route attaches or validates `app_id`, requires the dev trace token, accepts decoded observations without printing them, and rejects body/path app id mismatches.
 - The Rust WebSocket server emits decoded observations for `client_to_server` and `server_to_client`, including derived `table_name` and `schema_hash` for row-oriented sync payloads.
+- Multi-payload WebSocket frames include frame correlation fields, and multi-member sync payloads emit per-member records.
 - Decode failures produce explicit decode-error observations with raw bytes encoded as base64.
 
 ## Out Of Scope
