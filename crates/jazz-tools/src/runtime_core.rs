@@ -383,10 +383,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             core.mark_local_batch_rows_rejected(batch_id);
         }
 
-        if let Err(error) = core.upgrade_legacy_direct_batch_records() {
-            tracing::warn!(%error, "failed to upgrade legacy direct batch records");
-        }
-
         core
     }
 
