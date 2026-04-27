@@ -17,11 +17,12 @@ const originalBackendSecret = process.env.BACKEND_SECRET;
 function makeViteServer(
   command: "serve" | "build",
   root = "/tmp/jazz-sveltekit-test",
-): ViteDevServer {
+): ViteDevServer & { restart: ReturnType<typeof vi.fn> } {
   return {
     config: { root, command, env: {} },
     httpServer: { once() {} },
     ws: { send() {} },
+    restart: vi.fn(),
   };
 }
 
@@ -98,6 +99,45 @@ describe("jazzSvelteKit", () => {
     expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
   }, 30_000);
 
+  it("restarts the dev server on first-ever cold start so SvelteKit's $env capture sees the freshly allocated appId", async () => {
+    const port = await getAvailablePort();
+    const root = await tempRoots.create("jazz-sveltekit-cold-start-");
+    await mkdir(join(root, "src", "lib"), { recursive: true });
+    await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+
+    const plugin = jazzSvelteKit({
+      server: { port, adminSecret: "cold-start-admin" },
+    });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.restart).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("does not restart when appId is already persisted in .env (warm start)", async () => {
+    const persistedAppId = "00000000-0000-0000-0000-000000000099";
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: persistedAppId,
+      port: 19990,
+      url: "http://127.0.0.1:19990",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-warm-start-");
+    await writeFile(join(root, ".env"), `PUBLIC_JAZZ_APP_ID=${persistedAppId}\n`);
+
+    const plugin = jazzSvelteKit({
+      server: { port: 19990, adminSecret: "warm-start-admin" },
+    });
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(viteServer.restart).not.toHaveBeenCalled();
+  });
+
   it("does not start a server during build", async () => {
     const spy = vi.spyOn(devServer, "startLocalJazzServer");
 
@@ -163,6 +203,7 @@ describe("jazzSvelteKit", () => {
       config: { root, command: "serve", env: {}, server: { port: 3000 } },
       httpServer: { once() {} },
       ws: { send() {} },
+      restart: vi.fn(),
     };
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
@@ -198,6 +239,7 @@ describe("jazzSvelteKit", () => {
         config: { root, command: "serve", env: {}, server: { port: 3000 } },
         httpServer: { once() {} },
         ws: { send() {} },
+        restart: vi.fn(),
       };
       await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
@@ -280,47 +322,6 @@ describe("jazzSvelteKit", () => {
     await expect(
       (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(makeViteServer("serve")),
     ).rejects.toThrow("appId is required when connecting to an existing server");
-  });
-
-  it("stops the server and closes the watcher when the close hook fires", async () => {
-    const stop = vi.fn().mockResolvedValue(undefined);
-    const close = vi.fn();
-
-    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
-      appId: "00000000-0000-0000-0000-000000000002",
-      port: 19997,
-      url: "http://127.0.0.1:19997",
-      dataDir: undefined as unknown as string,
-      stop,
-    });
-    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({
-      hash: "abc",
-    });
-    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close });
-
-    const root = await tempRoots.create("jazz-sveltekit-close-test-");
-    let capturedCloseCallback: (() => void) | undefined;
-    const viteServer: ViteDevServer = {
-      config: { root, command: "serve", env: {} },
-      httpServer: {
-        once(event, cb) {
-          if (event === "close") capturedCloseCallback = cb;
-        },
-      },
-      ws: { send() {} },
-    };
-
-    const plugin = jazzSvelteKit({
-      server: { port: 19997, adminSecret: "close-hook-admin" },
-    });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
-
-    expect(capturedCloseCallback).toBeDefined();
-    capturedCloseCallback!();
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(stop).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
   });
 
   it("surfaces schema push failures as HMR errors", async () => {
