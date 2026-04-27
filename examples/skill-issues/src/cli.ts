@@ -1,5 +1,9 @@
+import { existsSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer as createViteServer } from "vite";
 import { readConfig, writeConfig } from "./config.js";
 import { openRepository as defaultOpenRepository } from "./db.js";
 import { exportMarkdownTodo, importMarkdownTodo } from "./domain/markdown.js";
@@ -12,6 +16,7 @@ import {
   startDeviceAuthorization as defaultStartDeviceAuthorization,
   type GitHubDeviceStart,
 } from "./server/github.js";
+import { createSkillIssuesServer } from "./server/server.js";
 
 export interface CliRuntime {
   cwd: string;
@@ -365,6 +370,52 @@ async function exportItems(
   };
 }
 
+function parsePort(value: string | undefined): number {
+  const port = Number(value ?? "4242");
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("Port must be an integer from 1 to 65535.");
+  }
+  return port;
+}
+
+function findUiRoot(runtime: CliRuntime): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(moduleDir, ".."),
+    join(moduleDir, "..", ".."),
+    join(runtime.cwd, "examples", "skill-issues"),
+    runtime.cwd,
+  ];
+
+  return candidates.find((candidate) => existsSync(join(candidate, "index.html"))) ?? runtime.cwd;
+}
+
+async function serve(args: string[], runtime: CliRuntime): Promise<CliResult> {
+  const port = parsePort(valueAfter(args, "--port") ?? runtime.env.PORT);
+  const app = createSkillIssuesServer();
+  const vite = await createViteServer({
+    root: findUiRoot(runtime),
+    server: { middlewareMode: true },
+    appType: "spa",
+  });
+  app.use(vite.middlewares);
+
+  const server = createHttpServer(app);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  return {
+    exitCode: 0,
+    stdout: `Skill issues server running at http://localhost:${port}\n`,
+    stderr: "",
+  };
+}
+
 export async function runCli(
   args: string[],
   runtime: CliRuntime,
@@ -387,6 +438,7 @@ export async function runCli(
     if (command === "status") return await setItemStatus(args, runtime, deps);
     if (command === "import") return await importItems(args, runtime, deps);
     if (command === "export") return await exportItems(args, runtime, deps);
+    if (command === "serve") return await serve(args, runtime);
 
     return {
       exitCode: 1,

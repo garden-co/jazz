@@ -1,7 +1,18 @@
 import express, { type ErrorRequestHandler, type Express } from "express";
+import { join } from "node:path";
 import { verifyLocalFirstIdentityProof } from "jazz-napi";
-import { openBackendRepository as defaultOpenBackendRepository } from "../db.js";
-import type { VerifiedUser } from "../repository.js";
+import {
+  openBackendRepository as defaultOpenBackendRepository,
+  openRepository as defaultOpenRepository,
+} from "../db.js";
+import { exportMarkdownTodo as defaultExportMarkdownTodo } from "../domain/markdown.js";
+import type {
+  IssueItem,
+  ItemStatus,
+  ListedItem,
+  ListFilters,
+  VerifiedUser,
+} from "../repository.js";
 import {
   exchangeDeviceCode as defaultExchangeDeviceCode,
   fetchGitHubUser as defaultFetchGitHubUser,
@@ -30,6 +41,19 @@ export interface VerifierDependencies {
   openBackendRepository?: () => Promise<VerifierRepository>;
 }
 
+export interface SkillIssuesRepository {
+  upsertItem(item: IssueItem): Promise<unknown>;
+  listItems(filters?: ListFilters): Promise<ListedItem[]>;
+  assignMe(slug: string): Promise<unknown>;
+  setStatus(slug: string, status: ItemStatus): Promise<unknown>;
+}
+
+export interface SkillIssuesServerDependencies {
+  openRepository?: () => Promise<SkillIssuesRepository>;
+  exportMarkdownTodo?: typeof defaultExportMarkdownTodo;
+  cwd?: string;
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -40,6 +64,22 @@ function requiredEnv(name: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isItemKind(value: unknown): value is IssueItem["kind"] {
+  return value === "idea" || value === "issue";
+}
+
+function isItemStatus(value: unknown): value is ItemStatus {
+  return value === "open" || value === "in_progress" || value === "done";
+}
+
+function requireString(record: Record<string, unknown>, name: string): string {
+  const value = record[name];
+  if (typeof value !== "string" || !value) {
+    throw new VerifierHttpError(400, `${name} is required`);
+  }
+  return value;
 }
 
 async function verifyJazzProof(proof: string): Promise<{ jazzUserId: string }> {
@@ -122,6 +162,101 @@ export function createVerifierApp(deps: VerifierDependencies = {}): Express {
     }
 
     response.status(500).json({ error: "Verifier request failed" });
+  };
+  app.use(errorHandler);
+
+  return app;
+}
+
+export function createSkillIssuesServer(deps: SkillIssuesServerDependencies = {}): Express {
+  const app = express();
+  const openRepository =
+    deps.openRepository ?? (() => defaultOpenRepository(process.cwd(), process.env));
+  const exportMarkdownTodo = deps.exportMarkdownTodo ?? defaultExportMarkdownTodo;
+  const cwd = deps.cwd ?? process.cwd();
+
+  app.use(createVerifierApp());
+  app.use(express.json());
+
+  app.get("/api/items", async (_request, response, next) => {
+    try {
+      const repo = await openRepository();
+      response.json(await repo.listItems({}));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/items", async (request, response, next) => {
+    try {
+      const body: unknown = request.body;
+      if (!isRecord(body) || !isItemKind(body.kind)) {
+        throw new VerifierHttpError(400, "kind is required");
+      }
+
+      const item: IssueItem = {
+        kind: body.kind,
+        slug: requireString(body, "slug"),
+        title: requireString(body, "title"),
+        description: requireString(body, "description"),
+      };
+      const repo = await openRepository();
+      await repo.upsertItem(item);
+      response.status(201).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/items/:slug/assign-me", async (request, response, next) => {
+    try {
+      const repo = await openRepository();
+      await repo.assignMe(request.params.slug);
+      response.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/items/:slug/status", async (request, response, next) => {
+    try {
+      const body: unknown = request.body;
+      if (!isRecord(body) || !isItemStatus(body.status)) {
+        throw new VerifierHttpError(400, "status is required");
+      }
+
+      const repo = await openRepository();
+      await repo.setStatus(request.params.slug, body.status);
+      response.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/export", async (_request, response, next) => {
+    try {
+      const repo = await openRepository();
+      const items = await repo.listItems({});
+      const plainItems: IssueItem[] = items.map(({ kind, slug, title, description }) => ({
+        kind,
+        slug,
+        title,
+        description,
+      }));
+      await exportMarkdownTodo(join(cwd, "todo"), plainItems);
+      response.json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+    if (error instanceof VerifierHttpError) {
+      response.status(error.statusCode).json({ error: error.message });
+      return;
+    }
+
+    response.status(500).json({ error: "Skill issues request failed" });
   };
   app.use(errorHandler);
 
