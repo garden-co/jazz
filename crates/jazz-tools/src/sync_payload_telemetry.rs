@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ops::Deref;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+    mpsc::{SyncSender, TrySendError, sync_channel},
+};
+use std::thread::{self, JoinHandle};
 
 use crate::batch_fate::BatchSettlement;
 use crate::object::{BranchName, ObjectId};
@@ -449,6 +455,360 @@ pub fn records_from_payload(
     SyncPayloadTelemetryFields::records_from_payload(payload, derivations)
 }
 
+pub trait SyncPayloadTelemetrySink: Send + Sync + 'static {
+    fn emit(&self, record: SyncPayloadTelemetryRecord);
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopSyncPayloadTelemetrySink;
+
+impl SyncPayloadTelemetrySink for NoopSyncPayloadTelemetrySink {
+    fn emit(&self, _record: SyncPayloadTelemetryRecord) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemorySyncPayloadTelemetrySink {
+    records: Arc<Mutex<Vec<SyncPayloadTelemetryRecord>>>,
+}
+
+impl InMemorySyncPayloadTelemetrySink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn records(&self) -> Vec<SyncPayloadTelemetryRecord> {
+        self.records.lock().unwrap().clone()
+    }
+
+    pub fn clear(&self) {
+        self.records.lock().unwrap().clear();
+    }
+}
+
+impl SyncPayloadTelemetrySink for InMemorySyncPayloadTelemetrySink {
+    fn emit(&self, record: SyncPayloadTelemetryRecord) {
+        self.records.lock().unwrap().push(record);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundedSyncPayloadTelemetrySink {
+    inner: Arc<BoundedSyncPayloadTelemetrySinkInner>,
+}
+
+#[derive(Debug)]
+struct BoundedSyncPayloadTelemetrySinkInner {
+    sender: Mutex<Option<SyncSender<SyncPayloadTelemetryRecord>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    dropped: AtomicU64,
+}
+
+impl BoundedSyncPayloadTelemetrySink {
+    pub fn new(capacity: usize, downstream: impl SyncPayloadTelemetrySink) -> Self {
+        assert!(
+            capacity > 0,
+            "sync payload telemetry queue capacity must be greater than zero"
+        );
+
+        let (sender, receiver) = sync_channel(capacity);
+        let worker = thread::Builder::new()
+            .name("sync-payload-telemetry".to_string())
+            .spawn(move || {
+                while let Ok(record) = receiver.recv() {
+                    downstream.emit(record);
+                }
+            })
+            .expect("failed to spawn sync payload telemetry worker");
+
+        Self {
+            inner: Arc::new(BoundedSyncPayloadTelemetrySinkInner {
+                sender: Mutex::new(Some(sender)),
+                worker: Mutex::new(Some(worker)),
+                dropped: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    pub fn dropped_count(&self) -> u64 {
+        self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.shutdown();
+    }
+}
+
+impl SyncPayloadTelemetrySink for BoundedSyncPayloadTelemetrySink {
+    fn emit(&self, record: SyncPayloadTelemetryRecord) {
+        let sender = self.inner.sender.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            match sender.try_send(record) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        } else {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl BoundedSyncPayloadTelemetrySinkInner {
+    fn shutdown(&self) {
+        self.sender.lock().unwrap().take();
+        if let Some(worker) = self.worker.lock().unwrap().take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for BoundedSyncPayloadTelemetrySinkInner {
+    fn drop(&mut self) {
+        if let Ok(sender) = self.sender.get_mut() {
+            sender.take();
+        }
+        if let Ok(worker) = self.worker.get_mut()
+            && let Some(worker) = worker.take()
+        {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(feature = "otel-logs")]
+pub mod otel_logs {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use opentelemetry::logs::{
+        AnyValue, LogRecord as _, Logger as _, LoggerProvider as _, Severity,
+    };
+    use opentelemetry::{Key, KeyValue};
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
+
+    use super::{
+        BoundedSyncPayloadTelemetrySink, SyncPayloadTelemetryRecord, SyncPayloadTelemetrySink,
+    };
+
+    #[derive(Debug, Clone)]
+    pub struct OtelLogsSyncPayloadTelemetrySink {
+        logger: SdkLogger,
+        _provider: SdkLoggerProvider,
+    }
+
+    impl OtelLogsSyncPayloadTelemetrySink {
+        pub fn new(
+            collector_url: impl Into<String>,
+        ) -> Result<Self, opentelemetry_otlp::ExporterBuildError> {
+            let exporter = opentelemetry_otlp::LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(collector_url.into())
+                .build()?;
+            let provider = SdkLoggerProvider::builder()
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder()
+                        .with_service_name("jazz-server")
+                        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+                        .build(),
+                )
+                .with_batch_exporter(exporter)
+                .build();
+            let logger = provider.logger("jazz-server.sync-payload");
+
+            Ok(Self {
+                logger,
+                _provider: provider,
+            })
+        }
+    }
+
+    impl SyncPayloadTelemetrySink for OtelLogsSyncPayloadTelemetrySink {
+        fn emit(&self, record: SyncPayloadTelemetryRecord) {
+            let mut log_record = self.logger.create_log_record();
+            log_record.set_event_name("jazz.sync_payload");
+            log_record.set_target("jazz-tools.sync_payload_telemetry");
+            log_record.set_severity_number(Severity::Debug);
+            log_record.set_severity_text(Severity::Debug.name());
+            log_record.set_timestamp(UNIX_EPOCH + Duration::from_millis(record.recorded_at));
+            log_record.set_body(AnyValue::String(
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| "sync_payload_telemetry_record".to_string())
+                    .into(),
+            ));
+            log_record.add_attributes(record_attributes(&record));
+            self.logger.emit(log_record);
+        }
+    }
+
+    pub fn bounded_otel_logs_sink(
+        collector_url: impl Into<String>,
+        queue_capacity: usize,
+    ) -> Result<BoundedSyncPayloadTelemetrySink, opentelemetry_otlp::ExporterBuildError> {
+        Ok(BoundedSyncPayloadTelemetrySink::new(
+            queue_capacity,
+            OtelLogsSyncPayloadTelemetrySink::new(collector_url)?,
+        ))
+    }
+
+    fn record_attributes(record: &SyncPayloadTelemetryRecord) -> Vec<(Key, AnyValue)> {
+        let mut attributes = Vec::new();
+        push_string(&mut attributes, "jazz.app_id", record.app_id.as_deref());
+        push_string(
+            &mut attributes,
+            "jazz.scope",
+            Some(scope_name(record.scope)),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.direction",
+            Some(direction_name(record.direction)),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.client_id",
+            record.client_id.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.connection_id",
+            record.connection_id.as_deref(),
+        );
+        push_u64(&mut attributes, "jazz.sequence", record.sequence);
+        push_string(
+            &mut attributes,
+            "jazz.source_frame_id",
+            record.source_frame_id.as_deref(),
+        );
+        push_usize(
+            &mut attributes,
+            "jazz.source_payload_index",
+            record.source_payload_index,
+        );
+        push_usize(
+            &mut attributes,
+            "jazz.source_payload_count",
+            record.source_payload_count,
+        );
+        push_u64(
+            &mut attributes,
+            "jazz.source_frame_bytes",
+            record.source_frame_bytes,
+        );
+        push_u64(
+            &mut attributes,
+            "jazz.message_bytes",
+            Some(record.message_bytes),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.message_encoding",
+            Some(message_encoding_name(record.message_encoding)),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.decode_error",
+            record.decode_error.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.payload_variant",
+            record.payload_variant.as_deref(),
+        );
+        push_string(&mut attributes, "jazz.row_id", record.row_id.as_deref());
+        push_string(
+            &mut attributes,
+            "jazz.table_name",
+            record.table_name.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.table_name_error",
+            record.table_name_error.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.branch_name",
+            record.branch_name.as_deref(),
+        );
+        push_string(&mut attributes, "jazz.batch_id", record.batch_id.as_deref());
+        push_u64(&mut attributes, "jazz.query_id", record.query_id);
+        push_string(
+            &mut attributes,
+            "jazz.schema_hash",
+            record.schema_hash.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.schema_hash_error",
+            record.schema_hash_error.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.durability_tier",
+            record.durability_tier.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.error_variant",
+            record.error_variant.as_deref(),
+        );
+        push_string(
+            &mut attributes,
+            "jazz.error_code",
+            record.error_code.as_deref(),
+        );
+        push_usize(&mut attributes, "jazz.member_index", record.member_index);
+        push_usize(&mut attributes, "jazz.member_count", record.member_count);
+        attributes
+    }
+
+    fn push_string(attributes: &mut Vec<(Key, AnyValue)>, key: &'static str, value: Option<&str>) {
+        if let Some(value) = value {
+            attributes.push((Key::from_static_str(key), value.to_string().into()));
+        }
+    }
+
+    fn push_u64(attributes: &mut Vec<(Key, AnyValue)>, key: &'static str, value: Option<u64>) {
+        if let Some(value) = value {
+            attributes.push((Key::from_static_str(key), to_i64(value).into()));
+        }
+    }
+
+    fn push_usize(attributes: &mut Vec<(Key, AnyValue)>, key: &'static str, value: Option<usize>) {
+        if let Some(value) = value {
+            attributes.push((Key::from_static_str(key), to_i64(value as u64).into()));
+        }
+    }
+
+    fn to_i64(value: u64) -> i64 {
+        i64::try_from(value).unwrap_or(i64::MAX)
+    }
+
+    fn scope_name(scope: super::SyncPayloadTelemetryScope) -> &'static str {
+        match scope {
+            super::SyncPayloadTelemetryScope::WorkerBridge => "worker_bridge",
+            super::SyncPayloadTelemetryScope::Websocket => "websocket",
+        }
+    }
+
+    fn direction_name(direction: super::SyncPayloadTelemetryDirection) -> &'static str {
+        match direction {
+            super::SyncPayloadTelemetryDirection::MainToWorker => "main_to_worker",
+            super::SyncPayloadTelemetryDirection::WorkerToMain => "worker_to_main",
+            super::SyncPayloadTelemetryDirection::ClientToServer => "client_to_server",
+            super::SyncPayloadTelemetryDirection::ServerToClient => "server_to_client",
+        }
+    }
+
+    fn message_encoding_name(encoding: super::SyncPayloadTelemetryMessageEncoding) -> &'static str {
+        match encoding {
+            super::SyncPayloadTelemetryMessageEncoding::Binary => "binary",
+            super::SyncPayloadTelemetryMessageEncoding::Utf8 => "utf8",
+        }
+    }
+}
+
 fn log_body_for_payload(payload: &SyncPayload) -> Option<Value> {
     if !is_error_or_failure_payload(payload) {
         return None;
@@ -537,10 +897,11 @@ mod tests {
     use crate::row_histories::{BatchId, RowState, StoredRowBatch};
     use crate::sync_manager::{DurabilityTier, QueryId, SyncError, SyncPayload};
     use crate::sync_payload_telemetry::{
-        FieldDerivation, FieldDerivations, SyncPayloadTelemetryDecodeFailureInput,
+        BoundedSyncPayloadTelemetrySink, FieldDerivation, FieldDerivations,
+        InMemorySyncPayloadTelemetrySink, SyncPayloadTelemetryDecodeFailureInput,
         SyncPayloadTelemetryDirection, SyncPayloadTelemetryFields,
         SyncPayloadTelemetryMessageEncoding, SyncPayloadTelemetryRecord,
-        SyncPayloadTelemetryRecordInput, SyncPayloadTelemetryScope,
+        SyncPayloadTelemetryRecordInput, SyncPayloadTelemetryScope, SyncPayloadTelemetrySink,
     };
 
     #[test]
@@ -987,6 +1348,73 @@ mod tests {
         assert_eq!(without_app.app_id, None);
     }
 
+    #[test]
+    fn in_memory_sink_keeps_emitted_records_for_route_tests() {
+        let sink = InMemorySyncPayloadTelemetrySink::default();
+        let record = telemetry_record(1);
+
+        sink.emit(record.clone());
+
+        assert_eq!(sink.records(), vec![record]);
+    }
+
+    #[test]
+    fn bounded_sink_drops_when_worker_queue_is_full() {
+        let downstream = BlockingTestSink::default();
+        let sink = BoundedSyncPayloadTelemetrySink::new(1, downstream.clone());
+
+        sink.emit(telemetry_record(1));
+        downstream.wait_until_blocked();
+        sink.emit(telemetry_record(2));
+        sink.emit(telemetry_record(3));
+
+        assert_eq!(sink.dropped_count(), 1);
+
+        downstream.release();
+        downstream.wait_for_records(2);
+        assert_eq!(
+            downstream
+                .records()
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        sink.shutdown();
+    }
+
+    #[test]
+    fn bounded_sink_shutdown_drains_queued_records() {
+        let downstream = InMemorySyncPayloadTelemetrySink::default();
+        let sink = BoundedSyncPayloadTelemetrySink::new(8, downstream.clone());
+
+        sink.emit(telemetry_record(1));
+        sink.emit(telemetry_record(2));
+        sink.shutdown();
+
+        assert_eq!(
+            downstream
+                .records()
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        assert_eq!(sink.dropped_count(), 0);
+    }
+
+    #[test]
+    fn bounded_sink_counts_emit_after_shutdown_as_dropped() {
+        let downstream = InMemorySyncPayloadTelemetrySink::default();
+        let sink = BoundedSyncPayloadTelemetrySink::new(8, downstream.clone());
+
+        sink.shutdown();
+        sink.emit(telemetry_record(1));
+
+        assert_eq!(downstream.records(), Vec::new());
+        assert_eq!(sink.dropped_count(), 1);
+    }
+
     fn row_batch(row_id: ObjectId, batch_id: BatchId, branch: &str) -> StoredRowBatch {
         StoredRowBatch::new_with_batch_id(
             batch_id,
@@ -1004,5 +1432,92 @@ mod tests {
             RowState::VisibleDirect,
             Some(DurabilityTier::Local),
         )
+    }
+
+    fn telemetry_record(sequence: u64) -> SyncPayloadTelemetryRecord {
+        SyncPayloadTelemetryRecord {
+            app_id: Some("app_todos".to_string()),
+            severity_text: "DEBUG".to_string(),
+            scope: SyncPayloadTelemetryScope::Websocket,
+            direction: SyncPayloadTelemetryDirection::ServerToClient,
+            client_id: Some("alice".to_string()),
+            connection_id: Some("conn-1".to_string()),
+            sequence: Some(sequence),
+            source_frame_id: None,
+            source_payload_index: None,
+            source_payload_count: None,
+            source_frame_bytes: None,
+            message_bytes: 24,
+            message_encoding: SyncPayloadTelemetryMessageEncoding::Binary,
+            recorded_at: 1_775_000_000_000 + sequence,
+            decode_error: None,
+            log_body: None,
+            fields: SyncPayloadTelemetryFields {
+                payload_variant: Some("QuerySettled".to_string()),
+                query_id: Some(sequence),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingTestSink {
+        state: std::sync::Arc<BlockingTestSinkState>,
+    }
+
+    #[derive(Default)]
+    struct BlockingTestSinkState {
+        records: std::sync::Mutex<Vec<SyncPayloadTelemetryRecord>>,
+        records_condvar: std::sync::Condvar,
+        blocked: std::sync::Mutex<bool>,
+        blocked_condvar: std::sync::Condvar,
+        release: std::sync::Mutex<bool>,
+        release_condvar: std::sync::Condvar,
+    }
+
+    impl SyncPayloadTelemetrySink for BlockingTestSink {
+        fn emit(&self, record: SyncPayloadTelemetryRecord) {
+            {
+                let mut records = self.state.records.lock().unwrap();
+                records.push(record);
+                self.state.records_condvar.notify_all();
+            }
+
+            let mut blocked = self.state.blocked.lock().unwrap();
+            *blocked = true;
+            self.state.blocked_condvar.notify_all();
+            drop(blocked);
+
+            let mut release = self.state.release.lock().unwrap();
+            while !*release {
+                release = self.state.release_condvar.wait(release).unwrap();
+            }
+        }
+    }
+
+    impl BlockingTestSink {
+        fn wait_until_blocked(&self) {
+            let mut blocked = self.state.blocked.lock().unwrap();
+            while !*blocked {
+                blocked = self.state.blocked_condvar.wait(blocked).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            let mut release = self.state.release.lock().unwrap();
+            *release = true;
+            self.state.release_condvar.notify_all();
+        }
+
+        fn wait_for_records(&self, count: usize) {
+            let mut records = self.state.records.lock().unwrap();
+            while records.len() < count {
+                records = self.state.records_condvar.wait(records).unwrap();
+            }
+        }
+
+        fn records(&self) -> Vec<SyncPayloadTelemetryRecord> {
+            self.state.records.lock().unwrap().clone()
+        }
     }
 }
