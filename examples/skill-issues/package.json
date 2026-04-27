@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "cli": "tsx src/cli.ts",
     "dev": "tsx watch src/cli.ts",
     "test": "vitest run",
     "serve": "tsx src/cli.ts serve"

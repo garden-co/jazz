@@ -1589,15 +1589,15 @@ Do not create or edit `todo/ideas/**/*.md` or `todo/issues/**/*.md` as source fi
 
 ## Commands
 
-- Initialize local auth: `pnpm --filter skill-issues exec issues auth init`
-- Verify GitHub identity: `pnpm --filter skill-issues exec issues auth github --verifier-url <url>`
-- Add issue: `pnpm --filter skill-issues exec issues add issue <slug> --title "<title>" --description "<description>"`
-- Add idea: `pnpm --filter skill-issues exec issues add idea <slug> --title "<title>" --description "<description>"`
-- List: `pnpm --filter skill-issues exec issues list`
-- Show: `pnpm --filter skill-issues exec issues show <slug>`
-- Self-assign: `pnpm --filter skill-issues exec issues assign <slug> --me`
-- Set status: `pnpm --filter skill-issues exec issues status <slug> <open|in_progress|done>`
-- Export Markdown: `pnpm --filter skill-issues exec issues export todo`
+- Initialize local auth: `pnpm --filter skill-issues cli auth init`
+- Verify GitHub identity: `pnpm --filter skill-issues cli auth github --verifier-url <url>`
+- Add issue: `pnpm --filter skill-issues cli add issue <slug> --title "<title>" --description "<description>"`
+- Add idea: `pnpm --filter skill-issues cli add idea <slug> --title "<title>" --description "<description>"`
+- List: `pnpm --filter skill-issues cli list`
+- Show: `pnpm --filter skill-issues cli show <slug>`
+- Self-assign: `pnpm --filter skill-issues cli assign <slug> --me`
+- Set status: `pnpm --filter skill-issues cli status <slug> <open|in_progress|done>`
+- Export Markdown: `pnpm --filter skill-issues cli export todo`
 
 ## Workflow
 
@@ -1719,8 +1719,8 @@ Record the conversion decisions in the implementation PR description. Do not sil
 After `issues auth init` and `issues auth github` are configured for the target Jazz Cloud app, run:
 
 ```bash
-pnpm --filter skill-issues exec issues import todo
-pnpm --filter skill-issues exec issues list
+pnpm --filter skill-issues cli import todo
+pnpm --filter skill-issues cli list
 ```
 
 Expected: list includes current ideas and issues, including `explicit-indices` and `better-auth-generalize-unique-field-enforcement`.
@@ -1740,7 +1740,7 @@ If any `todo/projects/` document was moved in Step 3, include the destination do
 Run:
 
 ```bash
-pnpm --filter skill-issues exec issues export todo
+pnpm --filter skill-issues cli export todo
 git status --short --ignored todo
 rm -rf todo
 ```
@@ -1811,12 +1811,12 @@ Expected: PASS.
 With a configured dev Jazz Cloud app and verifier URL:
 
 ```bash
-pnpm --filter skill-issues exec issues auth init
-pnpm --filter skill-issues exec issues auth github --verifier-url "$SKILL_ISSUES_VERIFIER_URL"
-pnpm --filter skill-issues exec issues add issue smoke-test --title "Smoke test" --description "Verify CLI write path."
-pnpm --filter skill-issues exec issues assign smoke-test --me
-pnpm --filter skill-issues exec issues status smoke-test done
-pnpm --filter skill-issues exec issues show smoke-test
+pnpm --filter skill-issues cli auth init
+pnpm --filter skill-issues cli auth github --verifier-url "$SKILL_ISSUES_VERIFIER_URL"
+pnpm --filter skill-issues cli add issue smoke-test --title "Smoke test" --description "Verify CLI write path."
+pnpm --filter skill-issues cli assign smoke-test --me
+pnpm --filter skill-issues cli status smoke-test done
+pnpm --filter skill-issues cli show smoke-test
 ```
 
 Expected: `show` prints `issue smoke-test done Smoke test`.

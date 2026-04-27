@@ -35,6 +35,11 @@ test-results/
 # Generated
 examples/wequencer/walkthrough/*.html
 
+# Skill issues generated/exported state
+todo/
+.skill-issues/
+examples/skill-issues/.skill-issues/
+
 # Local data
 data/
 
