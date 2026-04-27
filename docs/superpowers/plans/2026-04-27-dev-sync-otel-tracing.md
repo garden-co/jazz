@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add opt-in dev sync payload telemetry that captures structured worker-bridge and WebSocket sync diagnostics, including `table_name` and `schema_hash`, and exports them as OTel log records through the local dev server. Decoded payload bodies are not exported.
+**Goal:** Add opt-in dev sync payload telemetry that captures structured worker-bridge and WebSocket sync diagnostics, including `table_name` and `schema_hash`, and exports them as OTel log records through the local dev server. Normal non-error payloads stay structured-only; decoded error/failure payloads include the full parsed payload JSON in the OTel log body/content.
 
 **Architecture:** The dev plugin forwards `server.telemetry` into the NAPI dev server. Rust owns the OTel log exporter and the dev-only ingest route. Browser worker-bridge instrumentation is enabled only when the plugin/runtime provides an ingest URL; it uses a TS helper backed by WASM/Rust decoding to build telemetry records, then posts them to the local server. WebSocket instrumentation records typed Rust `SyncPayload`s directly.
 
@@ -464,7 +464,7 @@ pub struct SyncPayloadTelemetryFields {
 }
 ```
 
-Implement `SyncPayloadTelemetryFields::from_payload(&SyncPayload, FieldDerivation)` for single-record payloads using `payload.variant_name()`, `payload.object_id()`, `payload.branch_name()`, and explicit matches for batch/query/tier/error fields. For decoded sync error payloads, export `payload_variant`, `error_variant`, and `error_code` when available, but do not export the full decoded error payload body. For multi-member payloads such as `BatchSettlement` and `SealBatch`, add `SyncPayloadTelemetryFields::records_from_payload(...) -> Vec<SyncPayloadTelemetryFields>` and emit one field set per member with `member_index` and `member_count`. Do not collapse multiple tables or schema hashes into one arbitrary value. For row-oriented payloads, set `table_name_error` or `schema_hash_error` to `"not_derived"` when derivation is absent.
+Implement `SyncPayloadTelemetryFields::from_payload(&SyncPayload, FieldDerivation)` for single-record payloads using `payload.variant_name()`, `payload.object_id()`, `payload.branch_name()`, and explicit matches for batch/query/tier/error fields. For decoded sync error/failure payloads, export `payload_variant`, `error_variant`, and `error_code` when available, and set the OTel log body/content to the full parsed payload JSON. Do not emit that full parsed payload as top-level searchable attributes. For multi-member payloads such as `BatchSettlement` and `SealBatch`, add `SyncPayloadTelemetryFields::records_from_payload(...) -> Vec<SyncPayloadTelemetryFields>` and emit one field set per member with `member_index` and `member_count`. Do not collapse multiple tables or schema hashes into one arbitrary value. For row-oriented payloads, set `table_name_error` or `schema_hash_error` to `"not_derived"` when derivation is absent.
 
 Export it in `crates/jazz-tools/src/lib.rs`:
 
@@ -571,6 +571,7 @@ pub struct SyncPayloadTelemetryRecord {
     pub message_encoding: SyncPayloadTelemetryMessageEncoding,
     pub recorded_at: u64,
     pub decode_error: Option<String>,
+    pub log_body: Option<serde_json::Value>,
     #[serde(flatten)]
     pub fields: SyncPayloadTelemetryFields,
 }
@@ -583,7 +584,7 @@ pub enum SyncPayloadTelemetryMessageEncoding {
 }
 ```
 
-Successful records always set flattened `fields` and never include decoded payload bodies. Decode-failure records set `decode_error`, `message_bytes`, and `message_encoding`, and leave `fields` at `SyncPayloadTelemetryFields::default()`. Decode-failure and error records must not include decoded payload bodies, raw payload bytes, base64-encoded payload bytes, or original string payloads.
+Successful non-error records always set flattened `fields` and leave `log_body` empty. Decoded sync error/failure records set flattened `fields` and set `log_body` to the full parsed payload JSON; the OTel exporter maps `log_body` to the log body/content, not to searchable attributes. Decode-failure records set `decode_error`, `message_bytes`, and `message_encoding`, leave `fields` at `SyncPayloadTelemetryFields::default()`, and leave `log_body` empty because no parsed payload exists. Decode-failure records must not include raw payload bytes, base64-encoded payload bytes, or original string payloads.
 
 In `server/mod.rs`, add to `ServerState`:
 
@@ -824,7 +825,7 @@ and update unit tests that call it directly.
 
 Add helper methods on `ServerState` to derive `table_name` and `schema_hash` from storage/schema context and to set `table_name_error` or `schema_hash_error` fields when derivation fails.
 
-`emit_sync_payload_telemetry(...)` must emit the structured fields without materializing the decoded payload body.
+`emit_sync_payload_telemetry(...)` must emit structured fields without materializing the decoded payload body for normal non-error payloads. For decoded error/failure payloads, it must set `log_body` to the full parsed payload JSON.
 
 - [ ] **Step 4: Implement outbound telemetry emission**
 
@@ -899,6 +900,35 @@ it("builds structured telemetry records", () => {
     appId: "app-1",
     payloadVariant: "QuerySettled",
     queryId: 1,
+  });
+});
+
+it("puts decoded error payloads in the log body", () => {
+  const parsedErrorPayload = {
+    type: "SyncError",
+    code: "schema_mismatch",
+    message: "Client schema is behind",
+    expectedSchemaHash: "schema-new",
+    actualSchemaHash: "schema-old",
+  };
+  const record = buildSyncPayloadTelemetryRecord({
+    scope: "worker_bridge",
+    direction: "worker_to_main",
+    appId: "app-1",
+    payload: new Uint8Array([1, 2, 3]),
+    decode: () => ({
+      ok: true,
+      payloadVariant: "SyncError",
+      fields: { errorVariant: "SchemaMismatch", errorCode: "schema_mismatch" },
+      logBody: parsedErrorPayload,
+    }),
+  });
+
+  expect(record).toMatchObject({
+    payloadVariant: "SyncError",
+    errorVariant: "SchemaMismatch",
+    errorCode: "schema_mismatch",
+    logBody: parsedErrorPayload,
   });
 });
 
@@ -989,7 +1019,7 @@ export type SyncPayloadTelemetryDirection =
   | "server_to_client";
 
 export type DecodeResult =
-  | { ok: true; payloadVariant: string; fields: Record<string, unknown> }
+  | { ok: true; payloadVariant: string; fields: Record<string, unknown>; logBody?: unknown }
   | { ok: false; error: string };
 
 export function buildSyncPayloadTelemetryRecord(options: {
@@ -1028,6 +1058,9 @@ export function buildSyncPayloadTelemetryRecord(options: {
     recordedAt: Date.now(),
     ...decoded.fields,
   };
+  if (decoded.logBody !== undefined) {
+    record.logBody = decoded.logBody;
+  }
   return record;
 }
 ```
@@ -1135,7 +1168,7 @@ constructor(worker: Worker, runtime: Runtime)
 
 Store telemetry config from `WorkerBridge.init(options.telemetry)`. The instrumentation point for main-to-worker messages is inside the private `enqueueSyncMessageForWorker(payload)` method before pushing to `pendingSyncPayloadsForWorker`. The instrumentation point for worker-to-main messages is in the `this.worker.onmessage` `"sync"` branch before `this.runtime.onSyncMessageReceived(payload)`.
 
-Worker bridge telemetry is disabled unless `ingestUrl` and `appId` are present. `buildSyncPayloadTelemetryRecord(...)` must not emit decoded payload bodies.
+Worker bridge telemetry is disabled unless `ingestUrl` and `appId` are present. `buildSyncPayloadTelemetryRecord(...)` must not emit decoded payload bodies for normal non-error payloads, but decoded error/failure payloads must set `logBody` to the full parsed payload JSON.
 
 `postSyncPayloadTelemetryRecord` must catch and ignore fetch failures without console logging:
 
@@ -1354,7 +1387,7 @@ jazzPlugin({
 });
 ```
 
-State that sync payloads are exported as structured OTel logs, not stdout, and that decoded payload bodies are not exported.
+State that sync payloads are exported as structured OTel logs, not stdout, and that normal non-error decoded payload bodies are not exported. Decoded error/failure payloads include the full parsed payload JSON in the OTel log body/content.
 
 - [ ] **Step 3: Run focused verification**
 
@@ -1400,4 +1433,4 @@ git commit -m "docs: document dev sync payload telemetry"
 - [ ] Run `cargo test -p jazz-napi dev_server_option_tests`.
 - [ ] Run `cargo check -p jazz-tools --features otel-logs`.
 - [ ] Run `cargo check -p jazz-wasm`.
-- [ ] Start `dev/observability/docker compose up -d`, run one example app with `server.telemetry`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing structured fields and either `table_name`/`schema_hash` or the corresponding `table_name_error`/`schema_hash_error` derivation field, without decoded payload bodies.
+- [ ] Start `dev/observability/docker compose up -d`, run one example app with `server.telemetry`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing structured fields and either `table_name`/`schema_hash` or the corresponding `table_name_error`/`schema_hash_error` derivation field. Confirm normal non-error records do not include decoded payload bodies, and decoded error/failure records include the full parsed payload JSON in the log body/content.

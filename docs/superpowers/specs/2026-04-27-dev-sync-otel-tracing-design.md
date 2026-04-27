@@ -104,7 +104,7 @@ The record also includes searchable fields extracted or derived from the decoded
 - `member_index`, when a sync payload expands into multiple per-member records
 - `member_count`, when a sync payload expands into multiple per-member records
 
-Decoded sync error payloads follow the same structured-only rule as every other successful decode: export `payload_variant`, `error_variant`, `error_code` when available, and other searchable fields, but do not export the full decoded error payload body.
+Decoded sync error/failure payloads are the exception to the structured-only body rule. They still export searchable attributes such as `payload_variant`, `error_variant`, and `error_code`, and they also put the full parsed payload JSON in the OTel log body/content so the failure can be inspected locally. The full parsed payload is not emitted as top-level searchable attributes.
 
 ### Derived Fields
 
@@ -116,7 +116,7 @@ For multi-member payloads, the implementation emits one log record per member ra
 
 If the implementation cannot derive a required field for a payload that should have it, it must still export the message and set a derivation error field, for example `table_name_error` or `schema_hash_error`. Missing derivation must be visible in OTel, not silently omitted.
 
-Decode failures are exported too, but they do not include the payload body. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, message encoding, and decode error. It must not include decoded payload JSON, raw payload bytes, base64-encoded payload bytes, or the original string payload.
+Decode failures are exported too, but they do not include a payload body because no parsed payload exists. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, message encoding, and decode error. It must not include raw payload bytes, base64-encoded payload bytes, or the original string payload.
 
 ## No Stdout Fallback
 
@@ -180,7 +180,7 @@ Browser telemetry delivery is best-effort and lossy in v1. Failed ingest request
 
 Add a TypeScript sync-payload decoder for browser-side instrumentation. This is new runtime infrastructure: today worker bridge payloads can be `Uint8Array` or string values and there is no shared TypeScript decoder at that layer.
 
-The decoder must turn the worker-bridge `Uint8Array` or string payload into structured telemetry fields that match the Rust `SyncPayload` extractors, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a structured decode-failure result when decoding fails. `message_bytes` is the byte length of the binary payload or the UTF-8 byte length of the string payload. It must not materialize or return the decoded payload body.
+The decoder must turn the worker-bridge `Uint8Array` or string payload into structured telemetry fields that match the Rust `SyncPayload` extractors, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a structured decode-failure result when decoding fails. `message_bytes` is the byte length of the binary payload or the UTF-8 byte length of the string payload. It must not materialize or return the decoded payload body for normal successful sync payloads. For decoded sync error/failure payloads, it must return the full parsed payload JSON for use as the OTel log body/content.
 
 ### Worker Bridge Instrumentation
 
@@ -211,6 +211,7 @@ Implementation should be test-driven. The first tests should cover:
 - The generated NAPI TypeScript declaration includes `telemetry`.
 - The dev OTel exporter path emits OTel logs through the configured collector URL and never configures stdout export for sync payload telemetry.
 - The TypeScript sync-payload decoder returns `payload_variant`, `table_name`, `schema_hash`, other searchable fields, and decode-failure records without payload bodies or raw bytes.
+- Decoded sync error/failure payloads include the full parsed payload JSON in the OTel log body/content.
 - The worker bridge emits decoded telemetry observations for `main_to_worker` and `worker_to_main` only when ingest URL is configured.
 - The telemetry ingest route attaches or validates `app_id`, accepts decoded observations without printing them, and rejects body/path app id mismatches.
 - The Rust WebSocket server emits decoded observations for `client_to_server` and `server_to_client`, including derived `table_name` and `schema_hash` for row-oriented sync payloads.
