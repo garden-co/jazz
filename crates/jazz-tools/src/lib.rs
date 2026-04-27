@@ -20,6 +20,7 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
+pub mod sync_payload_telemetry;
 pub mod sync_tracer;
 #[cfg(test)]
 mod test_row_history;
