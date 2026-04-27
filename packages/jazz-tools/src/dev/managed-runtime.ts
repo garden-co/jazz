@@ -277,6 +277,7 @@ export class ManagedDevRuntime {
             catalogueAuthority: serverConfig.catalogueAuthority,
             catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
             catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
+            telemetry: serverConfig.telemetry,
           });
 
           serverUrl = this.serverHandle.url;

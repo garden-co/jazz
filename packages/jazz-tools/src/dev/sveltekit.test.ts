@@ -134,6 +134,37 @@ describe("jazzSvelteKit", () => {
     expect(process.env.BACKEND_SECRET).toBe("test-backend-secret");
   });
 
+  it("passes server telemetry through the managed runtime", async () => {
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000001",
+      port: 19991,
+      url: "http://127.0.0.1:19991",
+      dataDir: "/tmp/jazz-sveltekit-telemetry-test",
+      adminSecret: "sveltekit-telemetry-admin",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const root = await tempRoots.create("jazz-sveltekit-telemetry-test-");
+    const plugin = jazzSvelteKit({
+      server: {
+        port: 19991,
+        adminSecret: "sveltekit-telemetry-admin",
+        telemetry: false,
+      },
+    });
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
+      makeViteServer("serve", root),
+    );
+
+    expect(startSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: false,
+      }),
+    );
+  });
+
   it("builds jwksUrl from Vite's configured host and port", async () => {
     const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: "00000000-0000-0000-0000-000000000004",

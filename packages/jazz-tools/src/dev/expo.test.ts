@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
+import * as schemaWatcher from "./schema-watcher.js";
 import { __resetJazzPluginForTests, withJazz } from "./expo.js";
 
 const dev = await import("./index.js");
@@ -88,6 +89,40 @@ describe("withJazz", () => {
     expect(resolved.extra?.jazzAppId).toBe(process.env.EXPO_PUBLIC_JAZZ_APP_ID);
     expect(resolved.extra?.jazzServerUrl).toBe(`http://127.0.0.1:${port}`);
   }, 30_000);
+
+  it("passes server telemetry through the managed runtime", async () => {
+    const schemaDir = await tempRoots.create("jazz-expo-telemetry-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000001",
+      port: 19990,
+      url: "http://127.0.0.1:19990",
+      dataDir: "/tmp/jazz-expo-telemetry-test",
+      adminSecret: "expo-telemetry-admin",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    await withJazz(
+      { name: "my-app" },
+      {
+        server: {
+          port: 19990,
+          adminSecret: "expo-telemetry-admin",
+          telemetry: { collectorUrl: "http://localhost:4317" },
+        },
+        schemaDir,
+      },
+    );
+
+    expect(startSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: { collectorUrl: "http://localhost:4317" },
+      }),
+    );
+  });
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {
     const port = await getAvailablePort();

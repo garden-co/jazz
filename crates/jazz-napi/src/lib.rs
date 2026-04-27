@@ -14,7 +14,7 @@
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -361,6 +361,70 @@ struct TestingServerStartOptions {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+struct DevServerTelemetryOptions {
+    collector_url: Option<String>,
+}
+
+#[derive(Debug)]
+enum DevServerTelemetryInput {
+    Enabled(bool),
+    Options(DevServerTelemetryOptions),
+}
+
+impl<'de> Deserialize<'de> for DevServerTelemetryInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = JsonValue::deserialize(deserializer)?;
+        match value {
+            JsonValue::Bool(enabled) => Ok(Self::Enabled(enabled)),
+            JsonValue::Object(_) => serde_json::from_value(value)
+                .map(Self::Options)
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "expected boolean or telemetry options object, got {other}"
+            ))),
+        }
+    }
+}
+
+fn normalize_sync_payload_telemetry(
+    input: Option<DevServerTelemetryInput>,
+) -> Option<DevServerTelemetryOptions> {
+    match input {
+        None | Some(DevServerTelemetryInput::Enabled(false)) => None,
+        Some(DevServerTelemetryInput::Enabled(true)) => Some(DevServerTelemetryOptions {
+            collector_url: Some("http://localhost:4317".to_string()),
+        }),
+        Some(DevServerTelemetryInput::Options(mut options)) => {
+            if options.collector_url.is_none() {
+                options.collector_url = Some("http://localhost:4317".to_string());
+            }
+            Some(options)
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDevServerStartOptions {
+    app_id: String,
+    port: Option<u16>,
+    data_dir: Option<String>,
+    in_memory: Option<bool>,
+    jwks_url: Option<String>,
+    backend_secret: Option<String>,
+    admin_secret: Option<String>,
+    allow_local_first_auth: Option<bool>,
+    catalogue_authority: Option<String>,
+    catalogue_authority_url: Option<String>,
+    catalogue_authority_admin_secret: Option<String>,
+    telemetry: Option<DevServerTelemetryInput>,
+}
+
+#[derive(Debug)]
 struct DevServerStartOptions {
     app_id: String,
     port: Option<u16>,
@@ -373,11 +437,30 @@ struct DevServerStartOptions {
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
     catalogue_authority_admin_secret: Option<String>,
+    sync_payload_telemetry: Option<DevServerTelemetryOptions>,
 }
 
 fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
-    serde_json::from_value(options)
-        .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))
+    let raw: RawDevServerStartOptions = serde_json::from_value(options)
+        .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))?;
+    Ok(DevServerStartOptions {
+        app_id: raw.app_id,
+        port: raw.port,
+        data_dir: raw.data_dir,
+        in_memory: raw.in_memory,
+        jwks_url: raw.jwks_url,
+        backend_secret: raw.backend_secret,
+        admin_secret: raw.admin_secret,
+        allow_local_first_auth: raw.allow_local_first_auth,
+        catalogue_authority: raw.catalogue_authority,
+        catalogue_authority_url: raw.catalogue_authority_url,
+        catalogue_authority_admin_secret: raw.catalogue_authority_admin_secret,
+        sync_payload_telemetry: normalize_sync_payload_telemetry(raw.telemetry),
+    })
+}
+
+fn sync_payload_telemetry_ingest_url(base_url: &str, app_id: AppId) -> String {
+    format!("{base_url}/apps/{app_id}/dev/sync-payload-telemetry")
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -1695,6 +1778,7 @@ pub struct DevServer {
     data_dir: String,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
+    sync_payload_telemetry_ingest_url: Option<String>,
 }
 
 #[napi]
@@ -1702,7 +1786,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetry?: boolean | { collectorUrl?: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1776,6 +1860,10 @@ impl DevServer {
         let url = hosted.base_url();
         let port = hosted.port;
         let resolved_data_dir = hosted.data_dir.to_string_lossy().into_owned();
+        let sync_payload_telemetry_ingest_url = opts
+            .sync_payload_telemetry
+            .as_ref()
+            .map(|_| sync_payload_telemetry_ingest_url(&url, app_id));
 
         Ok(Self {
             inner: Mutex::new(Some(hosted)),
@@ -1785,6 +1873,7 @@ impl DevServer {
             data_dir: resolved_data_dir,
             backend_secret: opts.backend_secret,
             admin_secret: opts.admin_secret,
+            sync_payload_telemetry_ingest_url,
         })
     }
 
@@ -1816,6 +1905,11 @@ impl DevServer {
     #[napi(getter, js_name = "adminSecret")]
     pub fn admin_secret(&self) -> Option<String> {
         self.admin_secret.clone()
+    }
+
+    #[napi(getter, js_name = "syncPayloadTelemetryIngestUrl")]
+    pub fn sync_payload_telemetry_ingest_url(&self) -> Option<String> {
+        self.sync_payload_telemetry_ingest_url.clone()
     }
 
     #[napi]
@@ -1936,6 +2030,7 @@ pub fn get_public_key_b64(seed_b64: String) -> napi::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_dev_server_start_options, sync_payload_telemetry_ingest_url};
     use jazz_tools::binding_support::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
         query_rows_can_be_schema_aligned,
@@ -1946,6 +2041,78 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use jazz_tools::schema_manager::AppId;
+    use serde_json::json;
+
+    #[test]
+    fn parses_dev_server_telemetry_collector_url() {
+        let opts = parse_dev_server_start_options(json!({
+            "appId": "app-1",
+            "telemetry": { "collectorUrl": "http://127.0.0.1:4317" }
+        }))
+        .expect("parse options");
+
+        assert_eq!(
+            opts.sync_payload_telemetry
+                .as_ref()
+                .and_then(|o| o.collector_url.as_deref()),
+            Some("http://127.0.0.1:4317")
+        );
+    }
+
+    #[test]
+    fn parses_dev_server_telemetry_true_as_default_collector_url() {
+        let opts = parse_dev_server_start_options(json!({
+            "appId": "app-1",
+            "telemetry": true
+        }))
+        .expect("parse options");
+
+        assert_eq!(
+            opts.sync_payload_telemetry
+                .as_ref()
+                .and_then(|o| o.collector_url.as_deref()),
+            Some("http://localhost:4317")
+        );
+    }
+
+    #[test]
+    fn parses_dev_server_telemetry_false_as_disabled() {
+        let opts = parse_dev_server_start_options(json!({
+            "appId": "app-1",
+            "telemetry": false
+        }))
+        .expect("parse options");
+
+        assert!(opts.sync_payload_telemetry.is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_dev_server_telemetry_options() {
+        let error = parse_dev_server_start_options(json!({
+            "appId": "app-1",
+            "telemetry": { "collectorURL": "http://127.0.0.1:4317" }
+        }))
+        .expect_err("unknown telemetry keys should fail");
+
+        assert!(
+            error.to_string().contains("collectorURL"),
+            "error should name the unknown key: {error}"
+        );
+    }
+
+    #[test]
+    fn sync_payload_telemetry_ingest_url_uses_canonical_app_id() {
+        let app_id = AppId::from_name("test-app");
+
+        let url = sync_payload_telemetry_ingest_url("http://127.0.0.1:20000", app_id);
+
+        assert_eq!(
+            url,
+            format!("http://127.0.0.1:20000/apps/{app_id}/dev/sync-payload-telemetry")
+        );
+        assert!(!url.contains("/apps/test-app/"));
+    }
 
     #[test]
     fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {

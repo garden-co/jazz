@@ -3,6 +3,7 @@ import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
+import * as schemaWatcher from "./schema-watcher.js";
 import { __resetJazzNextPluginForTests, withJazz, type NextConfigLike } from "./next.js";
 
 const dev = await import("./index.js");
@@ -183,6 +184,43 @@ describe("withJazz", () => {
       ),
     );
   }, 30_000);
+
+  it("passes server telemetry through the managed runtime", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-telemetry-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000001",
+      port: 19992,
+      url: "http://127.0.0.1:19992",
+      dataDir: "/tmp/jazz-next-telemetry-test",
+      adminSecret: "next-telemetry-admin",
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const wrapped = withJazz(
+      {},
+      {
+        server: {
+          port: 19992,
+          adminSecret: "next-telemetry-admin",
+          telemetry: true,
+        },
+        schemaDir,
+      },
+    );
+
+    await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+
+    expect(startSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: true,
+      }),
+    );
+  });
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {
     const port = await getAvailablePort();
