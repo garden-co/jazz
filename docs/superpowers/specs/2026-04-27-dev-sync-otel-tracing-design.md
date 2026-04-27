@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add opt-in sync-message tracing for local dev sessions started by the Jazz dev plugins. When enabled, tracing captures the full decoded sync payloads for both browser-internal worker bridge traffic and client/server WebSocket traffic, then exports everything through one local server-side OpenTelemetry exporter as OpenTelemetry log records.
+Add opt-in sync-message tracing for local dev sessions started by the Jazz dev plugins. When enabled, tracing captures structured sync-message diagnostics for both browser-internal worker bridge traffic and client/server WebSocket traffic, then exports everything through one local server-side OpenTelemetry exporter as OpenTelemetry log records.
 
 Trace payloads must never be printed to console or stdout.
 
@@ -15,6 +15,7 @@ jazzPlugin({
   server: {
     syncTracing: {
       collectorUrl: "http://localhost:4317",
+      payload: "structured",
     },
   },
 });
@@ -27,13 +28,13 @@ The same `server.syncTracing` option is supported by:
 - `jazzSvelteKit(...)`
 - `startLocalJazzServer(...)`
 
-`collectorUrl` defaults to `http://localhost:4317` when `syncTracing` is enabled and no URL is provided.
+`collectorUrl` defaults to `http://localhost:4317` when `syncTracing` is enabled and no URL is provided. `payload` defaults to `"structured"` and can be set to `"full"` for deeper local debugging.
 
 ## Architecture
 
 The local dev server owns the OpenTelemetry exporter. Browser runtime code never exports to OTel directly and never talks to the collector.
 
-Browser-side worker bridge traffic is decoded in the TypeScript runtime layer, converted to compact trace observations that include the full decoded payload JSON, and sent to the local dev server with an app-scoped trace ingest request:
+Browser-side worker bridge traffic is decoded in the TypeScript runtime layer, converted to compact structured trace observations, and sent to the local dev server with an app-scoped trace ingest request:
 
 ```text
 POST /apps/:app_id/dev/sync-traces
@@ -58,7 +59,7 @@ worker/client <-> dev-server WebSocket
 
 Each sync observation is exported as an OpenTelemetry log record, not as a span or span event.
 
-Sync messages are discrete observations rather than operations with start/end lifetimes, and the browser-ingested worker-bridge records will not share span context with the Rust WebSocket server. Logs let the implementation export the complete decoded payload JSON and searchable attributes without inventing artificial span parenting.
+Sync messages are discrete observations rather than operations with start/end lifetimes, and the browser-ingested worker-bridge records will not share span context with the Rust WebSocket server. Logs let the implementation export searchable structured attributes without inventing artificial span parenting.
 
 The local observability stack must include an OTLP logs pipeline when sync tracing is enabled.
 
@@ -73,7 +74,6 @@ Each successfully decoded message produces one log record with:
 - `connection_id`, when known
 - `sequence`, when known
 - `payload_variant`
-- `payload_json`: the full decoded sync payload JSON
 - `message_bytes`
 - `recorded_at`
 
@@ -89,6 +89,12 @@ The record also includes searchable fields extracted or derived from the decoded
 - `error_variant`
 - `error_code`, when the `SyncError` variant carries a `code` field
 
+When `payload: "full"` is explicitly enabled, successful records also include:
+
+- `payload_json`: the full decoded sync payload JSON
+
+`payload_json` is not emitted in the default `"structured"` mode. The default mode should avoid serializing or exporting the full decoded payload when the structured fields are sufficient.
+
 ### Derived Fields
 
 `table_name` and `schema_hash` are required top-level searchable fields in v1 whenever a sync payload refers to row data, query data, schema diagnostics, or catalogue/schema data.
@@ -97,7 +103,7 @@ Some payloads carry these fields directly, such as `SchemaWarning`, `ConnectionS
 
 If the implementation cannot derive a required field for a payload that should have it, it must still export the message and set a derivation error field, for example `table_name_error` or `schema_hash_error`. Missing derivation must be visible in OTel, not silently omitted.
 
-Decode failures are traced too. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, decode error, and `message_base64` containing the raw undecoded message bytes. It does not silently degrade to an opaque byte-only success record.
+Decode failures are traced too. A decode-failure record includes scope, direction, app id, client or connection identifiers when available, message byte size, decode error, and a capped `message_base64` containing the raw undecoded message bytes. It does not silently degrade to an opaque byte-only success record. The cap is implementation-defined in v1 but must be documented near the option and applied before export.
 
 ## No Stdout Fallback
 
@@ -118,14 +124,22 @@ type SyncTracingOptions =
   | boolean
   | {
       collectorUrl?: string;
+      payload?: "structured" | "full";
     };
 ```
 
-Normalize `true` to `{ collectorUrl: "http://localhost:4317" }`.
+Normalize `true` to `{ collectorUrl: "http://localhost:4317", payload: "structured" }`.
 
 Forward the normalized option through `ManagedDevRuntime`, `startLocalJazzServer`, and `DevServer.start`.
 
 Update the generated NAPI TypeScript surface so `crates/jazz-napi/index.d.ts` exposes the same `syncTracing` shape on `DevServer.start(...)`.
+
+The dev plugin also exposes browser-readable runtime configuration for worker bridge tracing:
+
+- `*_JAZZ_SYNC_TRACE_INGEST_URL`
+- `*_JAZZ_SYNC_TRACE_PAYLOAD`
+
+The browser runtime mirrors the server option. When the mode is `"structured"`, it must not request or emit `payload_json`.
 
 ### Rust NAPI Dev Server
 
@@ -151,7 +165,7 @@ Browser trace delivery is best-effort and lossy in v1. Failed ingest requests mu
 
 Add a TypeScript sync-payload decoder for browser-side instrumentation. This is new runtime infrastructure: today worker bridge payloads are `Uint8Array` values and there is no shared TypeScript decoder at that layer.
 
-The decoder must turn the worker-bridge payload bytes into the same JSON shape used by Rust `SyncPayload` serialization, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a decode-failure result with `message_base64` when decoding fails.
+The decoder must turn the worker-bridge payload bytes into structured trace fields that match the Rust `SyncPayload` extractors, derive `payload_variant`, derive searchable fields including `table_name` and `schema_hash`, and return a decode-failure result with capped `message_base64` when decoding fails. It only materializes and returns full decoded JSON when the tracing config requests `payload: "full"`.
 
 ### Worker Bridge Instrumentation
 
@@ -179,7 +193,7 @@ Implementation should be test-driven. The first tests should cover:
 - `DevServer.start` parses `syncTracing` and rejects invalid shapes.
 - The generated NAPI TypeScript declaration includes `syncTracing`.
 - The dev OTel exporter path emits OTel logs through the configured collector URL and never configures stdout export for sync tracing.
-- The TypeScript sync-payload decoder returns decoded JSON, `payload_variant`, `table_name`, `schema_hash`, other searchable fields, and decode-failure records with `message_base64`.
+- The TypeScript sync-payload decoder returns `payload_variant`, `table_name`, `schema_hash`, other searchable fields, optional decoded JSON only when `payload: "full"`, and decode-failure records with capped `message_base64`.
 - The worker bridge emits decoded trace observations for `main_to_worker` and `worker_to_main`.
 - The trace ingest route attaches or validates `app_id`, accepts decoded observations without printing them, and rejects body/path app id mismatches.
 - The Rust WebSocket server emits decoded observations for `client_to_server` and `server_to_client`, including derived `table_name` and `schema_hash` for row-oriented sync payloads.
@@ -191,4 +205,4 @@ Implementation should be test-driven. The first tests should cover:
 - Direct browser-to-collector export.
 - Console or stdout trace output.
 - Reliable browser trace delivery, retry queues, or ring buffers.
-- Sampling, redaction, or payload-size truncation controls.
+- Sampling or redaction controls beyond the default structured-only payload mode.
