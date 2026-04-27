@@ -99,7 +99,31 @@ the same principal:
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
 
 If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is the
-recommended path for login, logout, and any principal change.
+recommended path for login, logout, and any principal change. See
+[Lifecycle](/docs/auth/lifecycle) for logout, storage reset, and local-first identity storage.
+
+### Cookie-based auth
+
+Use `cookieSession` when your browser app authenticates sync with an HttpOnly cookie and therefore
+does not have a bearer JWT available in JavaScript. The cookie remains the transport credential;
+`cookieSession` is a mirrored Jazz session used for local permission evaluation, `useSession()`, and
+`db.getAuthState()`.
+
+```ts
+const db = await createDb({
+  appId: "my-app",
+  serverUrl: "https://sync.example.com",
+  cookieSession: {
+    user_id: "user_123",
+    claims: { role: "member" },
+    authMode: "external",
+  },
+});
+```
+
+`cookieSession` is mutually exclusive with `secret` and `jwtToken`. When the cookie-backed session
+changes for the same principal, call `db.updateCookieSession(nextSession)`. For sign-in, sign-out,
+or a different user, recreate `Db` or `JazzProvider` with a new config.
 
 ### Reacting to expiry and unauthenticated responses
 
@@ -189,7 +213,7 @@ When the server receives a request, it tries each auth method in priority order 
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
-On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both.
+On TypeScript backends, `await createJazzContext(...).forRequest(req)` follows the same rule set. Configure `jwksUrl` or `jwtPublicKey` on the backend context to verify external JWTs there too, but not both. Cookie-based app auth is resolved by your app server, not by the Jazz CLI server; once you have a Jazz session from a cookie, use `context.forSession(session)`.
 
 ### Upgrading to external auth
 
