@@ -872,8 +872,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         Some(crate::batch_fate::BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch rows must belong to the declared target branch"
-                .to_string(),
+            reason: "sealed batch rows must belong to the declared target branch".to_string(),
         })
     );
     assert_eq!(

@@ -204,6 +204,78 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
 }
 
 #[test]
+fn rc_sealed_direct_batch_rejects_further_writes() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    let ((row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+        )
+        .unwrap();
+
+    core.seal_batch(batch_id).unwrap();
+
+    let record = core
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("sealed direct batch should keep its local record");
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Direct);
+    assert!(record.sealed);
+    assert_eq!(
+        record
+            .sealed_submission
+            .as_ref()
+            .expect("sealed direct batch should persist a submission")
+            .captured_frontier,
+        Vec::<CapturedFrontierMember>::new(),
+        "direct batch seals should not capture transactional frontier state"
+    );
+
+    let err = core
+        .update(
+            row_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            Some(&write_context),
+        )
+        .expect_err("sealed direct batches should be frozen");
+    let err = format!("{err:?}");
+    assert!(
+        err.contains("already sealed"),
+        "expected sealed-batch error, got {err:?}"
+    );
+}
+
+#[test]
+fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    let record = core
+        .local_batch_record(batch_id)
+        .unwrap()
+        .expect("open direct batch should have a local record");
+    assert!(!record.sealed);
+    assert!(record.sealed_submission.is_none());
+}
+
+#[test]
 fn rc_restart_recovers_completed_sealed_batch_from_storage() {
     let schema = test_schema();
     let schema_hash = SchemaHash::compute(&schema);

@@ -909,9 +909,9 @@ export class Transaction {
     return handle;
   }
 
-  create(table: string, values: InsertValues): InsertHandle<Row> {
+  create(table: string, values: InsertValues): Row {
     this.ensureActive();
-    const handle = this.client.createHandleInternal(
+    const row = this.client.createInternal(
       table,
       values,
       this.session,
@@ -919,13 +919,13 @@ export class Transaction {
       undefined,
       this.batchContext,
     );
-    this.markTouchedRow(handle.value.id);
-    return handle;
+    this.markTouchedRow(row.id);
+    return row;
   }
 
-  update(objectId: string, updates: Record<string, Value>): WriteHandle {
+  update(objectId: string, updates: Record<string, Value>): void {
     this.ensureActive();
-    const result = this.client.updateHandleInternal(
+    this.client.updateInternal(
       objectId,
       updates,
       this.session,
@@ -933,19 +933,12 @@ export class Transaction {
       this.batchContext,
     );
     this.markTouchedRow(objectId);
-    return result;
   }
 
-  delete(objectId: string): WriteHandle {
+  delete(objectId: string): void {
     this.ensureActive();
-    const result = this.client.deleteHandleInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
     this.markTouchedRow(objectId);
-    return result;
   }
 
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
@@ -967,6 +960,8 @@ export class Transaction {
 }
 
 export class DirectBatch {
+  private committedHandle: WriteHandle | null = null;
+
   constructor(
     private readonly client: JazzClient,
     private readonly batchContext: BatchWriteContext,
@@ -978,8 +973,24 @@ export class DirectBatch {
     return this.batchContext.batchId;
   }
 
-  create(table: string, values: InsertValues): InsertHandle<Row> {
-    return this.client.createHandleInternal(
+  private ensureActive(): void {
+    if (this.committedHandle) {
+      throw new Error(`Direct batch ${this.batchContext.batchId} is already committed`);
+    }
+  }
+
+  commit(): WriteHandle {
+    if (this.committedHandle) {
+      return this.committedHandle;
+    }
+    const handle = this.client.sealBatch(this.batchId());
+    this.committedHandle = handle;
+    return handle;
+  }
+
+  create(table: string, values: InsertValues): Row {
+    this.ensureActive();
+    return this.client.createInternal(
       table,
       values,
       this.session,
@@ -989,8 +1000,9 @@ export class DirectBatch {
     );
   }
 
-  update(objectId: string, updates: Record<string, Value>): WriteHandle {
-    return this.client.updateHandleInternal(
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.ensureActive();
+    this.client.updateInternal(
       objectId,
       updates,
       this.session,
@@ -999,13 +1011,9 @@ export class DirectBatch {
     );
   }
 
-  delete(objectId: string): WriteHandle {
-    return this.client.deleteHandleInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
+  delete(objectId: string): void {
+    this.ensureActive();
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -1165,6 +1173,10 @@ export class SessionClient {
 
   beginDirectBatch(): DirectBatch {
     return this.client.beginDirectBatchInternal(this.session);
+  }
+
+  beginBatch(): DirectBatch {
+    return this.beginDirectBatch();
   }
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
@@ -1415,6 +1427,10 @@ export class JazzClient {
 
   beginDirectBatch(): DirectBatch {
     return this.beginDirectBatchInternal();
+  }
+
+  beginBatch(): DirectBatch {
+    return this.beginDirectBatch();
   }
 
   private createBatchContext(batchMode: BatchMode): BatchWriteContext {
@@ -1801,6 +1817,9 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): InsertHandle<Row> {
     const row = this.createInternal(table, values, session, attribution, options, batchContext);
+    if (!batchContext) {
+      this.sealBatch(row.batchId);
+    }
     return new InsertHandle(row, row.batchId, this);
   }
 
@@ -1827,6 +1846,7 @@ export class JazzClient {
     updatedAt?: number,
   ): WriteHandle {
     const result = this.upsertInternal(table, values, objectId, session, attribution, updatedAt);
+    this.sealBatch(result.batchId);
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1979,6 +1999,9 @@ export class JazzClient {
       batchContext,
       updatedAt,
     );
+    if (!batchContext) {
+      this.sealBatch(result.batchId);
+    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -2020,6 +2043,9 @@ export class JazzClient {
     updatedAt?: number,
   ): WriteHandle {
     const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
+    if (!batchContext) {
+      this.sealBatch(result.batchId);
+    }
     return new WriteHandle(result.batchId, this);
   }
 

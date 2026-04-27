@@ -624,8 +624,7 @@ fn seal_batch_rejects_members_spanning_multiple_target_branches() {
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch rows must belong to the declared target branch"
-                .to_string(),
+            reason: "sealed batch rows must belong to the declared target branch".to_string(),
         })
     );
     assert_eq!(
@@ -704,7 +703,7 @@ fn seal_batch_rejects_when_batch_digest_does_not_match_members() {
         Some(BatchSettlement::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
-            reason: "sealed transactional batch digest does not match declared members".to_string(),
+            reason: "sealed batch digest does not match declared members".to_string(),
         })
     );
     assert_eq!(

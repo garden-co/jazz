@@ -11,7 +11,10 @@ All writes execute against the local database first. `insert`, `update`, and `de
 Jazz also exposes explicit batch builders:
 
 - `beginTransaction(...)` returns `DbTransaction`
-- `beginDirectBatch(...)` returns `DbDirectBatch`
+- `beginDirectBatch(...)` / `beginBatch(...)` returns `DbDirectBatch`
+
+Writes made through an open transaction or explicit direct batch are not individually waitable.
+Call `commit()` when the batch is complete, then call `.wait({ tier })` on the returned handle.
 
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
@@ -167,13 +170,15 @@ globally visible once it's committed and accepted by the authority.
 `DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
 
 Use a direct batch when you want to group several ordinary writes under one batch id, but still want them
-to be globally visible immediately:
+to be locally visible immediately:
 
 ```ts
-const batch = db.beginDirectBatch(app.todos);
+const batch = db.beginBatch(app.todos);
 
 batch.insert(app.todos, { title: "Grouped direct write", done: false });
 batch.update(app.todos, todoId, { done: true });
 
-console.log(batch.batchId());
+const committed = batch.commit();
+await committed.wait({ tier: "edge" });
+console.log(committed.batchId);
 ```
