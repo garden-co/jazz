@@ -464,7 +464,7 @@ pub struct SyncPayloadTelemetryFields {
 }
 ```
 
-Implement `SyncPayloadTelemetryFields::from_payload(&SyncPayload, FieldDerivation)` for single-record payloads using `payload.variant_name()`, `payload.object_id()`, `payload.branch_name()`, and explicit matches for batch/query/tier/error fields. For multi-member payloads such as `BatchSettlement` and `SealBatch`, add `SyncPayloadTelemetryFields::records_from_payload(...) -> Vec<SyncPayloadTelemetryFields>` and emit one field set per member with `member_index` and `member_count`. Do not collapse multiple tables or schema hashes into one arbitrary value. For row-oriented payloads, set `table_name_error` or `schema_hash_error` to `"not_derived"` when derivation is absent.
+Implement `SyncPayloadTelemetryFields::from_payload(&SyncPayload, FieldDerivation)` for single-record payloads using `payload.variant_name()`, `payload.object_id()`, `payload.branch_name()`, and explicit matches for batch/query/tier/error fields. For decoded sync error payloads, export `payload_variant`, `error_variant`, and `error_code` when available, but do not export the full decoded error payload body. For multi-member payloads such as `BatchSettlement` and `SealBatch`, add `SyncPayloadTelemetryFields::records_from_payload(...) -> Vec<SyncPayloadTelemetryFields>` and emit one field set per member with `member_index` and `member_count`. Do not collapse multiple tables or schema hashes into one arbitrary value. For row-oriented payloads, set `table_name_error` or `schema_hash_error` to `"not_derived"` when derivation is absent.
 
 Export it in `crates/jazz-tools/src/lib.rs`:
 
@@ -571,7 +571,6 @@ pub struct SyncPayloadTelemetryRecord {
     pub message_encoding: SyncPayloadTelemetryMessageEncoding,
     pub recorded_at: u64,
     pub decode_error: Option<String>,
-    pub message_base64: Option<String>,
     #[serde(flatten)]
     pub fields: SyncPayloadTelemetryFields,
 }
@@ -584,7 +583,7 @@ pub enum SyncPayloadTelemetryMessageEncoding {
 }
 ```
 
-Successful records always set flattened `fields` and never include decoded payload bodies. Decode-failure records set `decode_error`, capped `message_base64`, `message_encoding`, and leave `fields` at `SyncPayloadTelemetryFields::default()`.
+Successful records always set flattened `fields` and never include decoded payload bodies. Decode-failure records set `decode_error`, `message_bytes`, and `message_encoding`, and leave `fields` at `SyncPayloadTelemetryFields::default()`. Decode-failure and error records must not include decoded payload bodies, raw payload bytes, base64-encoded payload bytes, or original string payloads.
 
 In `server/mod.rs`, add to `ServerState`:
 
@@ -903,7 +902,7 @@ it("builds structured telemetry records", () => {
   });
 });
 
-it("builds decode-failure telemetry records with base64 payload bytes", () => {
+it("builds decode-failure telemetry records without payload bytes", () => {
   const record = buildSyncPayloadTelemetryRecord({
     scope: "worker_bridge",
     direction: "main_to_worker",
@@ -919,11 +918,11 @@ it("builds decode-failure telemetry records with base64 payload bytes", () => {
     messageBytes: 3,
     messageEncoding: "binary",
     decodeError: "bad postcard",
-    messageBase64: "AQID",
   });
+  expect(record).not.toHaveProperty("messageBase64");
 });
 
-it("builds decode-failure telemetry records for string payloads as utf8 bytes", () => {
+it("builds decode-failure telemetry records for string payloads without payload bytes", () => {
   const record = buildSyncPayloadTelemetryRecord({
     scope: "worker_bridge",
     direction: "worker_to_main",
@@ -936,8 +935,8 @@ it("builds decode-failure telemetry records for string payloads as utf8 bytes", 
     messageBytes: 12,
     messageEncoding: "utf8",
     decodeError: "bad json payload",
-    messageBase64: "eyJiYWQiOnRydWV9",
   });
+  expect(record).not.toHaveProperty("messageBase64");
 });
 ```
 
@@ -1016,7 +1015,6 @@ export function buildSyncPayloadTelemetryRecord(options: {
       messageEncoding: typeof options.payload === "string" ? "utf8" : "binary",
       recordedAt: Date.now(),
       decodeError: decoded.error,
-      messageBase64: payloadToBase64(options.payload, { maxBytes: 4096 }),
     };
   }
   const record: Record<string, unknown> = {
@@ -1034,7 +1032,7 @@ export function buildSyncPayloadTelemetryRecord(options: {
 }
 ```
 
-Implement capped `payloadToBase64(...)`, `payloadVariantFromJson(...)`, and direct field extraction for row id, branch, batch, query, tier, error variant, `table_name`, and `schema_hash`. For missing required derivations, include `tableNameError` or `schemaHashError`.
+Implement `payloadVariantFromJson(...)` and direct field extraction for row id, branch, batch, query, tier, error variant, `table_name`, and `schema_hash`. For missing required derivations, include `tableNameError` or `schemaHashError`.
 
 - [ ] **Step 5: Run tests to verify green**
 
