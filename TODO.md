@@ -38,6 +38,7 @@
 
 - [**postmessage-stream-adapter-for-worker-bridge**](todo/issues/postmessage-stream-adapter-for-worker-bridge.md) — The browser main-thread ↔ worker bridge currently uses a bespoke `postMessage` path and the `JsSyncSender` Rust-side shim. A `PostMessageStream` adapter implementing `StreamAdapter` would let the worker bridge reuse the same `TransportManager` + run-loop code path as the network transport, eliminating the `sync_sender` field and `JsSyncSender` entirely.
 - [**text-encoded-storage-enums**](todo/issues/text-encoded-storage-enums.md) — Flat row storage currently encodes enum-like fields as text, which is larger than necessary and adds avoidable decode overhead on hot storage paths.
+- [**wasm-column-to-ast-lossy**](todo/issues/wasm-column-to-ast-lossy.md) — `wasmColumnToAst` in `packages/jazz-tools/src/schema-loader.ts` projects a `ColumnDescriptor` to an AST `Column` but only carries `name`, `sqlType`, `nullable`, and `references`. `default` and `mergeStrategy` are dropped on the floor.
 - [**ws-route-clones-every-inbound-frame**](todo/issues/ws-route-clones-every-inbound-frame.md) — `crates/jazz-tools/src/routes.rs:1345` does `let inner = inner.to_vec();` before handing the payload to `process_ws_client_frame(&inner)`. The borrow from `frame_decode(&data)` would survive the `.await` because `data` owns the bytes, so the clone is avoidable — pass `&[u8]` through directly.
 
 ## Ideas
