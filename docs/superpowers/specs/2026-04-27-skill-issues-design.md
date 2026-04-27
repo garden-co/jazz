@@ -68,6 +68,7 @@ Verified users are represented by a general `User` table:
 ```ts
 User {
   id: string; // Jazz local-first principal id
+  jazzUserId: string; // duplicate of id for policy checks until id/session text comparison works
   githubUserId: string; // immutable GitHub id
   githubLogin: string;
   verifiedAt: string;
@@ -75,6 +76,8 @@ User {
 ```
 
 `ItemState.assigneeUserId` references `User.id`.
+
+`User.jazzUserId` must equal `User.id`. It exists only because current Jazz row ids are UUID-typed in policy comparisons while `session.user_id` is a text session value. Permissions should compare `users.jazzUserId` to `session.user_id`; assignment and foreign keys should continue to use `User.id`.
 
 ## Authorization
 

@@ -247,6 +247,8 @@ export interface VerifiedUser {
 }
 ```
 
+`users.jazzUserId` is a persisted policy key, not part of the public `VerifiedUser` DTO. The repository derives `users.jazzUserId = VerifiedUser.id` when writing a user row and strips it when returning a `VerifiedUser`.
+
 Create `examples/skill-issues/src/domain/slugs.ts`:
 
 ```ts
@@ -471,6 +473,7 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   users: s.table({
+    jazzUserId: s.string(),
     githubUserId: s.string(),
     githubLogin: s.string(),
     verifiedAt: s.string(),
@@ -507,7 +510,7 @@ export default s.definePermissions(app, ({ policy, session }) => {
   policy.items.allowRead.always();
   policy.itemStates.allowRead.always();
 
-  const isVerifiedUser = policy.users.exists.where({ id: session.user_id });
+  const isVerifiedUser = policy.users.exists.where({ jazzUserId: session.user_id });
 
   policy.items.allowInsert.where(isVerifiedUser);
   policy.items.allowUpdate.where(isVerifiedUser);
@@ -539,12 +542,21 @@ export interface ListFilters {
 }
 
 export function createIssueRepository(db: Db, app: App<any>) {
+  function toVerifiedUser(row: App["users"]["_rowType"]): VerifiedUser {
+    return {
+      id: row.id,
+      githubUserId: row.githubUserId,
+      githubLogin: row.githubLogin,
+      verifiedAt: row.verifiedAt,
+    };
+  }
+
   async function currentUser(): Promise<VerifiedUser> {
     const session = db.getAuthState().session;
     if (!session?.user_id) throw new Error("A local-first Jazz identity is required.");
-    const user = await db.one(app.users.where({ id: session.user_id }));
+    const user = await db.one(app.users.where({ jazzUserId: session.user_id }));
     if (!user) throw new Error("A verified GitHub identity is required. Run issues auth github.");
-    return user as VerifiedUser;
+    return toVerifiedUser(user);
   }
 
   async function stateFor(slug: string): Promise<ItemState> {
@@ -556,9 +568,24 @@ export function createIssueRepository(db: Db, app: App<any>) {
     async upsertVerifiedUser(user: VerifiedUser): Promise<void> {
       const existing = await db.one(app.users.where({ id: user.id }));
       if (existing) {
-        await db.update(app.users, user.id, user).wait({ tier: "local" });
+        await db
+          .update(app.users, user.id, {
+            jazzUserId: user.id,
+            githubUserId: user.githubUserId,
+            githubLogin: user.githubLogin,
+            verifiedAt: user.verifiedAt,
+          })
+          .wait({ tier: "local" });
       } else {
-        await db.insert(app.users, { id: user.id, ...user }).wait({ tier: "local" });
+        await db
+          .insert(app.users, {
+            id: user.id,
+            jazzUserId: user.id,
+            githubUserId: user.githubUserId,
+            githubLogin: user.githubLogin,
+            verifiedAt: user.verifiedAt,
+          })
+          .wait({ tier: "local" });
       }
     },
 
