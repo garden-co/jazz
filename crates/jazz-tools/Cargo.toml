@@ -134,6 +134,7 @@ serde = { version = "1", features = ["derive"] }
 futures = "0.3"
 tokio = { version = "1", features = ["test-util", "full"] }
 tower = { version = "0.5", features = ["util"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 [[bench]]
 name = "realistic_phase1"

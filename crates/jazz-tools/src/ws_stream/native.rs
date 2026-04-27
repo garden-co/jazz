@@ -115,11 +115,23 @@ mod tests {
         assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
     }
 
-    // The "populated native store does not pull in webpki-roots" branch is
-    // trivially correct from inspection (the fallback is gated on
-    // `native_added == 0`) and exercising it would require synthesising a
-    // valid X.509 DER cert as a fixture, which adds binary blobs or a
-    // cert-generation dev-dep just to assert a one-line conditional.
+    #[test]
+    fn populated_native_store_does_not_extend_with_bundled_webpki_roots() {
+        // Desktop case: OS trust store has anchors. Unioning bundled
+        // webpki-roots on top would silently re-introduce CAs that an admin
+        // or enterprise policy has distrusted, so the resulting store must
+        // contain only the native anchor we provided.
+        let cert = rcgen::generate_simple_self_signed(vec!["jazz-tls-fixture.local".into()])
+            .expect("rcgen self-signed");
+        let native = vec![cert.cert.der().clone()];
+
+        let roots = build_root_store_from_native(native, 0);
+        assert_eq!(
+            roots.len(),
+            1,
+            "populated native store must not pull in bundled webpki-roots"
+        );
+    }
 
     #[tokio::test]
     async fn native_ws_stream_send_recv_roundtrip() {
