@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
+    body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
@@ -23,8 +24,12 @@ use crate::query_manager::types::{
     ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
-use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
+use crate::server::{
+    CatalogueAuthorityMode, ConnectionState, ServerState, WsPayloadTelemetryInput,
+};
 use crate::sync_manager::ClientId;
+use crate::sync_payload_telemetry::SyncPayloadTelemetryDirection;
+use crate::sync_payload_telemetry::SyncPayloadTelemetryRecord;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -49,6 +54,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
+        )
+        .route(
+            "/dev/sync-payload-telemetry",
+            post(sync_payload_telemetry_handler),
         )
         .layer(TraceLayer::new_for_http());
 
@@ -82,6 +91,37 @@ struct AdminSubscriptionIntrospectionParams {
 struct SchemaConnectivityParams {
     from_hash: String,
     to_hash: String,
+}
+
+async fn sync_payload_telemetry_handler(
+    State(state): State<Arc<ServerState>>,
+    body: Bytes,
+) -> Response {
+    let Some(telemetry) = state.sync_payload_telemetry.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mut record = match serde_json::from_slice::<SyncPayloadTelemetryRecord>(&body) {
+        Ok(record) => record,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid sync payload telemetry record: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let expected_app_id = state.app_id.to_string();
+    if let Some(app_id) = record.app_id.as_deref()
+        && app_id != expected_app_id
+    {
+        return (StatusCode::BAD_REQUEST, "appId does not match route").into_response();
+    }
+    record.app_id = Some(expected_app_id);
+
+    telemetry.sink.emit(record);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -1591,7 +1631,7 @@ async fn handle_ws_connection(
                         continue;
                     };
                     let inner = inner.to_vec();
-                    if let Err(e) = state.process_ws_client_frame(client_id, &inner).await {
+                    if let Err(e) = state.process_ws_client_frame(client_id, Some(connection_id), &inner).await {
                         tracing::warn!(error = ?e, "ws client frame rejected");
                     }
                 }
@@ -1608,6 +1648,21 @@ async fn handle_ws_connection(
                     Ok(b) => b,
                     Err(_) => continue,
                 };
+                let telemetry_payload = match &event {
+                    crate::jazz_transport::ServerEvent::SyncUpdate { payload, .. } => payload.as_ref(),
+                    _ => unreachable!("event is always SyncUpdate"),
+                };
+                state.emit_ws_payload_telemetry(WsPayloadTelemetryInput {
+                    direction: SyncPayloadTelemetryDirection::ServerToClient,
+                    client_id,
+                    connection_id: Some(connection_id),
+                    source_frame_id: Uuid::now_v7().to_string(),
+                    source_payload_index: Some(0),
+                    source_payload_count: Some(1),
+                    source_frame_bytes: bytes.len() as u64,
+                    payload: telemetry_payload,
+                    sequence: Some(u.seq),
+                });
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),
@@ -1679,7 +1734,10 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use crate::middleware::AuthConfig;
-    use crate::server::{CatalogueAuthorityMode, ServerBuilder, ServerState};
+    use crate::server::{
+        CatalogueAuthorityMode, ServerBuilder, ServerState, SyncPayloadTelemetryConfig,
+    };
+    use crate::sync_payload_telemetry::InMemorySyncPayloadTelemetrySink;
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -1767,6 +1825,48 @@ mod tests {
         )
     }
 
+    async fn make_sync_payload_telemetry_test_state()
+    -> (Arc<ServerState>, InMemorySyncPayloadTelemetrySink) {
+        let sink = InMemorySyncPayloadTelemetrySink::default();
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_in_memory_storage()
+            .with_sync_payload_telemetry_sink(
+                SyncPayloadTelemetryConfig {
+                    collector_url: "http://localhost:4317".to_string(),
+                },
+                sink.clone(),
+            )
+            .build()
+            .await
+            .expect("build telemetry test state")
+            .state;
+        (state, sink)
+    }
+
+    fn sync_payload_telemetry_record_body(app_id: Option<String>) -> axum::body::Body {
+        let mut body = serde_json::json!({
+            "severityText": "DEBUG",
+            "scope": "worker_bridge",
+            "direction": "main_to_worker",
+            "clientId": "alice",
+            "sequence": 1,
+            "sourceFrameId": "frame-1",
+            "sourcePayloadIndex": 0,
+            "sourcePayloadCount": 1,
+            "sourceFrameBytes": 32,
+            "messageBytes": 32,
+            "messageEncoding": "binary",
+            "recordedAt": 1_775_000_000_000_u64,
+            "payloadVariant": "QuerySettled",
+            "queryId": 7
+        });
+        if let Some(app_id) = app_id {
+            body["appId"] = serde_json::Value::String(app_id);
+        }
+        axum::body::Body::from(body.to_string())
+    }
+
     /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
     fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
@@ -1787,6 +1887,172 @@ mod tests {
             metadata: None,
             row,
         }
+    }
+
+    #[tokio::test]
+    async fn sync_payload_telemetry_ingest_404s_when_disabled() {
+        let state = make_state_with_schema(SchemaBuilder::new().build()).await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/dev/sync-payload-telemetry"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(sync_payload_telemetry_record_body(None))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sync_payload_telemetry_ingest_attaches_route_app_id() {
+        let (state, sink) = make_sync_payload_telemetry_test_state().await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/dev/sync-payload-telemetry"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(sync_payload_telemetry_record_body(None))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].app_id.as_deref(),
+            Some(test_app_id_text().as_str())
+        );
+        assert_eq!(records[0].payload_variant.as_deref(), Some("QuerySettled"));
+        assert_eq!(records[0].query_id, Some(7));
+    }
+
+    #[tokio::test]
+    async fn sync_payload_telemetry_ingest_rejects_mismatched_app_id() {
+        let (state, sink) = make_sync_payload_telemetry_test_state().await;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/dev/sync-payload-telemetry"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(sync_payload_telemetry_record_body(Some(
+                        "wrong-app".to_string(),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(sink.records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ws_sync_batch_emits_one_telemetry_record_per_payload() {
+        let (state, sink) = make_sync_payload_telemetry_test_state().await;
+        let client_id = ClientId::new();
+        let _ = state.runtime.ensure_client_as_backend(client_id);
+        let p1 = row_version_created_payload("00000000-0000-0000-0000-000000000001");
+        let p2 = row_version_created_payload("00000000-0000-0000-0000-000000000002");
+        let frame_payload = serde_json::to_vec(&SyncBatchRequest {
+            payloads: vec![p1, p2],
+            client_id,
+        })
+        .unwrap();
+
+        state
+            .process_ws_client_frame(client_id, Some(41), &frame_payload)
+            .await
+            .expect("process ws batch");
+
+        let records = sink.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].direction,
+            SyncPayloadTelemetryDirection::ClientToServer
+        );
+        assert_eq!(records[0].connection_id.as_deref(), Some("41"));
+        assert_eq!(records[0].source_payload_index, Some(0));
+        assert_eq!(records[0].source_payload_count, Some(2));
+        assert_eq!(records[1].source_payload_index, Some(1));
+        assert_eq!(records[1].source_payload_count, Some(2));
+        assert_eq!(records[0].source_frame_id, records[1].source_frame_id);
+    }
+
+    #[tokio::test]
+    async fn ws_invalid_frame_emits_decode_failure_telemetry() {
+        let (state, sink) = make_sync_payload_telemetry_test_state().await;
+        let client_id = ClientId::new();
+
+        let error = state
+            .process_ws_client_frame(client_id, Some(42), b"not-json")
+            .await
+            .expect_err("invalid frame should fail");
+
+        assert!(error.contains("invalid ws payload"));
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].direction,
+            SyncPayloadTelemetryDirection::ClientToServer
+        );
+        assert_eq!(records[0].connection_id.as_deref(), Some("42"));
+        assert!(
+            records[0]
+                .decode_error
+                .as_deref()
+                .unwrap()
+                .contains("invalid ws payload")
+        );
+        assert_eq!(records[0].payload_variant, None);
+        assert_eq!(records[0].log_body, None);
+    }
+
+    #[tokio::test]
+    async fn ws_server_to_client_telemetry_records_sequence() {
+        let (state, sink) = make_sync_payload_telemetry_test_state().await;
+        let client_id = ClientId::new();
+        let payload = SyncPayload::QuerySettled {
+            query_id: QueryId(55),
+            tier: crate::sync_manager::DurabilityTier::EdgeServer,
+            through_seq: 9,
+        };
+
+        state.emit_ws_payload_telemetry(WsPayloadTelemetryInput {
+            direction: SyncPayloadTelemetryDirection::ServerToClient,
+            client_id,
+            connection_id: Some(43),
+            source_frame_id: "frame-server-1".to_string(),
+            source_payload_index: Some(0),
+            source_payload_count: Some(1),
+            source_frame_bytes: 128,
+            payload: &payload,
+            sequence: Some(77),
+        });
+
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].direction,
+            SyncPayloadTelemetryDirection::ServerToClient
+        );
+        assert_eq!(records[0].connection_id.as_deref(), Some("43"));
+        assert_eq!(records[0].sequence, Some(77));
+        assert_eq!(records[0].query_id, Some(55));
+        assert_eq!(records[0].durability_tier.as_deref(), Some("EdgeServer"));
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1896,7 +2162,7 @@ mod tests {
         };
         let frame_payload = serde_json::to_vec(&batch).unwrap();
         let result = state
-            .process_ws_client_frame(client_id, &frame_payload)
+            .process_ws_client_frame(client_id, None, &frame_payload)
             .await;
         assert!(
             result.is_ok(),
@@ -2032,7 +2298,7 @@ mod tests {
         };
         let frame_payload = serde_json::to_vec(&batch).unwrap();
         let result = state
-            .process_ws_client_frame(client_id, &frame_payload)
+            .process_ws_client_frame(client_id, None, &frame_payload)
             .await;
         assert!(
             result.is_ok(),
