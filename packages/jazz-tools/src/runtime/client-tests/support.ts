@@ -1,4 +1,3 @@
-import { vi } from "vitest";
 import {
   JazzClient,
   type DirectInsertResult,
@@ -47,7 +46,7 @@ export function mockMutation(batchId = "batch-id"): DirectMutationResult {
 export const runtimeBatchRecordStubs = {
   loadLocalBatchRecord: () => null,
   loadLocalBatchRecords: () => [],
-  sealBatch: vi.fn(),
+  sealBatch: () => {},
   insertDurable: async () => mockRow("00000000-0000-0000-0000-000000000001"),
   updateDurable: async () => {},
   deleteDurable: async () => {},
