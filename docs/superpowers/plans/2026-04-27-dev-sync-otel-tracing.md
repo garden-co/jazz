@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add opt-in dev sync tracing that captures structured worker-bridge and WebSocket sync diagnostics, including `table_name` and `schema_hash`, and exports them as OTel log records through the local dev server. Full decoded payload JSON is opt-in for deep local debugging, not the default.
+**Goal:** Add opt-in dev sync tracing that captures structured worker-bridge and WebSocket sync diagnostics, including `table_name` and `schema_hash`, and exports them as OTel log records through the local dev server. Decoded payload bodies are not exported.
 
-**Architecture:** The dev plugin forwards `server.syncTracing` into the NAPI dev server. Rust owns the OTel log exporter and the token-gated ingest route. Browser worker-bridge instrumentation is enabled only when the plugin/runtime provides an ingest URL and dev trace token; it uses a TS helper backed by WASM/Rust decoding to build trace records, then posts them to the local server. WebSocket instrumentation records typed Rust `SyncPayload`s directly.
+**Architecture:** The dev plugin forwards `server.syncTracing` into the NAPI dev server. Rust owns the OTel log exporter and the dev-only ingest route. Browser worker-bridge instrumentation is enabled only when the plugin/runtime provides an ingest URL; it uses a TS helper backed by WASM/Rust decoding to build trace records, then posts them to the local server. WebSocket instrumentation records typed Rust `SyncPayload`s directly.
 
 **Tech Stack:** TypeScript/Vitest, Rust/Tokio/Axum/NAPI, jazz-wasm bindings, OpenTelemetry OTLP logs, lefthook/oxfmt.
 
@@ -121,7 +121,6 @@ export type SyncTracingOptions =
   | boolean
   | {
       collectorUrl?: string;
-      payload?: "structured" | "full";
     };
 
 export interface JazzServerOptions {
@@ -146,7 +145,6 @@ export type SyncTracingOptions =
   | boolean
   | {
       collectorUrl?: string;
-      payload?: "structured" | "full";
     };
 
 export interface StartLocalJazzServerOptions {
@@ -229,10 +227,6 @@ mod dev_server_option_tests {
             opts.sync_tracing.as_ref().and_then(|o| o.collector_url.as_deref()),
             Some("http://127.0.0.1:4317")
         );
-        assert_eq!(
-            opts.sync_tracing.as_ref().and_then(|o| o.payload.as_deref()),
-            Some("structured")
-        );
     }
 
     #[test]
@@ -247,21 +241,6 @@ mod dev_server_option_tests {
             opts.sync_tracing.as_ref().and_then(|o| o.collector_url.as_deref()),
             Some("http://localhost:4317")
         );
-        assert_eq!(
-            opts.sync_tracing.as_ref().and_then(|o| o.payload.as_deref()),
-            Some("structured")
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_sync_tracing_payload_mode() {
-        let err = parse_dev_server_start_options(json!({
-            "appId": "app-1",
-            "syncTracing": { "payload": "everything" }
-        }))
-        .expect_err("invalid payload mode");
-
-        assert!(err.to_string().contains("syncTracing.payload"));
     }
 }
 ```
@@ -292,7 +271,6 @@ enum DevServerSyncTracingInput {
 #[serde(rename_all = "camelCase")]
 struct DevServerSyncTracingOptions {
     collector_url: Option<String>,
-    payload: Option<String>,
 }
 
 fn normalize_sync_tracing(
@@ -302,18 +280,10 @@ fn normalize_sync_tracing(
         None | Some(DevServerSyncTracingInput::Enabled(false)) => Ok(None),
         Some(DevServerSyncTracingInput::Enabled(true)) => Ok(Some(DevServerSyncTracingOptions {
             collector_url: Some("http://localhost:4317".to_string()),
-            payload: Some("structured".to_string()),
         })),
         Some(DevServerSyncTracingInput::Options(mut options)) => {
             if options.collector_url.is_none() {
                 options.collector_url = Some("http://localhost:4317".to_string());
-            }
-            if options.payload.is_none() {
-                options.payload = Some("structured".to_string());
-            }
-            match options.payload.as_deref() {
-                Some("structured" | "full") => {}
-                _ => return Err("syncTracing.payload must be \"structured\" or \"full\"".to_string()),
             }
             Ok(Some(options))
         }
@@ -348,21 +318,19 @@ Update `DevServerStartOptions` to include:
 sync_tracing: Option<DevServerSyncTracingOptions>,
 ```
 
-When constructing `SyncTracingConfig`, map `payload: "structured"` to `SyncTracePayloadMode::Structured` and `payload: "full"` to `SyncTracePayloadMode::Full`. Generate a random per-server `trace_token`, store it in `SyncTracingConfig`, and return it on the NAPI dev server handle so dev plugins can inject browser config.
+When constructing `SyncTracingConfig`, store the collector URL and return the app-scoped sync trace ingest URL on the NAPI dev server handle so dev plugins can inject browser config.
 
 - [ ] **Step 4: Update generated declaration**
 
 In `crates/jazz-napi/index.d.ts`, add:
 
 ```ts
-syncTracing?: boolean | { collectorUrl?: string; payload?: "structured" | "full" };
+syncTracing?: boolean | { collectorUrl?: string };
 ```
 
 inside `DevServer.start(options: { ... })`, and add these optional fields to the returned dev server handle:
 
 ```ts
-syncTraceToken?: string;
-syncTracePayload?: "structured" | "full";
 syncTraceIngestUrl?: string;
 ```
 
@@ -545,8 +513,6 @@ async fn server_builder_stores_sync_trace_config() {
         .with_in_memory_storage()
         .with_sync_tracing(crate::sync_trace::SyncTracingConfig {
             collector_url: "http://127.0.0.1:4317".to_string(),
-            payload: crate::sync_trace::SyncTracePayloadMode::Structured,
-            trace_token: "test-token".to_string(),
         })
         .build()
         .await
@@ -577,14 +543,6 @@ In `sync_trace.rs`:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncTracingConfig {
     pub collector_url: String,
-    pub payload: SyncTracePayloadMode,
-    pub trace_token: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncTracePayloadMode {
-    Structured,
-    Full,
 }
 
 pub trait SyncTraceSink: Send + Sync + 'static {
@@ -608,8 +566,6 @@ pub struct SyncTraceRecord {
     pub source_payload_index: Option<u32>,
     pub source_payload_count: Option<u32>,
     pub source_frame_bytes: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload_json: Option<serde_json::Value>,
     pub message_bytes: usize,
     pub message_encoding: SyncTraceMessageEncoding,
     pub recorded_at: u64,
@@ -627,7 +583,7 @@ pub enum SyncTraceMessageEncoding {
 }
 ```
 
-Successful records always set flattened `fields`. They set `payload_json` only when `SyncTracingConfig.payload == SyncTracePayloadMode::Full`; default structured mode must avoid serializing the full payload JSON. Decode-failure records set `decode_error`, capped `message_base64`, `message_encoding`, and leave `fields` at `SyncTraceFields::default()`.
+Successful records always set flattened `fields` and never include decoded payload bodies. Decode-failure records set `decode_error`, capped `message_base64`, `message_encoding`, and leave `fields` at `SyncTraceFields::default()`.
 
 In `server/mod.rs`, add to `ServerState`:
 
@@ -667,7 +623,7 @@ otel-logs = [
 
 Build a `SyncTraceSink` implementation behind `#[cfg(feature = "otel-logs")]` that uses OTLP logs and the configured collector URL. Do not use `opentelemetry-stdout`.
 
-`SyncTraceSink::emit(...)` must be fire-and-forget. Implement the OTel sink as a bounded in-memory queue drained by a background task; if the queue is full, drop the trace record and increment an internal dropped counter rather than blocking the WebSocket handler.
+`SyncTraceSink::emit(...)` must be fire-and-forget. Implement the OTel sink as a bounded in-memory queue drained by a background task; if the queue has no capacity, drop the trace record and increment an internal dropped counter rather than blocking the WebSocket handler.
 
 The `otel-logs` feature must be independent from the existing `otel` feature. Enabling sync tracing must not transitively enable `opentelemetry-stdout`; if both features are enabled in a build, sync-tracing records still use only the OTel logs exporter path.
 
@@ -724,7 +680,6 @@ async fn sync_trace_ingest_rejects_mismatched_app_id() {
                 .method("POST")
                 .uri(test_app_route("/dev/sync-traces"))
                 .header("content-type", "application/json")
-                .header("x-jazz-sync-trace-token", "test-token")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -736,8 +691,6 @@ async fn sync_trace_ingest_rejects_mismatched_app_id() {
 ```
 
 Add a second test that posts without `appId` and asserts the in-memory sink receives a record with `app_id` equal to the route app.
-
-Add a third test that omits `x-jazz-sync-trace-token` and asserts `401` with no sink emission.
 
 - [ ] **Step 2: Run tests to verify red**
 
@@ -762,20 +715,10 @@ Implement:
 ```rust
 async fn sync_trace_ingest_handler(
     State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
     Json(mut record): Json<crate::sync_trace::SyncTraceRecord>,
 ) -> impl IntoResponse {
     if state.sync_trace_config.is_none() {
         return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some(config) = state.sync_trace_config.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let token = headers
-        .get("x-jazz-sync-trace-token")
-        .and_then(|value| value.to_str().ok());
-    if token != Some(config.trace_token.as_str()) {
-        return StatusCode::UNAUTHORIZED.into_response();
     }
     let route_app_id = state.app_id.to_string();
     if let Some(body_app_id) = record.app_id.as_deref() {
@@ -794,7 +737,7 @@ async fn sync_trace_ingest_handler(
 
 The server builder must enforce the invariant that `sync_trace_config` and `sync_trace_sink` are either both `Some` or both `None`. If tracing config is present and sink construction fails, server startup fails before routes are served.
 
-The existing router already applies `CorsLayer::permissive()` to all routes in `create_router`. Keep `/dev/sync-traces` inside that router so cross-origin POSTs from the host dev server origin are allowed, but require the trace token for every POST. Add a route test with an `Origin` header and `OPTIONS` preflight or POST assertion that CORS allows the `x-jazz-sync-trace-token` header for `/dev/sync-traces`.
+The existing router already applies `CorsLayer::permissive()` to all routes in `create_router`. Keep `/dev/sync-traces` inside that router so cross-origin POSTs from the host dev server origin are allowed. The route is unauthenticated in v1 by design: it is dev-only, opt-in, local, structured-only, and unavailable when tracing is disabled. Add a route test with an `Origin` header and `OPTIONS` preflight or POST assertion that CORS headers are present for `/dev/sync-traces`.
 
 - [ ] **Step 4: Run tests to verify green**
 
@@ -881,7 +824,7 @@ and update unit tests that call it directly.
 
 Add helper methods on `ServerState` to derive `table_name` and `schema_hash` from storage/schema context and to set `table_name_error` or `schema_hash_error` fields when derivation fails.
 
-`emit_sync_trace_payload(...)` must read `sync_trace_config.payload` and only serialize `payload_json` when the mode is `Full`. In `Structured` mode, emit the structured fields without materializing the full JSON payload.
+`emit_sync_trace_payload(...)` must emit the structured fields without materializing the decoded payload body.
 
 - [ ] **Step 4: Implement outbound trace emission**
 
@@ -937,7 +880,7 @@ git commit -m "feat: trace websocket sync payloads"
 In `worker-bridge.test.ts`, add a helper-level test with a fake decoder:
 
 ```ts
-it("builds structured trace records without payloadJson by default", () => {
+it("builds structured trace records", () => {
   const record = buildSyncTraceRecord({
     scope: "worker_bridge",
     direction: "main_to_worker",
@@ -946,7 +889,6 @@ it("builds structured trace records without payloadJson by default", () => {
     decode: () => ({
       ok: true,
       payloadVariant: "QuerySettled",
-      payloadJson: { QuerySettled: { query_id: 1 } },
       fields: { queryId: 1 },
     }),
   });
@@ -957,27 +899,6 @@ it("builds structured trace records without payloadJson by default", () => {
     appId: "app-1",
     payloadVariant: "QuerySettled",
     queryId: 1,
-  });
-  expect(record).not.toHaveProperty("payloadJson");
-});
-
-it("includes payloadJson only when requested", () => {
-  const record = buildSyncTraceRecord({
-    scope: "worker_bridge",
-    direction: "main_to_worker",
-    appId: "app-1",
-    payload: new Uint8Array([1, 2, 3]),
-    includePayloadJson: true,
-    decode: () => ({
-      ok: true,
-      payloadVariant: "QuerySettled",
-      payloadJson: { QuerySettled: { query_id: 1 } },
-      fields: { queryId: 1 },
-    }),
-  });
-
-  expect(record).toMatchObject({
-    payloadJson: { QuerySettled: { query_id: 1 } },
   });
 });
 
@@ -1038,10 +959,9 @@ In `crates/jazz-wasm/src/runtime.rs`, add:
 pub fn decode_sync_payload_for_tracing(
     &self,
     payload: JsValue,
-    include_payload_json: bool,
 ) -> Result<JsValue, JsError> {
     let payload = self.parse_sync_payload(payload)?;
-    let trace = crate::sync_trace::SyncTraceDecoded::from_payload(&payload, include_payload_json);
+    let trace = crate::sync_trace::SyncTraceDecoded::from_payload(&payload);
     let trace_json = serde_wasm_bindgen::to_value(&trace)
         .map_err(|e| JsError::new(&format!("Sync payload JSON conversion failed: {e}")))?;
     Ok(trace_json)
@@ -1053,7 +973,7 @@ If `serde_wasm_bindgen` is not already available in `jazz-wasm`, add it to `crat
 Update `packages/jazz-tools/src/types/jazz-wasm.d.ts`:
 
 ```ts
-decodeSyncPayloadForTracing(payload: Uint8Array | string, includePayloadJson: boolean): unknown;
+decodeSyncPayloadForTracing(payload: Uint8Array | string): unknown;
 ```
 
 - [ ] **Step 4: Add TS trace helper**
@@ -1069,7 +989,7 @@ export type SyncTraceDirection =
   | "server_to_client";
 
 export type DecodeResult =
-  | { ok: true; payloadJson?: unknown; payloadVariant: string; fields: Record<string, unknown> }
+  | { ok: true; payloadVariant: string; fields: Record<string, unknown> }
   | { ok: false; error: string };
 
 export function buildSyncTraceRecord(options: {
@@ -1079,7 +999,6 @@ export function buildSyncTraceRecord(options: {
   clientId?: string;
   payload: Uint8Array | string;
   decode: (payload: Uint8Array | string) => DecodeResult;
-  includePayloadJson?: boolean;
 }): Record<string, unknown> {
   const messageBytes =
     typeof options.payload === "string"
@@ -1110,9 +1029,6 @@ export function buildSyncTraceRecord(options: {
     recordedAt: Date.now(),
     ...decoded.fields,
   };
-  if (options.includePayloadJson && decoded.payloadJson !== undefined) {
-    record.payloadJson = decoded.payloadJson;
-  }
   return record;
 }
 ```
@@ -1168,8 +1084,6 @@ it("posts main_to_worker trace records without blocking sync", async () => {
     syncTracing: {
       appId: "app-1",
       ingestUrl: "http://127.0.0.1:1234/apps/app-1/dev/sync-traces",
-      payload: "structured",
-      token: "trace-token",
       post: async (_url, body) => posted.push(body),
     },
   });
@@ -1207,8 +1121,6 @@ In `worker-protocol.ts`, extend `InitMessage`:
 syncTracing?: {
   ingestUrl: string;
   appId: string;
-  payload: "structured" | "full";
-  token: string;
 };
 ```
 
@@ -1224,23 +1136,20 @@ constructor(worker: Worker, runtime: Runtime)
 
 Store tracing config from `WorkerBridge.init(options.syncTracing)`. The trace point for main-to-worker messages is inside the private `enqueueSyncMessageForWorker(payload)` method before pushing to `pendingSyncPayloadsForWorker`. The trace point for worker-to-main messages is in the `this.worker.onmessage` `"sync"` branch before `this.runtime.onSyncMessageReceived(payload)`.
 
-Worker bridge tracing is disabled unless `ingestUrl`, `appId`, and `token` are all present.
-
-Pass `includePayloadJson: this.syncTracing.payload === "full"` into `buildSyncTraceRecord(...)`. Structured mode is the default and must not emit `payloadJson`.
+Worker bridge tracing is disabled unless `ingestUrl` and `appId` are present. `buildSyncTraceRecord(...)` must not emit decoded payload bodies.
 
 `postSyncTraceRecord` must catch and ignore fetch failures without console logging:
 
 ```ts
 export async function postSyncTraceRecord(
   ingestUrl: string,
-  token: string,
   record: Record<string, unknown>,
   post: typeof fetch = fetch,
 ): Promise<void> {
   try {
     await post(ingestUrl, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-jazz-sync-trace-token": token },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify(record),
     } as RequestInit);
   } catch {
@@ -1301,12 +1210,6 @@ Add equivalent assertions for:
 ```ts
 NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL;
 PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL;
-VITE_JAZZ_SYNC_TRACE_PAYLOAD;
-NEXT_PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD;
-PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD;
-VITE_JAZZ_SYNC_TRACE_TOKEN;
-NEXT_PUBLIC_JAZZ_SYNC_TRACE_TOKEN;
-PUBLIC_JAZZ_SYNC_TRACE_TOKEN;
 ```
 
 - [ ] **Step 2: Run tests to verify red**
@@ -1325,36 +1228,26 @@ Extend `ManagedRuntime`:
 
 ```ts
 syncTraceIngestUrl?: string;
-syncTracePayload?: "structured" | "full";
-syncTraceToken?: string;
 ```
 
 When local server sync tracing is enabled, set:
 
 ```ts
 syncTraceIngestUrl = `${serverUrl}/apps/${appId}/dev/sync-traces`;
-syncTracePayload = normalizedSyncTracing.payload;
-syncTraceToken = handle.syncTraceToken;
 ```
 
 Set the per-framework public env keys where app id and server URL are already injected:
 
 ```ts
 viteServer.config.env.VITE_JAZZ_SYNC_TRACE_INGEST_URL = managed.syncTraceIngestUrl;
-viteServer.config.env.VITE_JAZZ_SYNC_TRACE_PAYLOAD = managed.syncTracePayload;
-viteServer.config.env.VITE_JAZZ_SYNC_TRACE_TOKEN = managed.syncTraceToken;
 ```
 
 ```ts
 [NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL]: managed.syncTraceIngestUrl,
-[NEXT_PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD]: managed.syncTracePayload,
-[NEXT_PUBLIC_JAZZ_SYNC_TRACE_TOKEN]: managed.syncTraceToken,
 ```
 
 ```ts
 viteServer.config.env.PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL = managed.syncTraceIngestUrl;
-viteServer.config.env.PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD = managed.syncTracePayload;
-viteServer.config.env.PUBLIC_JAZZ_SYNC_TRACE_TOKEN = managed.syncTraceToken;
 ```
 
 - [ ] **Step 4: Connect runtime config to WorkerBridgeOptions**
@@ -1375,29 +1268,6 @@ function defaultSyncTraceIngestUrlFromEnv(): string | undefined {
   }
   return undefined;
 }
-
-function defaultSyncTracePayloadFromEnv(): "structured" | "full" {
-  const value =
-    (typeof import.meta !== "undefined" &&
-      ((import.meta as any).env?.VITE_JAZZ_SYNC_TRACE_PAYLOAD ??
-        (import.meta as any).env?.PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD)) ||
-    (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD);
-  return value === "full" ? "full" : "structured";
-}
-
-function defaultSyncTraceTokenFromEnv(): string | undefined {
-  if (typeof import.meta !== "undefined") {
-    const viteToken = (import.meta as any).env?.VITE_JAZZ_SYNC_TRACE_TOKEN;
-    const svelteToken = (import.meta as any).env?.PUBLIC_JAZZ_SYNC_TRACE_TOKEN;
-    if (typeof viteToken === "string" && viteToken.length > 0) return viteToken;
-    if (typeof svelteToken === "string" && svelteToken.length > 0) return svelteToken;
-  }
-  if (typeof process !== "undefined" && process.env) {
-    const nextToken = process.env.NEXT_PUBLIC_JAZZ_SYNC_TRACE_TOKEN;
-    if (typeof nextToken === "string" && nextToken.length > 0) return nextToken;
-  }
-  return undefined;
-}
 ```
 
 In `packages/jazz-tools/src/runtime/db.ts`, extend `DbConfig`:
@@ -1405,34 +1275,26 @@ In `packages/jazz-tools/src/runtime/db.ts`, extend `DbConfig`:
 ```ts
 /** Dev-only sync trace ingest endpoint injected by Jazz dev plugins. */
 syncTraceIngestUrl?: string;
-/** Dev-only sync trace payload mode. Defaults to structured. */
-syncTracePayload?: "structured" | "full";
-/** Dev-only trace ingest token injected by Jazz dev plugins. */
-syncTraceToken?: string;
 ```
 
 In `Db.buildWorkerBridgeOptions(schemaJson)`, compute:
 
 ```ts
 const syncTraceIngestUrl = this.config.syncTraceIngestUrl ?? defaultSyncTraceIngestUrlFromEnv();
-const syncTracePayload = this.config.syncTracePayload ?? defaultSyncTracePayloadFromEnv();
-const syncTraceToken = this.config.syncTraceToken ?? defaultSyncTraceTokenFromEnv();
 ```
 
 and include:
 
 ```ts
-syncTracing: syncTraceIngestUrl && syncTraceToken
+syncTracing: syncTraceIngestUrl
   ? {
       appId: this.config.appId,
       ingestUrl: syncTraceIngestUrl,
-      payload: syncTracePayload,
-      token: syncTraceToken,
     }
   : undefined,
 ```
 
-Add a `db.worker-bootstrap.test.ts` assertion that `buildWorkerBridgeOptions("{}")` uses `NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL`, `NEXT_PUBLIC_JAZZ_SYNC_TRACE_PAYLOAD`, and `NEXT_PUBLIC_JAZZ_SYNC_TRACE_TOKEN` when explicit config is absent, mirroring the existing `NEXT_PUBLIC_JAZZ_WASM_URL` pattern. Add a second assertion that missing token leaves `syncTracing` undefined.
+Add a `db.worker-bootstrap.test.ts` assertion that `buildWorkerBridgeOptions("{}")` uses `NEXT_PUBLIC_JAZZ_SYNC_TRACE_INGEST_URL` when explicit config is absent, mirroring the existing `NEXT_PUBLIC_JAZZ_WASM_URL` pattern.
 
 - [ ] **Step 5: Run tests to verify green**
 
@@ -1485,13 +1347,12 @@ jazzPlugin({
   server: {
     syncTracing: {
       collectorUrl: "http://localhost:4317",
-      payload: "structured",
     },
   },
 });
 ```
 
-State that sync payloads are exported as OTel logs, not stdout. Document that `payload: "structured"` is the default and avoids exporting `payload_json`; `payload: "full"` is available for short, deeper local debugging sessions.
+State that sync payloads are exported as structured OTel logs, not stdout, and that decoded payload bodies are not exported.
 
 - [ ] **Step 3: Run focused verification**
 
@@ -1537,4 +1398,4 @@ git commit -m "docs: document dev sync otel tracing"
 - [ ] Run `cargo test -p jazz-napi dev_server_option_tests`.
 - [ ] Run `cargo check -p jazz-tools --features otel-logs`.
 - [ ] Run `cargo check -p jazz-wasm`.
-- [ ] Start `dev/observability/docker compose up -d`, run one example app with default `server.syncTracing`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing structured fields and either `table_name`/`schema_hash` or the corresponding `table_name_error`/`schema_hash_error` derivation field. Repeat with `payload: "full"` for one message and confirm `payload_json` appears only in that mode.
+- [ ] Start `dev/observability/docker compose up -d`, run one example app with `server.syncTracing`, perform a write, and confirm Grafana/Loki receives `jazz.sync` log records containing structured fields and either `table_name`/`schema_hash` or the corresponding `table_name_error`/`schema_hash_error` derivation field, without decoded payload bodies.
