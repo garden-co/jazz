@@ -236,7 +236,6 @@ describe("backend request auth", () => {
   it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
     const token = signHs256Jwt({
       sub: "user-subject",
-      jazz_principal_id: "principal-123",
       iss: "https://issuer.example",
       claims: { role: "editor" },
     });

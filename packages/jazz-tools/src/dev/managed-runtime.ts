@@ -22,6 +22,7 @@ function printServerStartedBanner(opts: {
   serverUrl: string;
   appId: string;
   dataDir?: string;
+  adminSecret?: string;
 }): void {
   const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined;
   const bold = useColor ? "\x1b[1m" : "";
@@ -47,7 +48,9 @@ function printServerStartedBanner(opts: {
     console.log(`${bold}Data dir:${reset} ${bold}${brand}${toRelativePath(opts.dataDir)}${reset}`);
   }
   console.log(`${bold}App id:${reset}   ${bold}${brand}${opts.appId}${reset}`);
-  console.log("");
+  if (opts.adminSecret) {
+    console.log(`${bold}Admin secret:${reset} ${bold}${brand}${opts.adminSecret}${reset}`);
+  }
 }
 
 export type ManagedRuntime = {
@@ -101,8 +104,8 @@ async function persistAppIdToEnv(envPath: string, envKey: string, appId: string)
   let content = "";
   try {
     content = await readFile(envPath, "utf8");
-  } catch {
-    // file doesn't exist yet
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   if (content.includes(`${envKey}=`)) return;
   const line = `${envKey}=${appId}\n`;
@@ -248,7 +251,10 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} app id: ${appId}`);
         } else {
           const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
-          adminSecret = serverConfig.adminSecret ?? `jazz-dev-${randomUUID().slice(0, 8)}`;
+          adminSecret =
+            serverConfig.adminSecret ??
+            options.adminSecret ??
+            `jazz-dev-${randomUUID().slice(0, 8)}`;
           const envAppId = await readEnvAppId(envPath, this.envKeys.appId);
           appId =
             process.env[this.envKeys.appId] ??
@@ -284,6 +290,7 @@ export class ManagedDevRuntime {
             serverUrl,
             appId,
             dataDir: this.serverHandle.dataDir,
+            adminSecret,
           });
         }
 

@@ -10,6 +10,7 @@
     "prebuild": "node scripts/ensure-env.js",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node server-dist/index.js",
+    "test": "vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "tsx": "^4.19.4",
     "typescript": "catalog:default",
     "vite": "catalog:default",
+    "vitest": "catalog:default",
     "wait-on": "^8.0.2"
   }
 }

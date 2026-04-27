@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { bearer, jwt } from "better-auth/plugins";
 import { APIError, createAuthMiddleware } from "better-auth/api";
+import { jwtPayload } from "./jwt-payload.js";
 
 const APP_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:3001";
 
@@ -82,9 +83,7 @@ export const auth = betterAuth({
         expirationTime: "1h",
         issuer: APP_ORIGIN,
         getSubject: ({ user }: { user: { id: string } }) => user.id,
-        definePayload: ({ user }: { user: { id: string } }) => ({
-          jazz_principal_id: user.id,
-        }),
+        definePayload: jwtPayload,
       },
     }),
   ],

@@ -21,7 +21,14 @@ rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
-transport-websocket = ["transport", "runtime-tokio", "dep:tokio-tungstenite"]
+transport-websocket = [
+  "transport",
+  "runtime-tokio",
+  "dep:tokio-tungstenite",
+  "dep:rustls",
+  "dep:rustls-native-certs",
+  "dep:webpki-roots",
+]
 client = ["runtime-tokio", "transport-websocket", "dep:thiserror", "dep:tokio"]
 server = [
   "transport-websocket",
@@ -73,7 +80,18 @@ rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 axum = { version = "0.7", features = ["ws"], optional = true }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
+tokio-tungstenite = { version = "0.24", features = [
+  "rustls-tls-native-roots",
+  "rustls-tls-webpki-roots",
+], optional = true }
+rustls = { version = "0.23", default-features = false, features = [
+  "std",
+  "tls12",
+  "ring",
+  "logging",
+], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 bytes = { version = "1", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
@@ -116,6 +134,7 @@ serde = { version = "1", features = ["derive"] }
 futures = "0.3"
 tokio = { version = "1", features = ["test-util", "full"] }
 tower = { version = "0.5", features = ["util"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 [[bench]]
 name = "realistic_phase1"
