@@ -67,6 +67,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     unsubscribe: () => {},
     onSyncMessageReceived: () => {},
     onSyncMessageToSend: () => {},
+    sealBatch: vi.fn(),
     addServer: () => {},
     removeServer: () => {},
     addClient: () => "00000000-0000-0000-0000-000000000001",
@@ -92,6 +93,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 
   return {
     client: new JazzClientCtor(runtime, context, "edge"),
+    runtime,
     insertCalls,
     insertWithSessionCalls,
     updateCalls,
@@ -156,7 +158,7 @@ describe("JazzClient mutation durability split", () => {
   });
 
   it("routes update/delete through the synchronous runtime methods", () => {
-    const { client, updateCalls, deleteCalls } = makeClient();
+    const { client, runtime, updateCalls, deleteCalls } = makeClient();
     const updates = { done: { type: "Boolean" as const, value: true } };
 
     expect(client.update("row-1", updates)).toEqual({
@@ -168,6 +170,8 @@ describe("JazzClient mutation durability split", () => {
 
     expect(updateCalls).toEqual([["row-1", updates]]);
     expect(deleteCalls).toEqual(["row-1"]);
+    expect(runtime.sealBatch).toHaveBeenCalledWith("update-batch-id");
+    expect(runtime.sealBatch).toHaveBeenCalledWith("delete-batch-id");
   });
 
   it("routes attributed writes through session-aware runtime methods", async () => {
@@ -193,13 +197,14 @@ describe("JazzClient mutation durability split", () => {
         return { id: objectId ?? "generated-id", values: [], batchId: "batch-1" };
       },
     );
-    const { client } = makeClient({ insert });
+    const { client, runtime } = makeClient({ insert });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
 
     const created = client.create("todos", insertValues, { id: externalId });
 
     expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
     expect(created.value.id).toBe(externalId);
+    expect(runtime.sealBatch).toHaveBeenCalledWith("batch-1");
   });
 
   it("falls back to update when upsert sees an existing object id", async () => {

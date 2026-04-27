@@ -1,13 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
-import {
-  InsertHandle,
-  WriteHandle,
-  type JazzClient,
-  type LocalBatchRecord,
-  type Row,
-} from "./client.js";
+import { WriteHandle, type JazzClient, type LocalBatchRecord, type Row } from "./client.js";
 import type { Session } from "./context.js";
 
 class TestDb extends Db {
@@ -95,18 +89,6 @@ function makeHandleClient(mode: LocalBatchRecord["mode"] = "transactional", ackn
   };
 }
 
-function makeInsertHandle<T>(
-  value: T,
-  batchId: string,
-  mode: LocalBatchRecord["mode"] = "transactional",
-) {
-  const client = makeHandleClient(mode);
-  return {
-    handle: new InsertHandle(value, batchId, client as unknown as JazzClient),
-    client,
-  };
-}
-
 function makeWriteHandle(batchId: string, mode: LocalBatchRecord["mode"] = "transactional") {
   const client = makeHandleClient(mode);
   return {
@@ -126,15 +108,12 @@ describe("Db transactions", () => {
       ],
       batchId: "batch-tx",
     } as Row;
-    const insertedRuntime = makeInsertHandle(runtimeRow, "batch-tx");
-    const updatedRuntime = makeWriteHandle("batch-tx");
-    const deletedRuntime = makeWriteHandle("batch-tx");
     const committedRuntime = makeWriteHandle("batch-tx");
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-tx"),
-      create: vi.fn(() => insertedRuntime.handle),
-      update: vi.fn(() => updatedRuntime.handle),
-      delete: vi.fn(() => deletedRuntime.handle),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
       commit: vi.fn(() => committedRuntime.handle),
       localBatchRecord: vi.fn((batchId = "batch-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-tx")]),
@@ -156,7 +135,7 @@ describe("Db transactions", () => {
 
     expect(beginTransactionInternal).toHaveBeenCalledWith();
     expect(tx.batchId()).toBe("batch-tx");
-    expect(inserted.value).toEqual({
+    expect(inserted).toEqual({
       id: "todo-1",
       title: "Transactional",
       done: false,
@@ -169,16 +148,8 @@ describe("Db transactions", () => {
       done: { type: "Boolean", value: true },
     });
     expect(runtimeTransaction.delete).toHaveBeenCalledWith("todo-1");
-    await expect(inserted.wait({ tier: "global" })).resolves.toEqual({
-      id: "todo-1",
-      title: "Transactional",
-      done: false,
-    });
-    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
-    await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "global");
-    expect(updatedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "edge");
-    expect(deletedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith("batch-tx", "local");
+    expect(updated).toBeUndefined();
+    expect(deleted).toBeUndefined();
     const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-tx");
@@ -200,22 +171,19 @@ describe("Db transactions", () => {
       claims: { role: "writer" },
       authMode: "external",
     };
-    const insertedRuntime = makeInsertHandle(
-      {
-        id: "todo-2",
-        values: [
-          { type: "Text", value: "Session transaction" },
-          { type: "Boolean", value: true },
-        ],
-        batchId: "batch-session-tx",
-      } as Row,
-      "batch-session-tx",
-    );
+    const runtimeRow = {
+      id: "todo-2",
+      values: [
+        { type: "Text", value: "Session transaction" },
+        { type: "Boolean", value: true },
+      ],
+      batchId: "batch-session-tx",
+    } as Row;
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-session-tx"),
-      create: vi.fn(() => insertedRuntime.handle),
-      update: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
-      delete: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
       commit: vi.fn(() => makeWriteHandle("batch-session-tx").handle),
       localBatchRecord: vi.fn((batchId = "batch-session-tx") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-session-tx")]),
@@ -242,35 +210,26 @@ describe("Db transactions", () => {
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-session-tx");
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
-    expect(inserted.value).toEqual({
+    expect(inserted).toEqual({
       id: "todo-2",
       title: "Session transaction",
       done: true,
     });
-    await expect(inserted.wait({ tier: "global" })).resolves.toEqual({
-      id: "todo-2",
-      title: "Session transaction",
-      done: true,
-    });
-    expect(inserted.batchId).toBe("batch-session-tx");
   });
 
   it("rejects db transaction writes after commit", () => {
     const table = todoTable();
-    const insertedRuntime = makeInsertHandle(
-      {
-        id: "todo-closed",
-        values: [
-          { type: "Text", value: "Closed" },
-          { type: "Boolean", value: false },
-        ],
-        batchId: "batch-closed",
-      } as Row,
-      "batch-closed",
-    );
+    const runtimeRow = {
+      id: "todo-closed",
+      values: [
+        { type: "Text", value: "Closed" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-closed",
+    } as Row;
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-closed"),
-      create: vi.fn(() => insertedRuntime.handle),
+      create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-closed").handle),
@@ -310,7 +269,7 @@ describe("Db transactions", () => {
     };
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-read"),
-      create: vi.fn(() => makeInsertHandle(runtimeRow, "batch-read").handle),
+      create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       query: vi.fn(async () => [runtimeRow]),
@@ -433,14 +392,13 @@ describe("Db transactions", () => {
       ],
       batchId: "batch-direct",
     } as Row;
-    const insertedRuntime = makeInsertHandle(runtimeRow, "batch-direct", "direct");
-    const updatedRuntime = makeWriteHandle("batch-direct", "direct");
-    const deletedRuntime = makeWriteHandle("batch-direct", "direct");
+    const committedRuntime = makeWriteHandle("batch-direct", "direct");
     const runtimeBatch = {
       batchId: vi.fn(() => "batch-direct"),
-      create: vi.fn(() => insertedRuntime.handle),
-      update: vi.fn(() => updatedRuntime.handle),
-      delete: vi.fn(() => deletedRuntime.handle),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => committedRuntime.handle),
       localBatchRecord: vi.fn((batchId = "batch-direct") =>
         makeLocalBatchRecord(batchId, "direct"),
       ),
@@ -463,7 +421,7 @@ describe("Db transactions", () => {
 
     expect(beginDirectBatchInternal).toHaveBeenCalledWith();
     expect(batch.batchId()).toBe("batch-direct");
-    expect(inserted.value).toEqual({
+    expect(inserted).toEqual({
       id: "todo-direct-1",
       title: "Direct batch",
       done: false,
@@ -476,25 +434,17 @@ describe("Db transactions", () => {
       done: { type: "Boolean", value: true },
     });
     expect(runtimeBatch.delete).toHaveBeenCalledWith("todo-direct-1");
-    await expect(inserted.wait({ tier: "global" })).resolves.toEqual({
-      id: "todo-direct-1",
-      title: "Direct batch",
-      done: false,
-    });
-    await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
-    await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
+    expect(updated).toBeUndefined();
+    expect(deleted).toBeUndefined();
+    const committed = batch.commit();
+    expect(committed).toBeInstanceOf(WriteHandle);
+    expect(committed.batchId).toBe("batch-direct");
+    await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
+    expect(committedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
       "batch-direct",
       "global",
     );
-    expect(updatedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-direct",
-      "edge",
-    );
-    expect(deletedRuntime.client.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-direct",
-      "local",
-    );
+    expect(runtimeBatch.commit).toHaveBeenCalledWith();
     expect(batch.localBatchRecord()).toMatchObject({
       batchId: "batch-direct",
       mode: "direct",
@@ -514,6 +464,7 @@ describe("Db transactions", () => {
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-cross-client-direct", "direct").handle),
       localBatchRecord: vi.fn((batchId = "batch-cross-client-direct") =>
         makeLocalBatchRecord(batchId, "direct"),
       ),

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { SendIcon } from "lucide-react";
 import { useDb, useSession } from "jazz-tools/react";
 import { ActionMenu } from "@/components/composer/ActionMenu";
@@ -20,27 +20,36 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id ?? null;
-  const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
-  };
+  const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
+    () => ({
+      tier: db.getConfig().serverUrl ? "edge" : "local",
+    }),
+    [db],
+  );
 
   const myProfile = useMyProfile();
-  const composerReady = !!userId && !!myProfile && !disabled;
+  const [pendingSends, setPendingSends] = useState(0);
+  const composerReady = !!userId && !!myProfile && !disabled && pendingSends === 0;
 
   const handleSend = useCallback(
     (html: string) => {
       if (!userId || !myProfile) return;
       if (!html.trim()) return;
 
-      db.insert(app.messages, {
-        chatId,
-        text: html.trim(),
-        senderId: myProfile.id,
-        createdAt: new Date(),
-      })
+      setPendingSends((count) => count + 1);
+      void db
+        .insert(app.messages, {
+          chatId,
+          text: html.trim(),
+          senderId: myProfile.id,
+          createdAt: new Date(),
+        })
         .wait(sharedWriteOptions)
         .catch((error) => {
           console.error("failed to send message", error);
+        })
+        .finally(() => {
+          setPendingSends((count) => Math.max(0, count - 1));
         });
     },
     [userId, chatId, db, myProfile, sharedWriteOptions],
@@ -82,7 +91,11 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
   );
 
   return (
-    <div className="m-2 flex items-end gap-2">
+    <div
+      className="m-2 flex items-end gap-2"
+      data-testid="message-composer"
+      data-pending-sends={pendingSends}
+    >
       <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} disabled={!composerReady} />
 
       <Editor ref={editorRef} onSend={handleSend} disabled={!composerReady} />

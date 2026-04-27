@@ -97,11 +97,11 @@ The current `Db` API centers around a small set of predictable operations:
 - `delete(...)`
 - `subscribeAll(...)`
 - `beginDirectBatch(...)`
+- `beginBatch(...)`
 - `beginTransaction(...)`
 
-There are also durable variants for callers that want to wait for a specific durability tier instead of stopping at local application.
-
-Simple write calls are just one-member direct batches under the hood.
+Simple write calls are one-member direct batches under the hood. They seal immediately and return
+handles that callers can wait on for a specific durability tier.
 
 ## Explicit Batch APIs
 
@@ -111,6 +111,7 @@ now exposes explicit batch handles.
 At the runtime-client layer:
 
 - `client.beginDirectBatch()`
+- `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
 - `client.localBatchRecords()`
@@ -119,6 +120,7 @@ At the runtime-client layer:
 At the typed `Db` layer:
 
 - `db.beginDirectBatch(table)`
+- `db.beginBatch(table)`
 - `db.beginTransaction(table)`
 
 The returned handles (`DirectBatch`, `Transaction`, `DbDirectBatch`, `DbTransaction`) reuse the
@@ -126,15 +128,29 @@ same CRUD surface as normal writes, but with one shared logical `BatchId`.
 For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
 client/schema owns that handle.
 
+Open batch writes are intentionally not individually waitable:
+
+- `tx.insert(...)` and `batch.insert(...)` return the inserted row
+- `tx.update(...)`, `tx.delete(...)`, `batch.update(...)`, and `batch.delete(...)` return `void`
+- `tx.commit()` and `batch.commit()` return the batch-shaped write handle
+
+That makes the common durable path explicit in the type shape:
+
+```ts
+await db.beginBatch(app.todos).commit().wait({ tier: "edge" });
+await db.beginTransaction(app.todos).commit().wait({ tier: "global" });
+```
+
 Transactional handles also expose transaction-scoped reads over their own staged rows:
 
 - `Transaction.query(...)`
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
 
-Transactional handles add the explicit completion step:
+Both explicit batch handles add the explicit completion step:
 
 - `tx.commit()` in TypeScript
+- `batch.commit()` in TypeScript
 
 Persisted writes are batch-shaped too:
 
