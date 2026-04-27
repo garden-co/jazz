@@ -401,13 +401,22 @@ async function serve(args: string[], runtime: CliRuntime): Promise<CliResult> {
   app.use(vite.middlewares);
 
   const server = createHttpServer(app);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, () => {
-      server.off("error", reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error);
+      server.once("error", onError);
+      server.listen(port, "127.0.0.1", () => {
+        server.off("error", onError);
+        server.once("close", () => {
+          void vite.close();
+        });
+        resolve();
+      });
     });
-  });
+  } catch (error) {
+    await vite.close();
+    throw error;
+  }
 
   return {
     exitCode: 0,

@@ -82,6 +82,10 @@ function requireString(record: Record<string, unknown>, name: string): string {
   return value;
 }
 
+function isMalformedJsonError(error: unknown): boolean {
+  return error instanceof SyntaxError && isRecord(error) && error.status === 400 && "body" in error;
+}
+
 async function verifyJazzProof(proof: string): Promise<{ jazzUserId: string }> {
   const result = verifyLocalFirstIdentityProof(proof, "skill-issues-github");
   if (!result.ok) {
@@ -175,8 +179,7 @@ export function createSkillIssuesServer(deps: SkillIssuesServerDependencies = {}
   const exportMarkdownTodo = deps.exportMarkdownTodo ?? defaultExportMarkdownTodo;
   const cwd = deps.cwd ?? process.cwd();
 
-  app.use(createVerifierApp());
-  app.use(express.json());
+  app.use("/api", express.json());
 
   app.get("/api/items", async (_request, response, next) => {
     try {
@@ -251,6 +254,11 @@ export function createSkillIssuesServer(deps: SkillIssuesServerDependencies = {}
   });
 
   const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+    if (isMalformedJsonError(error)) {
+      response.status(400).json({ error: "Malformed JSON" });
+      return;
+    }
+
     if (error instanceof VerifierHttpError) {
       response.status(error.statusCode).json({ error: error.message });
       return;
@@ -259,6 +267,7 @@ export function createSkillIssuesServer(deps: SkillIssuesServerDependencies = {}
     response.status(500).json({ error: "Skill issues request failed" });
   };
   app.use(errorHandler);
+  app.use(createVerifierApp());
 
   return app;
 }
