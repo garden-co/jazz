@@ -22,7 +22,7 @@ function makeViteServer(
     config: { root, command, env: {} },
     httpServer: { once() {} },
     ws: { send() {} },
-    restart: vi.fn(),
+    restart: vi.fn(() => Promise.resolve()),
   };
 }
 

@@ -129,7 +129,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         console.log(
           `${LOG_PREFIX} initial appId allocated, restarting dev server so SvelteKit's $env captures it`,
         );
-        void viteServer.restart();
+        void viteServer.restart?.();
       }
     },
   };
