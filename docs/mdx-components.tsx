@@ -1,5 +1,5 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
-import * as TabsComponents from "fumadocs-ui/components/tabs";
+import * as TabsComponents from "./components/mdx/tabs";
 import type { MDXComponents } from "mdx/types";
 import { Mermaid } from "./components/mdx/mermaid";
 import { GenerateAppId } from "./components/mdx/generate-app-id";
