@@ -65,6 +65,96 @@ Extract precise TypeScript types from any table handle:
 | `s.InsertOf<typeof app.todos>` | The insert shape (no `id`, respects optionals and defaults) |
 | `s.WhereOf<typeof app.todos>`  | The `where(...)` input shape for that table                 |
 
+## Very Large Schemas
+
+For most apps, `s.defineApp(schema)` is the right export: it gives you one typed table handle for
+each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
+planning, and TypeScript inference.
+
+Very large apps can hit a different tradeoff. The runtime schema may need to contain hundreds of
+tables, while a given feature area only works with a much smaller subset. Because typed relations
+and reverse relations are derived from the app schema, asking TypeScript to understand the whole
+graph can make editor and build performance worse than the code you are writing actually needs.
+
+Use `s.defineSliceableApp(schema)` when you want one complete runtime schema but smaller typed app
+surfaces:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  accounts: s.table({
+    name: s.string(),
+  }),
+  workspaces: s.table({
+    name: s.string(),
+    accountId: s.ref("accounts"),
+  }),
+  catalog_items: s.table({
+    title: s.string(),
+    workspaceId: s.ref("workspaces"),
+  }),
+  orders: s.table({
+    number: s.string(),
+    catalogItemId: s.ref("catalog_items"),
+    buyerId: s.ref("users"),
+  }),
+  shipments: s.table({
+    trackingCode: s.string(),
+    orderId: s.ref("orders"),
+  }),
+  users: s.table({
+    name: s.string(),
+  }),
+  support_tickets: s.table({
+    workspaceId: s.ref("workspaces"),
+    requesterId: s.ref("users"),
+  }),
+};
+
+const sliceableApp = s.defineSliceableApp(schema);
+
+export const commerceApp = sliceableApp.slice(
+  "accounts",
+  "workspaces",
+  "catalog_items",
+  "orders",
+  "shipments",
+);
+export const supportApp = sliceableApp.slice("accounts", "workspaces", "support_tickets");
+```
+
+Each slice returns a normal typed `App` surface for only the selected tables:
+
+```ts
+await db.all(commerceApp.orders.include({ catalogItem: true }));
+await db.all(commerceApp.catalog_items.include({ ordersViaCatalogItem: true }));
+```
+
+Refs to tables inside the slice become typed relations and includes. Refs to tables outside the slice
+remain valid scalar ID columns:
+
+```ts
+type Order = s.RowOf<typeof commerceApp.orders>;
+// Order["catalogItemId"] is string, and commerceApp.orders.include({ catalogItem: true }) is typed.
+// Order["buyerId"] is string, but there is no typed `buyer` include unless `users` is in the slice.
+```
+
+Reverse relations are also derived only from the current slice. In the example above,
+`commerceApp.catalog_items` has `ordersViaCatalogItem`, while `supportApp.workspaces` has
+`support_ticketsViaWorkspace`.
+
+All slices share the complete runtime schema:
+
+```ts
+commerceApp.wasmSchema === sliceableApp.wasmSchema;
+supportApp.wasmSchema === sliceableApp.wasmSchema;
+```
+
+That means schema hashing, migrations, permissions, runtime validation, query planning, inserts,
+updates, and row transforms still see the full schema. The slice only limits the TypeScript app
+graph you ask the compiler to expand.
+
 ## Transformed Rows
 
 Use `.transformed(...)` when app code should read and write a TypeScript shape that differs from
