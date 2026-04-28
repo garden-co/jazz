@@ -154,3 +154,42 @@ supportApp.wasmSchema === sliceableApp.wasmSchema;
 That means schema hashing, migrations, permissions, runtime validation, query planning, inserts,
 updates, and row transforms still see the full schema. The slice only limits the TypeScript app
 graph you ask the compiler to expand.
+
+## Transformed Rows
+
+Use `.transformed(...)` when app code should read and write a TypeScript shape that differs from
+the stored table columns. The transform runs only in TypeScript at the `Db` boundary; the runtime
+schema, storage format, permissions, and query planner still use the table's real column names.
+
+```ts
+const todoCards = app.todos.transformed({
+  row: (todo) => ({
+    id: todo.id,
+    label: todo.title,
+    project: todo.projectId,
+    completed: todo.done,
+  }),
+
+  insert: (card: { label: string; project: string; completed?: boolean }) => ({
+    title: card.label,
+    projectId: card.project,
+    done: card.completed,
+  }),
+
+  update: (card: Partial<{ label: string; project: string; completed: boolean }>) => ({
+    title: card.label,
+    projectId: card.project,
+    done: card.completed,
+  }),
+});
+```
+
+Queries still filter, sort, and select using the stored row representation:
+
+```ts
+const openCards = await db.all(todoCards.where({ done: false }));
+```
+
+Reads and subscriptions return the transformed `row(...)` shape. Inserts and updates accept the
+transformed shapes and convert them through `insert(...)` and `update(...)` before writing stored
+columns.
