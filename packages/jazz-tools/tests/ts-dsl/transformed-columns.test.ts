@@ -25,7 +25,6 @@ describe("TS transformed columns", () => {
     db = await createDb({
       appId: "test-app",
       driver: { type: "persistent", dbName: uniqueDbName("transformed-columns") },
-      schema: priorityApp,
     });
   });
 
