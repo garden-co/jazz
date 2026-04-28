@@ -87,16 +87,27 @@ Acceptance:
 Small, independent fixes that remove parallel construction logic between
 `client.rs` and `server/builder.rs`.
 
-1. Extract `build_schema_manager(storage, context, role)` from the duplicated
-   blocks at `client.rs:64-82` and `server/builder.rs:217-238`.
-2. Extract `resolve_node_env()` from `main.rs:24-36` and `builder.rs:305-309`
+1. Extract `resolve_node_env()` from `main.rs:24-36` and `builder.rs:305-309`
    into a single helper (likely `server/env.rs`).
-3. Move JWT key resolution from `main.rs:38-59` into `commands/server.rs` so
+2. Move JWT key resolution from `main.rs:38-59` into `commands/server.rs` so
    the library no longer carries CLI-shaped logic.
-4. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
+3. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
    the JWKS loader (`builder.rs:338-342`).
-5. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
+4. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
    — either use it in a routed handler or remove the field.
+
+(An earlier draft proposed extracting a shared `build_schema_manager` from
+`client.rs:64-82` and `server/builder.rs:217-238`. On closer reading those
+two functions are not duplicates: the client uses an empty `SyncManager`,
+always constructs `SchemaManager::new(...)` with the declared schema, uses
+the `"client"` tier label, and always rehydrates from the catalogue. The
+server uses `server_sync_manager()` (Edge+Global tiers, plus optional
+unprivileged catalogue writes when `NODE_ENV != production`), splits on
+Dynamic vs Fixed schema mode, uses `"prod"`, only rehydrates in Dynamic
+mode, calls `require_authorization_schema()` afterwards to fail closed,
+and returns `String` errors. Sharing them would require a function with
+five orthogonal parameters that obscures rather than clarifies. Left as
+two separate construction policies.)
 
 (Promoting `allow_local_first_auth: true` into `AuthConfig::default()` was
 considered but moved to _Out of scope_ below: `AuthConfig` derives `Default`
