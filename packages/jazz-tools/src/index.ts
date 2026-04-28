@@ -13,6 +13,7 @@ import { definePermissions } from "./permissions/index.js";
 import {
   defineApp,
   defineSchema,
+  defineSliceableApp,
   defineTable,
   TypedTableQueryBuilder,
   permissionIntrospectionColumns,
@@ -23,6 +24,7 @@ import type {
   RowOf as TypedRowOf,
   Schema as TypedSchema,
   SchemaDefinition as TypedSchemaDefinition,
+  SliceableApp as TypedSliceableApp,
   TableDefinition as TypedTableDefinition,
   TableIndex as TypedTableIndex,
   TableMetaOf as TypedTableMetaOf,
@@ -106,6 +108,7 @@ export { schemaToWasm } from "./codegen/schema-reader.js";
 export {
   defineSchema,
   defineApp,
+  defineSliceableApp,
   TypedTableQueryBuilder,
   permissionIntrospectionColumns,
 } from "./typed-app.js";
@@ -138,6 +141,7 @@ export type {
   TableHandle,
   QueryHandle,
   App,
+  SliceableApp,
   TypedApp,
   RowOf,
   InsertOf,
@@ -157,6 +161,7 @@ type RuntimeSchemaNamespace = typeof col & {
   table: typeof defineTable;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
+  defineSliceableApp: typeof defineSliceableApp;
   defineMigration: typeof defineMigration;
   renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
@@ -167,6 +172,7 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   table: defineTable,
   defineSchema,
   defineApp,
+  defineSliceableApp,
   defineMigration,
   renameTableFrom,
   definePermissions,
@@ -187,6 +193,11 @@ export namespace schema {
    * App for a given schema.
    */
   export type App<TSchema extends TypedSchema<any> | TypedSchemaDefinition> = TypedApp<TSchema>;
+  /**
+   * App factory for deriving typed slices over one full runtime schema.
+   */
+  export type SliceableApp<TSchema extends TypedSchema<any> | TypedSchemaDefinition> =
+    TypedSliceableApp<TSchema>;
   /**
    * Row type for a given table (all columns, `id` included)
    */
