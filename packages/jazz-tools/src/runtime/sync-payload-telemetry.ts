@@ -9,7 +9,7 @@ export type SyncPayloadTelemetryDirection =
 
 export type SyncPayloadTelemetryOptions = {
   appId: string;
-  ingestUrl: string;
+  collectorUrl: string;
 };
 
 export type BuildSyncPayloadTelemetryRecordOptions = SyncPayloadTelemetryOptions & {
@@ -49,16 +49,16 @@ export function buildSyncPayloadTelemetryDecodeFailureRecord(
 }
 
 export function sendSyncPayloadTelemetryRecords(
-  ingestUrl: string | undefined,
+  collectorUrl: string | undefined,
   records: Record<string, unknown>[],
 ): void {
-  if (!ingestUrl || records.length === 0 || typeof fetch !== "function") return;
+  if (!collectorUrl || records.length === 0 || typeof fetch !== "function") return;
 
   for (const record of records) {
-    void fetch(ingestUrl, {
+    void fetch(normalizeOtlpLogsUrl(collectorUrl), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(record),
+      body: JSON.stringify(buildOtlpLogsBody(record)),
     }).catch(() => undefined);
   }
 }
@@ -67,10 +67,10 @@ export function postSyncPayloadTelemetry(
   payload: Uint8Array | string,
   options: BuildSyncPayloadTelemetryRecordOptions,
 ): void {
-  if (!options.ingestUrl || typeof fetch !== "function") return;
+  if (!options.collectorUrl || typeof fetch !== "function") return;
 
   const records = buildRecordsOrDecodeFailure(payload, options);
-  sendSyncPayloadTelemetryRecords(options.ingestUrl, records);
+  sendSyncPayloadTelemetryRecords(options.collectorUrl, records);
 }
 
 function buildRecordsOrDecodeFailure(
@@ -115,4 +115,84 @@ function dropUndefined(record: Record<string, unknown>): Record<string, unknown>
   return Object.fromEntries(
     Object.entries(record).filter(([, value]) => value !== undefined && value !== null),
   );
+}
+
+function normalizeOtlpLogsUrl(collectorUrl: string): string {
+  const trimmed = collectorUrl.replace(/\/+$/, "");
+  return trimmed.endsWith("/v1/logs") ? trimmed : `${trimmed}/v1/logs`;
+}
+
+function buildOtlpLogsBody(record: Record<string, unknown>): Record<string, unknown> {
+  return {
+    resourceLogs: [
+      {
+        resource: {
+          attributes: [
+            otlpAttribute("service.name", "jazz-browser"),
+            otlpAttribute("telemetry.sdk.language", "webjs"),
+          ],
+        },
+        scopeLogs: [
+          {
+            scope: { name: "jazz-browser.sync-payload" },
+            logRecords: [
+              {
+                timeUnixNano: String(BigInt(Number(record.recordedAt ?? Date.now())) * 1_000_000n),
+                severityNumber: 5,
+                severityText: "DEBUG",
+                body: { stringValue: JSON.stringify(record) },
+                attributes: recordAttributes(record),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function recordAttributes(record: Record<string, unknown>): Record<string, unknown>[] {
+  const attributes: Record<string, unknown>[] = [];
+  pushString(attributes, "jazz.app_id", record.appId);
+  pushString(attributes, "jazz.scope", record.scope);
+  pushString(attributes, "jazz.direction", record.direction);
+  pushString(attributes, "jazz.client_id", record.clientId);
+  pushString(attributes, "jazz.connection_id", record.connectionId);
+  pushInt(attributes, "jazz.sequence", record.sequence);
+  pushString(attributes, "jazz.source_frame_id", record.sourceFrameId);
+  pushInt(attributes, "jazz.source_payload_index", record.sourcePayloadIndex);
+  pushInt(attributes, "jazz.source_payload_count", record.sourcePayloadCount);
+  pushInt(attributes, "jazz.source_frame_bytes", record.sourceFrameBytes);
+  pushInt(attributes, "jazz.message_bytes", record.messageBytes);
+  pushString(attributes, "jazz.message_encoding", record.messageEncoding);
+  pushString(attributes, "jazz.decode_error", record.decodeError);
+  pushString(attributes, "jazz.payload_variant", record.payloadVariant);
+  pushString(attributes, "jazz.row_id", record.rowId);
+  pushString(attributes, "jazz.table_name", record.tableName);
+  pushString(attributes, "jazz.table_name_error", record.tableNameError);
+  pushString(attributes, "jazz.branch_name", record.branchName);
+  pushString(attributes, "jazz.batch_id", record.batchId);
+  pushInt(attributes, "jazz.query_id", record.queryId);
+  pushString(attributes, "jazz.schema_hash", record.schemaHash);
+  pushString(attributes, "jazz.schema_hash_error", record.schemaHashError);
+  pushString(attributes, "jazz.durability_tier", record.durabilityTier);
+  pushString(attributes, "jazz.error_variant", record.errorVariant);
+  pushString(attributes, "jazz.error_code", record.errorCode);
+  pushInt(attributes, "jazz.member_index", record.memberIndex);
+  pushInt(attributes, "jazz.member_count", record.memberCount);
+  return attributes;
+}
+
+function pushString(attributes: Record<string, unknown>[], key: string, value: unknown): void {
+  if (typeof value !== "string") return;
+  attributes.push(otlpAttribute(key, value));
+}
+
+function pushInt(attributes: Record<string, unknown>[], key: string, value: unknown): void {
+  if (typeof value !== "number") return;
+  attributes.push({ key, value: { intValue: String(value) } });
+}
+
+function otlpAttribute(key: string, value: string): Record<string, unknown> {
+  return { key, value: { stringValue: value } };
 }

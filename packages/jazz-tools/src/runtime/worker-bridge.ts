@@ -32,7 +32,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
-  syncPayloadTelemetryIngestUrl?: string;
+  telemetryCollectorUrl?: string;
 }
 
 export interface PeerSyncBatch {
@@ -63,7 +63,7 @@ interface WorkerBridgeState {
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
   appId: string | null;
-  syncPayloadTelemetryIngestUrl: string | undefined;
+  telemetryCollectorUrl: string | undefined;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -108,7 +108,7 @@ export class WorkerBridge {
       authFailureListener: null,
       serverPayloadForwarder: null,
       appId: null,
-      syncPayloadTelemetryIngestUrl: undefined,
+      telemetryCollectorUrl: undefined,
     };
 
     // Wire worker → main: incoming sync messages from worker
@@ -192,11 +192,11 @@ export class WorkerBridge {
       runtimeSources: options.runtimeSources,
       fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
-      syncPayloadTelemetryIngestUrl: options.syncPayloadTelemetryIngestUrl,
+      telemetryCollectorUrl: options.telemetryCollectorUrl,
       clientId: "", // Worker generates its own client ID for main thread
     };
     this.state.appId = options.appId;
-    this.state.syncPayloadTelemetryIngestUrl = options.syncPayloadTelemetryIngestUrl;
+    this.state.telemetryCollectorUrl = options.telemetryCollectorUrl;
 
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
@@ -418,12 +418,12 @@ export class WorkerBridge {
     },
   ): void {
     const appId = this.state.appId;
-    const ingestUrl = this.state.syncPayloadTelemetryIngestUrl;
-    if (!appId || !ingestUrl) return;
+    const collectorUrl = this.state.telemetryCollectorUrl;
+    if (!appId || !collectorUrl) return;
 
     postSyncPayloadTelemetry(payload, {
       appId,
-      ingestUrl,
+      collectorUrl,
       scope: "worker_bridge",
       direction: options.direction,
       clientId: this.state.workerClientId,
@@ -496,7 +496,7 @@ export class WorkerBridge {
     this.state.peerSyncListener = null;
     this.state.syncBatchFlushQueued = false;
     this.state.appId = null;
-    this.state.syncPayloadTelemetryIngestUrl = undefined;
+    this.state.telemetryCollectorUrl = undefined;
     this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }

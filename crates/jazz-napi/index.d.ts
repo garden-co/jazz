@@ -8,7 +8,6 @@ export declare class DevServer {
   get dataDir(): string
   get backendSecret(): string | null
   get adminSecret(): string | null
-  get syncPayloadTelemetryIngestUrl(): string | null
   stop(): Promise<void>
 }
 

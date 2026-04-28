@@ -72,7 +72,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   const runtime = new ManagedDevRuntime({
     appId: "VITE_JAZZ_APP_ID",
     serverUrl: "VITE_JAZZ_SERVER_URL",
-    syncPayloadTelemetryIngestUrl: "VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL",
+    telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
   });
 
   return {
@@ -127,9 +127,8 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       viteServer.config.env ??= {};
       viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
-      if (managed.syncPayloadTelemetryIngestUrl) {
-        viteServer.config.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-          managed.syncPayloadTelemetryIngestUrl;
+      if (managed.telemetryCollectorUrl) {
+        viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
       console.log(
         `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(

@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Router,
-    body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
@@ -29,7 +28,6 @@ use crate::server::{
 };
 use crate::sync_manager::ClientId;
 use crate::sync_payload_telemetry::SyncPayloadTelemetryDirection;
-use crate::sync_payload_telemetry::SyncPayloadTelemetryRecord;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -54,10 +52,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
-        )
-        .route(
-            "/dev/sync-payload-telemetry",
-            post(sync_payload_telemetry_handler),
         )
         .layer(TraceLayer::new_for_http());
 
@@ -91,37 +85,6 @@ struct AdminSubscriptionIntrospectionParams {
 struct SchemaConnectivityParams {
     from_hash: String,
     to_hash: String,
-}
-
-async fn sync_payload_telemetry_handler(
-    State(state): State<Arc<ServerState>>,
-    body: Bytes,
-) -> Response {
-    let Some(telemetry) = state.sync_payload_telemetry.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    let mut record = match serde_json::from_slice::<SyncPayloadTelemetryRecord>(&body) {
-        Ok(record) => record,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("invalid sync payload telemetry record: {err}"),
-            )
-                .into_response();
-        }
-    };
-
-    let expected_app_id = state.app_id.to_string();
-    if let Some(app_id) = record.app_id.as_deref()
-        && app_id != expected_app_id
-    {
-        return (StatusCode::BAD_REQUEST, "appId does not match route").into_response();
-    }
-    record.app_id = Some(expected_app_id);
-
-    telemetry.sink.emit(record);
-    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -1844,29 +1807,6 @@ mod tests {
         (state, sink)
     }
 
-    fn sync_payload_telemetry_record_body(app_id: Option<String>) -> axum::body::Body {
-        let mut body = serde_json::json!({
-            "severityText": "DEBUG",
-            "scope": "worker_bridge",
-            "direction": "main_to_worker",
-            "clientId": "alice",
-            "sequence": 1,
-            "sourceFrameId": "frame-1",
-            "sourcePayloadIndex": 0,
-            "sourcePayloadCount": 1,
-            "sourceFrameBytes": 32,
-            "messageBytes": 32,
-            "messageEncoding": "binary",
-            "recordedAt": 1_775_000_000_000_u64,
-            "payloadVariant": "QuerySettled",
-            "queryId": 7
-        });
-        if let Some(app_id) = app_id {
-            body["appId"] = serde_json::Value::String(app_id);
-        }
-        axum::body::Body::from(body.to_string())
-    }
-
     /// A minimal valid `SyncPayload::RowBatchCreated` suitable for embedding
     /// in batch request bodies.
     fn row_version_created_payload(object_id: &str) -> crate::sync_manager::SyncPayload {
@@ -1887,77 +1827,6 @@ mod tests {
             metadata: None,
             row,
         }
-    }
-
-    #[tokio::test]
-    async fn sync_payload_telemetry_ingest_404s_when_disabled() {
-        let state = make_state_with_schema(SchemaBuilder::new().build()).await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/dev/sync-payload-telemetry"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(sync_payload_telemetry_record_body(None))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn sync_payload_telemetry_ingest_attaches_route_app_id() {
-        let (state, sink) = make_sync_payload_telemetry_test_state().await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/dev/sync-payload-telemetry"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(sync_payload_telemetry_record_body(None))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let records = sink.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].app_id.as_deref(),
-            Some(test_app_id_text().as_str())
-        );
-        assert_eq!(records[0].payload_variant.as_deref(), Some("QuerySettled"));
-        assert_eq!(records[0].query_id, Some(7));
-    }
-
-    #[tokio::test]
-    async fn sync_payload_telemetry_ingest_rejects_mismatched_app_id() {
-        let (state, sink) = make_sync_payload_telemetry_test_state().await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/dev/sync-payload-telemetry"))
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(sync_payload_telemetry_record_body(Some(
-                        "wrong-app".to_string(),
-                    )))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(sink.records().is_empty());
     }
 
     #[tokio::test]

@@ -11,8 +11,7 @@ const dev = await import("./index.js");
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
-const originalSyncPayloadTelemetryIngestUrl =
-  process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+const originalTelemetryCollectorUrl = process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalNodeEnv = process.env.NODE_ENV;
 
 afterEach(async () => {
@@ -32,11 +31,10 @@ afterEach(async () => {
     process.env.EXPO_PUBLIC_JAZZ_APP_ID = originalJazzAppId;
   }
 
-  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
-    delete process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  if (originalTelemetryCollectorUrl === undefined) {
+    delete process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
   } else {
-    process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-      originalSyncPayloadTelemetryIngestUrl;
+    process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = originalTelemetryCollectorUrl;
   }
 
   process.env.NODE_ENV = originalNodeEnv;
@@ -132,8 +130,7 @@ describe("withJazz", () => {
       url: "http://127.0.0.1:19990",
       dataDir: "/tmp/jazz-expo-telemetry-test",
       adminSecret: "expo-telemetry-admin",
-      syncPayloadTelemetryIngestUrl:
-        "http://127.0.0.1:19990/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4317",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -156,9 +153,7 @@ describe("withJazz", () => {
         telemetry: { collectorUrl: "http://localhost:4317" },
       }),
     );
-    expect(process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19990/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
+    expect(process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://localhost:4317");
   });
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {

@@ -35,8 +35,7 @@ const DEVELOPMENT_PHASE = "phase-development-server";
 const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const PUBLIC_APP_ID_ENV = "NEXT_PUBLIC_JAZZ_APP_ID";
 const PUBLIC_SERVER_URL_ENV = "NEXT_PUBLIC_JAZZ_SERVER_URL";
-const PUBLIC_SYNC_PAYLOAD_TELEMETRY_INGEST_URL_ENV =
-  "NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL";
+const PUBLIC_TELEMETRY_COLLECTOR_URL_ENV = "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL";
 const PUBLIC_WASM_URL_ENV = "NEXT_PUBLIC_JAZZ_WASM_URL";
 const PUBLIC_WASM_SUBPATH = "_jazz/jazz_wasm_bg.wasm";
 
@@ -52,7 +51,7 @@ function buildPublicWasmUrl(basePath: unknown): string {
 const runtime = new ManagedDevRuntime({
   appId: PUBLIC_APP_ID_ENV,
   serverUrl: PUBLIC_SERVER_URL_ENV,
-  syncPayloadTelemetryIngestUrl: PUBLIC_SYNC_PAYLOAD_TELEMETRY_INGEST_URL_ENV,
+  telemetryCollectorUrl: PUBLIC_TELEMETRY_COLLECTOR_URL_ENV,
 });
 
 async function copyWasmToPublic(appRoot: string): Promise<void> {
@@ -143,9 +142,9 @@ export function withJazz(
         ...mergedWithWasmEnv.env,
         [PUBLIC_APP_ID_ENV]: managed.appId,
         [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
-        ...(managed.syncPayloadTelemetryIngestUrl
+        ...(managed.telemetryCollectorUrl
           ? {
-              [PUBLIC_SYNC_PAYLOAD_TELEMETRY_INGEST_URL_ENV]: managed.syncPayloadTelemetryIngestUrl,
+              [PUBLIC_TELEMETRY_COLLECTOR_URL_ENV]: managed.telemetryCollectorUrl,
             }
           : {}),
         ...(managed.backendSecret ? { BACKEND_SECRET: managed.backendSecret } : {}),

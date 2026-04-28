@@ -5,8 +5,6 @@ const devServerStart = vi.fn().mockResolvedValue({
   port: 19999,
   url: "http://127.0.0.1:19999",
   dataDir: "/tmp/jazz-dev-server-test",
-  syncPayloadTelemetryIngestUrl:
-    "http://127.0.0.1:19999/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
   stop: vi.fn().mockResolvedValue(undefined),
 });
 
@@ -33,7 +31,7 @@ describe("startLocalJazzServer telemetry", () => {
     );
   });
 
-  it("returns the sync payload telemetry ingest URL from the NAPI server handle", async () => {
+  it("returns the configured telemetry collector URL", async () => {
     const { startLocalJazzServer } = await import("./dev-server.js");
 
     const handle = await startLocalJazzServer({
@@ -42,8 +40,6 @@ describe("startLocalJazzServer telemetry", () => {
       telemetry: true,
     });
 
-    expect(handle.syncPayloadTelemetryIngestUrl).toBe(
-      "http://127.0.0.1:19999/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
+    expect(handle.telemetryCollectorUrl).toBe("http://localhost:4318");
   });
 });

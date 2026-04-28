@@ -38,7 +38,7 @@ function resolveViteOrigin(viteServer: ViteDevServer): string {
 const runtime = new ManagedDevRuntime({
   appId: "PUBLIC_JAZZ_APP_ID",
   serverUrl: "PUBLIC_JAZZ_SERVER_URL",
-  syncPayloadTelemetryIngestUrl: "PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL",
+  telemetryCollectorUrl: "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 });
 
 export function jazzSvelteKit(options: JazzPluginOptions = {}) {
@@ -125,9 +125,8 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       viteServer.config.env ??= {};
       viteServer.config.env.PUBLIC_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.PUBLIC_JAZZ_SERVER_URL = managed.serverUrl;
-      if (managed.syncPayloadTelemetryIngestUrl) {
-        viteServer.config.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-          managed.syncPayloadTelemetryIngestUrl;
+      if (managed.telemetryCollectorUrl) {
+        viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
 
       if (wasColdStart && managed.appId) {

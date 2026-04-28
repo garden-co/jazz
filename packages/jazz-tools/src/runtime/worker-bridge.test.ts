@@ -220,7 +220,7 @@ describe("WorkerBridge", () => {
     expect(bridge.getWorkerClientId()).toBe("worker-client-123");
   });
 
-  it("includes sync payload telemetry ingest URL in the worker init payload", async () => {
+  it("includes telemetry collector URL in the worker init payload", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
@@ -231,12 +231,12 @@ describe("WorkerBridge", () => {
       env: "dev",
       userBranch: "main",
       dbName: "db-1",
-      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
     });
 
     expect(worker.posted[0]).toMatchObject({
       type: "init",
-      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
     });
 
     worker.emitFromWorker({
@@ -265,7 +265,7 @@ describe("WorkerBridge", () => {
       env: "dev",
       userBranch: "main",
       dbName: "db-1",
-      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
     });
     worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
     await initPromise;
@@ -278,13 +278,19 @@ describe("WorkerBridge", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:3000/dev/sync-payload-telemetry",
+      "http://localhost:4318/v1/logs",
       expect.objectContaining({
         method: "POST",
-        body: expect.stringContaining('"direction":"main_to_worker"'),
+        body: expect.any(String),
       }),
     );
-    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toMatchObject({
+    const firstFetchCall = fetchMock.mock.calls[0];
+    expect(firstFetchCall).toBeDefined();
+    const firstOtlpBody = JSON.parse((firstFetchCall![1] as RequestInit).body as string);
+    const firstRecord = JSON.parse(
+      firstOtlpBody.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue,
+    );
+    expect(firstRecord).toMatchObject({
       appId: "app-1",
       severityText: "DEBUG",
       scope: "worker_bridge",
@@ -295,15 +301,25 @@ describe("WorkerBridge", () => {
       sourceFrameBytes: enc({ id: 1 }).byteLength,
       batch: "main-to-worker",
     });
+    expect(firstOtlpBody.resourceLogs[0].scopeLogs[0].logRecords[0]).toMatchObject({
+      severityNumber: 5,
+      severityText: "DEBUG",
+    });
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:3000/dev/sync-payload-telemetry",
+      "http://localhost:4318/v1/logs",
       expect.objectContaining({
         method: "POST",
-        body: expect.stringContaining('"direction":"worker_to_main"'),
+        body: expect.any(String),
       }),
     );
-    expect(JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string)).toMatchObject({
+    const secondFetchCall = fetchMock.mock.calls[1];
+    expect(secondFetchCall).toBeDefined();
+    const secondOtlpBody = JSON.parse((secondFetchCall![1] as RequestInit).body as string);
+    const secondRecord = JSON.parse(
+      secondOtlpBody.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue,
+    );
+    expect(secondRecord).toMatchObject({
       appId: "app-1",
       severityText: "DEBUG",
       scope: "worker_bridge",

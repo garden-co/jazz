@@ -12,8 +12,7 @@ const dev = await import("./index.js");
 const tempRoots = createTempRootTracker();
 const originalJazzAppId = process.env.PUBLIC_JAZZ_APP_ID;
 const originalJazzServerUrl = process.env.PUBLIC_JAZZ_SERVER_URL;
-const originalSyncPayloadTelemetryIngestUrl =
-  process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+const originalTelemetryCollectorUrl = process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalBackendSecret = process.env.BACKEND_SECRET;
 
 function makeViteServer(
@@ -35,7 +34,7 @@ function makeViteServer(
 beforeEach(() => {
   delete process.env.PUBLIC_JAZZ_APP_ID;
   delete process.env.PUBLIC_JAZZ_SERVER_URL;
-  delete process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  delete process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
 });
@@ -62,11 +61,10 @@ afterEach(async () => {
     process.env.PUBLIC_JAZZ_SERVER_URL = originalJazzServerUrl;
   }
 
-  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
-    delete process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  if (originalTelemetryCollectorUrl === undefined) {
+    delete process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
   } else {
-    process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-      originalSyncPayloadTelemetryIngestUrl;
+    process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = originalTelemetryCollectorUrl;
   }
 
   if (originalBackendSecret === undefined) {
@@ -199,8 +197,7 @@ describe("jazzSvelteKit", () => {
       url: "http://127.0.0.1:19991",
       dataDir: "/tmp/jazz-sveltekit-telemetry-test",
       adminSecret: "sveltekit-telemetry-admin",
-      syncPayloadTelemetryIngestUrl:
-        "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -211,7 +208,7 @@ describe("jazzSvelteKit", () => {
       server: {
         port: 19991,
         adminSecret: "sveltekit-telemetry-admin",
-        telemetry: false,
+        telemetry: true,
       },
     });
     const viteServer = makeViteServer("serve", root);
@@ -219,15 +216,13 @@ describe("jazzSvelteKit", () => {
 
     expect(startSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        telemetry: false,
+        telemetry: true,
       }),
     );
-    expect(viteServer.config.env!.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+    expect(viteServer.config.env!.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
+      "http://localhost:4318",
     );
-    expect(process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
+    expect(process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://localhost:4318");
   });
 
   it("builds jwksUrl from Vite's configured host and port", async () => {

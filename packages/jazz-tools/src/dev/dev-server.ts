@@ -14,6 +14,7 @@ import type { TelemetryOptions } from "./vite.js";
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const AUTO_PORT_MIN = 20_000;
 const AUTO_PORT_RANGE = 20_000;
+const DEFAULT_TELEMETRY_COLLECTOR_URL = "http://localhost:4318";
 
 const autoAllocatedPorts = new Set<number>();
 
@@ -46,7 +47,7 @@ export interface LocalJazzServerHandle {
   dataDir: string;
   adminSecret?: string;
   backendSecret?: string;
-  syncPayloadTelemetryIngestUrl?: string;
+  telemetryCollectorUrl?: string;
   stop: () => Promise<void>;
 }
 
@@ -94,6 +95,14 @@ async function allocateAutoPort(): Promise<number> {
 
 async function createOwnedDataDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), "jazz-dev-server-"));
+}
+
+function normalizeTelemetryCollectorUrl(
+  telemetry: TelemetryOptions | undefined,
+): string | undefined {
+  if (telemetry === undefined || telemetry === false) return undefined;
+  if (telemetry === true) return DEFAULT_TELEMETRY_COLLECTOR_URL;
+  return telemetry.collectorUrl ?? DEFAULT_TELEMETRY_COLLECTOR_URL;
 }
 
 export async function startLocalJazzServer(
@@ -165,7 +174,7 @@ export async function startLocalJazzServer(
     dataDir: server.dataDir,
     adminSecret: server.adminSecret ?? undefined,
     backendSecret: server.backendSecret ?? undefined,
-    syncPayloadTelemetryIngestUrl: server.syncPayloadTelemetryIngestUrl ?? undefined,
+    telemetryCollectorUrl: normalizeTelemetryCollectorUrl(options.telemetry),
     stop,
   };
 }

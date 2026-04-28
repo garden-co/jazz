@@ -9,8 +9,7 @@ import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-help
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
-const originalSyncPayloadTelemetryIngestUrl =
-  process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+const originalTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 
 // Managed-runtime writes VITE_JAZZ_APP_ID / VITE_JAZZ_SERVER_URL to process.env
@@ -20,7 +19,7 @@ const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 beforeEach(() => {
   delete process.env.VITE_JAZZ_APP_ID;
   delete process.env.VITE_JAZZ_SERVER_URL;
-  delete process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
 });
 
@@ -40,10 +39,10 @@ afterEach(async () => {
     process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
   }
 
-  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
-    delete process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  if (originalTelemetryCollectorUrl === undefined) {
+    delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
   } else {
-    process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL = originalSyncPayloadTelemetryIngestUrl;
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = originalTelemetryCollectorUrl;
   }
 
   if (originalAdminSecret === undefined) {
@@ -235,8 +234,7 @@ describe("jazzPlugin", () => {
       url: "http://127.0.0.1:19993",
       dataDir: "/tmp/jazz-vite-telemetry-test",
       adminSecret: "vite-telemetry-admin",
-      syncPayloadTelemetryIngestUrl:
-        "http://127.0.0.1:19993/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4317",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -266,12 +264,10 @@ describe("jazzPlugin", () => {
         telemetry: { collectorUrl: "http://localhost:4317" },
       }),
     );
-    expect(fakeViteServer.config.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19993/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+    expect(fakeViteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
+      "http://localhost:4317",
     );
-    expect(process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19993/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
+    expect(process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://localhost:4317");
   });
 
   it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {

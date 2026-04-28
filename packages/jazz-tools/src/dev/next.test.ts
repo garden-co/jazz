@@ -14,8 +14,7 @@ const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
-const originalSyncPayloadTelemetryIngestUrl =
-  process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+const originalTelemetryCollectorUrl = process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
 
 async function resolveWrappedConfig(
   wrapped: ReturnType<typeof withJazz>,
@@ -31,7 +30,7 @@ async function resolveWrappedConfig(
 beforeEach(async () => {
   delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
-  delete process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  delete process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
 
@@ -60,11 +59,10 @@ afterEach(async () => {
     process.env.NEXT_PUBLIC_JAZZ_APP_ID = originalJazzAppId;
   }
 
-  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
-    delete process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  if (originalTelemetryCollectorUrl === undefined) {
+    delete process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
   } else {
-    process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-      originalSyncPayloadTelemetryIngestUrl;
+    process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = originalTelemetryCollectorUrl;
   }
 });
 
@@ -205,8 +203,7 @@ describe("withJazz", () => {
       url: "http://127.0.0.1:19992",
       dataDir: "/tmp/jazz-next-telemetry-test",
       adminSecret: "next-telemetry-admin",
-      syncPayloadTelemetryIngestUrl:
-        "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -232,12 +229,8 @@ describe("withJazz", () => {
         telemetry: true,
       }),
     );
-    expect(resolved.env?.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
-    expect(process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
-      "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
-    );
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://localhost:4318");
+    expect(process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://localhost:4318");
   });
 
   it("releases a failed startup before retrying the same port after the schema is fixed", async () => {

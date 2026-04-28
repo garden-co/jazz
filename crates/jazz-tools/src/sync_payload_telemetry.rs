@@ -584,7 +584,7 @@ pub mod otel_logs {
         AnyValue, LogRecord as _, Logger as _, LoggerProvider as _, Severity,
     };
     use opentelemetry::{Key, KeyValue};
-    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_otlp::{Protocol, WithExportConfig};
     use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 
     use super::{
@@ -602,8 +602,9 @@ pub mod otel_logs {
             collector_url: impl Into<String>,
         ) -> Result<Self, opentelemetry_otlp::ExporterBuildError> {
             let exporter = opentelemetry_otlp::LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(collector_url.into())
+                .with_http()
+                .with_protocol(Protocol::HttpBinary)
+                .with_endpoint(normalize_otlp_logs_url(collector_url.into()))
                 .build()?;
             let provider = SdkLoggerProvider::builder()
                 .with_resource(
@@ -649,6 +650,15 @@ pub mod otel_logs {
             queue_capacity,
             OtelLogsSyncPayloadTelemetrySink::new(collector_url)?,
         ))
+    }
+
+    fn normalize_otlp_logs_url(collector_url: String) -> String {
+        let trimmed = collector_url.trim_end_matches('/');
+        if trimmed.ends_with("/v1/logs") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}/v1/logs")
+        }
     }
 
     fn record_attributes(record: &SyncPayloadTelemetryRecord) -> Vec<(Key, AnyValue)> {
@@ -1287,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn serialized_record_uses_browser_ingest_contract_keys() {
+    fn serialized_record_uses_browser_export_contract_keys() {
         let record = SyncPayloadTelemetryRecord {
             app_id: Some("app_todos".to_string()),
             severity_text: "DEBUG".to_string(),
@@ -1349,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_sink_keeps_emitted_records_for_route_tests() {
+    fn in_memory_sink_keeps_emitted_records_for_tests() {
         let sink = InMemorySyncPayloadTelemetrySink::default();
         let record = telemetry_record(1);
 

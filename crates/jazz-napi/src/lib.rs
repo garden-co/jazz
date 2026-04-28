@@ -396,11 +396,11 @@ fn normalize_sync_payload_telemetry(
     match input {
         None | Some(DevServerTelemetryInput::Enabled(false)) => None,
         Some(DevServerTelemetryInput::Enabled(true)) => Some(DevServerTelemetryOptions {
-            collector_url: Some("http://localhost:4317".to_string()),
+            collector_url: Some("http://localhost:4318".to_string()),
         }),
         Some(DevServerTelemetryInput::Options(mut options)) => {
             if options.collector_url.is_none() {
-                options.collector_url = Some("http://localhost:4317".to_string());
+                options.collector_url = Some("http://localhost:4318".to_string());
             }
             Some(options)
         }
@@ -457,10 +457,6 @@ fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerS
         catalogue_authority_admin_secret: raw.catalogue_authority_admin_secret,
         sync_payload_telemetry: normalize_sync_payload_telemetry(raw.telemetry),
     })
-}
-
-fn sync_payload_telemetry_ingest_url(base_url: &str, app_id: AppId) -> String {
-    format!("{base_url}/apps/{app_id}/dev/sync-payload-telemetry")
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -1778,7 +1774,6 @@ pub struct DevServer {
     data_dir: String,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
-    sync_payload_telemetry_ingest_url: Option<String>,
 }
 
 #[napi]
@@ -1838,7 +1833,7 @@ impl DevServer {
             let collector_url = sync_payload_telemetry
                 .collector_url
                 .clone()
-                .unwrap_or_else(|| "http://localhost:4317".to_string());
+                .unwrap_or_else(|| "http://localhost:4318".to_string());
             server_builder = server_builder
                 .with_sync_payload_telemetry_collector_url(collector_url)
                 .map_err(napi::Error::from_reason)?;
@@ -1870,11 +1865,6 @@ impl DevServer {
         let url = hosted.base_url();
         let port = hosted.port;
         let resolved_data_dir = hosted.data_dir.to_string_lossy().into_owned();
-        let sync_payload_telemetry_ingest_url = opts
-            .sync_payload_telemetry
-            .as_ref()
-            .map(|_| sync_payload_telemetry_ingest_url(&url, app_id));
-
         Ok(Self {
             inner: Mutex::new(Some(hosted)),
             app_id: opts.app_id,
@@ -1883,7 +1873,6 @@ impl DevServer {
             data_dir: resolved_data_dir,
             backend_secret: opts.backend_secret,
             admin_secret: opts.admin_secret,
-            sync_payload_telemetry_ingest_url,
         })
     }
 
@@ -1915,11 +1904,6 @@ impl DevServer {
     #[napi(getter, js_name = "adminSecret")]
     pub fn admin_secret(&self) -> Option<String> {
         self.admin_secret.clone()
-    }
-
-    #[napi(getter, js_name = "syncPayloadTelemetryIngestUrl")]
-    pub fn sync_payload_telemetry_ingest_url(&self) -> Option<String> {
-        self.sync_payload_telemetry_ingest_url.clone()
     }
 
     #[napi]
@@ -2040,7 +2024,7 @@ pub fn get_public_key_b64(seed_b64: String) -> napi::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_dev_server_start_options, sync_payload_telemetry_ingest_url};
+    use super::parse_dev_server_start_options;
     use jazz_tools::binding_support::{
         align_query_rows_to_declared_schema, align_values_to_declared_schema,
         query_rows_can_be_schema_aligned,
@@ -2051,7 +2035,6 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
-    use jazz_tools::schema_manager::AppId;
     use serde_json::json;
 
     #[test]
@@ -2082,7 +2065,7 @@ mod tests {
             opts.sync_payload_telemetry
                 .as_ref()
                 .and_then(|o| o.collector_url.as_deref()),
-            Some("http://localhost:4317")
+            Some("http://localhost:4318")
         );
     }
 
@@ -2109,19 +2092,6 @@ mod tests {
             error.to_string().contains("collectorURL"),
             "error should name the unknown key: {error}"
         );
-    }
-
-    #[test]
-    fn sync_payload_telemetry_ingest_url_uses_canonical_app_id() {
-        let app_id = AppId::from_name("test-app");
-
-        let url = sync_payload_telemetry_ingest_url("http://127.0.0.1:20000", app_id);
-
-        assert_eq!(
-            url,
-            format!("http://127.0.0.1:20000/apps/{app_id}/dev/sync-payload-telemetry")
-        );
-        assert!(!url.contains("/apps/test-app/"));
     }
 
     #[test]

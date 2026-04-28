@@ -55,8 +55,7 @@ import { Db } from "./db.js";
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
-const originalViteSyncPayloadTelemetryIngestUrl =
-  process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+const originalViteTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 
 afterEach(() => {
   loadWasmModuleMock.mockClear();
@@ -79,11 +78,10 @@ afterEach(() => {
     (globalThis as Record<string, unknown>).Worker = originalWorker;
   }
 
-  if (originalViteSyncPayloadTelemetryIngestUrl === undefined) {
-    delete process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  if (originalViteTelemetryCollectorUrl === undefined) {
+    delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
   } else {
-    process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-      originalViteSyncPayloadTelemetryIngestUrl;
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = originalViteTelemetryCollectorUrl;
   }
 });
 
@@ -252,7 +250,7 @@ describe("Db worker runtime bootstrap", () => {
     expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
   });
 
-  it("passes explicit sync payload telemetry ingest URL to the worker bridge", async () => {
+  it("passes explicit telemetry collector URL to the worker bridge", async () => {
     class FakeWorker extends EventTarget {
       constructor(_url: string | URL, _options?: WorkerOptions) {
         super();
@@ -280,18 +278,16 @@ describe("Db worker runtime bootstrap", () => {
     const db = await Db.createWithWorker({
       appId: "worker-bootstrap-sync-telemetry",
       driver: { type: "persistent", dbName: "worker-bootstrap-sync-telemetry" },
-      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+      telemetryCollectorUrl: "http://localhost:4318",
     });
 
     const options = (db as any).buildWorkerBridgeOptions("{}");
     await db.shutdown();
 
-    expect(options.syncPayloadTelemetryIngestUrl).toBe(
-      "http://localhost:3000/dev/sync-payload-telemetry",
-    );
+    expect(options.telemetryCollectorUrl).toBe("http://localhost:4318");
   });
 
-  it("defaults sync payload telemetry ingest URL from public framework env vars", async () => {
+  it("defaults telemetry collector URL from public framework env vars", async () => {
     class FakeWorker extends EventTarget {
       constructor(_url: string | URL, _options?: WorkerOptions) {
         super();
@@ -310,8 +306,7 @@ describe("Db worker runtime bootstrap", () => {
       terminate(): void {}
     }
 
-    process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
-      "http://localhost:3000/env-sync-payload-telemetry";
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = "http://localhost:4318";
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).location = {
       href: "http://localhost:3000/",
@@ -326,9 +321,7 @@ describe("Db worker runtime bootstrap", () => {
     const options = (db as any).buildWorkerBridgeOptions("{}");
     await db.shutdown();
 
-    expect(options.syncPayloadTelemetryIngestUrl).toBe(
-      "http://localhost:3000/env-sync-payload-telemetry",
-    );
+    expect(options.telemetryCollectorUrl).toBe("http://localhost:4318");
   });
 
   it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {

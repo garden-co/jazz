@@ -94,8 +94,8 @@ export interface DbConfig {
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
-  /** Optional endpoint for fire-and-forget sync payload telemetry records. */
-  syncPayloadTelemetryIngestUrl?: string;
+  /** Optional OTLP/HTTP collector URL for fire-and-forget dev telemetry records. */
+  telemetryCollectorUrl?: string;
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
@@ -147,23 +147,23 @@ function trimOptionalString(value?: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function readPublicSyncPayloadTelemetryIngestUrlEnv(): string | undefined {
+function readPublicTelemetryCollectorUrlEnv(): string | undefined {
   const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
   const candidates = [
-    metaEnv?.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
-    metaEnv?.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
-    metaEnv?.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
+    metaEnv?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL,
+    metaEnv?.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+    metaEnv?.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
     typeof process !== "undefined" && process.env
-      ? process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      ? process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL
       : undefined,
     typeof process !== "undefined" && process.env
-      ? process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      ? process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
       : undefined,
     typeof process !== "undefined" && process.env
-      ? process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      ? process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
       : undefined,
     typeof process !== "undefined" && process.env
-      ? process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      ? process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
       : undefined,
   ];
 
@@ -174,9 +174,9 @@ function readPublicSyncPayloadTelemetryIngestUrlEnv(): string | undefined {
 }
 
 function resolveDbConfigDefaults(config: DbConfig): DbConfig {
-  if (config.syncPayloadTelemetryIngestUrl) return config;
-  const syncPayloadTelemetryIngestUrl = readPublicSyncPayloadTelemetryIngestUrlEnv();
-  return syncPayloadTelemetryIngestUrl ? { ...config, syncPayloadTelemetryIngestUrl } : config;
+  if (config.telemetryCollectorUrl) return config;
+  const telemetryCollectorUrl = readPublicTelemetryCollectorUrlEnv();
+  return telemetryCollectorUrl ? { ...config, telemetryCollectorUrl } : config;
 }
 
 /** @internal Derive the default browser persistence namespace for this Db config. */
@@ -1369,7 +1369,7 @@ export class Db {
       runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
-      syncPayloadTelemetryIngestUrl: this.config.syncPayloadTelemetryIngestUrl,
+      telemetryCollectorUrl: this.config.telemetryCollectorUrl,
     };
   }
 
