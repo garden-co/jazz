@@ -106,8 +106,16 @@ Small, independent fixes that remove parallel construction logic between
    re-exported from `lib.rs`), so this is purely a binary-internal
    organization choice — nothing leaves or enters the public library.
    `main.rs` is 358 lines today; "leave it alone" is defensible.
-3. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
-   the JWKS loader (`builder.rs:338-342`).
+3. (Optional, naming-only.) Give the two `reqwest::Client` constructions in
+   `builder.rs` named helpers so their intent is explicit at the call site:
+   `build_authority_forwarding_client()` for `builder.rs:155` and
+   `build_jwks_client()` for `builder.rs:338-342`. **Do not collapse them
+   into one shared client** — they encode two different policies. The main
+   client is used at `routes.rs:219` to proxy catalogue admin requests
+   (potentially carrying large schema bundles) and uses default timeouts.
+   The JWKS client uses `connect_timeout(5s)` + `timeout(10s)` so a hung
+   IDP cannot block the auth path. Sharing one client requires picking
+   either policy for both, which is a behavior change in either direction.
 4. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
    — either use it in a routed handler or remove the field.
 
