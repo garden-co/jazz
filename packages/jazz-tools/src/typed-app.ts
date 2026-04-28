@@ -1167,6 +1167,18 @@ export type App<TSchema extends SchemaLike> = Simplify<
 
 export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
 
+type SchemaSlice<
+  TSchema extends SchemaLike,
+  TTables extends readonly TableName<TSchema>[],
+> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
+
+export interface SliceableApp<TSchema extends SchemaLike> {
+  readonly wasmSchema: WasmSchema;
+  slice<const TTables extends readonly [TableName<TSchema>, ...TableName<TSchema>[]]>(
+    ...tables: TTables
+  ): App<SchemaSlice<TSchema, TTables>>;
+}
+
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
 export type TableMetaOf<TTable> =
@@ -1255,9 +1267,60 @@ export function defineApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
+  return createAppForTables(Object.keys(normalizedDefinition), wasmSchema);
+}
+
+/**
+ * Create a sliceable app from a full schema definition.
+ *
+ * The full schema is compiled for runtime hashing, migrations, validation, and query planning,
+ * while each `.slice(...)` call exposes a smaller typed app surface backed by that same runtime
+ * schema.
+ *
+ * @example
+ * ```typescript
+ * const app = s.defineSliceableApp(schema);
+ * export const orgApp = app.slice("teams", "projects", "members");
+ * ```
+ */
+export function defineSliceableApp<const TSchema extends Schema<any>>(
+  definition: TSchema,
+): SliceableApp<TSchema>;
+export function defineSliceableApp<const TSchema extends SchemaDefinition>(
+  definition: TSchema,
+): SliceableApp<Schema<TSchema>>;
+export function defineSliceableApp(
+  definition: SchemaDefinition | Schema<any>,
+): SliceableApp<Schema<SchemaDefinition>> {
+  const normalizedDefinition = definition as unknown as SchemaDefinition;
+  const schema = definitionToSchema(normalizedDefinition);
+  const wasmSchema = schemaToWasm(schema);
+
+  return {
+    wasmSchema,
+    slice(...tableNames: string[]) {
+      if (tableNames.length === 0) {
+        throw new Error("slice(...) requires at least one table name.");
+      }
+
+      for (const tableName of tableNames) {
+        if (!(tableName in normalizedDefinition)) {
+          throw new Error(`slice(...) references unknown table "${tableName}".`);
+        }
+      }
+
+      return createAppForTables(tableNames, wasmSchema);
+    },
+  } as SliceableApp<Schema<SchemaDefinition>>;
+}
+
+function createAppForTables(
+  tableNames: readonly string[],
+  wasmSchema: WasmSchema,
+): App<Schema<SchemaDefinition>> {
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
-  for (const tableName of Object.keys(normalizedDefinition)) {
+  for (const tableName of tableNames) {
     tables[tableName] = new TypedTableQueryBuilder(tableName, wasmSchema);
   }
 
