@@ -176,6 +176,8 @@ export interface QueryBuilder<T> {
   readonly _table: string;
   /** Schema reference for translation and transformation */
   readonly _schema: WasmSchema;
+  /** Optional TypeScript-only per-column transforms carried by typed query handles. */
+  readonly _columnTransforms?: ColumnTransformMap;
   /** Build and return the query as JSON */
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
