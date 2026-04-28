@@ -97,8 +97,15 @@ Small, independent fixes that remove parallel construction logic between
    pub `node_env_mode() -> NodeEnvMode` in `server/env.rs`) and have both
    policy functions call it. The policy decisions on top stay separate.
    Scope is ~3 lines of true dedup; "leave it alone" is also defensible.
-2. Move JWT key resolution from `main.rs:38-59` into `commands/server.rs` so
-   the library no longer carries CLI-shaped logic.
+2. Thin `main.rs`: push CLI-helper functions
+   (`resolve_jwt_public_key_input` at `main.rs:38-59`, plus
+   `resolve_node_env_mode` and `resolve_dev_default_flag` from item 1 if
+   pursued) into `commands/server.rs`, where they're actually consumed.
+   `main.rs` keeps the clap struct definitions and dispatch only. Note:
+   both files are binary-only (`commands/` is `mod` in `main.rs`, not
+   re-exported from `lib.rs`), so this is purely a binary-internal
+   organization choice — nothing leaves or enters the public library.
+   `main.rs` is 358 lines today; "leave it alone" is defensible.
 3. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
    the JWKS loader (`builder.rs:338-342`).
 4. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
