@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -18,6 +18,19 @@ describe("agent-infra backend CLI run commands", () => {
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("resolves a legacy directory data path to the nested SQLite store", async () => {
+    await mkdir(dataPath, { recursive: true });
+
+    const tasks = runCliJson("list-tasks");
+
+    expect(tasks).toEqual([]);
+    await expect(stat(join(dataPath, "agent-infra.sqlite"))).resolves.toEqual(
+      expect.objectContaining({
+        size: expect.any(Number),
+      }),
+    );
   });
 
   it(

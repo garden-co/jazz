@@ -13,6 +13,11 @@ export {
   type RecordJAgentArtifactInput,
   type RecordJAgentAttemptCompletedInput,
   type RecordJAgentAttemptStartedInput,
+<<<<<<< HEAD
+=======
+  type RecordCodexTerminalPresenceInput,
+  type RecordJAgentEventInput,
+>>>>>>> 231c3091 (fix(jazz2): harden conversation-turn commits)
   type RecordJAgentRunCompletedInput,
   type RecordJAgentRunStartedInput,
   type RecordJAgentStepCompletedInput,
