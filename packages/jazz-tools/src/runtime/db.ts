@@ -407,6 +407,8 @@ export interface TableProxy<T, Init> {
   readonly _schema: WasmSchema;
   /** Optional TypeScript-only row transform carried by transformed table handles. */
   readonly _rowTransform?: RowTransform;
+  /** Optional TypeScript-only per-column transforms carried by typed table handles. */
+  readonly _columnTransforms?: ColumnTransformMap;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
@@ -419,22 +421,78 @@ export interface RowTransform {
   update(row: unknown): Record<string, unknown>;
 }
 
-function transformOutputRow<T>(source: { readonly _rowTransform?: RowTransform }, row: unknown): T {
-  return (source._rowTransform ? source._rowTransform.row(row) : row) as T;
+export interface ColumnTransform {
+  from(value: unknown): unknown;
+  to(value: unknown): unknown;
+}
+
+export type ColumnTransformMap = Record<string, ColumnTransform>;
+
+function transformOutputRow<T>(
+  source: {
+    readonly _rowTransform?: RowTransform;
+    readonly _columnTransforms?: ColumnTransformMap;
+  },
+  row: unknown,
+): T {
+  const columnTransformed = transformOutputColumns(source, row);
+  return (
+    source._rowTransform ? source._rowTransform.row(columnTransformed) : columnTransformed
+  ) as T;
+}
+
+function transformOutputColumns(
+  source: { readonly _columnTransforms?: ColumnTransformMap },
+  row: unknown,
+): unknown {
+  if (!source._columnTransforms || typeof row !== "object" || row === null) {
+    return row;
+  }
+
+  const transformed = { ...(row as Record<string, unknown>) };
+  for (const [column, transform] of Object.entries(source._columnTransforms)) {
+    if (column in transformed) {
+      transformed[column] = transform.from(transformed[column]);
+    }
+  }
+  return transformed;
 }
 
 function transformInsertInput(
   table: TableProxy<unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
-  return table._rowTransform ? table._rowTransform.insert(data) : (data as Record<string, unknown>);
+  const rowTransformed = table._rowTransform
+    ? table._rowTransform.insert(data)
+    : (data as Record<string, unknown>);
+  return transformInputColumns(table, rowTransformed);
 }
 
 function transformUpdateInput(
   table: TableProxy<unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
-  return table._rowTransform ? table._rowTransform.update(data) : (data as Record<string, unknown>);
+  const rowTransformed = table._rowTransform
+    ? table._rowTransform.update(data)
+    : (data as Record<string, unknown>);
+  return transformInputColumns(table, rowTransformed);
+}
+
+function transformInputColumns(
+  table: TableProxy<unknown, unknown>,
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!table._columnTransforms) {
+    return data;
+  }
+
+  const transformed = { ...data };
+  for (const [column, transform] of Object.entries(table._columnTransforms)) {
+    if (column in transformed) {
+      transformed[column] = transform.to(transformed[column]);
+    }
+  }
+  return transformed;
 }
 
 function backendScopedAuthState(session?: Session | null): AuthState {

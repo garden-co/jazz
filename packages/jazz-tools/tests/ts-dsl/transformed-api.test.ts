@@ -2,7 +2,10 @@ import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
 import { insertProject, insertUser, uniqueDbName } from "./factories";
-import { schema as s } from "../../src/index.js";
+import { schema as s, TypedTableQueryBuilder } from "../../src/index.js";
+import { schemaToWasm } from "../../src/codegen/schema-reader.js";
+import { schemaDefinitionToAst } from "../../src/migrations.js";
+import { mergePermissionsIntoSchema } from "../../src/schema-permissions.js";
 
 type TodoCard = {
   id: string;
@@ -40,6 +43,35 @@ const todoCards = app.todos.transformed<TodoCard, TodoCardInput>({
     done: card.completed,
   }),
 });
+
+type Priority = "low" | "medium" | "high";
+
+const prioritySchema = {
+  priorities: s.table({
+    label: s.string(),
+    score: s.int().transform<Priority>({
+      from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+      to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+    }),
+  }),
+};
+
+type PriorityAppSchema = s.Schema<typeof prioritySchema>;
+const priorityBaseApp: s.App<PriorityAppSchema> = s.defineApp(prioritySchema);
+const priorityPermissions = s.definePermissions(priorityBaseApp, ({ policy }) => {
+  policy.priorities.allowRead.where({});
+  policy.priorities.allowInsert.where({});
+  policy.priorities.allowUpdate.whereOld({}).whereNew({});
+});
+const priorityWasmSchema = schemaToWasm(
+  mergePermissionsIntoSchema(schemaDefinitionToAst(prioritySchema), priorityPermissions),
+);
+const priorityApp = {
+  priorities: new TypedTableQueryBuilder("priorities", priorityWasmSchema, undefined, {
+    score: prioritySchema.priorities.columns.score._transform!,
+  }),
+  wasmSchema: priorityWasmSchema,
+} as s.App<PriorityAppSchema>;
 
 describe("TS transformed row API", () => {
   let db: Db;
@@ -148,5 +180,46 @@ describe("TS transformed row API", () => {
     expectTypeOf<s.RowOf<typeof todoCards>>().toEqualTypeOf<TodoCard>();
     expectTypeOf<s.InsertOf<typeof todoCards>>().toEqualTypeOf<TodoCardInput>();
     expectTypeOf<s.WhereOf<typeof todoCards>>().toEqualTypeOf<s.WhereOf<typeof app.todos>>();
+  });
+
+  it("transforms individual columns on reads, inserts, updates, and subscriptions", async () => {
+    const { value: inserted } = db.insert(priorityApp.priorities, {
+      label: "Upgrade docs",
+      score: "high",
+    });
+
+    expectTypeOf(inserted.score).toEqualTypeOf<Priority>();
+    expect(inserted.score).toBe("high");
+
+    db.update(priorityApp.priorities, inserted.id, { score: "low" });
+
+    const byRawStoredValue = await db.one(priorityApp.priorities.where({ score: 1 }));
+    expect(byRawStoredValue).toMatchObject({
+      id: inserted.id,
+      label: "Upgrade docs",
+      score: "low",
+    });
+
+    let resolveUpdate: (all: s.RowOf<typeof priorityApp.priorities>[]) => void = () => {};
+    const nextUpdate = new Promise<s.RowOf<typeof priorityApp.priorities>[]>((resolve) => {
+      resolveUpdate = resolve;
+    });
+
+    const unsubscribe = db.subscribeAll(priorityApp.priorities.where({}), ({ all }) => {
+      if (all.some((row) => row.id === inserted.id && row.score === "medium")) {
+        resolveUpdate(all);
+      }
+    });
+
+    db.update(priorityApp.priorities, inserted.id, { score: "medium" });
+
+    await expect(nextUpdate).resolves.toContainEqual(
+      expect.objectContaining({
+        id: inserted.id,
+        score: "medium",
+      }),
+    );
+
+    unsubscribe();
   });
 });

@@ -52,6 +52,21 @@ const defaultedSchema = {
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
 
+type Urgency = "low" | "high";
+
+const transformedColumnSchema = {
+  tasks: s.table({
+    title: s.string(),
+    urgency: s.int().transform<Urgency>({
+      from: (value) => (value > 5 ? "high" : "low"),
+      to: (value) => (value === "high" ? 10 : 1),
+    }),
+  }),
+};
+type TransformedColumnAppSchema = s.Schema<typeof transformedColumnSchema>;
+const transformedColumnApp: s.App<TransformedColumnAppSchema> =
+  s.defineApp(transformedColumnSchema);
+
 const graphSchema = {
   teams: s.table({
     name: s.string(),
@@ -357,6 +372,30 @@ describe("typed app prototype", () => {
       };
       void invalidDefaultedNull;
     }
+  });
+
+  it("infers transformed column row and write types while keeping where raw", () => {
+    expectTypeOf<s.RowOf<typeof transformedColumnApp.tasks>>().toEqualTypeOf<{
+      id: string;
+      title: string;
+      urgency: Urgency;
+    }>();
+    expectTypeOf<s.InsertOf<typeof transformedColumnApp.tasks>>().toEqualTypeOf<{
+      title: string;
+      urgency: Urgency;
+    }>();
+    expectTypeOf<s.WhereOf<typeof transformedColumnApp.tasks>["urgency"]>().branded.toEqualTypeOf<
+      | number
+      | {
+          eq?: number;
+          ne?: number;
+          gt?: number;
+          gte?: number;
+          lt?: number;
+          lte?: number;
+        }
+      | undefined
+    >();
   });
 
   it("creates typed app slices over one full runtime schema", () => {
