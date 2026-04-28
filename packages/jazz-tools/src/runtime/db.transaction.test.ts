@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { WriteHandle, type JazzClient, type LocalBatchRecord, type Row } from "./client.js";
+import {
+  InsertHandle,
+  WriteHandle,
+  type JazzClient,
+  type LocalBatchRecord,
+  type Row,
+} from "./client.js";
 import type { Session } from "./context.js";
 
 class TestDb extends Db {
@@ -215,6 +221,86 @@ describe("Db transactions", () => {
       title: "Session transaction",
       done: true,
     });
+  });
+
+  it("commits a typed callback transaction and returns the callback result handle", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-callback",
+      values: [
+        { type: "Text", value: "Callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-callback",
+    } as Row;
+    const committedRuntime = makeWriteHandle("batch-callback");
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-callback"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => committedRuntime.handle),
+      localBatchRecord: vi.fn((batchId = "batch-callback") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-callback")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      waitForPersistedBatch: vi.fn(async () => undefined),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const handle = await db.transaction(table, (tx) => {
+      expect("commit" in tx).toBe(false);
+      const todo = tx.insert(table, { title: "Callback transaction", done: false });
+      return todo;
+    });
+
+    expect(handle).toBeInstanceOf(InsertHandle);
+    expect(handle.batchId).toBe("batch-callback");
+    expect(handle.value).toEqual({
+      id: "todo-callback",
+      title: "Callback transaction",
+      done: false,
+    });
+    expect(runtimeTransaction.commit).toHaveBeenCalledTimes(1);
+    await expect(handle.wait({ tier: "global" })).resolves.toEqual({
+      id: "todo-callback",
+      title: "Callback transaction",
+      done: false,
+    });
+    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-callback", "global");
+  });
+
+  it("does not commit a typed callback transaction when the callback rejects", async () => {
+    const table = todoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-callback-rejected"),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
+      localBatchRecord: vi.fn((batchId = "batch-callback-rejected") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-callback-rejected")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const error = new Error("callback failed");
+
+    await expect(db.transaction(table, async () => Promise.reject(error))).rejects.toBe(error);
+
+    expect(runtimeTransaction.commit).not.toHaveBeenCalled();
   });
 
   it("rejects db transaction writes after commit", () => {

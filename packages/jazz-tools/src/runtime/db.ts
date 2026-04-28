@@ -626,6 +626,11 @@ export class DbTransaction {
 }
 
 /**
+ * Transaction object available inside {@link Db.transaction}'s callback.
+ */
+export type DbTransactionScope = Omit<DbTransaction, "commit">;
+
+/**
  * Direct batches group a set of writes that should settle immediately, without an authority,
  * while still being part of the same batch.
  *
@@ -2310,6 +2315,8 @@ export class Db {
    * Use transactions when several writes should settle together after an authority validates them.
    *
    * Use {@link DbTransaction.commit} to commit the transaction.
+   *
+   * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
   beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
     const client = this.getClient(table._schema);
@@ -2324,6 +2331,24 @@ export class Db {
           operation,
         ),
     );
+  }
+
+  /**
+   * Run {@link callback} inside a transaction and commit it once the callback returns.
+   *
+   * Use transactions when several writes should settle together after an authority validates them.
+   *
+   * @returns a handle containing the result of the callback
+   */
+  async transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+  ): Promise<InsertHandle<Awaited<TResult>>> {
+    const client = this.getClient(table._schema);
+    const transaction = this.beginTransaction(table);
+    const value = await callback(transaction);
+    const committed = transaction.commit();
+    return new InsertHandle(value, committed.batchId, client);
   }
 
   /**
@@ -2838,6 +2863,16 @@ class ClientBackedDb extends Db {
       (candidateTable, operation) =>
         assertTableBelongsToClient(candidateTable, client, () => client, operation),
     );
+  }
+
+  override async transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
+  ): Promise<InsertHandle<Awaited<TResult>>> {
+    const transaction = this.beginTransaction(table);
+    const value = await callback(transaction);
+    const committed = transaction.commit();
+    return new InsertHandle(value, committed.batchId, this.runtimeClient);
   }
 
   override beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
