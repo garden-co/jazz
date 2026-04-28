@@ -1015,6 +1015,14 @@ impl SchemaManager {
             });
         }
 
+        if let Some(head) = self.current_permissions_head
+            && head.schema_hash == schema_hash
+            && let Some(existing) = self.known_permissions_bundles.get(&head.bundle_object_id)
+            && existing.permissions == permissions
+        {
+            return Ok(Some(self.permissions_head_object_id()));
+        }
+
         let version = self
             .current_permissions_head
             .map(|head| head.version + 1)
@@ -2675,6 +2683,199 @@ mod tests {
                 current: Some(_),
             })
         ));
+    }
+
+    #[test]
+    fn republishing_identical_permissions_is_a_no_op() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = crate::storage::MemoryStorage::new();
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        manager
+            .publish_permissions_bundle(&mut storage, schema_hash, permissions.clone(), None)
+            .expect("initial permissions publish should succeed");
+        manager.process(&mut storage);
+
+        let head_before = manager
+            .current_permissions_head()
+            .expect("head should exist after first publish");
+        let bundle_entry_before = storage
+            .load_catalogue_entry(head_before.bundle_object_id)
+            .expect("bundle entry should load")
+            .expect("bundle entry should exist");
+        let head_object_id = SchemaManager::permissions_head_object_id_for(test_app_id());
+        let head_entry_before = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load")
+            .expect("head entry should exist");
+
+        let republished = manager
+            .publish_permissions_bundle(
+                &mut storage,
+                schema_hash,
+                permissions,
+                Some(head_before.bundle_object_id),
+            )
+            .expect("republishing identical permissions should succeed");
+
+        assert_eq!(
+            republished,
+            Some(head_object_id),
+            "republish should return the existing head object id"
+        );
+
+        let head_after = manager
+            .current_permissions_head()
+            .expect("head should still exist after no-op publish");
+        assert_eq!(
+            head_after.version, head_before.version,
+            "no-op publish must not bump the version"
+        );
+        assert_eq!(
+            head_after.bundle_object_id, head_before.bundle_object_id,
+            "no-op publish must not produce a new bundle object id"
+        );
+        assert_eq!(
+            head_after.parent_bundle_object_id, head_before.parent_bundle_object_id,
+            "no-op publish must not change the parent link"
+        );
+
+        let bundle_entry_after = storage
+            .load_catalogue_entry(head_after.bundle_object_id)
+            .expect("bundle entry should load after no-op publish")
+            .expect("bundle entry should still exist");
+        let head_entry_after = storage
+            .load_catalogue_entry(head_object_id)
+            .expect("head entry should load after no-op publish")
+            .expect("head entry should still exist");
+        assert_eq!(
+            bundle_entry_after, bundle_entry_before,
+            "no-op publish must not rewrite the stored bundle entry"
+        );
+        assert_eq!(
+            head_entry_after, head_entry_before,
+            "no-op publish must not rewrite the stored head entry"
+        );
+    }
+
+    #[test]
+    fn republishing_changed_permissions_bumps_version() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = crate::storage::MemoryStorage::new();
+        let permissive = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let restrictive = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::False),
+        )]);
+
+        manager
+            .publish_permissions_bundle(&mut storage, schema_hash, permissive, None)
+            .expect("initial permissions publish should succeed");
+        let head_before = manager
+            .current_permissions_head()
+            .expect("head should exist after first publish");
+
+        manager
+            .publish_permissions_bundle(
+                &mut storage,
+                schema_hash,
+                restrictive,
+                Some(head_before.bundle_object_id),
+            )
+            .expect("changed publish should succeed");
+        let head_after = manager
+            .current_permissions_head()
+            .expect("head should exist after changed publish");
+
+        assert_eq!(
+            head_after.version,
+            head_before.version + 1,
+            "changed permissions must bump the version"
+        );
+        assert_ne!(
+            head_after.bundle_object_id, head_before.bundle_object_id,
+            "changed permissions must produce a new bundle object id"
+        );
+        assert_eq!(
+            head_after.parent_bundle_object_id,
+            Some(head_before.bundle_object_id),
+            "changed permissions must chain off the previous bundle"
+        );
+    }
+
+    #[test]
+    fn dedup_preserves_parent_chain_for_subsequent_change() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = crate::storage::MemoryStorage::new();
+        let permissive = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let restrictive = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::False),
+        )]);
+
+        manager
+            .publish_permissions_bundle(&mut storage, schema_hash, permissive.clone(), None)
+            .expect("initial publish should succeed");
+        let head_a = manager
+            .current_permissions_head()
+            .expect("head should exist after publish A");
+
+        manager
+            .publish_permissions_bundle(
+                &mut storage,
+                schema_hash,
+                permissive,
+                Some(head_a.bundle_object_id),
+            )
+            .expect("identical republish should succeed");
+        let head_a_again = manager
+            .current_permissions_head()
+            .expect("head should exist after no-op republish");
+        assert_eq!(
+            head_a_again, head_a,
+            "no-op republish must leave the head untouched"
+        );
+
+        manager
+            .publish_permissions_bundle(
+                &mut storage,
+                schema_hash,
+                restrictive,
+                Some(head_a.bundle_object_id),
+            )
+            .expect("subsequent changed publish should succeed");
+        let head_b = manager
+            .current_permissions_head()
+            .expect("head should exist after publish B");
+
+        assert_eq!(
+            head_b.version,
+            head_a.version + 1,
+            "version must advance by one across no-op + change, not two"
+        );
+        assert_eq!(
+            head_b.parent_bundle_object_id,
+            Some(head_a.bundle_object_id),
+            "B must chain off A, not off the skipped no-op"
+        );
     }
 
     #[test]
