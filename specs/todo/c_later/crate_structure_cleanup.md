@@ -20,27 +20,55 @@ inside `RuntimeCore` that conceptually belong elsewhere.
 
 ## Non-goals
 
-- No change to public API of `jazz-tools` consumed by `jazz-napi`, `jazz-wasm`,
-  `jazz-rn`, or the TS client. Re-exports in `lib.rs` continue to expose the
-  same names from their new paths.
 - No change to wire format, storage format, sync semantics, or query
   evaluation.
 - No new features. Hypothetical future requirements do not justify abstractions
   introduced here.
 - No tests rewritten. Tests move with their code; their assertions stay.
 
+## Public API impact
+
+Most phases preserve the public API of `jazz-tools` consumed by `jazz-napi`,
+`jazz-wasm`, `jazz-rn`, and the TS client — either because they touch internal
+code only, or because re-exports in `lib.rs` keep the existing import paths
+resolving from the new module locations.
+
+Two phases are **deliberate API breaks** coordinated with binding updates in
+the same PR:
+
+- **Phase 3 (builder collapse)** — replaces four public `ServerBuilder::with_*_storage`
+  methods. Call sites in `crates/jazz-napi/src/lib.rs:1585, 1754, 1756` must
+  be updated in the same PR.
+- **Phase 6 (typed subscribe)** — replaces public
+  `RuntimeCore::{create_subscription, execute_subscription}`. Call sites in
+  `crates/jazz-napi/src/lib.rs:941, 983`, `crates/jazz-wasm/src/runtime.rs:1588, 1612`,
+  and `crates/jazz-rn/rust/src/lib.rs:713, 755` (plus the regenerated UniFFI
+  C++ shim under `crates/jazz-rn/cpp/`) must be updated in the same PR.
+
 ## Phase 1 — Junk-drawer relocation
 
 Pure mechanical moves. Each one is a single PR.
 
-| Move                | From                  | To                                                                                   |
-| ------------------- | --------------------- | ------------------------------------------------------------------------------------ |
-| Sync clock          | `monotonic_clock.rs`  | `sync_manager/clock.rs`                                                              |
-| Batch lifecycle     | `batch_fate.rs`       | `sync_manager/batch_fate.rs`                                                         |
-| Sync test recorder  | `sync_tracer.rs`      | `sync_manager/test_support.rs` (gated `#[cfg(any(test, feature = "test-support"))]`) |
-| HTTP route surface  | `routes.rs`           | `server/routes.rs`                                                                   |
-| Native binding glue | `binding_support.rs`  | `query_manager/bindings.rs`                                                          |
-| Test row history    | `test_row_history.rs` | `row_histories/tests.rs` (gated `#[cfg(test)]`)                                      |
+| Move                | From                  | To                                                                                 |
+| ------------------- | --------------------- | ---------------------------------------------------------------------------------- |
+| Sync clock          | `monotonic_clock.rs`  | `sync_manager/clock.rs`                                                            |
+| Batch lifecycle     | `batch_fate.rs`       | `sync_manager/batch_fate.rs`                                                       |
+| Sync test recorder  | `sync_tracer.rs`      | `sync_manager/test_support.rs` (gated `#[cfg(any(test, feature = "test-utils"))]`) |
+| HTTP route surface  | `routes.rs`           | `server/routes.rs`                                                                 |
+| Native binding glue | `binding_support.rs`  | `query_manager/bindings.rs`                                                        |
+| Test row history    | `test_row_history.rs` | `row_histories/tests.rs` (gated `#[cfg(test)]`)                                    |
+
+Notes:
+
+- The sync-test-recorder gate uses the existing `test-utils` feature defined
+  in `crates/jazz-tools/Cargo.toml` (alongside `test`). No new feature is
+  introduced.
+- `binding_support` is currently `pub mod binding_support;` in `lib.rs:2` and
+  imported as `jazz_tools::binding_support::*` from all three FFI crates
+  (e.g. `jazz-napi/src/lib.rs:25`, `jazz-wasm/src/runtime.rs:21, 62`,
+  `jazz-rn/rust/src/lib.rs:14`). The move keeps that import path stable via
+  a `pub use crate::query_manager::bindings as binding_support;` re-export in
+  `lib.rs` — so binding crates see no source change.
 
 Top-level files that **stay** (true primitives, used by ≥3 subsystems):
 `commit.rs`, `digest.rs`, `identity.rs`, `metadata.rs`, `object.rs`,
@@ -50,7 +78,8 @@ Acceptance:
 
 - `cargo build --all-features` and `cargo test --all-features` pass.
 - `pnpm build` and `pnpm test` pass (covers napi/wasm/rn re-export paths).
-- No `pub use` from `lib.rs` changes name; only the path on the right-hand
+- All `jazz_tools::binding_support::*` imports in the three FFI crates resolve
+  unchanged. No `pub use` from `lib.rs` is renamed; only the right-hand
   side of each re-export shifts.
 
 ## Phase 2 — Entry-point dedup
@@ -66,10 +95,14 @@ Small, independent fixes that remove parallel construction logic between
    the library no longer carries CLI-shaped logic.
 4. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
    the JWKS loader (`builder.rs:338-342`).
-5. Promote `allow_local_first_auth: true` to `AuthConfig::default()` and drop
-   the hardcoded copies in `builder.rs:73-76` and `server/testing.rs:105`.
-6. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
+5. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
    — either use it in a routed handler or remove the field.
+
+(Promoting `allow_local_first_auth: true` into `AuthConfig::default()` was
+considered but moved to _Out of scope_ below: `AuthConfig` derives `Default`
+today, so the bool defaults to `false`, and `crates/jazz-tools/src/middleware/auth.rs:1134, 1617`
+plus `crates/jazz-tools/tests/auth_test.rs:228` rely on that. Flipping it is
+a behavior change, not cleanup.)
 
 ## Phase 3 — Builder collapse
 
@@ -91,7 +124,19 @@ The four call sites in tests, `commands/server.rs`, and `server/testing.rs`
 are mechanical replacements. Old methods are removed (no deprecation shim —
 this is prototype-stage code, per CLAUDE.md).
 
-Acceptance: `cargo build --all-features` clean; tests unchanged in spirit.
+**This is a public API break.** `with_persistent_storage`,
+`with_in_memory_storage`, `with_sqlite_storage`, and `with_rocksdb_storage`
+are public on `ServerBuilder` (`crates/jazz-tools/src/server/builder.rs:106-137`)
+and called directly by `crates/jazz-napi/src/lib.rs:1585, 1754, 1756`. The
+napi crate must be updated in the same PR. WASM and RN do not currently call
+these.
+
+Acceptance:
+
+- `cargo build --all-features` clean.
+- `crates/jazz-napi/src/lib.rs` updated to the new `with_storage(...)` API in
+  the same PR; `pnpm build` and `pnpm test` for the napi package pass.
+- Tests unchanged in spirit (only the call shape rewritten).
 
 ## Phase 4 — Storage trait split
 
@@ -130,12 +175,18 @@ unrelated concerns. Extract three focused owners:
   `parked_sync_messages_by_server_seq`, `next_expected_server_seq`,
   `last_applied_server_seq`. Replaces dual-buffer code at
   `runtime_core/ticks.rs:622-684` with one keyed buffer
-  (`Option<seq>`). Provides `push`, `apply_ready(&mut SyncManager)`.
+  (`Option<seq>`). Exact API to be settled during implementation, but it
+  must support: parking new entries, draining ready entries with their
+  metadata (notably whether each entry writes storage — see
+  `runtime_core/sync.rs:47` and `runtime_core/ticks.rs:632`), and reporting
+  whether further work is pending. Orchestration concerns (marking
+  storage-flush state, scheduling the next tick) stay in `RuntimeCore` —
+  the inbox returns enough information for the orchestrator to do them.
 - **`SubscriptionRegistry`** — owns `subscriptions`, `subscription_reverse`,
-  `pending_subscriptions`, `pending_one_shot_queries`. Encloses the
-  one-shot leak window in `runtime_core/ticks.rs:390-475` by carrying the
-  `sub_id` on `PendingOneShotQuery` so failure paths clean up
-  consistently.
+  `pending_subscriptions`, `pending_one_shot_queries`. Pure extraction;
+  the one-shot leak claim from earlier audit notes is stale —
+  `PendingOneShotQuery` already stores `subscription_id`
+  (`runtime_core.rs:273-274`, populated at `subscriptions.rs:396`).
 
 Done correctly, `RuntimeCore` becomes:
 
@@ -179,23 +230,56 @@ let handle  = pending.execute(callback); // consumes pending
 Forgetting to call `execute` becomes a compiler warning; calling it twice
 is impossible.
 
-Acceptance: every existing call site updated in the same PR; no
+**This is a public API break.** `create_subscription` and
+`execute_subscription` are public on `RuntimeCore`
+(`crates/jazz-tools/src/runtime_core/subscriptions.rs:179-231`) and called
+from all three FFI crates: `crates/jazz-napi/src/lib.rs:941, 983`,
+`crates/jazz-wasm/src/runtime.rs:1588, 1612`,
+`crates/jazz-rn/rust/src/lib.rs:713, 755` (with regenerated UniFFI bindings
+under `crates/jazz-rn/cpp/`).
+
+Two viable shapes:
+
+- **Coordinated rewrite** — change all three FFI crates in the same PR to
+  use the new state-machine API. Largest blast radius but cleanest end state.
+- **FFI-internal forwarding** — keep the new `subscribe(...).execute(cb)` API
+  at the `RuntimeCore` level but have each FFI wrapper expose a flat
+  `create_subscription` / `execute_subscription` pair internally to preserve
+  its own JS/UniFFI signatures. The "no-pair-misuse" guarantee then applies
+  inside `jazz-tools`; the FFI surface keeps its current shape until each
+  binding's API is updated independently.
+
+The coordinated rewrite is preferred unless the FFI breakage is judged too
+costly at the time of implementation.
+
+Acceptance: every Rust call site updated in the same PR; no
 `pub fn create_subscription` / `pub fn execute_subscription` remain on
-`RuntimeCore`.
+`RuntimeCore`. If the FFI-internal-forwarding shape is chosen, document
+that explicitly in each binding's wrapper.
 
 ## Phase 7 — Centralize storage-flush flag
 
-`mark_storage_write_pending_flush()` is called 21× in
-`runtime_core/writes.rs` and 3× in `runtime_core/ticks.rs`. The flag is
-set defensively after any mutation that touches the storage layer.
+`mark_storage_write_pending_flush()` is currently called from four files:
 
-Replace with a `WriteGuard` returned by mutation entry points; the guard
-sets the flag on construction and releases it normally. Mutation
+| File                     | Calls                            |
+| ------------------------ | -------------------------------- |
+| `runtime_core/writes.rs` | 12                               |
+| `runtime_core.rs`        | 5 (incl. the setter at line 427) |
+| `runtime_core/ticks.rs`  | 3                                |
+| `runtime_core/sync.rs`   | 1                                |
+
+The flag is set defensively after any mutation that touches the storage
+layer. Replace with a `WriteGuard` returned by mutation entry points; the
+guard sets the flag on construction and releases it normally. Mutation
 functions stop knowing about the flag at all.
 
-Acceptance: zero direct calls to `mark_storage_write_pending_flush` from
-`writes.rs`; `batched_tick` flushes whenever the guard registry shows
-unflushed work.
+Acceptance:
+
+- The only direct callers of the flag setter are the helper that constructs
+  a `WriteGuard` and (if still useful) `runtime_core.rs` itself for cases
+  that genuinely have no guard to attach to. No direct calls remain in
+  `writes.rs`, `ticks.rs`, or `sync.rs`.
+- `batched_tick` flushes whenever the guard registry shows unflushed work.
 
 ## Phase 8 — `query_manager/graph.rs` split
 
@@ -216,6 +300,13 @@ hot paths) is within ±2% of pre-split numbers.
 
 These came up in the audit but should be separate specs if pursued:
 
+- **`AuthConfig::default()` flipping `allow_local_first_auth` to `true`** —
+  this is a behavior change, not cleanup. Today the field defaults to `false`
+  via the derived `Default`, and tests and runtime paths in
+  `crates/jazz-tools/src/middleware/auth.rs:1134, 1617` plus
+  `crates/jazz-tools/tests/auth_test.rs:228` rely on that. If the new-app
+  default should be `true`, that needs its own spec and a sweep of all
+  callers that construct `AuthConfig::default()` for "no creds" scenarios.
 - WASM/native callback duplication in `subscriptions.rs:79-148` — needs
   thinking about whether the `Send` bound should be at the trait or the
   call site.
@@ -227,7 +318,9 @@ These came up in the audit but should be separate specs if pursued:
 
 ## Invariants
 
-- All phases preserve the public API of `jazz-tools`.
+- Phases 1, 2, 4, 5, 7, 8 preserve the public API of `jazz-tools`. Phases
+  3 and 6 are deliberate API breaks; they coordinate the corresponding
+  binding updates in the same PR (see _Public API impact_ above).
 - All phases preserve wire format, storage format, sync semantics.
 - Tests are not rewritten; they move with their code. Per CLAUDE.md, an
   unexpectedly failing test is treated as a signal, not as something to
