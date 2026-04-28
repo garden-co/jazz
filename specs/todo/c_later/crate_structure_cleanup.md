@@ -37,8 +37,10 @@ Two phases are **deliberate API breaks** coordinated with binding updates in
 the same PR:
 
 - **Phase 2 (builder collapse)** — replaces four public `ServerBuilder::with_*_storage`
-  methods. Call sites in `crates/jazz-napi/src/lib.rs:1585, 1754, 1756` must
-  be updated in the same PR.
+  methods. Call sites in `crates/jazz-napi/src/lib.rs:1754, 1756` must be
+  updated in the same PR. (Note: `jazz-napi/src/lib.rs:1585` looks similar
+  but is a call on `TestingServerBuilder`, a separate builder — out of
+  scope for this phase. See Phase 2 below.)
 - **Phase 5 (typed subscribe)** — replaces public
   `RuntimeCore::{create_subscription, execute_subscription}`. Call sites in
   `crates/jazz-napi/src/lib.rs:941, 983`, `crates/jazz-wasm/src/runtime.rs:1588, 1612`,
@@ -49,30 +51,46 @@ the same PR:
 
 Pure mechanical moves. Each one is a single PR.
 
-| Move                | From                  | To                                                                                 |
-| ------------------- | --------------------- | ---------------------------------------------------------------------------------- |
-| Sync clock          | `monotonic_clock.rs`  | `sync_manager/clock.rs`                                                            |
-| Batch lifecycle     | `batch_fate.rs`       | `sync_manager/batch_fate.rs`                                                       |
-| Sync test recorder  | `sync_tracer.rs`      | `sync_manager/test_support.rs` (gated `#[cfg(any(test, feature = "test-utils"))]`) |
-| HTTP route surface  | `routes.rs`           | `server/routes.rs`                                                                 |
-| Native binding glue | `binding_support.rs`  | `query_manager/bindings.rs`                                                        |
-| Test row history    | `test_row_history.rs` | `row_histories/tests.rs` (gated `#[cfg(test)]`)                                    |
+| Move                | From                  | To                                                                    |
+| ------------------- | --------------------- | --------------------------------------------------------------------- |
+| Sync clock          | `monotonic_clock.rs`  | `sync_manager/clock.rs`                                               |
+| Sync tracer         | `sync_tracer.rs`      | `sync_manager/sync_tracer.rs`                                         |
+| HTTP route surface  | `routes.rs`           | `server/routes.rs`                                                    |
+| Native binding glue | `binding_support.rs`  | `query_manager/bindings.rs`                                           |
+| Test row history    | `test_row_history.rs` | `test_support.rs` (gated `#[cfg(any(test, feature = "test-utils"))]`) |
 
 Notes:
 
-- The sync-test-recorder gate uses the existing `test-utils` feature defined
-  in `crates/jazz-tools/Cargo.toml` (alongside `test`). No new feature is
-  introduced.
+- `sync_tracer` is **not** moved behind a feature gate. The type is referenced
+  unconditionally by production code: `RuntimeCore::sync_tracer`
+  (`runtime_core.rs:327`), `RuntimeCore::set_sync_tracer`
+  (`runtime_core.rs:403`), and `ServerBuilder::with_sync_tracer`
+  (`server/builder.rs:86`). It's named "tracer" because tests use it as a
+  recorder, but the surface is part of the production API. The move is a
+  pure relocation.
+- `batch_fate` **stays at the top level**. It's used by ~15 files spanning
+  `runtime_core.rs`, `storage/mod.rs`, `binding_support.rs`,
+  `schema_manager/manager.rs`, `sync_manager/*` — by the ≥3-subsystem rule
+  below it qualifies as a primitive.
+- `test_row_history` is consumed by tests in `storage/`, `sync_manager/`,
+  `schema_manager/`, and `query_manager/`. A top-level `crate::test_support`
+  is the most honest home; tucking it inside any one subsystem creates
+  awkward cross-subsystem `crate::<subsystem>::tests::*` imports.
 - `binding_support` is currently `pub mod binding_support;` in `lib.rs:2` and
   imported as `jazz_tools::binding_support::*` from all three FFI crates
   (e.g. `jazz-napi/src/lib.rs:25`, `jazz-wasm/src/runtime.rs:21, 62`,
   `jazz-rn/rust/src/lib.rs:14`). The move keeps that import path stable via
   a `pub use crate::query_manager::bindings as binding_support;` re-export in
   `lib.rs` — so binding crates see no source change.
+- Every other moved module (`monotonic_clock`, `sync_tracer`, `routes`) is
+  also `pub mod` in `lib.rs` today. Each one needs a matching `pub use`
+  re-export in `lib.rs` so callers using `jazz_tools::sync_tracer::SyncTracer`
+  (e.g. `crates/jazz-tools/tests/sync_tracer_integration.rs`) continue to
+  resolve.
 
 Top-level files that **stay** (true primitives, used by ≥3 subsystems):
-`commit.rs`, `digest.rs`, `identity.rs`, `metadata.rs`, `object.rs`,
-`row_format.rs`, `wire_types.rs`, `catalogue.rs`, `otel.rs`.
+`batch_fate.rs`, `commit.rs`, `digest.rs`, `identity.rs`, `metadata.rs`,
+`object.rs`, `row_format.rs`, `wire_types.rs`, `catalogue.rs`, `otel.rs`.
 
 Acceptance:
 
@@ -84,10 +102,10 @@ Acceptance:
 
 ## Phase 2 — Builder collapse
 
-Replace the four storage builder variants (`with_persistent_storage`,
-`with_in_memory_storage`, `with_sqlite_storage`, `with_rocksdb_storage` —
-`server/builder.rs:86-146`) with a single `.with_storage(StorageBackend)`
-where `StorageBackend` is an enum:
+Replace the four storage builder variants on `ServerBuilder`
+(`with_persistent_storage`, `with_in_memory_storage`, `with_sqlite_storage`,
+`with_rocksdb_storage` — `server/builder.rs:106, 118, 130, 137`) with a
+single `.with_storage(StorageBackend)` where `StorageBackend` is an enum:
 
 ```rust
 pub enum StorageBackend {
@@ -98,33 +116,62 @@ pub enum StorageBackend {
 }
 ```
 
-The four call sites in tests, `commands/server.rs`, and `server/testing.rs`
-are mechanical replacements. Old methods are removed (no deprecation shim —
-this is prototype-stage code, per CLAUDE.md).
+Internal call sites are mechanical replacements:
+
+- `commands/server.rs:37, 39`
+- `server/mod.rs:359`
+- `server/testing.rs:476, 480, 483, 485` (the test-builder façade — see
+  below for why this stays)
+- 6 calls in tests inside `routes.rs` (lines 1719, 1731, 1746, 1947, 1989,
+  2053).
+
+Old methods are removed (no deprecation shim — this is prototype-stage code,
+per CLAUDE.md).
+
+**Scope clarification.** `TestingServerBuilder` (`server/testing.rs:27`) has
+its own parallel `with_persistent_storage` / `with_sqlite_storage` /
+`with_rocksdb_storage` (testing.rs:79, 87, 96). It's a different type —
+`napi/src/lib.rs:1585`, for example, is a call on `TestingServerBuilder`,
+not `ServerBuilder`. Phase 2 leaves the testing builder untouched; its
+public surface is consumed by the napi `TestingServer` wrapper and changing
+it would expand the FFI break unnecessarily. If a follow-up wants to apply
+the same enum collapse there, that's a separate phase.
 
 **This is a public API break.** `with_persistent_storage`,
 `with_in_memory_storage`, `with_sqlite_storage`, and `with_rocksdb_storage`
-are public on `ServerBuilder` (`crates/jazz-tools/src/server/builder.rs:106-137`)
-and called directly by `crates/jazz-napi/src/lib.rs:1585, 1754, 1756`. The
-napi crate must be updated in the same PR. WASM and RN do not currently call
+are public on `ServerBuilder` (`crates/jazz-tools/src/server/builder.rs:106-140`)
+and called directly by `crates/jazz-napi/src/lib.rs:1754, 1756`. The napi
+crate must be updated in the same PR. WASM and RN do not currently call
 these.
 
 Acceptance:
 
 - `cargo build --all-features` clean.
-- `crates/jazz-napi/src/lib.rs` updated to the new `with_storage(...)` API in
-  the same PR; `pnpm build` and `pnpm test` for the napi package pass.
+- `crates/jazz-napi/src/lib.rs:1754, 1756` updated to the new
+  `with_storage(...)` API in the same PR; `pnpm build` and `pnpm test` for
+  the napi package pass.
 - Tests unchanged in spirit (only the call shape rewritten).
 
 ## Phase 3 — Storage trait split
 
-`storage/mod.rs` is ~8K LOC: the `Storage` trait definition (~2K) plus the
-in-memory implementation (~6K). Split into:
+`storage/mod.rs` is ~8K LOC, structured as three buckets:
+
+- Lines 1–2621 (~2.6K): trait-adjacent types and codecs — `StorageError`,
+  `RawTableHeader`, `RowLocator`, `IndexMutation`, `RawTableMutation`, the
+  `cached_*` static helpers, key encoders/decoders, etc.
+- Lines 2622–4751 (~2.1K): the `Storage` trait definition with default
+  methods.
+- Lines 4752–8040 (~3.3K): `MemoryStorage` struct + impls + tests.
+
+Split into:
 
 ```
 storage/
-  mod.rs           re-exports + module docs
-  trait.rs         the Storage trait + associated types
+  mod.rs           re-exports + module docs + the ~2.6K of trait-adjacent
+                   types and codecs (StorageError, RowLocator, key encoders,
+                   cache statics, etc.) — these are not specific to any one
+                   backend
+  storage_trait.rs the Storage trait + associated types
   memory.rs        MemoryStorage impl
   sqlite.rs        (existing)
   rocksdb.rs       (existing)
@@ -136,6 +183,12 @@ storage/
     native.rs      #[cfg(not(target_arch = "wasm32"))] body
     wasm.rs        #[cfg(target_arch = "wasm32")] body
 ```
+
+Naming `storage_trait.rs` rather than `trait.rs` avoids the reserved-keyword
+filename. The trait-adjacent types stay in `mod.rs` because they're shared
+across all backends — moving them into `storage_trait.rs` would create a
+weird "trait module owns the storage error type" coupling, and moving them
+into `memory.rs` is wrong since sqlite/rocksdb need them too.
 
 Acceptance: every existing import keeps resolving via `storage::*`. The
 `opfs_btree` cfg-fork now lives at module boundary, not as `#[cfg]` blocks
@@ -156,7 +209,7 @@ unrelated concerns. Extract three focused owners:
   (`Option<seq>`). Exact API to be settled during implementation, but it
   must support: parking new entries, draining ready entries with their
   metadata (notably whether each entry writes storage — see
-  `runtime_core/sync.rs:47` and `runtime_core/ticks.rs:632`), and reporting
+  `runtime_core/sync.rs:49` and `runtime_core/ticks.rs:634`), and reporting
   whether further work is pending. Orchestration concerns (marking
   storage-flush state, scheduling the next tick) stay in `RuntimeCore` —
   the inbox returns enough information for the orchestrator to do them.
@@ -291,8 +344,9 @@ These came up in the audit but should be separate specs if pursued:
 - Rejected-batch notification channel — currently polled via
   `drain_rejected_batch_ids`; piggybacking on the subscription delta
   stream is appealing but is a behavioral change, not cleanup.
-- `query_manager/graph_nodes/magic_columns.rs` (47 LOC) — possibly inline
-  into `graph_nodes/mod.rs`, but trivially low value on its own.
+- `query_manager/magic_columns.rs` (47 LOC, the top-level helper, not the
+  444-LOC operator file at `query_manager/graph_nodes/magic_columns.rs`) —
+  possibly inline into its single caller, but trivially low value on its own.
 
 ## Invariants
 
