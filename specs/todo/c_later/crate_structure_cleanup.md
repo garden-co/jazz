@@ -87,8 +87,16 @@ Acceptance:
 Small, independent fixes that remove parallel construction logic between
 `client.rs` and `server/builder.rs`.
 
-1. Extract `resolve_node_env()` from `main.rs:24-36` and `builder.rs:305-309`
-   into a single helper (likely `server/env.rs`).
+1. Share the `NODE_ENV` → "are we in prod?" classification between
+   `main.rs::resolve_node_env_mode()` (`main.rs:24-29`) and
+   `builder.rs::should_allow_unprivileged_schema_catalogue_writes()`
+   (`builder.rs:305-310`). The two functions do not do the same thing — one
+   gates auth defaults, the other gates unprivileged catalogue writes — but
+   they share the same env-var match (`eq_ignore_ascii_case("production")`,
+   anything else treated as dev). Extract just the classifier (e.g. a
+   pub `node_env_mode() -> NodeEnvMode` in `server/env.rs`) and have both
+   policy functions call it. The policy decisions on top stay separate.
+   Scope is ~3 lines of true dedup; "leave it alone" is also defensible.
 2. Move JWT key resolution from `main.rs:38-59` into `commands/server.rs` so
    the library no longer carries CLI-shaped logic.
 3. Reuse one `reqwest::Client` between the main server (`builder.rs:155`) and
