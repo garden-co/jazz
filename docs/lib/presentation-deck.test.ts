@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   estimatePresentationSpeakingDurationSeconds,
+  extractPresentationImageSrcsFromMdx,
   parsePresentationSlidesFromMdx,
   readLetterCanvasArrowNavigationDirection,
   resolvePresentationSlideIdentity,
@@ -186,4 +187,24 @@ test("reads slide navigation from letter canvas arrow messages", () => {
     null,
   );
   assert.equal(readLetterCanvasArrowNavigationDirection({ key: "ArrowRight" }), null);
+});
+
+test("extracts unique image srcs from mdx image tags in source order", () => {
+  assert.deepEqual(
+    extractPresentationImageSrcsFromMdx(`
+<Slide>
+  <img src="/presentations/react-miami/overlays/saas-mines-photo.png" alt="" />
+  <img
+    alt=""
+    className="hero"
+    src="/presentations/react-miami/stacks/stack-0.svg"
+  />
+  <img src="/presentations/react-miami/overlays/saas-mines-photo.png" alt="" />
+</Slide>
+`),
+    [
+      "/presentations/react-miami/overlays/saas-mines-photo.png",
+      "/presentations/react-miami/stacks/stack-0.svg",
+    ],
+  );
 });
