@@ -98,7 +98,7 @@ function makeWriteHandle(batchId: string, mode: LocalBatchRecord["mode"] = "tran
 }
 
 describe("Db transactions", () => {
-  it("creates a typed db transaction seeded by a table schema", async () => {
+  it("runs a typed transaction callback and returns a waitable committed handle", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
       id: "todo-1",
@@ -128,18 +128,25 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Transactional", done: false });
-    const updated = tx.update(table, "todo-1", { done: true });
-    const deleted = tx.delete(table, "todo-1");
+    const committed = db.transaction((tx) => {
+      const inserted = tx.insert(table, { title: "Transactional", done: false });
+      const updated = tx.update(table, "todo-1", { done: true });
+      const deleted = tx.delete(table, "todo-1");
+
+      expect(tx.batchId()).toBe("batch-tx");
+      expect(inserted).toEqual({
+        id: "todo-1",
+        title: "Transactional",
+        done: false,
+      });
+      expect(updated).toBeUndefined();
+      expect(deleted).toBeUndefined();
+      expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
+      expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
+      expect(tx.acknowledgeRejectedBatch()).toBe(false);
+    });
 
     expect(beginTransactionInternal).toHaveBeenCalledWith();
-    expect(tx.batchId()).toBe("batch-tx");
-    expect(inserted).toEqual({
-      id: "todo-1",
-      title: "Transactional",
-      done: false,
-    });
     expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Transactional" },
       done: { type: "Boolean", value: false },
@@ -148,9 +155,6 @@ describe("Db transactions", () => {
       done: { type: "Boolean", value: true },
     });
     expect(runtimeTransaction.delete).toHaveBeenCalledWith("todo-1");
-    expect(updated).toBeUndefined();
-    expect(deleted).toBeUndefined();
-    const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-tx");
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
@@ -159,12 +163,9 @@ describe("Db transactions", () => {
       "global",
     );
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
-    expect(tx.localBatchRecord()).toMatchObject({ batchId: "batch-tx" });
-    expect(tx.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-tx")]);
-    expect(tx.acknowledgeRejectedBatch()).toBe(false);
   });
 
-  it("threads session-backed db transactions through beginTransactionInternal", async () => {
+  it("threads session-backed transaction callbacks through beginTransactionInternal", () => {
     const table = todoTable();
     const session: Session = {
       user_id: "alice",
@@ -202,62 +203,21 @@ describe("Db transactions", () => {
       "alice@writer",
     );
 
-    const tx = db.beginTransaction(table);
-    const inserted = tx.insert(table, { title: "Session transaction", done: true });
+    const committed = db.transaction((tx) => {
+      expect(tx.insert(table, { title: "Session transaction", done: true })).toEqual({
+        id: "todo-2",
+        title: "Session transaction",
+        done: true,
+      });
+    });
 
     expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(session, "alice@writer");
-    const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-session-tx");
     expect(runtimeTransaction.commit).toHaveBeenCalledWith();
-    expect(inserted).toEqual({
-      id: "todo-2",
-      title: "Session transaction",
-      done: true,
-    });
   });
 
-  it("rejects db transaction writes after commit", () => {
-    const table = todoTable();
-    const runtimeRow = {
-      id: "todo-closed",
-      values: [
-        { type: "Text", value: "Closed" },
-        { type: "Boolean", value: false },
-      ],
-      batchId: "batch-closed",
-    } as Row;
-    const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-closed"),
-      create: vi.fn(() => runtimeRow),
-      update: vi.fn(),
-      delete: vi.fn(),
-      commit: vi.fn(() => makeWriteHandle("batch-closed").handle),
-      localBatchRecord: vi.fn((batchId = "batch-closed") => makeLocalBatchRecord(batchId)),
-      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-closed")]),
-      acknowledgeRejectedBatch: vi.fn(() => false),
-    };
-    const runtimeClient = {
-      getSchema: () => new Map(Object.entries(todoSchema())),
-      beginTransactionInternal: vi.fn(() => runtimeTransaction),
-      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
-      acknowledgeRejectedBatch: vi.fn(() => false),
-    };
-    const db = createDbFromClient(
-      { appId: "client-backed-transaction" },
-      runtimeClient as unknown as JazzClient,
-    );
-
-    const tx = db.beginTransaction(table);
-    const committed = tx.commit();
-    expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBe("batch-closed");
-
-    expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
-    expect(runtimeTransaction.create).not.toHaveBeenCalled();
-  });
-
-  it("supports typed reads scoped to the open transaction", async () => {
+  it("keeps typed reads scoped to an async transaction callback", async () => {
     const table = todoTable();
     const query = todoQuery();
     const runtimeRow: Row = {
@@ -286,68 +246,74 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const tx = db.beginTransaction(table);
-    tx.insert(table, { title: "Transactional read", done: false });
+    const committed = await db.transaction(async (tx) => {
+      tx.insert(table, { title: "Transactional read", done: false });
 
-    await expect(tx.all(query)).resolves.toEqual([
-      {
+      await expect(tx.all(query)).resolves.toEqual([
+        {
+          id: "todo-read-1",
+          title: "Transactional read",
+          done: false,
+        },
+      ]);
+      await expect(tx.one(query)).resolves.toEqual({
         id: "todo-read-1",
         title: "Transactional read",
         done: false,
-      },
-    ]);
-    await expect(tx.one(query)).resolves.toEqual({
-      id: "todo-read-1",
-      title: "Transactional read",
-      done: false,
+      });
     });
 
+    expect(committed.batchId).toBe("batch-read");
     expect(runtimeTransaction.query).toHaveBeenCalledTimes(2);
+    expect(runtimeTransaction.commit).toHaveBeenCalledWith();
   });
 
-  it("rejects db transaction reads after commit", async () => {
+  it("does not commit when a transaction callback fails", () => {
     const table = todoTable();
-    const query = todoQuery();
     const runtimeTransaction = {
-      batchId: vi.fn(() => "batch-read-closed"),
+      batchId: vi.fn(() => "batch-fail"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
-      query: vi.fn(),
-      commit: vi.fn(() => makeWriteHandle("batch-read-closed").handle),
-      localBatchRecord: vi.fn((batchId = "batch-read-closed") => makeLocalBatchRecord(batchId)),
-      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read-closed")]),
+      commit: vi.fn(() => makeWriteHandle("batch-fail").handle),
+      localBatchRecord: vi.fn((batchId = "batch-fail") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-fail")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
     };
-    const runtimeClient = {
+    const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       beginTransactionInternal: vi.fn(() => runtimeTransaction),
       localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
       acknowledgeRejectedBatch: vi.fn(() => false),
-    };
-    const db = createDbFromClient(
-      { appId: "client-backed-transaction" },
-      runtimeClient as unknown as JazzClient,
-    );
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
 
-    const tx = db.beginTransaction(table);
-    const committed = tx.commit();
-    expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBe("batch-read-closed");
-
-    await expect(tx.all(query)).rejects.toThrow(/committed/i);
-    expect(runtimeTransaction.query).not.toHaveBeenCalled();
+    expect(() =>
+      db.transaction((tx) => {
+        tx.update(table, "todo-1", { done: true });
+        throw new Error("policy preflight failed");
+      }),
+    ).toThrow("policy preflight failed");
+    expect(runtimeTransaction.commit).not.toHaveBeenCalled();
   });
 
-  it("rejects db transaction writes against a different client/schema", () => {
+  it("rejects transaction writes against a different client/schema", () => {
     const primaryTable = todoTable();
     const secondaryTable = {
       ...todoTable(),
       _schema: todoSchema(),
     };
+    const runtimeRow: Row = {
+      id: "todo-cross-client",
+      values: [
+        { type: "Text", value: "Right client" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-cross-client",
+    } as Row;
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-cross-client"),
-      create: vi.fn(),
+      create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-cross-client").handle),
@@ -374,15 +340,17 @@ describe("Db transactions", () => {
       ]),
     );
 
-    const tx = db.beginTransaction(primaryTable);
-
-    expect(() => tx.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
-      /cannot be used with table "todos" from a different schema\/client/,
-    );
-    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+    expect(() =>
+      db.transaction((tx) => {
+        tx.insert(primaryTable, { title: "Right client", done: false });
+        tx.insert(secondaryTable, { title: "Wrong client", done: false });
+      }),
+    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
+    expect(runtimeTransaction.commit).not.toHaveBeenCalled();
   });
 
-  it("creates a typed db direct batch seeded by a table schema", async () => {
+  it("runs a typed direct batch callback and returns a waitable committed handle", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
       id: "todo-direct-1",
@@ -414,18 +382,28 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const batch = db.beginDirectBatch(table);
-    const inserted = batch.insert(table, { title: "Direct batch", done: false });
-    const updated = batch.update(table, "todo-direct-1", { done: true });
-    const deleted = batch.delete(table, "todo-direct-1");
+    const committed = db.batch((batch) => {
+      const inserted = batch.insert(table, { title: "Direct batch", done: false });
+      const updated = batch.update(table, "todo-direct-1", { done: true });
+      const deleted = batch.delete(table, "todo-direct-1");
+
+      expect(batch.batchId()).toBe("batch-direct");
+      expect(inserted).toEqual({
+        id: "todo-direct-1",
+        title: "Direct batch",
+        done: false,
+      });
+      expect(updated).toBeUndefined();
+      expect(deleted).toBeUndefined();
+      expect(batch.localBatchRecord()).toMatchObject({
+        batchId: "batch-direct",
+        mode: "direct",
+      });
+      expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
+      expect(batch.acknowledgeRejectedBatch()).toBe(false);
+    });
 
     expect(beginDirectBatchInternal).toHaveBeenCalledWith();
-    expect(batch.batchId()).toBe("batch-direct");
-    expect(inserted).toEqual({
-      id: "todo-direct-1",
-      title: "Direct batch",
-      done: false,
-    });
     expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
       title: { type: "Text", value: "Direct batch" },
       done: { type: "Boolean", value: false },
@@ -434,9 +412,6 @@ describe("Db transactions", () => {
       done: { type: "Boolean", value: true },
     });
     expect(runtimeBatch.delete).toHaveBeenCalledWith("todo-direct-1");
-    expect(updated).toBeUndefined();
-    expect(deleted).toBeUndefined();
-    const committed = batch.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-direct");
     await expect(committed.wait({ tier: "global" })).resolves.toBeUndefined();
@@ -445,23 +420,25 @@ describe("Db transactions", () => {
       "global",
     );
     expect(runtimeBatch.commit).toHaveBeenCalledWith();
-    expect(batch.localBatchRecord()).toMatchObject({
-      batchId: "batch-direct",
-      mode: "direct",
-    });
-    expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
-    expect(batch.acknowledgeRejectedBatch()).toBe(false);
   });
 
-  it("rejects db direct batch writes against a different client/schema", () => {
+  it("rejects direct batch writes against a different client/schema", () => {
     const primaryTable = todoTable();
     const secondaryTable = {
       ...todoTable(),
       _schema: todoSchema(),
     };
+    const runtimeRow: Row = {
+      id: "todo-cross-client-direct",
+      values: [
+        { type: "Text", value: "Right client" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-cross-client-direct",
+    } as Row;
     const runtimeBatch = {
       batchId: vi.fn(() => "batch-cross-client-direct"),
-      create: vi.fn(),
+      create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-cross-client-direct", "direct").handle),
@@ -490,11 +467,13 @@ describe("Db transactions", () => {
       ]),
     );
 
-    const batch = db.beginDirectBatch(primaryTable);
-
-    expect(() => batch.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
-      /cannot be used with table "todos" from a different schema\/client/,
-    );
-    expect(runtimeBatch.create).not.toHaveBeenCalled();
+    expect(() =>
+      db.batch((batch) => {
+        batch.insert(primaryTable, { title: "Right client", done: false });
+        batch.insert(secondaryTable, { title: "Wrong client", done: false });
+      }),
+    ).toThrow(/cannot be used with table "todos" from a different schema\/client/);
+    expect(runtimeBatch.create).toHaveBeenCalledTimes(1);
+    expect(runtimeBatch.commit).not.toHaveBeenCalled();
   });
 });

@@ -96,17 +96,16 @@ The current `Db` API centers around a small set of predictable operations:
 - `update(...)`
 - `delete(...)`
 - `subscribeAll(...)`
-- `beginDirectBatch(...)`
-- `beginBatch(...)`
-- `beginTransaction(...)`
+- `batch(...)`
+- `transaction(...)`
 
 Simple write calls are one-member direct batches under the hood. They seal immediately and return
 handles that callers can wait on for a specific durability tier.
 
 ## Explicit Batch APIs
 
-For callers that want to group writes or opt into authority-decided transactions, the app surface
-now exposes explicit batch handles.
+For callers that want to group writes or opt into authority-decided transactions, the typed app
+surface exposes callback-scoped batch helpers.
 
 At the runtime-client layer:
 
@@ -119,26 +118,37 @@ At the runtime-client layer:
 
 At the typed `Db` layer:
 
-- `db.beginDirectBatch(table)`
-- `db.beginBatch(table)`
-- `db.beginTransaction(table)`
+- `db.batch((batch) => { ... })`
+- `db.transaction((tx) => { ... })`
 
-The returned handles (`DirectBatch`, `Transaction`, `DbDirectBatch`, `DbTransaction`) reuse the
-same CRUD surface as normal writes, but with one shared logical `BatchId`.
-For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
-client/schema owns that handle.
+The callback handles (`DbDirectBatch`, `DbTransaction`) reuse the same CRUD surface as normal
+writes, but with one shared logical `BatchId`. The first table or query used inside the callback
+chooses the underlying runtime client/schema for that handle; later writes through the same handle
+must stay on that client-bound schema surface.
 
 Open batch writes are intentionally not individually waitable:
 
 - `tx.insert(...)` and `batch.insert(...)` return the inserted row
 - `tx.update(...)`, `tx.delete(...)`, `batch.update(...)`, and `batch.delete(...)` return `void`
-- `tx.commit()` and `batch.commit()` return the batch-shaped write handle
+- the callback return value is ignored for commit purposes
+- `db.transaction(...)` and `db.batch(...)` return the committed batch-shaped write handle
 
 That makes the common durable path explicit in the type shape:
 
 ```ts
-await db.beginBatch(app.todos).commit().wait({ tier: "edge" });
-await db.beginTransaction(app.todos).commit().wait({ tier: "global" });
+await db
+  .batch((batch) => {
+    batch.insert(app.todos, { title: "Ship docs", done: false });
+    batch.update(app.projects, projectId, { name: "Launch" });
+  })
+  .wait({ tier: "edge" });
+
+await db
+  .transaction((tx) => {
+    tx.insert(app.todos, { title: "Ship docs", done: false });
+    tx.update(app.projects, projectId, { name: "Launch" });
+  })
+  .wait({ tier: "global" });
 ```
 
 Transactional handles also expose transaction-scoped reads over their own staged rows:
@@ -147,17 +157,15 @@ Transactional handles also expose transaction-scoped reads over their own staged
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
 
-Both explicit batch handles add the explicit completion step:
+The typed `Db` callback helpers commit automatically when the callback completes. Runtime-client
+handles still expose explicit `commit()` for lower-level callers.
 
-- `tx.commit()` in TypeScript
-- `batch.commit()` in TypeScript
+Persisted write handles are batch-shaped too:
 
-Persisted writes are batch-shaped too:
-
-- the handle exposes `batchId()`
+- the handle exposes `batchId`
 - `wait()` resolves when the requested replayable durability outcome is satisfied, or rejects if the batch is rejected
-- `localBatchRecord()` reloads retained local state
-- `acknowledgeRejectedBatch()` prunes retained rejected records once the app has handled them
+- `localBatchRecord(batchId)` and `acknowledgeRejectedBatch(batchId)` remain available on the
+  runtime client for retained batch state
 
 ## What App Code Does _Not_ Need to Care About
 

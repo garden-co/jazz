@@ -508,13 +508,12 @@ Important APIs:
 - `client.acknowledgeRejectedBatch(batchId)`
 - `tx.commit()`
 - `batch.commit()`
-- `db.beginDirectBatch(table)`
-- `db.beginBatch(table)`
-- `db.beginTransaction(table)`
+- `db.batch((batch) => { ... })`
+- `db.transaction((tx) => { ... })`
 
-The `Db` batch handles are intentionally seeded by a table: that first table chooses the runtime
-client/schema, and later writes through the same handle must stay on that client-bound schema
-surface.
+The typed `Db` callback handles are not seeded by a table. The first table or query used inside the
+callback chooses the runtime client/schema, and later writes through the same handle must stay on
+that client-bound schema surface.
 
 Transactional handles also support transaction-scoped reads before commit:
 
