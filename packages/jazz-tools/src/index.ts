@@ -74,6 +74,8 @@ export type {
   ColumnBuilderSqlType,
   ColumnBuilderOptional,
   ColumnBuilderReferences,
+  ColumnBuilderValue,
+  ColumnTransform,
   StringColumn,
   BooleanColumn,
   IntColumn,
