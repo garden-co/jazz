@@ -1433,11 +1433,44 @@ fn validate_ws_cookie_origin(headers: &HeaderMap) -> Result<(), String> {
         .map(|authority| authority.as_str())
         .ok_or_else(|| "Cookie auth requires an Origin authority".to_string())?;
 
-    if origin_authority.eq_ignore_ascii_case(host) {
+    let is_allowed_origin = origin_authority.eq_ignore_ascii_case(host)
+        || is_loopback_cookie_origin(origin_uri.scheme_str(), origin_authority, host)?;
+
+    if is_allowed_origin {
         Ok(())
     } else {
         Err("Cookie auth Origin must match Host".to_string())
     }
+}
+
+fn is_loopback_cookie_origin(
+    origin_scheme: Option<&str>,
+    origin_authority: &str,
+    host: &str,
+) -> Result<bool, String> {
+    if !matches!(origin_scheme, Some("http") | Some("https")) {
+        return Ok(false);
+    }
+
+    let origin_authority: axum::http::uri::Authority = origin_authority
+        .parse()
+        .map_err(|_| "Cookie auth requires a valid Origin authority".to_string())?;
+    let host_authority: axum::http::uri::Authority = host
+        .parse()
+        .map_err(|_| "Cookie auth requires a valid Host header".to_string())?;
+
+    Ok(
+        is_loopback_dev_host(origin_authority.host())
+            && is_loopback_dev_host(host_authority.host()),
+    )
+}
+
+fn is_loopback_dev_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
 }
 
 /// Send a `ServerEvent::Error` frame on the socket, best-effort.
@@ -1971,6 +2004,90 @@ mod tests {
             .expect("cookie auth should succeed");
 
         assert!(matches!(setup, WsClientSetup::Session(_)));
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_accepts_loopback_cross_port_cookie_auth() {
+        let token = mint_test_token("test-app");
+        let auth_config = AuthConfig {
+            backend_secret: Some("test-backend-secret".to_string()),
+            admin_secret: None,
+            allow_local_first_auth: true,
+            jwks_url: None,
+            auth_cookie_name: Some("jazz-auth".to_string()),
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build sync test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(axum::http::header::HOST, "localhost:4200".parse().unwrap());
+        request_headers.insert(
+            axum::http::header::ORIGIN,
+            "http://localhost:5173".parse().unwrap(),
+        );
+        request_headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+
+        let setup = authenticate_ws_handshake(&handshake, &request_headers, &state)
+            .await
+            .expect("loopback cross-port cookie auth should succeed");
+
+        assert!(matches!(setup, WsClientSetup::Session(_)));
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_rejects_deceptive_localhost_cookie_origin() {
+        let token = mint_test_token("test-app");
+        let auth_config = AuthConfig {
+            backend_secret: Some("test-backend-secret".to_string()),
+            admin_secret: None,
+            allow_local_first_auth: true,
+            jwks_url: None,
+            auth_cookie_name: Some("jazz-auth".to_string()),
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build sync test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig::default(),
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(axum::http::header::HOST, "localhost:4200".parse().unwrap());
+        request_headers.insert(
+            axum::http::header::ORIGIN,
+            "http://localhost.evil.example:5173".parse().unwrap(),
+        );
+        request_headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+
+        let error = authenticate_ws_handshake(&handshake, &request_headers, &state)
+            .await
+            .expect_err("deceptive localhost cookie auth should fail");
+
+        assert!(error.to_lowercase().contains("origin"));
     }
 
     #[tokio::test]
