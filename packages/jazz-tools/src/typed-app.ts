@@ -4,6 +4,8 @@ import type {
   ColumnBuilderOptional,
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
+  ColumnBuilderValue,
+  ColumnTransform,
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
@@ -14,7 +16,7 @@ import {
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
-import type { QueryBuilder, RowTransform } from "./runtime/db.js";
+import type { ColumnTransformMap, QueryBuilder, RowTransform } from "./runtime/db.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
@@ -166,7 +168,8 @@ type BuilderForColumn<
   TColumn extends ColumnName<TSchema, TTable>,
 > = NormalizedSchema<TSchema>[TTable][TColumn];
 
-type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
+type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = ColumnBuilderValue<TBuilder>;
+type StoredColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
 type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
@@ -276,9 +279,9 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
               ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
                 ? WhereEqNe<
-                    ColumnValue<TBuilder>,
+                    StoredColumnValue<TBuilder>,
                     ColumnBuilderOptional<TBuilder>,
-                    { in?: ColumnValue<TBuilder>[] }
+                    { in?: StoredColumnValue<TBuilder>[] }
                   >
                 : ColumnBuilderSqlType<TBuilder> extends {
                       kind: "ENUM";
@@ -290,7 +293,7 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                         element: infer TElementSql extends SqlType;
                       }
                     ? WhereEqNe<
-                        ColumnValue<TBuilder>,
+                        StoredColumnValue<TBuilder>,
                         ColumnBuilderOptional<TBuilder>,
                         { contains?: TSTypeFromSqlType<TElementSql> }
                       >
@@ -855,11 +858,18 @@ export class TypedTableQueryBuilder<
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
   _rowTransform?: RowTransform;
+  _columnTransforms?: ColumnTransformMap;
 
-  constructor(table: TableNameFromMeta<TMeta>, schema: WasmSchema, rowTransform?: RowTransform) {
+  constructor(
+    table: TableNameFromMeta<TMeta>,
+    schema: WasmSchema,
+    rowTransform?: RowTransform,
+    columnTransforms?: ColumnTransformMap,
+  ) {
     this._table = table;
     this._schema = schema;
     this._rowTransform = rowTransform;
+    this._columnTransforms = columnTransforms;
   }
 
   where(
@@ -1087,7 +1097,7 @@ export class TypedTableQueryBuilder<
       TNewRequired,
       TNewRow,
       TNewInit
-    >(this._table, this._schema, this._rowTransform);
+    >(this._table, this._schema, this._rowTransform, this._columnTransforms);
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
     clone._requireIncludes = this._requireIncludes;
@@ -1295,6 +1305,23 @@ function definitionToColumns(
   return columns;
 }
 
+function columnTransformsForTable(
+  definition: TableDefinition | DefinedTable<TableDefinition> | undefined,
+): ColumnTransformMap | undefined {
+  if (!definition) {
+    return undefined;
+  }
+
+  const columnsDefinition = unwrapTableDefinition(definition);
+  const transforms: ColumnTransformMap = {};
+  for (const [columnName, builder] of Object.entries(columnsDefinition)) {
+    if (builder._transform) {
+      transforms[columnName] = builder._transform as ColumnTransform;
+    }
+  }
+  return Object.keys(transforms).length > 0 ? transforms : undefined;
+}
+
 function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => ({
@@ -1335,7 +1362,7 @@ export function defineApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  return createAppForTables(Object.keys(normalizedDefinition), wasmSchema);
+  return createAppForTables(Object.keys(normalizedDefinition), wasmSchema, normalizedDefinition);
 }
 
 /**
@@ -1377,7 +1404,7 @@ export function defineSliceableApp(
         }
       }
 
-      return createAppForTables(tableNames, wasmSchema);
+      return createAppForTables(tableNames, wasmSchema, normalizedDefinition);
     },
   } as SliceableApp<Schema<SchemaDefinition>>;
 }
@@ -1385,11 +1412,17 @@ export function defineSliceableApp(
 function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
+  definition?: SchemaDefinition,
 ): App<Schema<SchemaDefinition>> {
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of tableNames) {
-    tables[tableName] = new TypedTableQueryBuilder(tableName, wasmSchema);
+    tables[tableName] = new TypedTableQueryBuilder(
+      tableName,
+      wasmSchema,
+      undefined,
+      definition ? columnTransformsForTable(definition[tableName]) : undefined,
+    );
   }
 
   return {
