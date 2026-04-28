@@ -177,14 +177,10 @@ impl JazzClient {
             // `batched_tick` handles `TransportInbound::Connected` automatically —
             // it calls `add_server_with_catalogue_state_hash` — so we only need
             // to gate here until that first tick fires.
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if runtime.transport_ever_connected() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                runtime.transport_wait_until_connected(),
+            )
             .await
             .map_err(|_| {
                 JazzError::Connection(
