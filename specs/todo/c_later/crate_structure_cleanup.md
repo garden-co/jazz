@@ -36,10 +36,10 @@ resolving from the new module locations.
 Two phases are **deliberate API breaks** coordinated with binding updates in
 the same PR:
 
-- **Phase 3 (builder collapse)** — replaces four public `ServerBuilder::with_*_storage`
+- **Phase 2 (builder collapse)** — replaces four public `ServerBuilder::with_*_storage`
   methods. Call sites in `crates/jazz-napi/src/lib.rs:1585, 1754, 1756` must
   be updated in the same PR.
-- **Phase 6 (typed subscribe)** — replaces public
+- **Phase 5 (typed subscribe)** — replaces public
   `RuntimeCore::{create_subscription, execute_subscription}`. Call sites in
   `crates/jazz-napi/src/lib.rs:941, 983`, `crates/jazz-wasm/src/runtime.rs:1588, 1612`,
   and `crates/jazz-rn/rust/src/lib.rs:713, 755` (plus the regenerated UniFFI
@@ -82,63 +82,7 @@ Acceptance:
   unchanged. No `pub use` from `lib.rs` is renamed; only the right-hand
   side of each re-export shifts.
 
-## Phase 2 — Entry-point dedup
-
-Small, independent fixes that remove parallel construction logic between
-`client.rs` and `server/builder.rs`.
-
-1. Share the `NODE_ENV` → "are we in prod?" classification between
-   `main.rs::resolve_node_env_mode()` (`main.rs:24-29`) and
-   `builder.rs::should_allow_unprivileged_schema_catalogue_writes()`
-   (`builder.rs:305-310`). The two functions do not do the same thing — one
-   gates auth defaults, the other gates unprivileged catalogue writes — but
-   they share the same env-var match (`eq_ignore_ascii_case("production")`,
-   anything else treated as dev). Extract just the classifier (e.g. a
-   pub `node_env_mode() -> NodeEnvMode` in `server/env.rs`) and have both
-   policy functions call it. The policy decisions on top stay separate.
-   Scope is ~3 lines of true dedup; "leave it alone" is also defensible.
-2. Thin `main.rs`: push CLI-helper functions
-   (`resolve_jwt_public_key_input` at `main.rs:38-59`, plus
-   `resolve_node_env_mode` and `resolve_dev_default_flag` from item 1 if
-   pursued) into `commands/server.rs`, where they're actually consumed.
-   `main.rs` keeps the clap struct definitions and dispatch only. Note:
-   both files are binary-only (`commands/` is `mod` in `main.rs`, not
-   re-exported from `lib.rs`), so this is purely a binary-internal
-   organization choice — nothing leaves or enters the public library.
-   `main.rs` is 358 lines today; "leave it alone" is defensible.
-3. (Optional, naming-only.) Give the two `reqwest::Client` constructions in
-   `builder.rs` named helpers so their intent is explicit at the call site:
-   `build_authority_forwarding_client()` for `builder.rs:155` and
-   `build_jwks_client()` for `builder.rs:338-342`. **Do not collapse them
-   into one shared client** — they encode two different policies. The main
-   client is used at `routes.rs:219` to proxy catalogue admin requests
-   (potentially carrying large schema bundles) and uses default timeouts.
-   The JWKS client uses `connect_timeout(5s)` + `timeout(10s)` so a hung
-   IDP cannot block the auth path. Sharing one client requires picking
-   either policy for both, which is a behavior change in either direction.
-4. Delete `#[allow(dead_code)] pub app_id` on `ServerState` (`server/mod.rs:165`)
-   — either use it in a routed handler or remove the field.
-
-(An earlier draft proposed extracting a shared `build_schema_manager` from
-`client.rs:64-82` and `server/builder.rs:217-238`. On closer reading those
-two functions are not duplicates: the client uses an empty `SyncManager`,
-always constructs `SchemaManager::new(...)` with the declared schema, uses
-the `"client"` tier label, and always rehydrates from the catalogue. The
-server uses `server_sync_manager()` (Edge+Global tiers, plus optional
-unprivileged catalogue writes when `NODE_ENV != production`), splits on
-Dynamic vs Fixed schema mode, uses `"prod"`, only rehydrates in Dynamic
-mode, calls `require_authorization_schema()` afterwards to fail closed,
-and returns `String` errors. Sharing them would require a function with
-five orthogonal parameters that obscures rather than clarifies. Left as
-two separate construction policies.)
-
-(Promoting `allow_local_first_auth: true` into `AuthConfig::default()` was
-considered but moved to _Out of scope_ below: `AuthConfig` derives `Default`
-today, so the bool defaults to `false`, and `crates/jazz-tools/src/middleware/auth.rs:1134, 1617`
-plus `crates/jazz-tools/tests/auth_test.rs:228` rely on that. Flipping it is
-a behavior change, not cleanup.)
-
-## Phase 3 — Builder collapse
+## Phase 2 — Builder collapse
 
 Replace the four storage builder variants (`with_persistent_storage`,
 `with_in_memory_storage`, `with_sqlite_storage`, `with_rocksdb_storage` —
@@ -172,7 +116,7 @@ Acceptance:
   the same PR; `pnpm build` and `pnpm test` for the napi package pass.
 - Tests unchanged in spirit (only the call shape rewritten).
 
-## Phase 4 — Storage trait split
+## Phase 3 — Storage trait split
 
 `storage/mod.rs` is ~8K LOC: the `Storage` trait definition (~2K) plus the
 in-memory implementation (~6K). Split into:
@@ -197,7 +141,7 @@ Acceptance: every existing import keeps resolving via `storage::*`. The
 `opfs_btree` cfg-fork now lives at module boundary, not as `#[cfg]` blocks
 threaded through one file.
 
-## Phase 5 — `RuntimeCore` decomposition
+## Phase 4 — `RuntimeCore` decomposition
 
 `RuntimeCore` (`runtime_core.rs:282-332`) holds 15+ fields blending
 unrelated concerns. Extract three focused owners:
@@ -247,7 +191,7 @@ Acceptance: existing `runtime_core/tests.rs` passes unchanged. Behavior of
 `immediate_tick` and `batched_tick` is identical (verified by integration
 tests, not internal mocks — see CLAUDE.md TDD note).
 
-## Phase 6 — Subscribe as typed builder
+## Phase 5 — Subscribe as typed builder
 
 The two-phase subscribe path (`runtime_core/subscriptions.rs:179-266`)
 requires the caller to call `create_subscription` followed by
@@ -291,7 +235,7 @@ Acceptance: every Rust call site updated in the same PR; no
 `RuntimeCore`. If the FFI-internal-forwarding shape is chosen, document
 that explicitly in each binding's wrapper.
 
-## Phase 7 — Centralize storage-flush flag
+## Phase 6 — Centralize storage-flush flag
 
 `mark_storage_write_pending_flush()` is currently called from four files:
 
@@ -315,7 +259,7 @@ Acceptance:
   `writes.rs`, `ticks.rs`, or `sync.rs`.
 - `batched_tick` flushes whenever the guard registry shows unflushed work.
 
-## Phase 8 — `query_manager/graph.rs` split
+## Phase 7 — `query_manager/graph.rs` split
 
 `graph.rs` is 4.6K LOC and conflates two phases:
 
@@ -352,25 +296,25 @@ These came up in the audit but should be separate specs if pursued:
 
 ## Invariants
 
-- Phases 1, 2, 4, 5, 7, 8 preserve the public API of `jazz-tools`. Phases
-  3 and 6 are deliberate API breaks; they coordinate the corresponding
+- Phases 1, 3, 4, 6, 7 preserve the public API of `jazz-tools`. Phases 2
+  and 5 are deliberate API breaks; they coordinate the corresponding
   binding updates in the same PR (see _Public API impact_ above).
 - All phases preserve wire format, storage format, sync semantics.
 - Tests are not rewritten; they move with their code. Per CLAUDE.md, an
   unexpectedly failing test is treated as a signal, not as something to
   edit out.
-- Each phase is its own PR. Phases 1–4 are independent of one another;
-  phases 5–8 build on the cleaner module layout from 1–4.
+- Each phase is its own PR. Phases 1–3 are independent of one another;
+  phases 4–7 build on the cleaner module layout from 1–3.
 
 ## Testing Strategy
 
 - Each phase relies on the existing `cargo test --all-features` and
   `pnpm test` suites. No new test files are required for the moves
   themselves.
-- For Phase 5 (RuntimeCore decomposition), the existing
+- For Phase 4 (RuntimeCore decomposition), the existing
   `runtime_core/tests.rs` exercises `immediate_tick`/`batched_tick`
   end-to-end and is the load-bearing safety net.
-- For Phase 6 (typed subscribe), removing the old API at compile time
+- For Phase 5 (typed subscribe), removing the old API at compile time
   is the test — no path can call `create_subscription` without the
   compiler complaining.
 - Per CLAUDE.md, prefer e2e checks over unit tests added during the
@@ -383,22 +327,20 @@ These came up in the audit but should be separate specs if pursued:
 ```
 1 Junk drawer ────┐
                   ├── independent, mergeable in any order
-2 Entry-point   ──┤
+2 Builder enum ───┤
                   │
-3 Builder enum ───┤
-                  │
-4 Storage split ──┘
+3 Storage split ──┘
                   │
                   v
-5 RuntimeCore decomposition  (depends on 1: sync_tracer + clock have moved)
+4 RuntimeCore decomposition  (depends on 1: sync_tracer + clock have moved)
                   │
                   v
-6 Typed subscribe            (depends on 5: SubscriptionRegistry exists)
+5 Typed subscribe            (depends on 4: SubscriptionRegistry exists)
                   │
                   v
-7 WriteGuard                 (depends on 5: DurabilityTracker exists)
+6 WriteGuard                 (depends on 4: DurabilityTracker exists)
                   │
                   v
-8 graph.rs split             (independent; sequenced last to avoid
+7 graph.rs split             (independent; sequenced last to avoid
                               merge conflicts with hot-path PRs)
 ```
