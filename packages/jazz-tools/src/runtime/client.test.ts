@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  InsertHandle,
+  WriteResult,
   JazzClient,
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
@@ -342,7 +342,7 @@ describe("JazzClient transactions", () => {
     });
 
     expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
-    expect(handle).toBeInstanceOf(InsertHandle);
+    expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Callback transaction" });
     await expect(handle.wait({ tier: "global" })).resolves.toEqual({
       title: "Callback transaction",

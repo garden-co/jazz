@@ -15,7 +15,7 @@ import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schem
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   DirectBatch as RuntimeDirectBatch,
-  InsertHandle,
+  WriteResult,
   JazzClient,
   type LocalBatchRecord,
   type MutationErrorEvent,
@@ -2244,17 +2244,13 @@ export class Db {
   /**
    * Insert a new row into a table without waiting for durability.
    *
-   * Use {@link InsertHandle.wait} to wait for durable confirmation.
+   * Use {@link WriteResult.wait} to wait for durable confirmation.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
    * @returns Insert handle containing the inserted row
    */
-  insert<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    options?: CreateOptions,
-  ): InsertHandle<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
@@ -2343,12 +2339,12 @@ export class Db {
   async transaction<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
-  ): Promise<InsertHandle<Awaited<TResult>>> {
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const client = this.getClient(table._schema);
     const transaction = this.beginTransaction(table);
     const value = await callback(transaction);
     const committed = transaction.commit();
-    return new InsertHandle(value, committed.batchId, client);
+    return new WriteResult(value, committed.batchId, client);
   }
 
   /**
@@ -2796,7 +2792,7 @@ class ClientBackedDb extends Db {
     table: TableProxy<T, Init>,
     data: Init,
     options?: CreateOptions,
-  ): InsertHandle<T> {
+  ): WriteResult<T> {
     const runtimeSchema = createRuntimeSchemaResolver(() =>
       normalizeRuntimeSchema(this.runtimeClient.getSchema()),
     );
@@ -2868,11 +2864,11 @@ class ClientBackedDb extends Db {
   override async transaction<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
-  ): Promise<InsertHandle<Awaited<TResult>>> {
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction(table);
     const value = await callback(transaction);
     const committed = transaction.commit();
-    return new InsertHandle(value, committed.batchId, this.runtimeClient);
+    return new WriteResult(value, committed.batchId, this.runtimeClient);
   }
 
   override beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
