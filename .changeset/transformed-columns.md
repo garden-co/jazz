@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add transformed columns to the TypeScript schema DSL.

@@ -12,6 +12,8 @@ Any column can be made nullable by chaining `.optional()`. For binary data like 
 
 ## Transformed Columns
 
+> **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.
+
 Any normal column definer can be transformed with `.transform({ from, to })`. The database still stores the column using the underlying SQL type, while the TypeScript API exposes the transformed type on rows, inserts, and updates.
 
 Use `from` to convert stored values into the value your app reads. Use `to` to convert app values back into the stored column value before inserts and updates.
