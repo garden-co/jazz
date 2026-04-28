@@ -571,7 +571,19 @@ collaboration between nearby users.
 That gives us another mode on the light-milliseconds metric: not just
 full remote and not just optimistic preview, but genuinely short
 regional paths.
+</Notes>
+</Slide>
 
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 9
+
+<img
+  src="/presentations/react-miami/stacks/stack-9.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
 And unlike a normal cache bolted onto the side, this thing is aware of
 the data model and auth model, which matters because otherwise these
 low-latency layers quickly turn into yet another source of glue and
@@ -738,6 +750,17 @@ because now you've got multiple users writing to the same data.
 Like what if eventual consistency isn't enough and you need global
 transactions? Should you use a second database? Yuck.
 
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Maybe `useState()` databasen't?
+
+- consistency and transactions?
+- permissions for local-first state?
+- schema evolution?
+
+<Notes>
 And it's usually pretty easy to enforce permissions using a centralized
 API in front of a database, but the crazy system we came up with for
 local-first permissions was way too confusing.
@@ -897,9 +920,7 @@ the table in the cloud.
 />
 
 <Notes>
-But here we have a local version of the table, maybe with a subset of
-rows that this client cares about and then a much bigger version of
-the table in the cloud. And here we get sync as our first new dimension.
+And here we get sync as our first new dimension.
 </Notes>
 </Slide>
 
@@ -924,6 +945,19 @@ different versions of shared data.
 But the exceptions matter: like only one user should be able to buy the
 last ticket for React Miami.
 
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: tunable consistency
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-tunable-consistency.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
 And we don't want a whole second database just because some corners of
 the app need global consistency.
 
@@ -956,6 +990,19 @@ at the API in front of the database.
 But here we have local state and direct sync, so the database itself has
 to understand permissions.
 
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
 For this we rely on a proven concept: row-level security. It lets you
 define permissions as queries that look like your normal queries, in one
 centralized, testable place.
@@ -1414,7 +1461,9 @@ export const app = s.defineApp(schema);
 ```tsx
 function Canvas({ canvasId }) {
   const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const cursors = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy")
+  );
 
   return (
     <Stage>
@@ -1478,7 +1527,9 @@ export const app = s.defineApp(schema);
 ```tsx
 function Canvas({ canvasId }) {
   const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const cursors = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy")
+  );
 
   return (
     <Stage>
@@ -1561,7 +1612,9 @@ export const app = s.defineApp(schema);
 ```tsx
 function Canvas({ canvasId }) {
   const letters = useAll(app.letters.where({ canvasId }));
-  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+  const cursors = useAll(
+    app.cursors.where({ canvasId }).select("x", "y", "$createdBy")
+  );
 
   return (
     <Stage>
@@ -1649,18 +1702,6 @@ testing your whole app.
 Ok! Do you actually want to try it?
 
 Here it is as an actual Jazz app.
-
-This slide is a Jazz app. My whole slide deck is just a Next.js app with
-no backend components, and this slide happens to have a whole
-multiplayer database in it.
-
-I had promised myself not to do a demo in this talk. And if I did, not
-one that relied on conference wifi. And if I did that, definitely not
-one where audience interaction was projected on a giant recorded screen
-where people might do silly things
-
-Anyways, here is the join code. Let's put this through the paces, but
-please be wholesome.
 
 </Notes>
 </Slide>

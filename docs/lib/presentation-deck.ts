@@ -14,6 +14,7 @@ export type PresentationSlideIdentity = {
 
 const notesTagPattern = /<Notes\b[^>]*>([\s\S]*?)<\/Notes>/g;
 const slideTagPattern = /<Slide\b([\s\S]*?)>([\s\S]*?)<\/Slide>/g;
+const imageTagPattern = /<img\b[\s\S]*?\bsrc=(["'])([\s\S]*?)\1[\s\S]*?\/?>/g;
 const slideHashPrefix = "slide=";
 const letterCanvasArrowMessageType = "jazz-letter-canvas:arrow-key";
 
@@ -48,6 +49,22 @@ export function readLetterCanvasArrowNavigationDirection(message: unknown) {
   if (data.key === "ArrowLeft") return "previous";
 
   return null;
+}
+
+export function extractPresentationImageSrcsFromMdx(rawMdx: string) {
+  const seenSrcs = new Set<string>();
+  const imageSrcs: string[] = [];
+
+  for (const match of rawMdx.matchAll(imageTagPattern)) {
+    const src = match[2]?.trim();
+
+    if (!src || seenSrcs.has(src)) continue;
+
+    seenSrcs.add(src);
+    imageSrcs.push(src);
+  }
+
+  return imageSrcs;
 }
 
 export function parsePresentationSlidesFromMdx(

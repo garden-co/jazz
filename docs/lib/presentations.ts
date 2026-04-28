@@ -3,6 +3,7 @@ import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
 import { presentationDecks } from "../.source/server";
 import {
+  extractPresentationImageSrcsFromMdx,
   parsePresentationSlidesFromMdx,
   type PresentationSlideDefinition,
 } from "./presentation-deck";
@@ -42,6 +43,7 @@ export function getPresentationDeckPage(deck: string) {
 }
 
 const presentationSlideCache = new Map<string, Promise<PresentationSlide[]>>();
+const presentationImageSrcCache = new Map<string, Promise<string[]>>();
 
 async function getRawDeckSource(page: PresentationDeckPage) {
   return page.data.getText("raw");
@@ -62,6 +64,19 @@ export async function getPresentationSlidesForPage(
   presentationSlideCache.set(deckSlug, parsedSlides);
 
   return parsedSlides;
+}
+
+export async function getPresentationImageSrcsForPage(page: PresentationDeckPage) {
+  const deckSlug = getDeckSlug(page);
+  const cached = presentationImageSrcCache.get(deckSlug);
+
+  if (cached) return cached;
+
+  const imageSrcs = getRawDeckSource(page).then((rawMdx) => extractPresentationImageSrcsFromMdx(rawMdx));
+
+  presentationImageSrcCache.set(deckSlug, imageSrcs);
+
+  return imageSrcs;
 }
 
 export async function getPresentationDeckSlides(deck: string) {
