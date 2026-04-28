@@ -119,6 +119,8 @@ export type TypedColumnBuilder<
   ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
   /**
    * Transform stored column values at the TypeScript boundary.
+   *
+   * @experimental This API may change before the stable release.
    */
   transform<TransformedValue>(transform: {
     from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
