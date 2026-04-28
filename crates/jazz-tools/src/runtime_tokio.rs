@@ -844,6 +844,26 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             .unwrap_or(false)
     }
 
+    /// Async wait that resolves once the WebSocket transport has completed
+    /// its first successful handshake (or returns immediately if it already
+    /// has). Returns `false` when no transport is installed — callers should
+    /// either check `is_connected()`/`has_server` first or wrap this in a
+    /// timeout.
+    pub async fn transport_wait_until_connected(&self) -> bool {
+        let Some(mut rx) = self
+            .core
+            .lock()
+            .ok()
+            .and_then(|c| c.transport.as_ref().map(|h| h.connected_rx.clone()))
+        else {
+            return false;
+        };
+        if *rx.borrow() {
+            return true;
+        }
+        rx.wait_for(|connected| *connected).await.is_ok()
+    }
+
     /// Returns the wire `ClientId` used by the active transport, if any.
     ///
     /// Tests use this to register the transport's client identity with a
