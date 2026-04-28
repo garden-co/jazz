@@ -803,8 +803,8 @@ export class PersistedWriteRejectedError extends Error {
 }
 
 /**
- * Returned by upsert, update, and delete operations. Allows waiting for the
- * write to be persisted at a given durability tier.
+ * Returned by upsert, update, and delete operations, and explicitly-committed transactions.
+ * Allows waiting for the write to be persisted at a given durability tier.
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
@@ -831,10 +831,11 @@ export class WriteHandle<T = void> {
 }
 
 /**
- * Returned by insert operations. Allows getting the inserted value and
- * waiting for the write to be persisted at a given durability tier.
+ * Returned by insert operations and auto-committed transactions.
+ * Allows getting the inserted value and waiting for the write
+ * to be persisted at a given durability tier.
  */
-export class InsertHandle<T> extends WriteHandle<T> {
+export class WriteResult<T> extends WriteHandle<T> {
   constructor(
     readonly value: T,
     batchId: string,
@@ -854,8 +855,8 @@ export class InsertHandle<T> extends WriteHandle<T> {
     return this.value;
   }
 
-  mapValue<U>(transformValue: (value: T) => U): InsertHandle<U> {
-    return new InsertHandle(transformValue(this.value), this.batchId, this.client());
+  mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
+    return new WriteResult(transformValue(this.value), this.batchId, this.client());
   }
 }
 
@@ -1178,11 +1179,11 @@ export class SessionClient {
 
   async transaction<TResult>(
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): Promise<InsertHandle<Awaited<TResult>>> {
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     const value = await callback(transaction);
     const committed = transaction.commit();
-    return new InsertHandle(value as Awaited<TResult>, committed.batchId, this.client);
+    return new WriteResult(value as Awaited<TResult>, committed.batchId, this.client);
   }
 
   beginDirectBatch(): DirectBatch {
@@ -1441,11 +1442,11 @@ export class JazzClient {
 
   async transaction<TResult>(
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): Promise<InsertHandle<Awaited<TResult>>> {
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     const value = await callback(transaction);
     const committed = transaction.commit();
-    return new InsertHandle(value as Awaited<TResult>, committed.batchId, this);
+    return new WriteResult(value as Awaited<TResult>, committed.batchId, this);
   }
 
   beginDirectBatch(): DirectBatch {
@@ -1827,7 +1828,7 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues, options?: CreateOptions): InsertHandle<Row> {
+  create(table: string, values: InsertValues, options?: CreateOptions): WriteResult<Row> {
     return this.createHandleInternal(table, values, undefined, undefined, options);
   }
 
@@ -1838,12 +1839,12 @@ export class JazzClient {
     attribution?: string,
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
-  ): InsertHandle<Row> {
+  ): WriteResult<Row> {
     const row = this.createInternal(table, values, session, attribution, options, batchContext);
     if (!batchContext) {
       this.sealBatch(row.batchId);
     }
-    return new InsertHandle(row, row.batchId, this);
+    return new WriteResult(row, row.batchId, this);
   }
 
   /**

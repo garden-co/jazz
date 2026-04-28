@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
-import { InsertHandle, JazzClient, type DirectInsertResult, WriteHandle } from "./client.js";
+import { WriteResult, JazzClient, type DirectInsertResult, WriteHandle } from "./client.js";
 
 class TestDb extends Db {
   constructor(private readonly testClient: JazzClient) {
@@ -19,8 +19,8 @@ function makeHandleClient(): JazzClient {
   } as unknown as JazzClient;
 }
 
-function makeInsertHandle(row: DirectInsertResult): InsertHandle<DirectInsertResult> {
-  return new InsertHandle(row, row.batchId, makeHandleClient());
+function makeWriteResult(row: DirectInsertResult): WriteResult<DirectInsertResult> {
+  return new WriteResult(row, row.batchId, makeHandleClient());
 }
 
 function makeWriteHandle(batchId: string): WriteHandle {
@@ -45,16 +45,15 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => InsertHandle<DirectInsertResult>>(
-      () =>
-        makeInsertHandle({
-          id: "todo-1",
-          values: [
-            { type: "Text", value: "Buy milk" },
-            { type: "Boolean", value: false },
-          ],
-          batchId: "batch-schema-order-runtime",
-        }),
+    const create = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+      makeWriteResult({
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+        batchId: "batch-schema-order-runtime",
+      }),
     );
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
@@ -211,16 +210,15 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, InsertValues]) => InsertHandle<DirectInsertResult>>(
-      () =>
-        makeInsertHandle({
-          id: "todo-1",
-          values: [
-            { type: "Text", value: "Buy milk" },
-            { type: "Boolean", value: false },
-          ],
-          batchId: "batch-schema-order-generated",
-        }),
+    const create = vi.fn<(...args: [string, InsertValues]) => WriteResult<DirectInsertResult>>(() =>
+      makeWriteResult({
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+        batchId: "batch-schema-order-generated",
+      }),
     );
     const client = {
       getSchema: () => new Map(),
@@ -265,9 +263,9 @@ describe("Db runtime schema order", () => {
     };
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const create = vi.fn<
-      (...args: [string, InsertValues, { id: string }]) => InsertHandle<DirectInsertResult>
+      (...args: [string, InsertValues, { id: string }]) => WriteResult<DirectInsertResult>
     >(() =>
-      makeInsertHandle({
+      makeWriteResult({
         id: externalId,
         values: [
           { type: "Text", value: "Buy milk" },
@@ -361,9 +359,9 @@ describe("Db runtime schema order", () => {
     };
     const updatedAt = 1_764_000_000_000_000;
     const create = vi.fn<
-      (...args: [string, InsertValues, { updatedAt: number }]) => InsertHandle<DirectInsertResult>
+      (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<DirectInsertResult>
     >(() =>
-      makeInsertHandle({
+      makeWriteResult({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },
@@ -434,7 +432,7 @@ describe("Db runtime schema order", () => {
     };
     const updatedAt = 1_764_000_000_000_000;
     const createHandleInternal = vi.fn(() =>
-      makeInsertHandle({
+      makeWriteResult({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  InsertHandle,
+  WriteResult,
   WriteHandle,
   type JazzClient,
   type LocalBatchRecord,
@@ -61,14 +61,14 @@ function makeHandleClient(localBatchRecord: LocalBatchRecord) {
   };
 }
 
-function makeInsertHandle(
+function makeWriteResult(
   value: Row,
   batchId: string,
   localBatchRecord = makeLocalBatchRecord(batchId),
 ) {
   const client = makeHandleClient(localBatchRecord);
   return {
-    handle: new InsertHandle(value, batchId, client as unknown as JazzClient),
+    handle: new WriteResult(value, batchId, client as unknown as JazzClient),
     client,
   };
 }
@@ -91,11 +91,11 @@ describe("Db write handles", () => {
         { type: "Boolean", value: false },
       ],
     };
-    const { handle: insertHandle, client: handleClient } = makeInsertHandle(
+    const { handle: writeResult, client: handleClient } = makeWriteResult(
       runtimeRow,
       "batch-insert",
     );
-    const create = vi.fn(() => insertHandle);
+    const create = vi.fn(() => writeResult);
     const client = {
       getSchema: () => new Map(Object.entries(todoSchema())),
       create,
@@ -163,7 +163,7 @@ describe("Db write handles", () => {
       claims: { role: "writer" },
       authMode: "external",
     };
-    const { handle: insertHandle, client: insertClient } = makeInsertHandle(
+    const { handle: insertHandle, client: insertClient } = makeWriteResult(
       {
         id: "todo-2",
         values: [

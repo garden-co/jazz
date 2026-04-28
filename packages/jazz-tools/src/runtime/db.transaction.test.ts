@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Db, createDbFromClient, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  InsertHandle,
+  WriteResult,
   WriteHandle,
   type JazzClient,
   type LocalBatchRecord,
@@ -259,7 +259,7 @@ describe("Db transactions", () => {
       return todo;
     });
 
-    expect(handle).toBeInstanceOf(InsertHandle);
+    expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.batchId).toBe("batch-callback");
     expect(handle.value).toEqual({
       id: "todo-callback",

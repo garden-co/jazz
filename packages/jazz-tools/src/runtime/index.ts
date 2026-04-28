@@ -26,7 +26,7 @@ export {
   type UpdateOptions,
   type UpsertOptions,
   type WasmModule,
-  type InsertHandle,
+  type WriteResult,
   type WriteHandle,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
