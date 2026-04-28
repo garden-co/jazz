@@ -176,8 +176,6 @@ export interface QueryBuilder<T> {
   readonly _table: string;
   /** Schema reference for translation and transformation */
   readonly _schema: WasmSchema;
-  /** Optional TypeScript-only row transform carried by transformed table handles. */
-  readonly _rowTransform?: RowTransform;
   /** Build and return the query as JSON */
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
@@ -405,20 +403,12 @@ export interface TableProxy<T, Init> {
   readonly _table: string;
   /** Schema reference */
   readonly _schema: WasmSchema;
-  /** Optional TypeScript-only row transform carried by transformed table handles. */
-  readonly _rowTransform?: RowTransform;
   /** Optional TypeScript-only per-column transforms carried by typed table handles. */
   readonly _columnTransforms?: ColumnTransformMap;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
-}
-
-export interface RowTransform {
-  row(row: unknown): unknown;
-  insert(row: unknown): Record<string, unknown>;
-  update(row: unknown): Record<string, unknown>;
 }
 
 export interface ColumnTransform {
@@ -429,16 +419,10 @@ export interface ColumnTransform {
 export type ColumnTransformMap = Record<string, ColumnTransform>;
 
 function transformOutputRow<T>(
-  source: {
-    readonly _rowTransform?: RowTransform;
-    readonly _columnTransforms?: ColumnTransformMap;
-  },
+  source: { readonly _columnTransforms?: ColumnTransformMap },
   row: unknown,
 ): T {
-  const columnTransformed = transformOutputColumns(source, row);
-  return (
-    source._rowTransform ? source._rowTransform.row(columnTransformed) : columnTransformed
-  ) as T;
+  return transformOutputColumns(source, row) as T;
 }
 
 function transformOutputColumns(
@@ -462,20 +446,14 @@ function transformInsertInput(
   table: TableProxy<unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
-  const rowTransformed = table._rowTransform
-    ? table._rowTransform.insert(data)
-    : (data as Record<string, unknown>);
-  return transformInputColumns(table, rowTransformed);
+  return transformInputColumns(table, data as Record<string, unknown>);
 }
 
 function transformUpdateInput(
   table: TableProxy<unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
-  const rowTransformed = table._rowTransform
-    ? table._rowTransform.update(data)
-    : (data as Record<string, unknown>);
-  return transformInputColumns(table, rowTransformed);
+  return transformInputColumns(table, data as Record<string, unknown>);
 }
 
 function transformInputColumns(
@@ -563,8 +541,7 @@ export class DbTransaction {
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
     const row = this.runtimeTransaction.create(table._table, values);
-    const typedRow = transformRow(row, table._schema, table._table);
-    return transformOutputRow(table, typedRow);
+    return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
   /**
@@ -611,8 +588,15 @@ export class DbTransaction {
       options,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
-      (row) => transformOutputRow(query, row),
+    const transformedRows = transformRows(
+      rows,
+      outputSchema,
+      outputTable,
+      outputIncludes,
+      builtQuery.select,
+    );
+    return transformedRows.map((row) =>
+      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
     );
   }
 
@@ -694,8 +678,7 @@ export class DbDirectBatch {
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
     const row = this.runtimeBatch.create(table._table, values);
-    const typedRow = transformRow(row, table._schema, table._table);
-    return transformOutputRow(table, typedRow);
+    return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
@@ -2271,10 +2254,9 @@ export class Db {
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
     const inserted = client.create(table._table, values, options);
-    return inserted.mapValue((row) => {
-      const typedRow = transformRow(row, table._schema, table._table);
-      return transformOutputRow(table, typedRow);
-    });
+    return inserted.mapValue((row) =>
+      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    );
   }
 
   /**
@@ -2445,8 +2427,15 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const rows = await client.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
-      (row) => transformOutputRow(query, row),
+    const transformedRows = transformRows(
+      rows,
+      outputSchema,
+      outputTable,
+      outputIncludes,
+      builtQuery.select,
+    );
+    return transformedRows.map((row) =>
+      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
     );
   }
 
@@ -2560,16 +2549,11 @@ export class Db {
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
-    const transform = (row: WasmRow): T => {
-      const typedRow = transformRow(
-        row,
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
+    const transform = (row: WasmRow): T =>
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
-      return transformOutputRow(query, typedRow);
-    };
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
@@ -2794,10 +2778,7 @@ class ClientBackedDb extends Db {
     const values = toInsertRecord(transformedData, inputSchema, table._table);
     return this.runtimeClient
       .createHandleInternal(table._table, values, this.session, this.attribution, options)
-      .mapValue((row) => {
-        const typedRow = transformRow(row, table._schema, table._table);
-        return transformOutputRow(table, typedRow);
-      });
+      .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
   }
 
   override upsert<T, Init>(
@@ -2892,8 +2873,15 @@ class ClientBackedDb extends Db {
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
-      (row) => transformOutputRow(query, row),
+    const transformedRows = transformRows(
+      rows,
+      outputSchema,
+      outputTable,
+      outputIncludes,
+      builtQuery.select,
+    );
+    return transformedRows.map((row) =>
+      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
     );
   }
 
@@ -2924,16 +2912,11 @@ class ClientBackedDb extends Db {
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
-    const transform = (row: WasmRow): T => {
-      const typedRow = transformRow(
-        row,
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
+    const transform = (row: WasmRow): T =>
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
-      return transformOutputRow(query, typedRow);
-    };
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
