@@ -81,9 +81,11 @@ interface ColumnBuilder {
   optional(): this;
   default(value: unknown): this;
   merge(strategy: ColumnMergeStrategyName): this;
+  transform(transform: ColumnTransform<unknown, unknown>): ColumnBuilder;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
+  _transform?: ColumnTransform<unknown, unknown>;
 }
 
 type AllowedColumnMergeStrategy<
@@ -96,27 +98,36 @@ export type TypedColumnBuilder<
   Optional extends boolean = boolean,
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
+  Value = TSTypeFromSqlType<Sql>,
 > = Omit<ColumnBuilder, "optional" | "default"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
   readonly __jazzHasDefault: HasDefault;
+  readonly __jazzValue: Value;
   /**
    * Set the default value for the column
    */
   default(
     value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, true>;
+  ): ColumnAlias<Sql, Optional, Ref, true, Value>;
   /**
    * Set the merge strategy for the column (defaults to LWW)
    */
   merge(
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, HasDefault>;
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
+  /**
+   * Transform stored column values at the TypeScript boundary.
+   */
+  transform<TransformedValue>(transform: {
+    from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
+    to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
+  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue>;
   /**
    * Make the column nullable
    */
-  optional(): ColumnAlias<Sql, true, Ref, HasDefault>;
+  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
 };
 
 export type AnyTypedColumnBuilder = TypedColumnBuilder<
@@ -133,40 +144,54 @@ export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzReferences"];
 export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzHasDefault"];
+export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
+
+export interface ColumnTransform<Stored = unknown, View = unknown> {
+  from(value: Stored): View;
+  to(value: View): Stored;
+}
 
 export type StringColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault>;
+  Value = string,
+> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value>;
 export type BooleanColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault>;
+  Value = boolean,
+> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value>;
 export type IntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault>;
+  Value = number,
+> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault>;
+  Value = Date | number,
+> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value>;
 export type FloatColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault>;
+  Value = number,
+> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value>;
 export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault>;
+  Value = Uint8Array,
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault>;
+  Value = Output,
+> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value>;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
+  Value = Variants[number],
 > = TypedColumnBuilder<
   {
     kind: "ENUM";
@@ -174,18 +199,21 @@ export type EnumColumn<
   },
   Optional,
   undefined,
-  HasDefault
+  HasDefault,
+  Value
 >;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault>;
+  Value = string,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value>;
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
   Ref extends string | undefined = undefined,
   HasDefault extends boolean = false,
+  Value = TSTypeFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
@@ -193,40 +221,42 @@ export type ArrayColumn<
   },
   Optional,
   Ref,
-  HasDefault
+  HasDefault,
+  Value
 >;
 export type ColumnAlias<
   Sql extends SqlType = SqlType,
   Optional extends boolean = boolean,
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
+  Value = TSTypeFromSqlType<Sql>,
 > = Sql extends {
   kind: "ARRAY";
   element: infer ElementSql extends SqlType;
 }
-  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault>
+  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value>
   : Ref extends string
-    ? RefColumn<Ref, Optional, HasDefault>
+    ? RefColumn<Ref, Optional, HasDefault, Value>
     : Sql extends "TEXT"
-      ? StringColumn<Optional, HasDefault>
+      ? StringColumn<Optional, HasDefault, Value>
       : Sql extends "BOOLEAN"
-        ? BooleanColumn<Optional, HasDefault>
+        ? BooleanColumn<Optional, HasDefault, Value>
         : Sql extends "INTEGER"
-          ? IntColumn<Optional, HasDefault>
+          ? IntColumn<Optional, HasDefault, Value>
           : Sql extends "TIMESTAMP"
-            ? TimestampColumn<Optional, HasDefault>
+            ? TimestampColumn<Optional, HasDefault, Value>
             : Sql extends "REAL"
-              ? FloatColumn<Optional, HasDefault>
+              ? FloatColumn<Optional, HasDefault, Value>
               : Sql extends "BYTEA"
-                ? BytesColumn<Optional, HasDefault>
+                ? BytesColumn<Optional, HasDefault, Value>
                 : Sql extends JsonSqlType<infer Output>
-                  ? JsonColumn<Output, Optional, HasDefault>
+                  ? JsonColumn<Output, Optional, HasDefault, Value>
                   : Sql extends {
                         kind: "ENUM";
                         variants: infer Variants extends readonly string[];
                       }
-                    ? EnumColumn<Variants, Optional, HasDefault>
-                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault>;
+                    ? EnumColumn<Variants, Optional, HasDefault, Value>
+                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
@@ -276,6 +306,7 @@ class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
+  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(public _sqlType: ScalarSqlType) {}
 
@@ -294,6 +325,11 @@ class ScalarBuilder implements ColumnBuilder {
 
   merge(strategy: ColumnMergeStrategyName): this {
     this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
+  transform(transform: ColumnTransform<unknown, unknown>): this {
+    this._transform = transform;
     return this;
   }
 
@@ -317,6 +353,7 @@ class EnumBuilder implements ColumnBuilder {
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   public _sqlType: EnumSqlType;
+  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(...variants: string[]) {
     this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
@@ -340,6 +377,11 @@ class EnumBuilder implements ColumnBuilder {
     return this;
   }
 
+  transform(transform: ColumnTransform<unknown, unknown>): this {
+    this._transform = transform;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
@@ -360,6 +402,7 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   public _sqlType: JsonSqlType<Output>;
+  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
     this._sqlType = schema
@@ -382,6 +425,11 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 
   merge(strategy: ColumnMergeStrategyName): this {
     this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
+  transform(transform: ColumnTransform<unknown, unknown>): this {
+    this._transform = transform;
     return this;
   }
 
@@ -408,6 +456,7 @@ class RefBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
+  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(private _targetTable: string) {}
 
@@ -426,6 +475,11 @@ class RefBuilder implements ColumnBuilder {
 
   merge(strategy: ColumnMergeStrategyName): this {
     this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
+  transform(transform: ColumnTransform<unknown, unknown>): this {
+    this._transform = transform;
     return this;
   }
 
@@ -453,6 +507,7 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
+  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(public _element: T) {}
 
@@ -471,6 +526,11 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
 
   merge(strategy: ColumnMergeStrategyName): this {
     this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
+    return this;
+  }
+
+  transform(transform: ColumnTransform<unknown, unknown>): this {
+    this._transform = transform;
     return this;
   }
 
