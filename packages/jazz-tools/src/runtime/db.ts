@@ -176,6 +176,8 @@ export interface QueryBuilder<T> {
   readonly _table: string;
   /** Schema reference for translation and transformation */
   readonly _schema: WasmSchema;
+  /** Optional TypeScript-only row transform carried by transformed table handles. */
+  readonly _rowTransform?: RowTransform;
   /** Build and return the query as JSON */
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
@@ -403,10 +405,36 @@ export interface TableProxy<T, Init> {
   readonly _table: string;
   /** Schema reference */
   readonly _schema: WasmSchema;
+  /** Optional TypeScript-only row transform carried by transformed table handles. */
+  readonly _rowTransform?: RowTransform;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+}
+
+export interface RowTransform {
+  row(row: unknown): unknown;
+  insert(row: unknown): Record<string, unknown>;
+  update(row: unknown): Record<string, unknown>;
+}
+
+function transformOutputRow<T>(source: { readonly _rowTransform?: RowTransform }, row: unknown): T {
+  return (source._rowTransform ? source._rowTransform.row(row) : row) as T;
+}
+
+function transformInsertInput(
+  table: TableProxy<unknown, unknown>,
+  data: unknown,
+): Record<string, unknown> {
+  return table._rowTransform ? table._rowTransform.insert(data) : (data as Record<string, unknown>);
+}
+
+function transformUpdateInput(
+  table: TableProxy<unknown, unknown>,
+  data: unknown,
+): Record<string, unknown> {
+  return table._rowTransform ? table._rowTransform.update(data) : (data as Record<string, unknown>);
 }
 
 function backendScopedAuthState(session?: Session | null): AuthState {
@@ -474,13 +502,11 @@ export class DbTransaction {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     this.ensureActive();
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
+    const transformedData = transformInsertInput(table, data);
+    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
     const row = this.runtimeTransaction.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    const typedRow = transformRow(row, table._schema, table._table);
+    return transformOutputRow(table, typedRow);
   }
 
   /**
@@ -491,11 +517,8 @@ export class DbTransaction {
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
+    const transformedData = transformUpdateInput(table, data);
+    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
     this.runtimeTransaction.update(id, updates);
   }
 
@@ -530,7 +553,9 @@ export class DbTransaction {
       options,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
+      (row) => transformOutputRow(query, row),
+    );
   }
 
   /**
@@ -608,22 +633,17 @@ export class DbDirectBatch {
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     this.ensureActive();
-    const values = toInsertRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
+    const transformedData = transformInsertInput(table, data);
+    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
     const row = this.runtimeBatch.create(table._table, values);
-    return transformRow(row, table._schema, table._table);
+    const typedRow = transformRow(row, table._schema, table._table);
+    return transformOutputRow(table, typedRow);
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
-    const updates = toUpdateRecord(
-      data as Record<string, unknown>,
-      this.resolveInputSchema(table),
-      table._table,
-    );
+    const transformedData = transformUpdateInput(table, data);
+    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
     this.runtimeBatch.update(id, updates);
   }
 
@@ -2190,9 +2210,13 @@ export class Db {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
-    const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
+    const transformedData = transformInsertInput(table, data);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     const inserted = client.create(table._table, values, options);
-    return inserted.mapValue((row) => transformRow(row, table._schema, table._table));
+    return inserted.mapValue((row) => {
+      const typedRow = transformRow(row, table._schema, table._table);
+      return transformOutputRow(table, typedRow);
+    });
   }
 
   /**
@@ -2206,7 +2230,8 @@ export class Db {
     options: UpsertOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const values = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    const transformedData = transformUpdateInput(table, data);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     return client.upsert(table._table, values, options);
   }
 
@@ -2222,7 +2247,8 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    const transformedData = transformUpdateInput(table, data);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     return client.update(id, updates, options);
   }
 
@@ -2361,7 +2387,9 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const rows = await client.query(wasmQuery, options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
+      (row) => transformOutputRow(query, row),
+    );
   }
 
   /**
@@ -2475,7 +2503,14 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
+      const typedRow = transformRow(
+        row,
+        outputSchema,
+        outputTable,
+        outputIncludes,
+        builtQuery.select,
+      );
+      return transformOutputRow(query, typedRow);
     };
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
@@ -2697,10 +2732,14 @@ class ClientBackedDb extends Db {
       normalizeRuntimeSchema(this.runtimeClient.getSchema()),
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const transformedData = transformInsertInput(table, data);
+    const values = toInsertRecord(transformedData, inputSchema, table._table);
     return this.runtimeClient
       .createHandleInternal(table._table, values, this.session, this.attribution, options)
-      .mapValue((row) => transformRow(row, table._schema, table._table));
+      .mapValue((row) => {
+        const typedRow = transformRow(row, table._schema, table._table);
+        return transformOutputRow(table, typedRow);
+      });
   }
 
   override upsert<T, Init>(
@@ -2712,7 +2751,8 @@ class ClientBackedDb extends Db {
       normalizeRuntimeSchema(this.runtimeClient.getSchema()),
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const values = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const transformedData = transformUpdateInput(table, data);
+    const values = toUpdateRecord(transformedData, inputSchema, table._table);
     return this.runtimeClient.upsertHandleInternal(
       table._table,
       values,
@@ -2733,7 +2773,8 @@ class ClientBackedDb extends Db {
       normalizeRuntimeSchema(this.runtimeClient.getSchema()),
     );
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
-    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const transformedData = transformUpdateInput(table, data);
+    const updates = toUpdateRecord(transformedData, inputSchema, table._table);
     return this.runtimeClient.updateHandleInternal(
       id,
       updates,
@@ -2793,7 +2834,9 @@ class ClientBackedDb extends Db {
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+    return transformRows(rows, outputSchema, outputTable, outputIncludes, builtQuery.select).map(
+      (row) => transformOutputRow(query, row),
+    );
   }
 
   override async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
@@ -2823,8 +2866,16 @@ class ClientBackedDb extends Db {
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
-    const transform = (row: WasmRow): T =>
-      transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
+    const transform = (row: WasmRow): T => {
+      const typedRow = transformRow(
+        row,
+        outputSchema,
+        outputTable,
+        outputIncludes,
+        builtQuery.select,
+      );
+      return transformOutputRow(query, typedRow);
+    };
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
