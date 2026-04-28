@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  InsertHandle,
   JazzClient,
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
@@ -326,6 +327,41 @@ describe("JazzClient transactions", () => {
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+  });
+
+  it("commits a callback transaction and returns the callback result handle", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const handle = await client.transaction((tx) => {
+      expect("commit" in tx).toBe(false);
+      return { title: "Callback transaction" };
+    });
+
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(handle).toBeInstanceOf(InsertHandle);
+    expect(handle.value).toEqual({ title: "Callback transaction" });
+    await expect(handle.wait({ tier: "global" })).resolves.toEqual({
+      title: "Callback transaction",
+    });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
+  });
+
+  it("does not commit a callback transaction when the callback throws", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const error = new Error("nope");
+
+    await expect(
+      client.transaction(() => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 });
 

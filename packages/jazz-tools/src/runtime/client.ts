@@ -959,6 +959,11 @@ export class Transaction {
   }
 }
 
+/**
+ * Transaction object available inside {@link JazzClient.transaction}'s callback.
+ */
+export type TransactionScope = Omit<Transaction, "commit">;
+
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
 
@@ -1169,6 +1174,15 @@ export class SessionClient {
 
   beginTransaction(): Transaction {
     return this.client.beginTransactionInternal(this.session);
+  }
+
+  async transaction<TResult>(
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+  ): Promise<InsertHandle<Awaited<TResult>>> {
+    const transaction = this.beginTransaction();
+    const value = await callback(transaction);
+    const committed = transaction.commit();
+    return new InsertHandle(value as Awaited<TResult>, committed.batchId, this.client);
   }
 
   beginDirectBatch(): DirectBatch {
@@ -1423,6 +1437,15 @@ export class JazzClient {
 
   beginTransaction(): Transaction {
     return this.beginTransactionInternal();
+  }
+
+  async transaction<TResult>(
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+  ): Promise<InsertHandle<Awaited<TResult>>> {
+    const transaction = this.beginTransaction();
+    const value = await callback(transaction);
+    const committed = transaction.commit();
+    return new InsertHandle(value as Awaited<TResult>, committed.batchId, this);
   }
 
   beginDirectBatch(): DirectBatch {
