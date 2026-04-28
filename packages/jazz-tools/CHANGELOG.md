@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 2.0.0-alpha.41
+
+### Patch Changes
+
+- 7ed02fc: Add `schema.defineSliceableApp(schema).slice(...)` for deriving smaller typed app surfaces backed by one complete runtime schema.
+- 6585b53: Add transformed columns to the TypeScript schema DSL.
+
+  Column definers like `s.string()`, `s.boolean()`, and `s.int()` now support `.transform({ from, to })`, allowing apps to expose a transformed TypeScript value while storing the underlying column's normal SQL type. Transforms apply on rows returned from reads and subscriptions, and in reverse before inserts and updates.
+  - jazz-wasm@2.0.0-alpha.41
+  - jazz-rn@2.0.0-alpha.41
+
 ## 2.0.0-alpha.40
 
 ### Patch Changes
