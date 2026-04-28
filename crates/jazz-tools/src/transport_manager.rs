@@ -61,6 +61,13 @@ pub struct TransportHandle {
     pub outbox_tx: mpsc::UnboundedSender<OutboxEntry>,
     pub inbound_rx: mpsc::UnboundedReceiver<TransportInbound>,
     pub ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Async signal that flips to `true` on the first successful handshake.
+    /// Callers can `clone()` the receiver and `await` `wait_for(|v| *v)` to
+    /// be notified without polling. Kept alongside `ever_connected` so the
+    /// wasm transport and other non-native wait paths can still read the
+    /// latched state synchronously.
+    #[cfg(feature = "transport-websocket")]
+    pub(crate) connected_rx: tokio::sync::watch::Receiver<bool>,
     pub control_tx: mpsc::UnboundedSender<TransportControl>,
     /// Client's current catalogue-state digest. The TransportManager reads
     /// this at each handshake attempt so reconnects can tell the server
@@ -259,6 +266,12 @@ pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     reconnect: ReconnectState,
     pub client_id: ClientId,
     ever_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Sender side of the handshake-completion watch. Held by the manager
+    /// task so it can broadcast `true` once on the first handshake. Only
+    /// present for the native Tokio WebSocket wait path; the wasm transport
+    /// relies solely on the `AtomicBool` above.
+    #[cfg(feature = "transport-websocket")]
+    connected_tx: tokio::sync::watch::Sender<bool>,
     control_rx: mpsc::UnboundedReceiver<TransportControl>,
     /// Shared with `TransportHandle::catalogue_state_hash`. Read at each
     /// handshake attempt so reconnects can reflect catalogue changes.
@@ -280,6 +293,8 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     let (inbound_tx, inbound_rx) = mpsc::unbounded();
     let (control_tx, control_rx) = mpsc::unbounded();
     let ever_connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(feature = "transport-websocket")]
+    let (connected_tx, connected_rx) = tokio::sync::watch::channel(false);
     let catalogue_state_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let declared_schema_hash = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let handle = TransportHandle {
@@ -288,6 +303,8 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         outbox_tx,
         inbound_rx,
         ever_connected: ever_connected.clone(),
+        #[cfg(feature = "transport-websocket")]
+        connected_rx,
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
         declared_schema_hash: declared_schema_hash.clone(),
@@ -302,6 +319,8 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         reconnect: ReconnectState::new(),
         client_id,
         ever_connected,
+        #[cfg(feature = "transport-websocket")]
+        connected_tx,
         control_rx,
         catalogue_state_hash,
         declared_schema_hash,
@@ -501,6 +520,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 ControlOrPhase::Phase(HandshakeResult::Connected(resp)) => {
                     self.ever_connected
                         .store(true, std::sync::atomic::Ordering::Release);
+                    #[cfg(feature = "transport-websocket")]
+                    let _ = self.connected_tx.send(true);
                     let _ = self.inbound_tx.unbounded_send(TransportInbound::Connected {
                         catalogue_state_hash: resp.catalogue_state_hash,
                         next_sync_seq: resp.next_sync_seq,
