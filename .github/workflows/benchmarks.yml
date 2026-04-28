@@ -656,4 +656,12 @@ jobs:
           fi
           git commit -m "bench: update realistic benchmark site (${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT})"
           git pull --rebase origin main
-          git push origin HEAD:main
+          push_output="$(git push origin HEAD:main 2>&1)" && push_status=0 || push_status=$?
+          printf '%s\n' "$push_output"
+          if [ "$push_status" -ne 0 ]; then
+            if printf '%s' "$push_output" | grep -qE "protected branch|GH006"; then
+              echo "::warning::Cannot push benchmark history to protected main; the site artifact is uploaded for follow-up."
+              exit 0
+            fi
+            exit "$push_status"
+          fi
