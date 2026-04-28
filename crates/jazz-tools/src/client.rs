@@ -177,7 +177,7 @@ impl JazzClient {
             // `batched_tick` handles `TransportInbound::Connected` automatically —
             // it calls `add_server_with_catalogue_state_hash` — so we only need
             // to gate here until that first tick fires.
-            tokio::time::timeout(
+            let connected = tokio::time::timeout(
                 Duration::from_secs(10),
                 runtime.transport_wait_until_connected(),
             )
@@ -187,6 +187,11 @@ impl JazzClient {
                     "timed out waiting for WebSocket handshake to complete".to_string(),
                 )
             })?;
+            if !connected {
+                return Err(JazzError::Connection(
+                    "transport closed before WebSocket handshake completed".to_string(),
+                ));
+            }
         }
 
         Ok(Self {
