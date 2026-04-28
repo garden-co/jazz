@@ -64,6 +64,36 @@ const graphSchema = {
 type GraphAppSchema = s.Schema<typeof graphSchema>;
 const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
 
+const largeSchema = {
+  accounts: s.table({
+    name: s.string(),
+  }),
+  workspaces: s.table({
+    name: s.string(),
+    accountId: s.ref("accounts"),
+  }),
+  catalog_items: s.table({
+    title: s.string(),
+    workspaceId: s.ref("workspaces"),
+  }),
+  orders: s.table({
+    number: s.string(),
+    catalogItemId: s.ref("catalog_items"),
+    buyerId: s.ref("users"),
+  }),
+  shipments: s.table({
+    trackingCode: s.string(),
+    orderId: s.ref("orders"),
+  }),
+  users: s.table({
+    name: s.string(),
+  }),
+  support_tickets: s.table({
+    workspaceId: s.ref("workspaces"),
+    requesterId: s.ref("users"),
+  }),
+};
+
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
@@ -326,6 +356,95 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
+    }
+  });
+
+  it("creates typed app slices over one full runtime schema", () => {
+    const sliceableApp = s.defineSliceableApp(largeSchema);
+    const commerceApp = sliceableApp.slice(
+      "accounts",
+      "workspaces",
+      "catalog_items",
+      "orders",
+      "shipments",
+    );
+    const supportApp = sliceableApp.slice("accounts", "workspaces", "support_tickets");
+
+    expect(commerceApp.wasmSchema).toBe(sliceableApp.wasmSchema);
+    expect(supportApp.wasmSchema).toBe(sliceableApp.wasmSchema);
+    expect(() => (sliceableApp.slice as (...tables: string[]) => unknown)()).toThrow(
+      "slice(...) requires at least one table name.",
+    );
+    expect(() => (sliceableApp.slice as (...tables: string[]) => unknown)("missing")).toThrow(
+      'slice(...) references unknown table "missing".',
+    );
+    expect(Object.keys(commerceApp.wasmSchema).sort()).toEqual([
+      "accounts",
+      "catalog_items",
+      "orders",
+      "shipments",
+      "support_tickets",
+      "users",
+      "workspaces",
+    ]);
+    expect(JSON.parse(commerceApp.orders.include({ catalogItem: true })._build())).toEqual({
+      table: "orders",
+      conditions: [],
+      includes: { catalogItem: true },
+      orderBy: [],
+      hops: [],
+    });
+
+    type OrderRow = s.RowOf<typeof commerceApp.orders>;
+    type OrderWithCatalogItem = s.RowOf<
+      ReturnType<typeof commerceApp.orders.include<{ catalogItem: true }>>
+    >;
+    type CatalogItemWithOrders = s.RowOf<
+      ReturnType<
+        typeof commerceApp.catalog_items.include<{
+          ordersViaCatalogItem: typeof commerceApp.orders;
+        }>
+      >
+    >;
+    type WorkspaceWithSupportTickets = s.RowOf<
+      ReturnType<typeof supportApp.workspaces.include<{ support_ticketsViaWorkspace: true }>>
+    >;
+
+    const orderRow = {} as OrderRow;
+    const orderWithCatalogItem = {} as OrderWithCatalogItem;
+    const catalogItemWithOrders = {} as CatalogItemWithOrders;
+    const workspaceWithSupportTickets = {} as WorkspaceWithSupportTickets;
+
+    expectTypeOf(orderRow.buyerId).toEqualTypeOf<string>();
+    expectTypeOf(orderWithCatalogItem.catalogItem).toEqualTypeOf<{
+      id: string;
+      title: string;
+      workspaceId: string;
+    } | null>();
+    expectTypeOf(catalogItemWithOrders.ordersViaCatalogItem).toEqualTypeOf<OrderRow[]>();
+    expectTypeOf(workspaceWithSupportTickets.support_ticketsViaWorkspace).toEqualTypeOf<
+      Array<{
+        id: string;
+        workspaceId: string;
+        requesterId: string;
+      }>
+    >();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error the full app does not expose a typed global table graph
+      void sliceableApp.orders;
+
+      // @ts-expect-error only selected tables are exposed on this slice
+      void commerceApp.support_tickets;
+
+      // @ts-expect-error refs outside the slice stay scalar ids, not relations
+      commerceApp.orders.include({ buyer: true });
+
+      // @ts-expect-error reverse relations are derived only from the selected slice tables
+      commerceApp.workspaces.include({ support_ticketsViaWorkspace: true });
+
+      // @ts-expect-error unknown slice table
+      sliceableApp.slice("accounts", "missing");
     }
   });
 });
