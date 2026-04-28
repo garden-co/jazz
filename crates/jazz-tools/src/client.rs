@@ -111,6 +111,25 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .and_then(session_from_unverified_jwt)
 }
 
+async fn wait_for_initial_transport_handshake(
+    runtime: &ClientRuntime,
+    timeout_after: Duration,
+) -> Result<()> {
+    let connected = tokio::time::timeout(timeout_after, runtime.transport_wait_until_connected())
+        .await
+        .map_err(|_| {
+            JazzError::Connection(
+                "timed out waiting for WebSocket handshake to complete".to_string(),
+            )
+        })?;
+    if !connected {
+        return Err(JazzError::Connection(
+            "transport closed before WebSocket handshake completed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
@@ -177,21 +196,7 @@ impl JazzClient {
             // `batched_tick` handles `TransportInbound::Connected` automatically —
             // it calls `add_server_with_catalogue_state_hash` — so we only need
             // to gate here until that first tick fires.
-            let connected = tokio::time::timeout(
-                Duration::from_secs(10),
-                runtime.transport_wait_until_connected(),
-            )
-            .await
-            .map_err(|_| {
-                JazzError::Connection(
-                    "timed out waiting for WebSocket handshake to complete".to_string(),
-                )
-            })?;
-            if !connected {
-                return Err(JazzError::Connection(
-                    "transport closed before WebSocket handshake completed".to_string(),
-                ));
-            }
+            wait_for_initial_transport_handshake(&runtime, Duration::from_secs(10)).await?;
         }
 
         Ok(Self {
@@ -1040,6 +1045,30 @@ mod tests {
             default_session_from_context(&context).is_none(),
             "backend/admin clients should keep using explicit SessionClient scopes"
         );
+    }
+
+    #[tokio::test]
+    async fn initial_transport_handshake_wait_errors_when_transport_is_absent() {
+        let app_id = AppId::from_name("client-missing-transport");
+        let context = make_offline_context(
+            app_id,
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        );
+        let storage: DynStorage = Box::new(MemoryStorage::new());
+        let schema_manager =
+            build_client_schema_manager(storage.as_ref(), &context).expect("schema manager");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry: OutboxEntry| {});
+
+        let result = wait_for_initial_transport_handshake(&runtime, Duration::from_secs(1)).await;
+
+        match result {
+            Err(JazzError::Connection(message)) => assert_eq!(
+                message,
+                "transport closed before WebSocket handshake completed"
+            ),
+            other => panic!("expected connection error for missing transport, got {other:?}"),
+        }
     }
 
     #[test]
