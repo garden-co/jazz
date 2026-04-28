@@ -14,7 +14,7 @@ import {
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
-import type { QueryBuilder, RowTransform } from "./runtime/db.js";
+import type { QueryBuilder } from "./runtime/db.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
@@ -690,21 +690,6 @@ type MetaQueryBuilderShape<TMeta extends AnyTableMeta, TRow = unknown> = QueryBu
   readonly _initType: TableInitFromMeta<TMeta>;
 };
 
-export type RowTransformSpec<StoredRow, StoredInit, ViewRow, ViewInit> = {
-  row(row: StoredRow): ViewRow;
-  insert(row: ViewInit): StoredInit;
-  update(row: Partial<ViewInit>): Partial<StoredInit>;
-};
-
-type TransformedQueryHandle<
-  TMeta extends AnyTableMeta,
-  TInclude extends BuilderInclude<TMeta>,
-  TSelection extends TableSelectableFromMeta<TMeta>,
-  TRequired extends boolean,
-  ViewRow,
-  ViewInit,
-> = TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired, ViewRow, ViewInit>;
-
 type BuilderInclude<TMeta extends AnyTableMeta> = {
   [TRelation in RelationNameFromMeta<TMeta>]?:
     | true
@@ -837,13 +822,11 @@ export class TypedTableQueryBuilder<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
-  TRow = SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>,
-  TInit = TableInitFromMeta<TMeta>,
-> implements QueryBuilder<TRow> {
+> implements QueryBuilder<SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>> {
   readonly _table: TableNameFromMeta<TMeta>;
   readonly _schema: WasmSchema;
-  declare readonly _rowType: TRow;
-  declare readonly _initType: TInit;
+  declare readonly _rowType: SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>;
+  declare readonly _initType: TableInitFromMeta<TMeta>;
   private _conditions: BuiltCondition[] = [];
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
@@ -854,35 +837,26 @@ export class TypedTableQueryBuilder<
   private _hops: string[] = [];
   private _gatherVal?: BuiltGather;
   private _unionVal?: BuiltRelation;
-  _rowTransform?: RowTransform;
 
-  constructor(table: TableNameFromMeta<TMeta>, schema: WasmSchema, rowTransform?: RowTransform) {
+  constructor(table: TableNameFromMeta<TMeta>, schema: WasmSchema) {
     this._table = table;
     this._schema = schema;
-    this._rowTransform = rowTransform;
   }
 
   where(
     conditions: TableWhereFromMeta<TMeta>,
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
+  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
-    const clone = this._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+    const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._conditions.push(...this._whereConditions(conditions as Record<string, unknown>));
     return clone;
   }
 
   select<NewSelection extends TableSelectableFromMeta<TMeta>>(
     ...columns: [NewSelection, ...NewSelection[]]
-  ): MetaQueryHandle<
-    TMeta,
-    TInclude,
-    NewSelection,
-    TRequired,
-    SelectedWithIncludesFromMeta<TMeta, TInclude, NewSelection, TRequired>,
-    TInit
-  > {
+  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
     const clone = this._clone<TInclude, NewSelection, TRequired>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -890,27 +864,13 @@ export class TypedTableQueryBuilder<
 
   include<NewInclude extends BuilderInclude<TMeta>>(
     relations: NewInclude,
-  ): MetaQueryHandle<
-    TMeta,
-    TInclude & NewInclude,
-    TSelection,
-    TRequired,
-    SelectedWithIncludesFromMeta<TMeta, TInclude & NewInclude, TSelection, TRequired>,
-    TInit
-  > {
+  ): MetaQueryHandle<TMeta, TInclude & NewInclude, TSelection, TRequired> {
     const clone = this._clone<TInclude & NewInclude, TSelection, TRequired>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  requireIncludes(): MetaQueryHandle<
-    TMeta,
-    TInclude,
-    TSelection,
-    true,
-    SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, true>,
-    TInit
-  > {
+  requireIncludes(): MetaQueryHandle<TMeta, TInclude, TSelection, true> {
     const clone = this._clone<TInclude, TSelection, true>();
     clone._requireIncludes = true;
     return clone;
@@ -919,31 +879,31 @@ export class TypedTableQueryBuilder<
   orderBy(
     column: TableOrderableFromMeta<TMeta>,
     direction: "asc" | "desc" = "asc",
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
-    const clone = this._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
-    const clone = this._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+  limit(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
-    const clone = this._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+  offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._offsetVal = n;
     return clone;
   }
 
   hopTo(
     relation: RelationNameFromMeta<TMeta>,
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
+  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
-    const clone = this._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+    const clone = this._clone<TInclude, TSelection, TRequired>();
     clone._hops.push(relation as string);
     return clone;
   }
@@ -952,7 +912,7 @@ export class TypedTableQueryBuilder<
     start?: TableWhereFromMeta<TMeta>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {
+  }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
     if (typeof options.step !== "function") {
       throw new Error("gather(...) requires step callback.");
     }
@@ -1016,8 +976,8 @@ export class TypedTableQueryBuilder<
       this._unionVal !== undefined || this._hops.length > 0 || this._gatherVal !== undefined;
     const seedSource = options.start === undefined ? this : this.where(options.start);
     const clone = needsExplicitSeed
-      ? this._clone<TInclude, TSelection, TRequired, TRow, TInit>()
-      : seedSource._clone<TInclude, TSelection, TRequired, TRow, TInit>();
+      ? this._clone<TInclude, TSelection, TRequired>()
+      : seedSource._clone<TInclude, TSelection, TRequired>();
     clone._conditions = [];
     clone._hops = [];
     clone._gatherVal = {
@@ -1031,26 +991,6 @@ export class TypedTableQueryBuilder<
     clone._unionVal = undefined;
 
     return clone;
-  }
-
-  transformed<ViewRow, ViewInit>(
-    transform: RowTransformSpec<
-      SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>,
-      TableInitFromMeta<TMeta>,
-      ViewRow,
-      ViewInit
-    >,
-  ): TransformedQueryHandle<TMeta, TInclude, TSelection, TRequired, ViewRow, ViewInit> {
-    const clone = this._clone<TInclude, TSelection, TRequired>();
-    (clone as { _rowTransform?: RowTransform })._rowTransform = transform as RowTransform;
-    return clone as unknown as TransformedQueryHandle<
-      TMeta,
-      TInclude,
-      TSelection,
-      TRequired,
-      ViewRow,
-      ViewInit
-    >;
   }
 
   _build(): string {
@@ -1077,17 +1017,11 @@ export class TypedTableQueryBuilder<
     TNewInclude extends BuilderInclude<TMeta>,
     TNewSelection extends TableSelectableFromMeta<TMeta>,
     TNewRequired extends boolean,
-    TNewRow = SelectedWithIncludesFromMeta<TMeta, TNewInclude, TNewSelection, TNewRequired>,
-    TNewInit = TInit,
-  >(): TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired, TNewRow, TNewInit> {
-    const clone = new TypedTableQueryBuilder<
-      TMeta,
-      TNewInclude,
-      TNewSelection,
-      TNewRequired,
-      TNewRow,
-      TNewInit
-    >(this._table, this._schema, this._rowTransform);
+  >(): TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired> {
+    const clone = new TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired>(
+      this._table,
+      this._schema,
+    );
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
     clone._requireIncludes = this._requireIncludes;
@@ -1136,9 +1070,7 @@ interface MetaQueryHandle<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection extends TableSelectableFromMeta<TMeta> = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
-  TRow = SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>,
-  TInit = TableInitFromMeta<TMeta>,
-> extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired, TRow, TInit> {}
+> extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired> {}
 
 export interface Query<
   TTable extends string,
@@ -1409,7 +1341,7 @@ function createAppForTables(
       return builder;
     },
     wasmSchema,
-  } as unknown as App<Schema<SchemaDefinition>>;
+  } as App<Schema<SchemaDefinition>>;
 }
 
 export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
