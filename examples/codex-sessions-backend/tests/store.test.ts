@@ -109,6 +109,41 @@ describe("CodexSessionStore", () => {
     );
   });
 
+  it("records terminal activity into session presence without rollout projection", async () => {
+    const summary = await store.recordTerminalPresence({
+      terminalSessionId: "designer-v2-wterm",
+      sessionId: "session-terminal",
+      turnId: "turn-terminal",
+      cwd: "/Users/nikitavoloboev/repos/openai/codex",
+      projectRoot: "/Users/nikitavoloboev/repos/openai/codex",
+      repoRoot: "/Users/nikitavoloboev/repos/openai/codex",
+      state: "running",
+      active: true,
+      activityPath: "/tmp/designer-v2-wterm.json",
+      updatedAtMs: Date.parse("2026-04-08T12:05:10.000Z"),
+      startedAtMs: Date.parse("2026-04-08T12:05:00.000Z"),
+      pid: 1234,
+      runtimeHost: "designer-dev",
+    });
+
+    expect(summary.session.session_id).toBe("session-terminal");
+    expect(summary.session.status).toBe("in_progress");
+    expect(summary.turns).toHaveLength(1);
+    expect(summary.turns[0]?.turn_id).toBe("turn-terminal");
+    expect(summary.turns[0]?.status).toBe("in_progress");
+    expect(summary.presence?.state).toBe("running");
+    expect(summary.presence?.current_turn_id).toBe("turn-terminal");
+    expect(summary.presence?.runtime_pid).toBe(1234);
+    expect(summary.presence?.runtime_host).toBe("designer-dev");
+    expect(summary.syncState?.absolute_path).toBe("/tmp/designer-v2-wterm.json");
+
+    const active = await store.listActiveSessionSummaries({
+      projectRoot: "/Users/nikitavoloboev/repos/openai/codex",
+      limit: 10,
+    });
+    expect(active.map((entry) => entry.presence.session_id)).toContain("session-terminal");
+  });
+
   it("creates a native Jazz run binding for every projected codex session", async () => {
     await store.replaceSessionProjection(
       {
@@ -201,6 +236,7 @@ describe("CodexSessionStore", () => {
     const adminContext = createJazzContext({
       appId: "codex-session-store-test",
       app,
+      permissions: {},
       driver: { type: "persistent", dataPath },
       env: "dev",
       userBranch: "main",
@@ -375,6 +411,7 @@ describe("CodexSessionStore", () => {
     const adminContext = createJazzContext({
       appId: "codex-session-store-test",
       app,
+      permissions: {},
       driver: { type: "persistent", dataPath },
       env: "dev",
       userBranch: "main",
@@ -659,6 +696,7 @@ describe("CodexSessionStore", () => {
     const adminContext = createJazzContext({
       appId: "codex-session-store-test",
       app,
+      permissions: {},
       driver: { type: "persistent", dataPath },
       env: "dev",
       userBranch: "main",

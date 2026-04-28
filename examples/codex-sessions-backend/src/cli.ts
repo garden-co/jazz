@@ -19,6 +19,7 @@ import {
   createCodexSessionStore,
   type CodexCompletionEvent,
   type JAgentRunSummary,
+  type RecordCodexTerminalPresenceInput,
   type RecordJAgentArtifactInput,
   type RecordJAgentAttemptCompletedInput,
   type RecordJAgentAttemptStartedInput,
@@ -446,6 +447,18 @@ function normalizeArtifactInput(input: RecordJAgentArtifactInput): RecordJAgentA
   return {
     ...input,
     path: normalizeRequiredPath(input.path),
+  };
+}
+
+function normalizeRecordCodexTerminalPresenceInput(
+  input: RecordCodexTerminalPresenceInput,
+): RecordCodexTerminalPresenceInput {
+  return {
+    ...input,
+    cwd: normalizeOptionalPath(input.cwd),
+    projectRoot: normalizeOptionalPath(input.projectRoot),
+    repoRoot: normalizeOptionalPath(input.repoRoot),
+    activityPath: normalizeOptionalPath(input.activityPath),
   };
 }
 
@@ -1257,6 +1270,92 @@ async function dispatchSessionServiceRequest(
       });
       return completions.map(asJsonLine);
     }
+<<<<<<< HEAD
+=======
+    case "upsert-definition": {
+      const input = normalizeDefinitionInput(
+        request.payload as UpsertJAgentDefinitionInput,
+      );
+      const definition = await store.upsertJAgentDefinition(input);
+      return toJAgentDefinitionRow(definition);
+    }
+    case "record-run-started": {
+      const input = normalizeRunStartedInput(
+        request.payload as RecordJAgentRunStartedInput,
+      );
+      const run = await store.recordJAgentRunStarted(input);
+      return toJAgentRunRow(run);
+    }
+    case "record-terminal-presence": {
+      const summary = await store.recordTerminalPresence(
+        normalizeRecordCodexTerminalPresenceInput(
+          request.payload as RecordCodexTerminalPresenceInput,
+        ),
+      );
+      return summary;
+    }
+    case "record-run-completed": {
+      const run = await store.recordJAgentRunCompleted(
+        request.payload as RecordJAgentRunCompletedInput,
+      );
+      return toJAgentRunRow(run);
+    }
+    case "record-step-started": {
+      const step = await store.recordJAgentStepStarted(
+        request.payload as RecordJAgentStepStartedInput,
+      );
+      return toJAgentStepRow(step);
+    }
+    case "record-step-completed": {
+      const step = await store.recordJAgentStepCompleted(
+        request.payload as RecordJAgentStepCompletedInput,
+      );
+      return toJAgentStepRow(step);
+    }
+    case "record-attempt-started": {
+      const attempt = await store.recordJAgentAttemptStarted(
+        request.payload as RecordJAgentAttemptStartedInput,
+      );
+      return toJAgentAttemptRow(attempt);
+    }
+    case "record-attempt-completed": {
+      const attempt = await store.recordJAgentAttemptCompleted(
+        request.payload as RecordJAgentAttemptCompletedInput,
+      );
+      return toJAgentAttemptRow(attempt);
+    }
+    case "record-wait-started": {
+      const wait = await store.recordJAgentWaitStarted(
+        request.payload as RecordJAgentWaitStartedInput,
+      );
+      return toJAgentWaitRow(wait);
+    }
+    case "resolve-wait": {
+      const wait = await store.recordJAgentWaitResolved(
+        request.payload as RecordJAgentWaitResolvedInput,
+      );
+      return toJAgentWaitRow(wait);
+    }
+    case "bind-session": {
+      const binding = await store.bindJAgentSession(
+        request.payload as BindJAgentSessionInput,
+      );
+      return toJAgentSessionBindingRow(binding);
+    }
+    case "record-artifact": {
+      const input = normalizeArtifactInput(
+        request.payload as RecordJAgentArtifactInput,
+      );
+      const artifact = await store.recordJAgentArtifact(input);
+      return toJAgentArtifactRow(artifact);
+    }
+    case "record-event": {
+      const event = await store.recordJAgentEvent(
+        request.payload as RecordJAgentEventInput,
+      );
+      return toJAgentEventRow(event);
+    }
+>>>>>>> 231c3091 (fix(jazz2): harden conversation-turn commits)
     default:
       throw new Error(`Unsupported session service method: ${request.method}`);
   }
@@ -2245,6 +2344,15 @@ async function main(): Promise<void> {
       const input = normalizeRunStartedInput(readJsonInput<RecordJAgentRunStartedInput>(command));
       const run = await store.recordJAgentRunStarted(input);
       console.log(JSON.stringify(toJAgentRunRow(run)));
+      return;
+    }
+
+    if (command === "record-terminal-presence") {
+      const input = normalizeRecordCodexTerminalPresenceInput(
+        readJsonInput<RecordCodexTerminalPresenceInput>(command),
+      );
+      const summary = await store.recordTerminalPresence(input);
+      console.log(JSON.stringify(summary));
       return;
     }
 
