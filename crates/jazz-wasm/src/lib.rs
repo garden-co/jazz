@@ -62,6 +62,11 @@ pub use runtime::WasmRuntime;
 
 use wasm_bindgen::prelude::*;
 
+use jazz_tools::sync_manager::SyncPayload;
+use jazz_tools::sync_payload_telemetry::{
+    log_body_for_payload, FieldDerivation, SyncPayloadTelemetryFields,
+};
+
 /// Initialize the WASM module.
 ///
 /// Sets up panic hook for better error messages in the browser console.
@@ -97,4 +102,34 @@ pub fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+/// Decode a sync payload for browser-side dev telemetry.
+#[wasm_bindgen(js_name = decodeSyncPayloadForTelemetry)]
+pub fn decode_sync_payload_for_telemetry(payload: JsValue) -> Result<JsValue, JsError> {
+    let payload = parse_sync_payload_for_telemetry(payload)?;
+    let fields =
+        SyncPayloadTelemetryFields::records_from_payload(&payload, FieldDerivation::default());
+    let log_body = log_body_for_payload(&payload);
+    let payload_json = serde_json::json!({
+        "ok": true,
+        "records": fields,
+        "logBody": log_body,
+    });
+    Ok(serde_wasm_bindgen::to_value(&payload_json)?)
+}
+
+fn parse_sync_payload_for_telemetry(payload: JsValue) -> Result<SyncPayload, JsError> {
+    if let Some(json) = payload.as_string() {
+        SyncPayload::from_json(&json)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+    } else if payload.is_instance_of::<js_sys::Uint8Array>() {
+        let bytes = js_sys::Uint8Array::new(&payload).to_vec();
+        SyncPayload::from_bytes(&bytes)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+    } else {
+        Err(JsError::new(
+            "Invalid sync payload type: expected Uint8Array or JSON string",
+        ))
+    }
 }

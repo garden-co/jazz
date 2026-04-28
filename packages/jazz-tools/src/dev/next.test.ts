@@ -14,6 +14,8 @@ const PRODUCTION_BUILD_PHASE = "phase-production-build";
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
+const originalSyncPayloadTelemetryIngestUrl =
+  process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
 
 async function resolveWrappedConfig(
   wrapped: ReturnType<typeof withJazz>,
@@ -29,6 +31,7 @@ async function resolveWrappedConfig(
 beforeEach(async () => {
   delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   delete process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
 
@@ -55,6 +58,13 @@ afterEach(async () => {
     delete process.env.NEXT_PUBLIC_JAZZ_APP_ID;
   } else {
     process.env.NEXT_PUBLIC_JAZZ_APP_ID = originalJazzAppId;
+  }
+
+  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
+    delete process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  } else {
+    process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
+      originalSyncPayloadTelemetryIngestUrl;
   }
 });
 
@@ -195,6 +205,8 @@ describe("withJazz", () => {
       url: "http://127.0.0.1:19992",
       dataDir: "/tmp/jazz-next-telemetry-test",
       adminSecret: "next-telemetry-admin",
+      syncPayloadTelemetryIngestUrl:
+        "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -213,12 +225,18 @@ describe("withJazz", () => {
       },
     );
 
-    await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+    const resolved = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
 
     expect(startSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetry: true,
       }),
+    );
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
+      "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+    );
+    expect(process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
+      "http://127.0.0.1:19992/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
     );
   });
 

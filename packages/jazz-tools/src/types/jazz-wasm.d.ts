@@ -20,6 +20,11 @@ declare module "jazz-wasm" {
 
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
+  export function decodeSyncPayloadForTelemetry(payload: string | Uint8Array): {
+    ok: true;
+    records: Array<Record<string, unknown>>;
+    logBody?: unknown;
+  };
 
   export class WasmRuntime {
     constructor(

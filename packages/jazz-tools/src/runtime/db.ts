@@ -94,6 +94,8 @@ export interface DbConfig {
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
+  /** Optional endpoint for fire-and-forget sync payload telemetry records. */
+  syncPayloadTelemetryIngestUrl?: string;
   /** Optional runtime source overrides for WASM and worker loading. */
   runtimeSources?: RuntimeSourcesConfig;
   /** Environment (e.g., "dev", "prod") */
@@ -143,6 +145,38 @@ function trimOptionalString(value?: string | null): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function readPublicSyncPayloadTelemetryIngestUrlEnv(): string | undefined {
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const candidates = [
+    metaEnv?.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
+    metaEnv?.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
+    metaEnv?.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL,
+    typeof process !== "undefined" && process.env
+      ? process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      : undefined,
+    typeof process !== "undefined" && process.env
+      ? process.env.NEXT_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      : undefined,
+    typeof process !== "undefined" && process.env
+      ? process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      : undefined,
+    typeof process !== "undefined" && process.env
+      ? process.env.EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL
+      : undefined,
+  ];
+
+  for (const candidate of candidates) {
+    const value = trimOptionalString(candidate);
+    if (value) return value;
+  }
+}
+
+function resolveDbConfigDefaults(config: DbConfig): DbConfig {
+  if (config.syncPayloadTelemetryIngestUrl) return config;
+  const syncPayloadTelemetryIngestUrl = readPublicSyncPayloadTelemetryIngestUrlEnv();
+  return syncPayloadTelemetryIngestUrl ? { ...config, syncPayloadTelemetryIngestUrl } : config;
 }
 
 /** @internal Derive the default browser persistence namespace for this Db config. */
@@ -960,9 +994,9 @@ export class Db {
     wasmModule: WasmModule | null,
     authStateOptions?: AuthStateStoreOptions,
   ) {
-    this.config = config;
+    this.config = resolveDbConfigDefaults(config);
     this.wasmModule = wasmModule;
-    this.authStateStore = createAuthStateStore(config, authStateOptions);
+    this.authStateStore = createAuthStateStore(this.config, authStateOptions);
   }
 
   /** @internal Store the seed used for local-first auth and schedule token refresh. */
@@ -1335,6 +1369,7 @@ export class Db {
       runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
+      syncPayloadTelemetryIngestUrl: this.config.syncPayloadTelemetryIngestUrl,
     };
   }
 

@@ -12,6 +12,8 @@ const dev = await import("./index.js");
 const tempRoots = createTempRootTracker();
 const originalJazzAppId = process.env.PUBLIC_JAZZ_APP_ID;
 const originalJazzServerUrl = process.env.PUBLIC_JAZZ_SERVER_URL;
+const originalSyncPayloadTelemetryIngestUrl =
+  process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
 const originalBackendSecret = process.env.BACKEND_SECRET;
 
 function makeViteServer(
@@ -33,6 +35,7 @@ function makeViteServer(
 beforeEach(() => {
   delete process.env.PUBLIC_JAZZ_APP_ID;
   delete process.env.PUBLIC_JAZZ_SERVER_URL;
+  delete process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
   delete process.env.BACKEND_SECRET;
 });
@@ -57,6 +60,13 @@ afterEach(async () => {
     delete process.env.PUBLIC_JAZZ_SERVER_URL;
   } else {
     process.env.PUBLIC_JAZZ_SERVER_URL = originalJazzServerUrl;
+  }
+
+  if (originalSyncPayloadTelemetryIngestUrl === undefined) {
+    delete process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  } else {
+    process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
+      originalSyncPayloadTelemetryIngestUrl;
   }
 
   if (originalBackendSecret === undefined) {
@@ -189,6 +199,8 @@ describe("jazzSvelteKit", () => {
       url: "http://127.0.0.1:19991",
       dataDir: "/tmp/jazz-sveltekit-telemetry-test",
       adminSecret: "sveltekit-telemetry-admin",
+      syncPayloadTelemetryIngestUrl:
+        "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
       stop: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc" });
@@ -202,14 +214,19 @@ describe("jazzSvelteKit", () => {
         telemetry: false,
       },
     });
-    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(
-      makeViteServer("serve", root),
-    );
+    const viteServer = makeViteServer("serve", root);
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     expect(startSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetry: false,
       }),
+    );
+    expect(viteServer.config.env!.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
+      "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
+    );
+    expect(process.env.PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL).toBe(
+      "http://127.0.0.1:19991/apps/00000000-0000-0000-0000-000000000001/dev/sync-payload-telemetry",
     );
   });
 

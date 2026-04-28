@@ -55,6 +55,8 @@ import { Db } from "./db.js";
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
+const originalViteSyncPayloadTelemetryIngestUrl =
+  process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
 
 afterEach(() => {
   loadWasmModuleMock.mockClear();
@@ -75,6 +77,13 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>).Worker;
   } else {
     (globalThis as Record<string, unknown>).Worker = originalWorker;
+  }
+
+  if (originalViteSyncPayloadTelemetryIngestUrl === undefined) {
+    delete process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL;
+  } else {
+    process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
+      originalViteSyncPayloadTelemetryIngestUrl;
   }
 });
 
@@ -241,6 +250,85 @@ describe("Db worker runtime bootstrap", () => {
     await db.shutdown();
 
     expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
+  });
+
+  it("passes explicit sync payload telemetry ingest URL to the worker bridge", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await Db.createWithWorker({
+      appId: "worker-bootstrap-sync-telemetry",
+      driver: { type: "persistent", dbName: "worker-bootstrap-sync-telemetry" },
+      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+    });
+
+    const options = (db as any).buildWorkerBridgeOptions("{}");
+    await db.shutdown();
+
+    expect(options.syncPayloadTelemetryIngestUrl).toBe(
+      "http://localhost:3000/dev/sync-payload-telemetry",
+    );
+  });
+
+  it("defaults sync payload telemetry ingest URL from public framework env vars", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    process.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
+      "http://localhost:3000/env-sync-payload-telemetry";
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await Db.createWithWorker({
+      appId: "worker-bootstrap-env-sync-telemetry",
+      driver: { type: "persistent", dbName: "worker-bootstrap-env-sync-telemetry" },
+    });
+
+    const options = (db as any).buildWorkerBridgeOptions("{}");
+    await db.shutdown();
+
+    expect(options.syncPayloadTelemetryIngestUrl).toBe(
+      "http://localhost:3000/env-sync-payload-telemetry",
+    );
   });
 
   it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {
