@@ -143,7 +143,7 @@ npx tsx src/index.ts
 Try it out with a self-signed dev token:
 
 ```bash title="Terminal"
-TOKEN=$(node -e 'const { mintSelfSignedToken } = require("jazz-napi"); const seed = Buffer.alloc(32, 7).toString("base64url"); console.log(mintSelfSignedToken(seed, "todo-server-ts", 3600));')
+TOKEN=$(node -e 'const { mintLocalFirstToken } = require("jazz-napi"); const seed = Buffer.alloc(32, 7).toString("base64url"); console.log(mintLocalFirstToken(seed, "todo-server-ts", 3600));')
 
 curl -X POST http://localhost:3000/api/todos \
   -H "Content-Type: application/json" \
