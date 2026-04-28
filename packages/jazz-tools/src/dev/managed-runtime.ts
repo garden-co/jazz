@@ -55,6 +55,7 @@ export type ManagedRuntime = {
   serverUrl: string;
   adminSecret: string;
   backendSecret?: string;
+  syncPayloadTelemetryIngestUrl?: string;
 };
 
 type ManagedRuntimeConfig = {
@@ -64,11 +65,13 @@ type ManagedRuntimeConfig = {
   appId: string | null;
   publicServerUrl: string | null;
   publicAppId: string | null;
+  publicSyncPayloadTelemetryIngestUrl: string | null;
 };
 
 export interface ManagedRuntimeEnvKeys {
   appId: string;
   serverUrl: string;
+  syncPayloadTelemetryIngestUrl: string;
 }
 
 function normalizeServerOption(
@@ -138,6 +141,8 @@ export class ManagedDevRuntime {
       appId: options.appId ?? null,
       publicServerUrl: process.env[this.envKeys.serverUrl] ?? null,
       publicAppId: process.env[this.envKeys.appId] ?? null,
+      publicSyncPayloadTelemetryIngestUrl:
+        process.env[this.envKeys.syncPayloadTelemetryIngestUrl] ?? null,
     };
   }
 
@@ -209,6 +214,7 @@ export class ManagedDevRuntime {
       let serverUrl: string;
       let adminSecret: string;
       let appId: string;
+      let syncPayloadTelemetryIngestUrl: string | undefined;
 
       try {
         if (serverOpt === false) {
@@ -217,6 +223,8 @@ export class ManagedDevRuntime {
 
         if (process.env[this.envKeys.serverUrl]) {
           serverUrl = process.env[this.envKeys.serverUrl]!;
+          syncPayloadTelemetryIngestUrl =
+            process.env[this.envKeys.syncPayloadTelemetryIngestUrl] || undefined;
           adminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? "";
           appId = process.env[this.envKeys.appId] ?? options.appId ?? "";
           if (!adminSecret) {
@@ -233,6 +241,8 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} app id: ${appId}`);
         } else if (typeof serverOpt === "string") {
           serverUrl = serverOpt;
+          syncPayloadTelemetryIngestUrl =
+            process.env[this.envKeys.syncPayloadTelemetryIngestUrl] || undefined;
           adminSecret = options.adminSecret ?? "";
           appId = options.appId ?? "";
           if (!adminSecret) {
@@ -281,6 +291,8 @@ export class ManagedDevRuntime {
           });
 
           serverUrl = this.serverHandle.url;
+          syncPayloadTelemetryIngestUrl =
+            this.serverHandle.syncPayloadTelemetryIngestUrl ?? undefined;
           printServerStartedBanner({
             serverUrl,
             appId,
@@ -315,11 +327,20 @@ export class ManagedDevRuntime {
 
         process.env[this.envKeys.appId] = appId;
         process.env[this.envKeys.serverUrl] = serverUrl;
+        if (syncPayloadTelemetryIngestUrl) {
+          process.env[this.envKeys.syncPayloadTelemetryIngestUrl] = syncPayloadTelemetryIngestUrl;
+        }
         if (backendSecret) {
           process.env.BACKEND_SECRET = backendSecret;
         }
 
-        this.runtime = { appId, serverUrl, adminSecret, backendSecret };
+        this.runtime = {
+          appId,
+          serverUrl,
+          adminSecret,
+          backendSecret,
+          syncPayloadTelemetryIngestUrl,
+        };
         this.runtimeConfigSignature = this.serializeConfig(this.getManagedRuntimeConfig(options));
         return this.runtime;
       } catch (error) {

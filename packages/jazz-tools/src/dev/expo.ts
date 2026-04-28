@@ -11,6 +11,7 @@ export interface ExpoConfigLike {
 const runtime = new ManagedDevRuntime({
   appId: "EXPO_PUBLIC_JAZZ_APP_ID",
   serverUrl: "EXPO_PUBLIC_JAZZ_SERVER_URL",
+  syncPayloadTelemetryIngestUrl: "EXPO_PUBLIC_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL",
 });
 
 export async function withJazz(

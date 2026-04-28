@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { decodeSyncPayloadForTelemetry } = vi.hoisted(() => ({
+  decodeSyncPayloadForTelemetry: vi.fn(),
+}));
+
+vi.mock("jazz-wasm", () => ({
+  decodeSyncPayloadForTelemetry,
+}));
+
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
@@ -115,6 +124,17 @@ function createRuntimeMock(): {
 
 describe("WorkerBridge", () => {
   const enc = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    decodeSyncPayloadForTelemetry.mockReset();
+    if (originalFetch === undefined) {
+      delete (globalThis as { fetch?: typeof fetch }).fetch;
+    } else {
+      globalThis.fetch = originalFetch;
+    }
+    vi.restoreAllMocks();
+  });
 
   it("attaches runtime server and forwards worker sync payloads to runtime", () => {
     const worker = new MockWorker();
@@ -198,6 +218,104 @@ describe("WorkerBridge", () => {
 
     await expect(initPromise).resolves.toBe("worker-client-123");
     expect(bridge.getWorkerClientId()).toBe("worker-client-123");
+  });
+
+  it("includes sync payload telemetry ingest URL in the worker init payload", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+    });
+
+    expect(worker.posted[0]).toMatchObject({
+      type: "init",
+      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+    });
+
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+    });
+
+    await expect(initPromise).resolves.toBe("worker-client-123");
+  });
+
+  it("posts decoded sync payload telemetry for main-worker sync traffic", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    decodeSyncPayloadForTelemetry
+      .mockReturnValueOnce({ ok: true, records: [{ batch: "main-to-worker" }] })
+      .mockReturnValueOnce({ ok: true, records: [{ batch: "worker-to-main" }] });
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      syncPayloadTelemetryIngestUrl: "http://localhost:3000/dev/sync-payload-telemetry",
+    });
+    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    await initPromise;
+
+    runtimeMock.emitSyncPayload("server", "server-1", enc({ id: 1 }), false);
+    await Promise.resolve();
+    worker.emitFromWorker({ type: "sync", payload: [enc({ id: 2 })] });
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:3000/dev/sync-payload-telemetry",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"direction":"main_to_worker"'),
+      }),
+    );
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toMatchObject({
+      appId: "app-1",
+      severityText: "DEBUG",
+      scope: "worker_bridge",
+      direction: "main_to_worker",
+      clientId: "worker-client-123",
+      sourcePayloadIndex: 0,
+      sourcePayloadCount: 1,
+      sourceFrameBytes: enc({ id: 1 }).byteLength,
+      batch: "main-to-worker",
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:3000/dev/sync-payload-telemetry",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"direction":"worker_to_main"'),
+      }),
+    );
+    expect(JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string)).toMatchObject({
+      appId: "app-1",
+      severityText: "DEBUG",
+      scope: "worker_bridge",
+      direction: "worker_to_main",
+      clientId: "worker-client-123",
+      sourcePayloadIndex: 0,
+      sourcePayloadCount: 1,
+      sourceFrameBytes: enc({ id: 2 }).byteLength,
+      batch: "worker-to-main",
+    });
+    expect(consoleLogSpy).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
   it("includes runtimeSources in the worker init payload", async () => {

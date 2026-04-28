@@ -28,6 +28,8 @@ export interface InitMessage {
   fallbackWasmUrl?: string;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  /** Optional endpoint for browser sync payload telemetry records. */
+  syncPayloadTelemetryIngestUrl?: string;
 }
 
 /** Forward a sync payload from main thread to worker. */

@@ -54,6 +54,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   const runtime = new ManagedDevRuntime({
     appId: "VITE_JAZZ_APP_ID",
     serverUrl: "VITE_JAZZ_SERVER_URL",
+    syncPayloadTelemetryIngestUrl: "VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL",
   });
 
   return {
@@ -94,6 +95,10 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       viteServer.config.env ??= {};
       viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
+      if (managed.syncPayloadTelemetryIngestUrl) {
+        viteServer.config.env.VITE_JAZZ_SYNC_PAYLOAD_TELEMETRY_INGEST_URL =
+          managed.syncPayloadTelemetryIngestUrl;
+      }
       console.log(
         `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
           managed.serverUrl,

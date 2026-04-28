@@ -15,6 +15,7 @@ import type {
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
 import { createSyncOutboxRouter } from "./sync-transport.js";
+import { postSyncPayloadTelemetry } from "./sync-payload-telemetry.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -31,6 +32,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  syncPayloadTelemetryIngestUrl?: string;
 }
 
 export interface PeerSyncBatch {
@@ -60,6 +62,8 @@ interface WorkerBridgeState {
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
+  appId: string | null;
+  syncPayloadTelemetryIngestUrl: string | undefined;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -103,13 +107,24 @@ export class WorkerBridge {
       peerSyncListener: null,
       authFailureListener: null,
       serverPayloadForwarder: null,
+      appId: null,
+      syncPayloadTelemetryIngestUrl: undefined,
     };
 
     // Wire worker → main: incoming sync messages from worker
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
       const msg = event.data;
       if (msg.type === "sync") {
-        for (const payload of msg.payload) {
+        const sourceFrameId = createBridgeFrameId("worker-to-main");
+        const sourceFrameBytes = sumPayloadBytes(msg.payload);
+        for (const [index, payload] of msg.payload.entries()) {
+          this.postSyncPayloadTelemetry(payload, {
+            direction: "worker_to_main",
+            sourceFrameId,
+            sourcePayloadIndex: index,
+            sourcePayloadCount: msg.payload.length,
+            sourceFrameBytes,
+          });
           this.runtime.onSyncMessageReceived(payload);
         }
       } else if (msg.type === "upstream-connected") {
@@ -177,8 +192,11 @@ export class WorkerBridge {
       runtimeSources: options.runtimeSources,
       fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
+      syncPayloadTelemetryIngestUrl: options.syncPayloadTelemetryIngestUrl,
       clientId: "", // Worker generates its own client ID for main thread
     };
+    this.state.appId = options.appId;
+    this.state.syncPayloadTelemetryIngestUrl = options.syncPayloadTelemetryIngestUrl;
 
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
@@ -374,8 +392,46 @@ export class WorkerBridge {
       type: "sync" as const,
       payload: payloads,
     };
+    const sourceFrameId = createBridgeFrameId("main-to-worker");
+    const sourceFrameBytes = sumPayloadBytes(payloads);
+    for (const [index, payload] of payloads.entries()) {
+      this.postSyncPayloadTelemetry(payload, {
+        direction: "main_to_worker",
+        sourceFrameId,
+        sourcePayloadIndex: index,
+        sourcePayloadCount: payloads.length,
+        sourceFrameBytes,
+      });
+    }
     const transfer = collectPayloadTransferables(payloads);
     this.worker.postMessage(message, transfer);
+  }
+
+  private postSyncPayloadTelemetry(
+    payload: Uint8Array | string,
+    options: {
+      direction: "main_to_worker" | "worker_to_main";
+      sourceFrameId: string;
+      sourcePayloadIndex: number;
+      sourcePayloadCount: number;
+      sourceFrameBytes: number;
+    },
+  ): void {
+    const appId = this.state.appId;
+    const ingestUrl = this.state.syncPayloadTelemetryIngestUrl;
+    if (!appId || !ingestUrl) return;
+
+    postSyncPayloadTelemetry(payload, {
+      appId,
+      ingestUrl,
+      scope: "worker_bridge",
+      direction: options.direction,
+      clientId: this.state.workerClientId,
+      sourceFrameId: options.sourceFrameId,
+      sourcePayloadIndex: options.sourcePayloadIndex,
+      sourcePayloadCount: options.sourcePayloadCount,
+      sourceFrameBytes: options.sourceFrameBytes,
+    });
   }
 
   private markUpstreamServerConnected(): void {
@@ -439,12 +495,32 @@ export class WorkerBridge {
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
     this.state.syncBatchFlushQueued = false;
+    this.state.appId = null;
+    this.state.syncPayloadTelemetryIngestUrl = undefined;
     this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }
 
 function collectPayloadTransferables(payloads: Uint8Array[]): Transferable[] {
   return payloads.map((payload) => payload.buffer);
+}
+
+function createBridgeFrameId(prefix: string): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return `${prefix}-${cryptoObj.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sumPayloadBytes(payloads: (Uint8Array | string)[]): number {
+  return payloads.reduce((total, payload) => total + messageBytes(payload), 0);
+}
+
+function messageBytes(payload: Uint8Array | string): number {
+  if (typeof payload !== "string") return payload.byteLength;
+  if (typeof TextEncoder === "undefined") return payload.length;
+  return new TextEncoder().encode(payload).byteLength;
 }
 
 /**

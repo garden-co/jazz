@@ -809,7 +809,7 @@ pub mod otel_logs {
     }
 }
 
-fn log_body_for_payload(payload: &SyncPayload) -> Option<Value> {
+pub fn log_body_for_payload(payload: &SyncPayload) -> Option<Value> {
     if !is_error_or_failure_payload(payload) {
         return None;
     }
