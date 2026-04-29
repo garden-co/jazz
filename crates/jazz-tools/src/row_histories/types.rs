@@ -16,11 +16,11 @@ use crate::row_format::{EncodingError, encode_row};
 use crate::storage::{RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
-use super::apply::{
+use super::codecs::{compute_row_digest, flat_user_values, malformed, tier_satisfies};
+use super::resolution::{
     assign_winner_ordinals, branch_frontier, build_computed_visible_preview,
     latest_visible_version_for_tier, preview_override_sidecar,
 };
-use super::codecs::{compute_row_digest, flat_user_values, malformed, tier_satisfies};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BatchId(pub [u8; 16]);
