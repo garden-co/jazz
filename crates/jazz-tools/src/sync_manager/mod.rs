@@ -5,7 +5,6 @@ use web_time::Instant;
 
 use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
-use crate::monotonic_clock::MonotonicClock;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
@@ -13,11 +12,15 @@ use crate::row_histories::{BatchId, RowVisibilityChange};
 use crate::storage::Storage;
 
 // Module declarations
+pub mod clock;
 pub mod forwarding;
 pub mod inbox;
 pub mod permissions;
 pub mod sync_logic;
+pub mod sync_tracer;
 pub mod types;
+
+use clock::MonotonicClock;
 
 #[cfg(test)]
 mod tests;

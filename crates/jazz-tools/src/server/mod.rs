@@ -14,6 +14,7 @@ use crate::sync_manager::{ClientId, InboxEntry, Source, SyncPayload};
 
 mod builder;
 mod hosted;
+pub mod routes;
 #[cfg(feature = "test-utils")]
 mod testing;
 
