@@ -43,20 +43,20 @@ function makeTodoQuery(
   };
 }
 
-describe("db transaction reads browser integration", () => {
-  const dbs: Db[] = [];
+const dbs: Db[] = [];
 
-  function track(db: Db): Db {
-    dbs.push(db);
-    return db;
+function track(db: Db): Db {
+  dbs.push(db);
+  return db;
+}
+
+afterEach(async () => {
+  for (const db of dbs.splice(0).reverse()) {
+    await db.shutdown();
   }
+});
 
-  afterEach(async () => {
-    for (const db of dbs.splice(0).reverse()) {
-      await db.shutdown();
-    }
-  });
-
+describe("db transaction reads browser integration", () => {
   it("shows only the current transaction's staged inserts through tx.all", async () => {
     const db = track(
       await createDb({
@@ -106,5 +106,77 @@ describe("db transaction reads browser integration", () => {
       title: "Bob draft",
       done: false,
     });
+  });
+
+  it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
+      }),
+    );
+
+    const txResult = db.transaction((tsx) => {
+      return tsx.insert(todos, { title: "Batch", done: false });
+    });
+    // No need to wait in this case, because the Db is not connected to a server
+    // await txResult.wait({ tier: "global" });
+    const insertedTodo = txResult.value;
+
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
+  it("does not commit changes if the callback rejects", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
+      }),
+    );
+
+    expect(() =>
+      db.transaction((tsx) => {
+        tsx.insert(todos, { title: "Batch", done: false });
+        throw new Error("callback failed");
+      }),
+    ).toThrow("callback failed");
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+  });
+});
+
+describe("db batch reads browser integration", () => {
+  it("commits changes once the callback resolves", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
+      }),
+    );
+
+    const batchResult = db.batch((batch) => {
+      return batch.insert(todos, { title: "Batch", done: false });
+    });
+    const insertedTodo = batchResult.value;
+
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
+  it("does not commit changes if the callback rejects", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
+      }),
+    );
+
+    expect(() =>
+      db.batch((batch) => {
+        batch.insert(todos, { title: "Batch", done: false });
+        throw new Error("callback failed");
+      }),
+    ).toThrow("callback failed");
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
 });
