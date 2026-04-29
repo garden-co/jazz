@@ -186,6 +186,10 @@ export interface QueryBuilder<T> {
 
 export type QueryOptions = QueryExecutionOptions;
 
+function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
+  return { localUpdates: "deferred", ...options };
+}
+
 export interface ActiveQuerySubscriptionTrace {
   id: string;
   query: string;
@@ -2425,9 +2429,10 @@ export class Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    await this.ensureQueryReady(options);
+    const queryOptions = ordinaryDbQueryOptions(options);
+    await this.ensureQueryReady(queryOptions);
     const wasmQuery = translateQuery(builderJson, planningSchema);
-    const rows = await client.query(wasmQuery, options);
+    const rows = await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -2562,11 +2567,22 @@ export class Db {
       callback(typedDelta);
     };
 
+    const queryOptions = ordinaryDbQueryOptions(options);
     const subId =
       session !== undefined
-        ? client.subscribeInternal(wasmQuery, handleDelta, session, options, runtimeSchema.peek())
-        : client.subscribe(wasmQuery, handleDelta, options);
-    const traceId = this.registerActiveQuerySubscriptionTrace(wasmQuery, builtQuery.table, options);
+        ? client.subscribeInternal(
+            wasmQuery,
+            handleDelta,
+            session,
+            queryOptions,
+            runtimeSchema.peek(),
+          )
+        : client.subscribe(wasmQuery, handleDelta, queryOptions);
+    const traceId = this.registerActiveQuerySubscriptionTrace(
+      wasmQuery,
+      builtQuery.table,
+      queryOptions,
+    );
 
     // Return unsubscribe function
     return () => {
@@ -2867,11 +2883,12 @@ class ClientBackedDb extends Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    await this.ensureQueryReady(options);
+    const queryOptions = ordinaryDbQueryOptions(options);
+    await this.ensureQueryReady(queryOptions);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
-      options,
+      queryOptions,
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
@@ -2927,7 +2944,7 @@ class ClientBackedDb extends Db {
         callback(typedDelta);
       },
       this.session,
-      options,
+      ordinaryDbQueryOptions(options),
       runtimeSchema.peek(),
     );
 

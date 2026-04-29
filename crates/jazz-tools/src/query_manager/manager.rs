@@ -188,9 +188,6 @@ pub(crate) struct QuerySubscription {
     pub(crate) durability_tier: Option<DurabilityTier>,
     /// How local writes behave while waiting for durability.
     pub(crate) local_updates: LocalUpdates,
-    /// Whether accepted transactional batches must be complete for the
-    /// query's current local scope before becoming visible.
-    pub(crate) strict_transactions: bool,
     /// True when this subscription observed a local write since last delivery.
     pub(crate) has_pending_local_updates: bool,
     /// Row ids that should use the local current version as an overlay while
@@ -1196,6 +1193,10 @@ impl QueryManager {
                             durability_tier,
                             local_pending_version,
                             !subscription.local_overlay_rows.is_empty(),
+                            !subscription.local_overlay_rows.is_empty()
+                                || (subscription.sync_backed
+                                    && subscription.durability_tier.is_some()
+                                    && subscription.local_updates == LocalUpdates::Immediate),
                             include_deleted,
                             schema_context,
                             branch_schema_map,
@@ -1265,13 +1266,11 @@ impl QueryManager {
                 );
             }
 
-            if subscription.strict_transactions {
-                visible_tuples = self.filter_strict_transaction_tuples(
-                    storage_ref,
-                    QueryId(sub_id.0),
-                    visible_tuples,
-                );
-            }
+            visible_tuples = self.filter_transaction_visible_tuples(
+                storage_ref,
+                QueryId(sub_id.0),
+                visible_tuples,
+            );
 
             let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
             let visible_rows_by_id: HashMap<_, _> = visible_rows
@@ -2048,6 +2047,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         local_pending_version: Option<RowBatchKey>,
         prefer_local_overlay: bool,
+        allow_staged_overlay: bool,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -2100,10 +2100,12 @@ impl QueryManager {
             exact_pending_visible_row()
                 .or_else(pending_staged_row)
                 .or_else(best_visible_row)
-        } else {
+        } else if allow_staged_overlay {
             best_visible_row()
                 .or_else(exact_pending_visible_row)
                 .or_else(pending_staged_row)
+        } else {
+            best_visible_row().or_else(exact_pending_visible_row)
         }?;
         let (table, row) = resolved;
 
@@ -2308,7 +2310,7 @@ impl QueryManager {
         }
     }
 
-    fn filter_strict_transaction_tuples(
+    fn filter_transaction_visible_tuples(
         &self,
         storage: &dyn Storage,
         query_id: QueryId,
