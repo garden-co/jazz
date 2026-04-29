@@ -42,7 +42,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::{
-    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder,
+    CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
     TestingServer as JazzTestingServer,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
@@ -1751,9 +1751,11 @@ impl DevServer {
             .with_catalogue_authority(catalogue_authority);
 
         if in_memory {
-            server_builder = server_builder.with_in_memory_storage();
+            server_builder = server_builder.with_storage(StorageBackend::InMemory);
         } else {
-            server_builder = server_builder.with_sqlite_storage(&data_dir);
+            server_builder = server_builder.with_storage(StorageBackend::Sqlite {
+                path: data_dir.clone().into(),
+            });
         }
 
         let built = server_builder

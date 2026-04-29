@@ -1712,7 +1712,7 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use crate::middleware::AuthConfig;
-    use crate::server::{CatalogueAuthorityMode, ServerBuilder, ServerState};
+    use crate::server::{CatalogueAuthorityMode, ServerBuilder, ServerState, StorageBackend};
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -1749,7 +1749,7 @@ mod tests {
 
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(auth_config)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build sync test state")
@@ -1761,7 +1761,7 @@ mod tests {
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
             .build()
             .await
@@ -1776,7 +1776,7 @@ mod tests {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
             .with_catalogue_authority(catalogue_authority)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .with_schema(schema)
             .build()
             .await
@@ -1977,7 +1977,7 @@ mod tests {
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(auth_config)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build sync test state")
@@ -2019,7 +2019,7 @@ mod tests {
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(auth_config)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build sync test state")
@@ -2061,7 +2061,7 @@ mod tests {
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(auth_config)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build sync test state")
@@ -2103,7 +2103,7 @@ mod tests {
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(auth_config)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build sync test state")
@@ -2167,7 +2167,7 @@ mod tests {
                 jwks_url: None,
                 ..Default::default()
             })
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build server state")
