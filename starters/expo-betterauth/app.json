@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "expo-betterauth",
+    "slug": "expo-betterauth",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "scheme": "expobetterauth",
+    "android": {
+      "package": "dev.jazz.starter.expobetterauth"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.starter.expobetterauth"
+    }
+  }
+}
