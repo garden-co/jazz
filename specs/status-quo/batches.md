@@ -350,7 +350,7 @@ watchers.
 A direct batch can start in two ways:
 
 - implicitly, through ordinary `insert` / `update` / `delete`
-- explicitly, through `beginDirectBatch()` / `begin_direct_batch()`
+- explicitly, through `beginBatch()` / `begin_direct_batch()`
 
 Implicit writes create a fresh one-member direct batch and seal it immediately.
 
@@ -500,7 +500,6 @@ The batch-aware TS surface lives in:
 
 Important APIs:
 
-- `client.beginDirectBatch()`
 - `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
@@ -508,7 +507,6 @@ Important APIs:
 - `client.acknowledgeRejectedBatch(batchId)`
 - `tx.commit()`
 - `batch.commit()`
-- `db.beginDirectBatch(table)`
 - `db.beginBatch(table)`
 - `db.beginTransaction(table)`
 

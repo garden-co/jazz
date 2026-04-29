@@ -1065,9 +1065,9 @@ export class DirectBatch {
 }
 
 /**
- * Direct batch object available inside {@link JazzClient.directBatch}'s callback.
+ * Batch object available inside {@link JazzClient.batch}'s callback.
  */
-export type DirectBatchScope = Omit<DirectBatch, "commit">;
+export type BatchScope = Omit<DirectBatch, "commit">;
 
 /**
  * Session-scoped client for backend operations.
@@ -1222,23 +1222,19 @@ export class SessionClient {
     return runInBatch(transaction, callback, this.client);
   }
 
-  beginDirectBatch(): DirectBatch {
-    return this.client.beginDirectBatchInternal(this.session);
-  }
-
-  directBatch<TResult>(
-    callback: (batch: DirectBatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  directBatch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
-  directBatch<TResult>(
-    callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginDirectBatch();
-    return runInBatch(batch, callback, this.client);
-  }
-
   beginBatch(): DirectBatch {
-    return this.beginDirectBatch();
+    return this.client.beginBatchInternal(this.session);
+  }
+
+  batch<TResult>(
+    callback: (batch: BatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const batch = this.beginBatch();
+    return runInBatch(batch, callback, this.client);
   }
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
@@ -1498,33 +1494,18 @@ export class JazzClient {
     return runInBatch(transaction, callback, this);
   }
 
-  beginDirectBatch(): DirectBatch {
-    return this.beginDirectBatchInternal();
-  }
-
-  directBatch<TResult>(
-    callback: (batch: DirectBatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  directBatch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
-  directBatch<TResult>(
-    callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginDirectBatch();
-    return runInBatch(batch, callback, this);
-  }
-
   beginBatch(): DirectBatch {
-    return this.beginDirectBatch();
+    return this.beginBatchInternal();
   }
 
   batch<TResult>(
-    callback: (batch: DirectBatchScope) => Promise<TResult>,
+    callback: (batch: BatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
   batch<TResult>(
-    callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginDirectBatch();
+    const batch = this.beginBatch();
     return runInBatch(batch, callback, this);
   }
 
@@ -1545,7 +1526,7 @@ export class JazzClient {
     );
   }
 
-  beginDirectBatchInternal(session?: Session, attribution?: string): DirectBatch {
+  beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
       this.createBatchContext("direct"),

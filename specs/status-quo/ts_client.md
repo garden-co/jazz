@@ -96,7 +96,6 @@ The current `Db` API centers around a small set of predictable operations:
 - `update(...)`
 - `delete(...)`
 - `subscribeAll(...)`
-- `beginDirectBatch(...)`
 - `beginBatch(...)`
 - `beginTransaction(...)`
 
@@ -110,7 +109,6 @@ now exposes explicit batch handles.
 
 At the runtime-client layer:
 
-- `client.beginDirectBatch()`
 - `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
@@ -119,7 +117,6 @@ At the runtime-client layer:
 
 At the typed `Db` layer:
 
-- `db.beginDirectBatch(table)`
 - `db.beginBatch(table)`
 - `db.beginTransaction(table)`
 
