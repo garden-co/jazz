@@ -18,7 +18,7 @@ pub mod routes;
 #[cfg(feature = "test-utils")]
 mod testing;
 
-pub use builder::{BuiltServer, ServerBuilder};
+pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub use hosted::HostedServer;
 #[cfg(feature = "test-utils")]
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
@@ -352,12 +352,12 @@ mod tests {
 
     use super::*;
     use crate::schema_manager::AppId;
-    use crate::server::builder::ServerBuilder;
+    use crate::server::builder::{ServerBuilder, StorageBackend};
 
     async fn build_test_state() -> Arc<ServerState> {
         let app_id = AppId::from_name("lifecycle-test");
         let built = ServerBuilder::new(app_id)
-            .with_in_memory_storage()
+            .with_storage(StorageBackend::InMemory)
             .build()
             .await
             .expect("build test server");
