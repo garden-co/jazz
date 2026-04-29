@@ -58,8 +58,7 @@ use crate::sync_manager::DurabilityTier;
 // Storage Types
 // ============================================================================
 
-type EncodedHistoryRowKey = (ObjectId, SharedString, BatchId);
-type EncodedTableRowHistories = BTreeMap<EncodedHistoryRowKey, Vec<u8>>;
+type EncodedTableRowHistories = BTreeMap<ObjectId, BTreeMap<(SharedString, BatchId), Vec<u8>>>;
 
 /// Errors from storage operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
