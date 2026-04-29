@@ -5921,7 +5921,7 @@ db.onMutationError((error) => {
 Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
 
 ```ts
-const result = db.transaction(app.todos, (tx) => {
+const result = await db.transaction(app.todos, async (tx) => {
   tx.insert(app.todos, { title: "Draft copy", done: false });
   const stagedDrafts = await tx.all(app.todos.where({ done: false }));
   tx.update(app.todos, todoId, { done: true });
