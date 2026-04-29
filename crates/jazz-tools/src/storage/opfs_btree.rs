@@ -481,7 +481,7 @@ mod tests {
     use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
     use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
-    use crate::test_row_history::persist_test_schema;
+    use crate::test_support::persist_test_schema;
 
     fn users_test_schema() -> crate::query_manager::types::Schema {
         SchemaBuilder::new()
