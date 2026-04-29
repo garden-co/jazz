@@ -80,6 +80,19 @@ export class Db extends RuntimeDb {
     }
     this.nativeClients.clear();
   }
+
+  // The base implementation needs a WASM module to mint the proof. RN has no
+  // WASM module, so route through jazz-rn's native binding instead.
+  override async getLocalFirstIdentityProof(options?: {
+    ttlSeconds?: number;
+    audience?: string;
+  }): Promise<string | null> {
+    const secret = this.nativeConfig.secret;
+    if (!secret) return null;
+    const ttl = BigInt(options?.ttlSeconds ?? 60);
+    const audience = options?.audience ?? this.nativeConfig.appId;
+    return jazzRn.jazz_rn.mintLocalFirstToken(secret, audience, ttl);
+  }
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
