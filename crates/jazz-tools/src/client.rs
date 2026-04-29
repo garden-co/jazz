@@ -275,7 +275,6 @@ impl JazzClient {
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
-                    strict_transactions: false,
                 },
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;
@@ -692,7 +691,6 @@ impl<'a> SessionClient<'a> {
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
-                    strict_transactions: false,
                 },
             )
             .map_err(|e| JazzError::Query(e.to_string()))?;

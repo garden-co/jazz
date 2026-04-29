@@ -2,6 +2,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPlugin } from "./vite.js";
+import * as devServer from "./dev-server.js";
+import * as schemaWatcher from "./schema-watcher.js";
 import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
@@ -20,6 +22,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await tempRoots.cleanup();
 
   if (originalJazzServerUrl === undefined) {
@@ -212,6 +215,52 @@ describe("jazzPlugin", () => {
       await handler();
     }
   }, 30_000);
+
+  it("sends a full-reload to the browser on a successful schema watch push", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000060",
+      port: 19880,
+      url: "http://127.0.0.1:19880",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    let capturedOnPush: ((hash: string) => void) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      capturedOnPush = opts.onPush;
+      return { close: vi.fn() };
+    });
+
+    const schemaDir = await tempRoots.create("jazz-vite-reload-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const wsSend = vi.fn();
+    const fakeViteServer = {
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, _cb: () => void) {},
+      },
+      ws: { send: wsSend },
+    };
+
+    const plugin = jazzPlugin({
+      server: { port: 19880, adminSecret: "vite-reload-admin" },
+      schemaDir,
+    });
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    expect(capturedOnPush).toBeDefined();
+    capturedOnPush!("abc123def4567890");
+
+    expect(wsSend).toHaveBeenCalledWith({ type: "full-reload" });
+  });
 
   it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {
     const port = await getAvailablePort();
