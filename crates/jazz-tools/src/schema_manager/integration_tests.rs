@@ -14,7 +14,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
     };
-    use crate::row_histories::{RowState, StoredRowBatch, VisibleRowEntry};
+    use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
@@ -226,6 +226,20 @@ mod tests {
         let results = qm.get_subscription_results(sub_id);
         qm.unsubscribe_with_sync(sub_id);
         results
+    }
+
+    fn load_single_staged_history_row(
+        storage: &MemoryStorage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> StoredRowBatch {
+        let rows = storage
+            .scan_history_region(table, branch, HistoryScan::Row { row_id })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, RowState::StagingPending);
+        rows[0].clone()
     }
 
     /// Ingest a remote row batch entry on a specific branch through the storage-backed sync path.

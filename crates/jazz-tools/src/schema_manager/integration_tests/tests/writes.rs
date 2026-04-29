@@ -260,11 +260,17 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
         &mut storage,
         QueryBuilder::new("users").branch(v1_branch.clone()).build(),
     );
-    assert_eq!(target_rows.len(), 1);
-    assert_eq!(target_rows[0].0, inserted.row_id);
     assert!(
-        target_rows[0]
-            .1
+        target_rows.is_empty(),
+        "uncommitted transactional insert should not be visible to ordinary reads"
+    );
+
+    let staged_row = load_single_staged_history_row(&storage, "users", &v1_branch, inserted.row_id);
+    assert_eq!(staged_row.row_id, inserted.row_id);
+    let v1_table = v1.get(&TableName::new("users")).unwrap();
+    let staged_values = decode_row(&v1_table.columns, &staged_row.data).unwrap();
+    assert!(
+        staged_values
             .iter()
             .any(|value| value == &Value::Text("alice@example.com".to_string()))
     );
@@ -406,11 +412,17 @@ fn transactional_update_uses_frozen_target_branch_schema() {
         &mut storage,
         QueryBuilder::new("users").branch(v1_branch.clone()).build(),
     );
-    assert_eq!(target_rows.len(), 1);
-    assert_eq!(target_rows[0].0, row_id);
     assert!(
-        target_rows[0]
-            .1
+        target_rows.is_empty(),
+        "uncommitted transactional update should not be visible to ordinary reads"
+    );
+
+    let staged_row = load_single_staged_history_row(&storage, "users", &v1_branch, row_id);
+    assert_eq!(staged_row.row_id, row_id);
+    let v1_table = v1.get(&TableName::new("users")).unwrap();
+    let staged_values = decode_row(&v1_table.columns, &staged_row.data).unwrap();
+    assert!(
+        staged_values
             .iter()
             .any(|value| value == &Value::Text("alice+tx@example.com".to_string()))
     );
