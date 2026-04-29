@@ -864,9 +864,11 @@ impl QueryGraph {
             return None;
         };
 
-        // Materialize node (boundary between Phase 1 and Phase 2)
-        // Lens transforms are applied in the row_loader, so MaterializeNode uses current schema
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        // Materialize node (boundary between Phase 1 and Phase 2). Lens transforms are
+        // applied in the row_loader using the current schema, but the materialize hint
+        // still carries the resolved table name — `LensTransformer::new` needs it to
+        // translate old-branch rows into the current schema.
+        let tuple_desc = TupleDescriptor::single(plan.table, descriptor.clone());
         let materialize_node = MaterializeNode::new_all(tuple_desc);
         let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
         graph.add_edge(materialize_id, phase1_output);
