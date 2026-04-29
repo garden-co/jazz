@@ -1,5 +1,4 @@
 pub mod batch_fate;
-pub mod binding_support;
 pub mod catalogue;
 pub mod commit;
 pub mod digest;
@@ -7,11 +6,8 @@ pub mod identity;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
-mod monotonic_clock;
 pub mod object;
 pub mod query_manager;
-#[cfg(any(feature = "cli", feature = "server"))]
-pub mod routes;
 pub mod row_format;
 pub mod row_histories;
 pub mod runtime_core;
@@ -20,10 +16,14 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
-pub mod sync_tracer;
-#[cfg(test)]
-mod test_row_history;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support;
 pub mod wire_types;
+
+pub use query_manager::bindings as binding_support;
+#[cfg(any(feature = "cli", feature = "server"))]
+pub use server::routes;
+pub use sync_manager::sync_tracer;
 
 #[cfg(feature = "runtime-tokio")]
 pub mod runtime_tokio;

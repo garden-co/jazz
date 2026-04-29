@@ -28,7 +28,7 @@ use crate::storage::{
     OwnedVisibleRowBytes, RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
 };
 use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
-use crate::test_row_history::{
+use crate::test_support::{
     apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
     persist_test_schema, put_test_row_metadata, seeded_memory_storage,
 };

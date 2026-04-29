@@ -5875,7 +5875,7 @@ mod tests {
     };
     use crate::row_format::encode_row;
     use crate::row_histories::{decode_flat_history_row, encode_flat_history_row};
-    use crate::test_row_history::persist_test_schema;
+    use crate::test_support::persist_test_schema;
 
     fn users_test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![ColumnDescriptor::new("value", ColumnType::Text)])
