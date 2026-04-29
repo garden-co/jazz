@@ -146,6 +146,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager_mut()
             .sync_manager_mut()
             .discard_pending_batch_outbox(batch_id);
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .cancel_batch_to_servers(batch_id);
         self.storage
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;

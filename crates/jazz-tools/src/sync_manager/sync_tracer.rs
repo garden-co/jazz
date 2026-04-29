@@ -160,6 +160,7 @@ impl SyncMessage {
                 vec![row.batch_id()]
             }
             SyncPayload::RowBatchStateChanged { batch_id, .. } => vec![*batch_id],
+            SyncPayload::CancelBatch { batch_id } => vec![*batch_id],
             _ => vec![],
         }
     }
@@ -908,6 +909,9 @@ impl<'a> Normalizer<'a> {
                     submission.captured_frontier
                 )
             }
+            SyncPayload::CancelBatch { batch_id } => {
+                format!("cancel batch:{}", self.batch(batch_id))
+            }
             SyncPayload::CatalogueEntryUpdated { entry } => {
                 format!(
                     "catalogue obj:{} type:{}",
@@ -1097,6 +1101,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 submission.members,
                 submission.captured_frontier
             )
+        }
+        SyncPayload::CancelBatch { batch_id } => {
+            format!("cancel batch:{}", names.batch(batch_id))
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
             format!("query:{}", query_id.0)

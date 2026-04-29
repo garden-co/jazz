@@ -468,6 +468,113 @@ impl SyncManager {
         }
     }
 
+    fn pending_row_payload_for_batch(
+        payload: &SyncPayload,
+        batch_id: crate::row_histories::BatchId,
+    ) -> bool {
+        matches!(
+            payload,
+            SyncPayload::RowBatchCreated { row, .. }
+                | SyncPayload::RowBatchNeeded { row, .. }
+                if row.batch_id == batch_id
+                    && matches!(row.state, RowState::StagingPending | RowState::Superseded)
+        )
+    }
+
+    fn discard_pending_permission_checks_for_batch(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> bool {
+        let before = self.pending_permission_checks.len();
+        self.pending_permission_checks
+            .retain(|check| !Self::pending_row_payload_for_batch(&check.payload, batch_id));
+        before != self.pending_permission_checks.len()
+    }
+
+    fn cancellable_pending_batch_rows<H: Storage>(
+        &self,
+        storage: &H,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(String, StoredRowBatch)> {
+        let Ok(row_locators) = storage.scan_row_locators() else {
+            return Vec::new();
+        };
+
+        let mut rows = Vec::new();
+        for (row_id, row_locator) in row_locators {
+            let Ok(history_rows) =
+                storage.scan_history_row_batches(row_locator.table.as_str(), row_id)
+            else {
+                continue;
+            };
+
+            rows.extend(history_rows.into_iter().filter_map(|row| {
+                (row.batch_id == batch_id
+                    && matches!(row.state, RowState::StagingPending | RowState::Superseded))
+                .then(|| (row_locator.table.to_string(), row))
+            }));
+        }
+
+        rows.sort_by(|(left_table, left), (right_table, right)| {
+            left_table.cmp(right_table).then_with(|| {
+                left.row_id
+                    .uuid()
+                    .as_bytes()
+                    .cmp(right.row_id.uuid().as_bytes())
+                    .then_with(|| left.branch.as_str().cmp(right.branch.as_str()))
+                    .then_with(|| left.batch_id.0.cmp(&right.batch_id.0))
+            })
+        });
+        rows
+    }
+
+    fn cancel_pending_batch<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        batch_id: crate::row_histories::BatchId,
+    ) {
+        let pending_rows = self.cancellable_pending_batch_rows(storage, batch_id);
+        let removed_pending_checks = self.discard_pending_permission_checks_for_batch(batch_id);
+        if pending_rows.is_empty() && !removed_pending_checks {
+            return;
+        }
+
+        self.discard_pending_batch_outbox(batch_id);
+        self.row_batch_interest
+            .retain(|key, _clients| key.batch_id != batch_id);
+
+        for (table, row) in pending_rows {
+            let row_id = row.row_id;
+            let branch_name = BranchName::new(&row.branch);
+            let visibility_change = patch_row_batch_state(
+                storage,
+                row_id,
+                &branch_name,
+                row.batch_id(),
+                Some(RowState::Rejected),
+                None,
+            )
+            .ok()
+            .flatten();
+
+            if let Some(update) = visibility_change {
+                self.pending_row_visibility_changes.push(update);
+                self.forward_update_to_clients_with_storage(storage, row_id, branch_name);
+            }
+
+            tracing::debug!(
+                ?batch_id,
+                table,
+                %row_id,
+                "cancelled pending transactional row"
+            );
+        }
+
+        if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
+            tracing::warn!(?batch_id, %error, "failed to delete cancelled sealed batch submission");
+        }
+    }
+
     fn transactional_batch_rows<H: Storage>(
         &self,
         storage: &H,
@@ -1097,6 +1204,9 @@ impl SyncManager {
                     batch_ids,
                 );
             }
+            SyncPayload::CancelBatch { batch_id } => {
+                self.cancel_pending_batch(storage, batch_id);
+            }
             SyncPayload::QueryScopeSnapshot { query_id, scope } => {
                 let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
                 self.remote_query_scopes
@@ -1367,6 +1477,9 @@ impl SyncManager {
             SyncPayload::SealBatch { .. } => {
                 self.apply_payload_from_client(storage, client_id, payload, false);
             }
+            SyncPayload::CancelBatch { .. } => {
+                self.apply_payload_from_client(storage, client_id, payload, false);
+            }
             // Handle query subscription with full Query struct
             // Queue for QueryManager to process (SyncManager doesn't know about QueryGraph)
             SyncPayload::QuerySubscription {
@@ -1635,6 +1748,10 @@ impl SyncManager {
                     client_id,
                     submission.batch_id,
                 );
+            }
+            SyncPayload::CancelBatch { batch_id } => {
+                self.cancel_pending_batch(storage, batch_id);
+                self.cancel_batch_to_servers_except(batch_id, None);
             }
             SyncPayload::BatchSettlement { settlement } => {
                 self.pending_batch_settlements.push(settlement);

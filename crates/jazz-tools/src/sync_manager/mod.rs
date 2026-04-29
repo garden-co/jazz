@@ -8,7 +8,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::{BatchId, RowVisibilityChange};
+use crate::row_histories::{BatchId, RowState, RowVisibilityChange};
 use crate::storage::Storage;
 
 // Module declarations
@@ -434,6 +434,29 @@ impl SyncManager {
         }
     }
 
+    pub fn cancel_batch_to_servers(&mut self, batch_id: BatchId) {
+        self.cancel_batch_to_servers_except(batch_id, None);
+    }
+
+    pub(super) fn cancel_batch_to_servers_except(
+        &mut self,
+        batch_id: BatchId,
+        except: Option<ServerId>,
+    ) {
+        let server_ids: Vec<_> = self
+            .servers
+            .keys()
+            .copied()
+            .filter(|server_id| Some(*server_id) != except)
+            .collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::CancelBatch { batch_id },
+            });
+        }
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
@@ -545,7 +568,8 @@ impl SyncManager {
         self.outbox.retain(|entry| match &entry.payload {
             SyncPayload::RowBatchCreated { metadata, row }
             | SyncPayload::RowBatchNeeded { metadata, row }
-                if row.batch_id == batch_id =>
+                if row.batch_id == batch_id
+                    && matches!(row.state, RowState::StagingPending | RowState::Superseded) =>
             {
                 let key = RowBatchKey::from_row(row);
                 match entry.destination {

@@ -552,6 +552,120 @@ fn rc_transactional_rollback_does_not_write_staged_insert_upstream() {
 }
 
 #[test]
+fn rc_transactional_rollback_cancels_staged_rows_already_sent_upstream() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_a_to_b(&mut s);
+    let worker_rows =
+        s.b.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(worker_rows.len(), 1);
+    assert_eq!(
+        worker_rows[0].state,
+        crate::row_histories::RowState::StagingPending,
+        "worker should hold the transactional row as still-pending before rollback"
+    );
+
+    pump_b_to_c(&mut s);
+    let edge_rows =
+        s.c.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(edge_rows.len(), 1);
+    assert_eq!(
+        edge_rows[0].state,
+        crate::row_histories::RowState::StagingPending,
+        "edge should hold the transactional row as still-pending before rollback"
+    );
+
+    s.a.rollback_batch(batch_id)
+        .expect("rollback should discard the staged transaction locally");
+    s.a.batched_tick();
+    let rollback_outbox = s.a.sync_sender().take();
+    assert!(
+        rollback_outbox.iter().any(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::CancelBatch { batch_id: cancelled },
+                } if *server_id == s.b_server_for_a && *cancelled == batch_id
+            )
+        }),
+        "rollback should explicitly cancel the pending batch upstream, got {rollback_outbox:?}"
+    );
+    for entry in rollback_outbox {
+        if entry.destination == Destination::Server(s.b_server_for_a) {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    pump_b_to_c(&mut s);
+
+    for (node_name, core) in [("worker", &s.b), ("edge", &s.c)] {
+        let rows = core
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "{node_name} should retain only audit history"
+        );
+        assert_eq!(
+            rows[0].state,
+            crate::row_histories::RowState::Rejected,
+            "{node_name} should reject the still-pending row after CancelBatch"
+        );
+        assert_eq!(
+            core.storage()
+                .load_visible_region_row(
+                    "users",
+                    core.schema_manager().branch_name().as_str(),
+                    row_id
+                )
+                .unwrap(),
+            None,
+            "{node_name} should never publish the cancelled staged row"
+        );
+        assert_eq!(
+            core.storage()
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap(),
+            None,
+            "{node_name} should not create a rejected settlement for a client cancel"
+        );
+    }
+}
+
+#[test]
 fn rc_transactional_rollback_restores_visible_state_after_staged_update() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "tx-rollback-update");
     let ((row_id, _), _) = core
