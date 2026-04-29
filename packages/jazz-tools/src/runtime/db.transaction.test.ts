@@ -254,7 +254,6 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
 
     const handle = await db.transaction(table, (tx) => {
-      expect("commit" in tx).toBe(false);
       const todo = tx.insert(table, { title: "Callback transaction", done: false });
       return todo;
     });
@@ -275,7 +274,7 @@ describe("Db transactions", () => {
     expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-callback", "global");
   });
 
-  it("does not commit a typed callback transaction when the callback rejects", async () => {
+  it("does not commit a callback transaction when the callback rejects", async () => {
     const table = todoTable();
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-callback-rejected"),
@@ -537,6 +536,88 @@ describe("Db transactions", () => {
     });
     expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
     expect(batch.acknowledgeRejectedBatch()).toBe(false);
+  });
+
+  it("commits a callback direct batch and returns the callback result handle", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-direct-callback",
+      values: [
+        { type: "Text", value: "Callback direct batch" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-direct-callback",
+    } as Row;
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-callback"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-callback", "direct").handle),
+      localBatchRecord: vi.fn((batchId = "batch-direct-callback") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-direct-callback", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      waitForPersistedBatch: vi.fn(async () => undefined),
+      beginDirectBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const handle = await db.directBatch(table, (batch) => {
+      const todo = batch.insert(table, { title: "Callback direct batch", done: false });
+      return todo;
+    });
+
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.batchId).toBe("batch-direct-callback");
+    expect(handle.value).toEqual({
+      id: "todo-direct-callback",
+      title: "Callback direct batch",
+      done: false,
+    });
+    expect(runtimeBatch.commit).toHaveBeenCalledTimes(1);
+    await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
+      id: "todo-direct-callback",
+      title: "Callback direct batch",
+      done: false,
+    });
+    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-direct-callback", "edge");
+  });
+
+  it("does not commit a callback direct batch when the callback rejects", async () => {
+    const table = todoTable();
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-callback-rejected"),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-callback-rejected", "direct").handle),
+      localBatchRecord: vi.fn((batchId = "batch-direct-callback-rejected") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [
+        makeLocalBatchRecord("batch-direct-callback-rejected", "direct"),
+      ]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginDirectBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const error = new Error("callback failed");
+
+    await expect(db.directBatch(table, async () => Promise.reject(error))).rejects.toBe(error);
+
+    expect(runtimeBatch.commit).not.toHaveBeenCalled();
   });
 
   it("rejects db direct batch writes against a different client/schema", () => {

@@ -336,8 +336,7 @@ describe("JazzClient transactions", () => {
       .spyOn(client, "waitForPersistedBatch")
       .mockResolvedValue(undefined);
 
-    const handle = await client.transaction((tx) => {
-      expect("commit" in tx).toBe(false);
+    const handle = await client.transaction(() => {
       return { title: "Callback transaction" };
     });
 
@@ -350,6 +349,26 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
+  it("commits a callback direct batch and returns the callback result handle", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const handle = await client.directBatch(() => {
+      return { title: "Callback direct batch" };
+    });
+
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.value).toEqual({ title: "Callback direct batch" });
+    await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
+      title: "Callback direct batch",
+    });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
+  });
+
   it("does not commit a callback transaction when the callback throws", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
@@ -357,6 +376,20 @@ describe("JazzClient transactions", () => {
 
     await expect(
       client.transaction(() => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a callback direct batch when the callback throws", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const error = new Error("nope");
+
+    await expect(
+      client.directBatch(() => {
         throw error;
       }),
     ).rejects.toBe(error);
