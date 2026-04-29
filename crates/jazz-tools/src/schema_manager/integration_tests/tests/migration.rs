@@ -442,3 +442,67 @@ fn end_to_end_multi_hop_transform() {
     );
     assert_eq!(charlie_row.1[3], Value::Text("admin".to_string()));
 }
+
+/// Regression: every MaterializeNode the schema-aware compiler emits must carry
+/// the actual table name in each output-descriptor element. The materialize
+/// hint propagates to the row loader and ultimately to `LensTransformer::new`;
+/// an empty hint causes `translate_table_name_to_schema(ctx, "", &source_hash)`
+/// to fail with `TableNotFound("")`, silently dropping every old-branch row
+/// after a schema migration on storage backends that resolve rows by locator
+/// rather than by table key.
+#[test]
+fn materialize_nodes_carry_concrete_table_name() {
+    use crate::query_manager::graph::GraphNode;
+
+    let v1 = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let v2 = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text),
+        )
+        .build();
+
+    let lens = generate_lens(&v1, &v2);
+    let mut ctx = SchemaContext::new(v2.clone(), "dev", "main");
+    ctx.add_live_schema(v1.clone(), lens);
+
+    let query = QueryBuilder::new("users").build();
+    let graph = QueryGraph::compile_with_schema_context(&query, &v2, None, &ctx)
+        .expect("query graph compile should succeed");
+
+    let mut materialize_count = 0;
+    for compact in &graph.nodes {
+        let GraphNode::Materialize(node) = &compact.node else {
+            continue;
+        };
+        materialize_count += 1;
+        let desc = node.output_tuple_descriptor();
+        for index in 0..desc.element_count() {
+            let element = desc.element(index).expect("element index in range");
+            assert!(
+                !element.table.as_str().is_empty(),
+                "MaterializeNode element {index} has empty table; \
+                 row_loader will pass an empty table_hint to LensTransformer \
+                 and TableNotFound(\"\") will silently drop old-branch rows",
+            );
+            assert_eq!(
+                element.table.as_str(),
+                "users",
+                "MaterializeNode element {index} should carry the queried table name",
+            );
+        }
+    }
+    assert!(
+        materialize_count > 0,
+        "expected at least one MaterializeNode in the compiled graph"
+    );
+}
