@@ -30,6 +30,7 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="email-address"
+          accessibilityLabel="Email"
         />
       </View>
       <View style={styles.field}>
@@ -39,6 +40,7 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
           onChangeText={setPassword}
           style={styles.input}
           secureTextEntry
+          accessibilityLabel="Password"
         />
       </View>
       {error ? <Text style={styles.error}>{error}</Text> : null}

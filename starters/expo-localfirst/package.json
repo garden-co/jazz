@@ -10,7 +10,8 @@
     "build": "jazz-tools validate && tsc --noEmit",
     "prebuild": "expo prebuild --clean",
     "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
-    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install"
+    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install",
+    "test:e2e": "maestro test .maestro/flows"
   },
   "dependencies": {
     "expo": "^54.0.0",

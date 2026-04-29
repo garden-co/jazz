@@ -37,6 +37,7 @@ export function SignInForm() {
             onChangeText={setName}
             style={styles.input}
             autoCapitalize="words"
+            accessibilityLabel="Name"
           />
         </View>
       ) : null}
@@ -49,6 +50,7 @@ export function SignInForm() {
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="email-address"
+          accessibilityLabel="Email"
         />
       </View>
       <View style={styles.field}>
@@ -58,6 +60,7 @@ export function SignInForm() {
           onChangeText={setPassword}
           style={styles.input}
           secureTextEntry
+          accessibilityLabel="Password"
         />
       </View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
