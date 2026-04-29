@@ -506,3 +506,109 @@ fn materialize_nodes_carry_concrete_table_name() {
         "expected at least one MaterializeNode in the compiled graph"
     );
 }
+
+/// End-to-end regression: with a storage backend that resolves rows by
+/// locator (matching `RocksDBStorage`'s production behaviour, but mocked
+/// here via `LocatorOnlyStorage` so the test stays in-process and doesn't
+/// pull in native deps), an old-schema row must still project through the
+/// lens into the current schema and appear in subscription results. Before
+/// the fix, the empty `element.table` on the materialize node propagated
+/// to `LensTransformer::new(ctx, "")`, the transform failed with
+/// `TableNotFound("")`, and the row was silently dropped — exactly the
+/// user-visible "data disappears after a schema migration" symptom.
+#[test]
+fn locator_only_storage_returns_old_branch_rows_through_lens() {
+    use super::locator_only_storage::LocatorOnlyStorage;
+    use crate::metadata::MetadataKey;
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+    use crate::test_row_history::put_test_row_metadata;
+
+    let v1 = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text),
+        )
+        .build();
+
+    let v2 = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .nullable_column("email", ColumnType::Text),
+        )
+        .build();
+
+    let v1_hash = SchemaHash::compute(&v1);
+    let v2_hash = SchemaHash::compute(&v2);
+    let lens = generate_lens(&v1, &v2);
+
+    let sm = SyncManager::new();
+    let mut qm = QueryManager::new(sm);
+    qm.set_current_schema(v2.clone(), "dev", "main");
+    qm.add_live_schema(v1.clone());
+    qm.register_lens(lens);
+
+    let mut storage = LocatorOnlyStorage::new();
+
+    let v1_branch = format!("dev-{}-main", v1_hash.short());
+    let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+    // Ingest Alice as a v1 row through the sync inbox. With
+    // LocatorOnlyStorage, `load_visible_query_row("", branch, row_id)` will
+    // find this row by locator — so the empty table hint propagates all the
+    // way to LensTransformer (this is the path that's broken in production
+    // and that MemoryStorage masks).
+    let v1_users = v1.get(&TableName::new("users")).unwrap();
+    let alice_id = ObjectId::new();
+    let alice_v1_data = encode_row(
+        &v1_users.columns,
+        &[Value::Uuid(alice_id), Value::Text("Alice".to_string())],
+    )
+    .unwrap();
+    let mut alice_metadata = HashMap::new();
+    alice_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    alice_metadata.insert(
+        MetadataKey::OriginSchemaHash.to_string(),
+        v1_hash.to_string(),
+    );
+    put_test_row_metadata(&mut storage, alice_id, alice_metadata);
+    let alice_commit = stored_row_commit(alice_v1_data, 1_000, alice_id.to_string());
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowBatchCreated {
+            metadata: None,
+            row: alice_commit.to_row(alice_id, &v1_branch),
+        },
+    });
+
+    let query = QueryBuilder::new("users")
+        .branches(&[&v1_branch, &v2_branch])
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+    let results = qm.get_subscription_results(sub_id);
+    qm.unsubscribe_with_sync(sub_id);
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Alice's old-schema row should project through the lens, \
+         not be silently dropped by TableNotFound(\"\")"
+    );
+    let alice = &results[0];
+    assert_eq!(alice.0, alice_id);
+    assert_eq!(
+        alice.1.len(),
+        3,
+        "row should be transformed to v2 (3 columns)"
+    );
+    assert_eq!(alice.1[0], Value::Uuid(alice_id));
+    assert_eq!(alice.1[1], Value::Text("Alice".to_string()));
+    assert_eq!(
+        alice.1[2],
+        Value::Null,
+        "added email column should be Null after lens transform"
+    );
+}
