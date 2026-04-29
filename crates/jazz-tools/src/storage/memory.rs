@@ -15,17 +15,17 @@ type RawTableEntries = BTreeMap<String, Vec<u8>>;
 #[derive(Debug, Clone, Default)]
 struct TableRowHistories {
     visible: BTreeMap<SharedString, BTreeMap<ObjectId, VisibleRowEntry>>,
-    history: BTreeMap<(ObjectId, SharedString, BatchId), StoredRowBatch>,
+    history: BTreeMap<ObjectId, BTreeMap<(SharedString, BatchId), StoredRowBatch>>,
 }
 
 impl TableRowHistories {
     fn history_rows_for(&self, branch: &str, row_id: ObjectId) -> Vec<StoredRowBatch> {
         let mut rows: Vec<_> = self
             .history
-            .iter()
-            .filter(|((history_row_id, history_branch, _), _)| {
-                *history_row_id == row_id && history_branch.as_str() == branch
-            })
+            .get(&row_id)
+            .into_iter()
+            .flat_map(|inner| inner.iter())
+            .filter(|((history_branch, _), _)| history_branch.as_str() == branch)
             .map(|(_, row)| row.clone())
             .collect();
         rows.sort_by_key(|row| (row.updated_at, row.batch_id()));
@@ -139,19 +139,16 @@ impl Storage for MemoryStorage {
                 .entry(table.clone())
                 .or_default()
                 .history
-                .insert(
-                    (row.row_id, row.branch.clone(), row.batch_id()),
-                    row.clone(),
-                );
+                .entry(row.row_id)
+                .or_default()
+                .insert((row.branch.clone(), row.batch_id()), row.clone());
             self.row_history_bytes
                 .entry(table.clone())
                 .or_default()
+                .entry(encoded.row_id)
+                .or_default()
                 .insert(
-                    (
-                        encoded.row_id,
-                        encoded.branch.clone().into(),
-                        encoded.batch_id,
-                    ),
+                    (encoded.branch.clone().into(), encoded.batch_id),
                     encoded.bytes.clone(),
                 );
         }
@@ -228,17 +225,15 @@ impl Storage for MemoryStorage {
                 .entry(table.clone())
                 .or_default()
                 .history
-                .insert(
-                    (row.row_id, row.branch.clone().into(), row.batch_id),
-                    decoded,
-                );
+                .entry(row.row_id)
+                .or_default()
+                .insert((row.branch.clone().into(), row.batch_id), decoded);
             self.row_history_bytes
                 .entry(table.clone())
                 .or_default()
-                .insert(
-                    (row.row_id, row.branch.clone().into(), row.batch_id),
-                    row.bytes.clone(),
-                );
+                .entry(row.row_id)
+                .or_default()
+                .insert((row.branch.clone().into(), row.batch_id), row.bytes.clone());
         }
 
         for row in visible_rows {
@@ -474,10 +469,11 @@ impl Storage for MemoryStorage {
         {
             let regions = self.row_histories.entry(table.to_string()).or_default();
             for row in rows {
-                regions.history.insert(
-                    (row.row_id, row.branch.clone(), row.batch_id()),
-                    row.clone(),
-                );
+                regions
+                    .history
+                    .entry(row.row_id)
+                    .or_default()
+                    .insert((row.branch.clone(), row.batch_id()), row.clone());
             }
         }
         for row in &encoded_rows {
@@ -500,10 +496,10 @@ impl Storage for MemoryStorage {
         }
         let raw_regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in encoded_rows {
-            raw_regions.insert(
-                (row.row_id, row.branch.clone().into(), row.batch_id),
-                row.bytes,
-            );
+            raw_regions
+                .entry(row.row_id)
+                .or_default()
+                .insert((row.branch.clone().into(), row.batch_id), row.bytes);
         }
         Ok(())
     }
@@ -515,8 +511,8 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         let regions = self.row_history_bytes.entry(table.to_string()).or_default();
         for row in rows {
-            regions.insert(
-                (row.row_id, row.branch.to_string().into(), row.batch_id),
+            regions.entry(row.row_id).or_default().insert(
+                (row.branch.to_string().into(), row.batch_id),
                 row.bytes.to_vec(),
             );
         }
@@ -593,7 +589,11 @@ impl Storage for MemoryStorage {
             };
 
             let mut affected_visible_rows = HashSet::new();
-            for row in regions.history.values_mut() {
+            for row in regions
+                .history
+                .values_mut()
+                .flat_map(|inner| inner.values_mut())
+            {
                 if row.batch_id == batch_id {
                     if let Some(state) = state {
                         row.state = state;
@@ -861,9 +861,10 @@ impl Storage for MemoryStorage {
 
         let mut rows: Vec<_> = regions
             .history
-            .iter()
-            .filter(|((history_row_id, _, _), _)| *history_row_id == row_id)
-            .map(|(_, row)| row.clone())
+            .get(&row_id)
+            .into_iter()
+            .flat_map(|inner| inner.values())
+            .cloned()
             .collect();
         rows.sort_by_key(|row| (row.branch.clone(), row.updated_at, row.batch_id()));
         Ok(rows)
@@ -878,7 +879,8 @@ impl Storage for MemoryStorage {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.row_history_bytes.get(table).and_then(|regions| {
             regions
-                .get(&(row_id, branch.to_string().into(), batch_id))
+                .get(&row_id)
+                .and_then(|inner| inner.get(&(branch.to_string().into(), batch_id)))
                 .cloned()
         }))
     }
@@ -893,14 +895,15 @@ impl Storage for MemoryStorage {
         };
 
         Ok(match scan {
-            HistoryScan::Branch | HistoryScan::AsOf { .. } => {
-                regions.values().cloned().collect::<Vec<_>>()
-            }
-            HistoryScan::Row { row_id } => regions
-                .iter()
-                .filter(|((history_row_id, _, _), _)| *history_row_id == row_id)
-                .map(|(_, bytes)| bytes.clone())
+            HistoryScan::Branch | HistoryScan::AsOf { .. } => regions
+                .values()
+                .flat_map(|inner| inner.values())
+                .cloned()
                 .collect::<Vec<_>>(),
+            HistoryScan::Row { row_id } => regions
+                .get(&row_id)
+                .map(|inner| inner.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
         })
     }
 
@@ -955,7 +958,8 @@ impl Storage for MemoryStorage {
         Ok(self.row_histories.get(table).and_then(|regions| {
             regions
                 .history
-                .get(&(row_id, branch.to_string().into(), batch_id))
+                .get(&row_id)
+                .and_then(|inner| inner.get(&(branch.to_string().into(), batch_id)))
                 .cloned()
         }))
     }
@@ -984,7 +988,8 @@ impl Storage for MemoryStorage {
             .and_then(|regions| {
                 regions
                     .history
-                    .get(&(row_id, branch.to_string().into(), batch_id))
+                    .get(&row_id)
+                    .and_then(|inner| inner.get(&(branch.to_string().into(), batch_id)))
             })
             .map(QueryRowBatch::from))
     }
@@ -1002,30 +1007,36 @@ impl Storage for MemoryStorage {
         let mut rows: Vec<StoredRowBatch> = match scan {
             HistoryScan::Branch => regions
                 .history
-                .iter()
-                .filter(|(_, row)| row.branch == branch)
-                .map(|(_, row)| row.clone())
+                .values()
+                .flat_map(|inner| inner.values())
+                .filter(|row| row.branch == branch)
+                .cloned()
                 .collect(),
             HistoryScan::Row { row_id } => regions
                 .history
-                .iter()
-                .filter(|((history_row_id, _, _), row)| {
-                    row.branch == branch && *history_row_id == row_id
+                .get(&row_id)
+                .map(|inner| {
+                    inner
+                        .values()
+                        .filter(|row| row.branch == branch)
+                        .cloned()
+                        .collect()
                 })
-                .map(|(_, row)| row.clone())
-                .collect(),
+                .unwrap_or_default(),
             HistoryScan::AsOf { ts } => {
                 let mut latest_per_row: BTreeMap<ObjectId, StoredRowBatch> = BTreeMap::new();
-                for ((row_id, _, _), row) in &regions.history {
-                    if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
-                        continue;
-                    }
-                    match latest_per_row.get(row_id) {
-                        Some(existing)
-                            if (existing.updated_at, existing.batch_id())
-                                >= (row.updated_at, row.batch_id()) => {}
-                        _ => {
-                            latest_per_row.insert(*row_id, row.clone());
+                for (row_id, inner) in &regions.history {
+                    for row in inner.values() {
+                        if row.branch != branch || row.updated_at > ts || !row.state.is_visible() {
+                            continue;
+                        }
+                        match latest_per_row.get(row_id) {
+                            Some(existing)
+                                if (existing.updated_at, existing.batch_id())
+                                    >= (row.updated_at, row.batch_id()) => {}
+                            _ => {
+                                latest_per_row.insert(*row_id, row.clone());
+                            }
                         }
                     }
                 }
