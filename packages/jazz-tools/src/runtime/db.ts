@@ -714,6 +714,11 @@ export class DbDirectBatch {
   }
 }
 
+/**
+ * Direct batch object available inside {@link Db.directBatch}'s callback.
+ */
+export type DbDirectBatchScope = Omit<DbDirectBatch, "commit">;
+
 interface BroadcastChannelLike {
   postMessage(data: unknown): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -2248,7 +2253,7 @@ export class Db {
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
-   * @returns Insert handle containing the inserted row
+   * @returns Write result containing the inserted row
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
@@ -2334,7 +2339,7 @@ export class Db {
    *
    * Use transactions when several writes should settle together after an authority validates them.
    *
-   * @returns a handle containing the result of the callback
+   * @returns a write result containing the result of the callback
    */
   async transaction<T, Init, TResult>(
     table: TableProxy<T, Init>,
@@ -2353,6 +2358,8 @@ export class Db {
    * Use a direct batch when several visible writes should settle together.
    * Call {@link DbDirectBatch.commit} to freeze the batch, then wait on the
    * returned handle if you need durable confirmation.
+   *
+   * Prefer using {@link Db.directBatch} when an explicit commit is not required.
    */
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
     const client = this.getClient(table._schema);
@@ -2367,6 +2374,24 @@ export class Db {
           operation,
         ),
     );
+  }
+
+  /**
+   * Run {@link callback} inside a direct batch and commit it once the callback returns.
+   *
+   * Use a direct batch when several visible writes should settle together.
+   *
+   * @returns a write result containing the result of the callback
+   */
+  async directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => TResult | Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>> {
+    const client = this.getClient(table._schema);
+    const batch = this.beginDirectBatch(table);
+    const value = await callback(batch);
+    const committed = batch.commit();
+    return new WriteResult(value, committed.batchId, client);
   }
 
   beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
@@ -2879,6 +2904,16 @@ class ClientBackedDb extends Db {
       (candidateTable, operation) =>
         assertTableBelongsToClient(candidateTable, client, () => client, operation),
     );
+  }
+
+  override async directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => TResult | Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>> {
+    const batch = this.beginDirectBatch(table);
+    const value = await callback(batch);
+    const committed = batch.commit();
+    return new WriteResult(value, committed.batchId, this.runtimeClient);
   }
 
   override beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
