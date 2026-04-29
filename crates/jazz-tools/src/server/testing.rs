@@ -14,8 +14,8 @@ use crate::middleware::AuthConfig;
 use crate::query_manager::types::Schema;
 use crate::schema_manager::AppId;
 
-use super::ServerBuilder;
 use super::hosted::HostedServer;
+use super::{ServerBuilder, StorageBackend};
 use crate::sync_manager::ClientId;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
@@ -239,10 +239,9 @@ impl TestingServer {
         };
 
         let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        let data_dir_str = data_dir.to_string_lossy().into_owned();
         let mut server_builder = apply_storage_mode(
             server_builder,
-            data_dir_str,
+            data_dir.clone(),
             persistent_storage,
             sqlite_storage,
             rocksdb_storage,
@@ -466,23 +465,23 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
 /// blocks inside `start_from_builder`.
 fn apply_storage_mode(
     builder: ServerBuilder,
-    data_dir: String,
+    data_dir: PathBuf,
     persistent: bool,
     #[allow(unused_variables)] sqlite: bool,
     #[allow(unused_variables)] rocksdb: bool,
 ) -> ServerBuilder {
     #[cfg(feature = "sqlite")]
     if sqlite {
-        return builder.with_sqlite_storage(data_dir);
+        return builder.with_storage(StorageBackend::Sqlite { path: data_dir });
     }
     #[cfg(feature = "rocksdb")]
     if rocksdb {
-        return builder.with_rocksdb_storage(data_dir);
+        return builder.with_storage(StorageBackend::RocksDb { path: data_dir });
     }
     if persistent {
-        builder.with_persistent_storage(data_dir)
+        builder.with_storage(StorageBackend::Persistent { path: data_dir })
     } else {
-        builder.with_in_memory_storage()
+        builder.with_storage(StorageBackend::InMemory)
     }
 }
 
