@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevServer } from "jazz-napi";
 import { loadCompiledSchema } from "../schema-loader.js";
+import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 import {
   fetchPermissionsHead,
   publishStoredPermissions,
@@ -31,6 +32,7 @@ export interface StartLocalJazzServerOptions {
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
   enableLogs?: boolean;
+  telemetry?: TelemetryOptions;
 }
 
 export interface LocalJazzServerHandle {
@@ -112,6 +114,7 @@ export async function startLocalJazzServer(
       catalogueAuthority: options.catalogueAuthority,
       catalogueAuthorityUrl: options.catalogueAuthorityUrl,
       catalogueAuthorityAdminSecret: options.catalogueAuthorityAdminSecret,
+      telemetry: options.telemetry,
     });
   } catch (error) {
     if (ownsPort) {

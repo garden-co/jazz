@@ -37,6 +37,17 @@ struct PreparedSyncDispatch {
     update: SequencedSyncUpdate,
 }
 
+struct WsClientPayloadTelemetry<'a> {
+    client_id: ClientId,
+    connection_id: Option<u64>,
+    source_frame_id: Option<String>,
+    source_payload_index: Option<usize>,
+    source_payload_count: Option<usize>,
+    source_frame_bytes: Option<usize>,
+    message_bytes: Option<usize>,
+    payload: &'a SyncPayload,
+}
+
 struct ConnectionStreamState {
     client_id: ClientId,
     next_sync_seq: u64,
@@ -184,6 +195,8 @@ pub struct ServerState {
     pub client_ttl: RwLock<Duration>,
     /// Optional sync message tracer for test observability.
     pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    /// Optional dev-only sync payload telemetry sink.
+    pub sync_payload_telemetry: Option<crate::sync_payload_telemetry::SyncPayloadTelemetrySink>,
 }
 
 /// State for a single SSE connection.
@@ -314,9 +327,30 @@ impl ServerState {
         client_id: ClientId,
         payload: &[u8],
     ) -> Result<(), String> {
+        self.process_ws_client_frame_with_telemetry(client_id, payload, None, None)
+            .await
+    }
+
+    pub async fn process_ws_client_frame_with_telemetry(
+        &self,
+        client_id: ClientId,
+        payload: &[u8],
+        connection_id: Option<u64>,
+        source_frame_id: Option<String>,
+    ) -> Result<(), String> {
         if let Ok(entry) =
             serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
         {
+            self.emit_ws_payload_telemetry(WsClientPayloadTelemetry {
+                client_id,
+                connection_id,
+                source_frame_id,
+                source_payload_index: Some(0),
+                source_payload_count: Some(1),
+                source_frame_bytes: Some(payload.len()),
+                message_bytes: payload_json_len(&entry.payload),
+                payload: &entry.payload,
+            });
             let inbox = InboxEntry {
                 source: Source::Client(client_id),
                 payload: entry.payload,
@@ -329,7 +363,18 @@ impl ServerState {
 
         match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
             Ok(batch) => {
-                for p in batch.payloads {
+                let payload_count = batch.payloads.len();
+                for (index, p) in batch.payloads.into_iter().enumerate() {
+                    self.emit_ws_payload_telemetry(WsClientPayloadTelemetry {
+                        client_id,
+                        connection_id,
+                        source_frame_id: source_frame_id.clone(),
+                        source_payload_index: Some(index),
+                        source_payload_count: Some(payload_count),
+                        source_frame_bytes: Some(payload.len()),
+                        message_bytes: payload_json_len(&p),
+                        payload: &p,
+                    });
                     let inbox = InboxEntry {
                         source: Source::Client(client_id),
                         payload: p,
@@ -340,9 +385,117 @@ impl ServerState {
                 }
                 Ok(())
             }
-            Err(e) => Err(format!("invalid ws payload: {e}")),
+            Err(e) => {
+                if let Some(sink) = &self.sync_payload_telemetry {
+                    let context = crate::sync_payload_telemetry::SyncPayloadTelemetryContext {
+                        app_id: Some(self.app_id.to_string()),
+                        scope: crate::sync_payload_telemetry::SyncPayloadTelemetryScope::Websocket,
+                        direction: crate::sync_payload_telemetry::SyncPayloadTelemetryDirection::ClientToServer,
+                        client_id: Some(client_id.to_string()),
+                        connection_id: connection_id.map(|value| value.to_string()),
+                        source_frame_id,
+                        source_frame_bytes: Some(payload.len()),
+                        message_bytes: Some(payload.len()),
+                        message_encoding: Some("binary".to_string()),
+                        ..Default::default()
+                    };
+                    sink.emit(
+                        crate::sync_payload_telemetry::SyncPayloadTelemetryRecord::decode_failure(
+                            &context,
+                            e.to_string(),
+                        ),
+                    );
+                }
+                Err(format!("invalid ws payload: {e}"))
+            }
         }
     }
+
+    fn emit_ws_payload_telemetry(&self, telemetry: WsClientPayloadTelemetry<'_>) {
+        let Some(sink) = &self.sync_payload_telemetry else {
+            return;
+        };
+        let context = crate::sync_payload_telemetry::SyncPayloadTelemetryContext {
+            app_id: Some(self.app_id.to_string()),
+            scope: crate::sync_payload_telemetry::SyncPayloadTelemetryScope::Websocket,
+            direction: crate::sync_payload_telemetry::SyncPayloadTelemetryDirection::ClientToServer,
+            client_id: Some(telemetry.client_id.to_string()),
+            connection_id: telemetry.connection_id.map(|value| value.to_string()),
+            source_frame_id: telemetry.source_frame_id,
+            source_payload_index: telemetry.source_payload_index,
+            source_payload_count: telemetry.source_payload_count,
+            source_frame_bytes: telemetry.source_frame_bytes,
+            message_bytes: telemetry.message_bytes,
+            message_encoding: Some("binary".to_string()),
+            ..Default::default()
+        };
+        sink.emit_many(crate::sync_payload_telemetry::records_for_payload(
+            &context,
+            telemetry.payload,
+        ));
+    }
+
+    pub fn emit_ws_server_payload_telemetry(
+        &self,
+        client_id: ClientId,
+        connection_id: u64,
+        sequence: u64,
+        message_bytes: Option<usize>,
+        payload: &SyncPayload,
+    ) {
+        let Some(sink) = &self.sync_payload_telemetry else {
+            return;
+        };
+        let context = crate::sync_payload_telemetry::SyncPayloadTelemetryContext {
+            app_id: Some(self.app_id.to_string()),
+            scope: crate::sync_payload_telemetry::SyncPayloadTelemetryScope::Websocket,
+            direction: crate::sync_payload_telemetry::SyncPayloadTelemetryDirection::ServerToClient,
+            client_id: Some(client_id.to_string()),
+            connection_id: Some(connection_id.to_string()),
+            sequence: Some(sequence),
+            source_payload_index: Some(0),
+            source_payload_count: Some(1),
+            message_bytes,
+            message_encoding: Some("utf8".to_string()),
+            ..Default::default()
+        };
+        sink.emit_many(crate::sync_payload_telemetry::records_for_payload(
+            &context, payload,
+        ));
+    }
+
+    pub fn emit_ws_decode_failure_telemetry(
+        &self,
+        client_id: ClientId,
+        connection_id: u64,
+        source_frame_bytes: usize,
+        error: impl Into<String>,
+    ) {
+        let Some(sink) = &self.sync_payload_telemetry else {
+            return;
+        };
+        let context = crate::sync_payload_telemetry::SyncPayloadTelemetryContext {
+            app_id: Some(self.app_id.to_string()),
+            scope: crate::sync_payload_telemetry::SyncPayloadTelemetryScope::Websocket,
+            direction: crate::sync_payload_telemetry::SyncPayloadTelemetryDirection::ClientToServer,
+            client_id: Some(client_id.to_string()),
+            connection_id: Some(connection_id.to_string()),
+            source_frame_id: Some(uuid::Uuid::now_v7().to_string()),
+            source_frame_bytes: Some(source_frame_bytes),
+            message_bytes: Some(source_frame_bytes),
+            message_encoding: Some("binary".to_string()),
+            ..Default::default()
+        };
+        sink.emit(
+            crate::sync_payload_telemetry::SyncPayloadTelemetryRecord::decode_failure(
+                &context, error,
+            ),
+        );
+    }
+}
+
+fn payload_json_len(payload: &SyncPayload) -> Option<usize> {
+    serde_json::to_vec(payload).ok().map(|bytes| bytes.len())
 }
 
 #[cfg(test)]

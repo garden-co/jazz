@@ -60,6 +60,8 @@ pub use driver_bridge::JsStorageDriver;
 pub use query::WasmQueryBuilder;
 pub use runtime::WasmRuntime;
 
+use jazz_tools::sync_manager::SyncPayload;
+use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
 /// Initialize the WASM module.
@@ -97,4 +99,30 @@ pub fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
+}
+
+/// Decode a sync payload into telemetry records for JS OTLP export.
+#[wasm_bindgen(js_name = decodeSyncPayloadTelemetry)]
+pub fn decode_sync_payload_telemetry(payload: JsValue) -> Result<JsValue, JsError> {
+    let payload = if let Some(json) = payload.as_string() {
+        SyncPayload::from_json(&json)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))?
+    } else if payload.is_instance_of::<Uint8Array>() {
+        let bytes = Uint8Array::new(&payload).to_vec();
+        SyncPayload::from_bytes(&bytes)
+            .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))?
+    } else {
+        return Err(JsError::new(
+            "Invalid sync payload type: expected Uint8Array or JSON string",
+        ));
+    };
+
+    let context = jazz_tools::sync_payload_telemetry::SyncPayloadTelemetryContext {
+        scope: jazz_tools::sync_payload_telemetry::SyncPayloadTelemetryScope::WorkerBridge,
+        direction: jazz_tools::sync_payload_telemetry::SyncPayloadTelemetryDirection::MainToWorker,
+        ..Default::default()
+    };
+    let records = jazz_tools::sync_payload_telemetry::records_for_payload(&context, &payload);
+    serde_wasm_bindgen::to_value(&serde_json::json!({ "records": records }))
+        .map_err(|e| JsError::new(&format!("Encode telemetry records failed: {e}")))
 }

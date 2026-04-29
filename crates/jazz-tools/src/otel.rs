@@ -5,11 +5,12 @@
 //! `OTEL_TRACES_SAMPLER`, etc.) are respected automatically by the SDK.
 
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 
 /// Build an OTel TracerProvider.
 ///
-/// - If `OTEL_EXPORTER_OTLP_ENDPOINT` is set → OTLP gRPC exporter (tonic).
+/// - If `OTEL_EXPORTER_OTLP_ENDPOINT` is set → OTLP/HTTP JSON exporter.
 /// - Otherwise → stdout exporter for local dev.
 pub fn init_tracer_provider() -> SdkTracerProvider {
     let mut builder = SdkTracerProvider::builder().with_resource(
@@ -26,7 +27,8 @@ pub fn init_tracer_provider() -> SdkTracerProvider {
 
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
+            .with_http()
+            .with_protocol(Protocol::HttpJson)
             .build()
             .expect("failed to build OTLP exporter");
         builder = builder.with_batch_exporter(exporter);

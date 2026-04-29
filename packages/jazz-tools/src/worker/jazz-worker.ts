@@ -16,6 +16,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
+import { installWasmTraceTelemetry } from "../runtime/sync-telemetry.js";
 import { httpUrlToWs } from "../runtime/url.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -283,6 +284,11 @@ export function handleUpdateAuth(
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
+    installWasmTraceTelemetry({
+      collectorUrl: msg.telemetryCollectorUrl,
+      appId: msg.appId,
+      runtimeThread: "worker",
+    });
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);

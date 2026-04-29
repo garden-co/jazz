@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 // jazz-tools contains a dynamic `import("jazz-wasm")` that we intentionally
 // keep out of Vite's dep optimizer (wasm-bindgen output breaks esbuild's
@@ -30,6 +31,7 @@ export interface JazzServerOptions {
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
+  telemetry?: TelemetryOptions;
 }
 
 export interface JazzPluginOptions {
@@ -69,6 +71,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   const runtime = new ManagedDevRuntime({
     appId: "VITE_JAZZ_APP_ID",
     serverUrl: "VITE_JAZZ_SERVER_URL",
+    telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
   });
 
   return {
@@ -129,6 +132,9 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       viteServer.config.env ??= {};
       viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
       viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
+      if (managed.telemetryCollectorUrl) {
+        viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
+      }
       console.log(
         `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
           managed.serverUrl,

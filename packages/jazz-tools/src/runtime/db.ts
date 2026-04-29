@@ -56,6 +56,7 @@ import {
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
+import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
@@ -110,6 +111,8 @@ export interface DbConfig {
   dbName?: string;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
+  /** Optional OTLP/HTTP collector URL for dev sync payload telemetry. */
+  telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
   /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
@@ -1335,6 +1338,8 @@ export class Db {
       runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
+      telemetryCollectorUrl:
+        resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl,
     };
   }
 

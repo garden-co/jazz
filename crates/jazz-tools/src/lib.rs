@@ -16,6 +16,7 @@ pub mod schema_manager;
 pub mod server;
 pub mod storage;
 pub mod sync_manager;
+pub mod sync_payload_telemetry;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_support;
 pub mod wire_types;

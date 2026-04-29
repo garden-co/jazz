@@ -9,6 +9,7 @@ import { createTempRootTracker, getAvailablePort, todoSchema } from "./test-help
 const tempRoots = createTempRootTracker();
 const originalJazzServerUrl = process.env.VITE_JAZZ_SERVER_URL;
 const originalJazzAppId = process.env.VITE_JAZZ_APP_ID;
+const originalJazzTelemetryCollectorUrl = process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
 const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 
 // Managed-runtime writes VITE_JAZZ_APP_ID / VITE_JAZZ_SERVER_URL to process.env
@@ -18,6 +19,7 @@ const originalAdminSecret = process.env.JAZZ_ADMIN_SECRET;
 beforeEach(() => {
   delete process.env.VITE_JAZZ_APP_ID;
   delete process.env.VITE_JAZZ_SERVER_URL;
+  delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
   delete process.env.JAZZ_ADMIN_SECRET;
 });
 
@@ -35,6 +37,12 @@ afterEach(async () => {
     delete process.env.VITE_JAZZ_APP_ID;
   } else {
     process.env.VITE_JAZZ_APP_ID = originalJazzAppId;
+  }
+
+  if (originalJazzTelemetryCollectorUrl === undefined) {
+    delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
+  } else {
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = originalJazzTelemetryCollectorUrl;
   }
 
   if (originalAdminSecret === undefined) {
@@ -305,4 +313,46 @@ describe("jazzPlugin", () => {
       await handler();
     }
   }, 30_000);
+
+  it("exposes telemetry collector url when reusing an env-provided server", async () => {
+    process.env.VITE_JAZZ_SERVER_URL = "http://localhost:4242";
+    process.env.VITE_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000090";
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(devServer, "startLocalJazzServer");
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const schemaDir = await tempRoots.create("jazz-vite-telemetry-string-server-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const plugin = jazzPlugin({
+      appId: "00000000-0000-0000-0000-000000000090",
+      adminSecret: "vite-telemetry-admin",
+      server: {
+        telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      } as never,
+      schemaDir,
+    });
+    const configureServer = plugin.configureServer as (server: {
+      config: {
+        root: string;
+        command: "serve";
+        env: Record<string, string>;
+      };
+      httpServer: { once(_event: string, _cb: () => void): void };
+      ws: { send(): void };
+    }) => Promise<void>;
+
+    await configureServer({
+      config: {
+        root: schemaDir,
+        command: "serve",
+        env: {},
+      },
+      httpServer: { once() {} },
+      ws: { send() {} },
+    });
+
+    expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
+    expect(process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://127.0.0.1:54418");
+  });
 });

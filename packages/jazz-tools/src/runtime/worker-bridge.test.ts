@@ -1,8 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
 import { OutboxDestinationKind, type AuthFailureReason } from "./sync-transport.js";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  if (originalFetch === undefined) {
+    delete (globalThis as { fetch?: typeof fetch }).fetch;
+  } else {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 class MockWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -232,6 +243,81 @@ describe("WorkerBridge", () => {
     });
 
     await expect(initPromise).resolves.toBe("worker-client-123");
+  });
+
+  it("passes telemetry collector url through worker init", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+
+    expect(worker.posted[0]).toMatchObject({
+      type: "init",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+    });
+    await initPromise;
+  });
+
+  it("exports telemetry for sync payloads in both worker bridge directions", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    await initPromise;
+
+    runtimeMock.emitSyncPayload("server", "server-1", enc({ invalid: "postcard" }), false);
+    await Promise.resolve();
+    worker.emitFromWorker({
+      type: "sync",
+      payload: [enc({ invalid: "postcard-from-worker" })],
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const records = fetchMock.mock.calls.map((call) => {
+      const body = JSON.parse(String(call[1]?.body));
+      return JSON.parse(body.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue);
+    });
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          appId: "app-1",
+          scope: "worker_bridge",
+          direction: "main_to_worker",
+          decodeError: expect.any(String),
+        }),
+        expect.objectContaining({
+          appId: "app-1",
+          scope: "worker_bridge",
+          direction: "worker_to_main",
+          decodeError: expect.any(String),
+        }),
+      ]),
+    );
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {

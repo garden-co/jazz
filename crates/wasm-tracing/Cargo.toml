@@ -24,6 +24,7 @@ tracing = { version = "0.1", features = ["attributes"], default-features = false
 tracing-log = { version = "0.2", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3", features = ["registry"], default-features = false }
 wasm-bindgen = { version = "0.2" }
+js-sys = "0.3"
 
 
 [dev-dependencies]

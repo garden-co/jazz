@@ -15,6 +15,7 @@ import type {
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
 import { createSyncOutboxRouter } from "./sync-transport.js";
+import { installWasmTraceTelemetry, observeSyncPayloadsForTelemetry } from "./sync-telemetry.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -31,6 +32,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  telemetryCollectorUrl?: string;
 }
 
 export interface PeerSyncBatch {
@@ -60,6 +62,8 @@ interface WorkerBridgeState {
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
+  telemetryCollectorUrl: string | null;
+  appId: string | null;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -103,12 +107,21 @@ export class WorkerBridge {
       peerSyncListener: null,
       authFailureListener: null,
       serverPayloadForwarder: null,
+      telemetryCollectorUrl: null,
+      appId: null,
     };
 
     // Wire worker → main: incoming sync messages from worker
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
       const msg = event.data;
       if (msg.type === "sync") {
+        observeSyncPayloadsForTelemetry({
+          collectorUrl: this.state.telemetryCollectorUrl ?? undefined,
+          appId: this.state.appId ?? "",
+          scope: "worker_bridge",
+          direction: "worker_to_main",
+          payloads: msg.payload,
+        });
         for (const payload of msg.payload) {
           this.runtime.onSyncMessageReceived(payload);
         }
@@ -177,8 +190,16 @@ export class WorkerBridge {
       runtimeSources: options.runtimeSources,
       fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
+      telemetryCollectorUrl: options.telemetryCollectorUrl,
       clientId: "", // Worker generates its own client ID for main thread
     };
+    this.state.telemetryCollectorUrl = options.telemetryCollectorUrl ?? null;
+    this.state.appId = options.appId;
+    installWasmTraceTelemetry({
+      collectorUrl: options.telemetryCollectorUrl,
+      appId: options.appId,
+      runtimeThread: "main",
+    });
 
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
@@ -369,6 +390,13 @@ export class WorkerBridge {
 
     const payloads = this.state.pendingSyncPayloadsForWorker;
     this.state.pendingSyncPayloadsForWorker = [];
+    observeSyncPayloadsForTelemetry({
+      collectorUrl: this.state.telemetryCollectorUrl ?? undefined,
+      appId: this.state.appId ?? "",
+      scope: "worker_bridge",
+      direction: "main_to_worker",
+      payloads,
+    });
 
     const message = {
       type: "sync" as const,

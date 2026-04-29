@@ -66,6 +66,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    sync_payload_telemetry_collector_url: Option<String>,
 }
 
 impl ServerBuilder {
@@ -82,11 +83,20 @@ impl ServerBuilder {
                 path: PathBuf::from("./data"),
             },
             sync_tracer: None,
+            sync_payload_telemetry_collector_url: None,
         }
     }
 
     pub fn with_sync_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
         self.sync_tracer = Some(tracer);
+        self
+    }
+
+    pub fn with_sync_payload_telemetry_collector_url(
+        mut self,
+        collector_url: impl Into<String>,
+    ) -> Self {
+        self.sync_payload_telemetry_collector_url = Some(collector_url.into());
         self
     }
 
@@ -140,6 +150,9 @@ impl ServerBuilder {
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
             sync_tracer: self.sync_tracer.clone(),
+            sync_payload_telemetry: self
+                .sync_payload_telemetry_collector_url
+                .map(crate::sync_payload_telemetry::SyncPayloadTelemetrySink::new),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits

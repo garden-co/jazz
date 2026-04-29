@@ -10,6 +10,21 @@ use crate::{
     recorder::StringRecorder, thread_display_suffix, warn1, warn4,
 };
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = globalThis, js_name = __JAZZ_WASM_TRACE_SPAN__, catch)]
+    fn emit_wasm_trace_span(span: &JsValue) -> Result<(), JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+struct SpanTiming {
+    start_unix_nano: String,
+}
+
 #[doc = r#"
 Implements [tracing_subscriber::layer::Layer] which uses [wasm_bindgen] for marking and measuring via `window.performance` and `window.console`
 
@@ -183,6 +198,12 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         if self.config.report_logs_in_timings {
             mark(&mark_name(id));
+            #[cfg(target_arch = "wasm32")]
+            if let Some(span_ref) = ctx.span(id) {
+                span_ref.extensions_mut().insert(SpanTiming {
+                    start_unix_nano: unix_nano_now_string(),
+                });
+            }
         }
 
         if self.config.console_group_spans {
@@ -220,7 +241,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
 
         if let Some(span_ref) = ctx.span(id) {
             let meta = span_ref.metadata();
-            if let Some(debug_record) = span_ref.extensions().get::<StringRecorder>() {
+            let extensions = span_ref.extensions();
+            let debug_record = extensions.get::<StringRecorder>();
+            #[cfg(target_arch = "wasm32")]
+            let timing = extensions.get::<SpanTiming>();
+            if let Some(debug_record) = debug_record {
                 let _ = measure(
                     format!(
                         "\"{}\"{} {} {}",
@@ -231,6 +256,10 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     ),
                     mark_name(id),
                 );
+                #[cfg(target_arch = "wasm32")]
+                emit_span_to_js(meta, Some(debug_record), timing);
+                #[cfg(not(target_arch = "wasm32"))]
+                emit_span_to_js(meta, Some(debug_record));
             } else {
                 let _ = measure(
                     format!(
@@ -241,9 +270,59 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     ),
                     mark_name(id),
                 );
+                #[cfg(target_arch = "wasm32")]
+                emit_span_to_js(meta, None, timing);
+                #[cfg(not(target_arch = "wasm32"))]
+                emit_span_to_js(meta, None);
             }
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn emit_span_to_js(
+    meta: &tracing::Metadata<'_>,
+    recorder: Option<&StringRecorder>,
+    timing: Option<&SpanTiming>,
+) {
+    let object = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&object, &"name".into(), &meta.name().into());
+    let _ = js_sys::Reflect::set(&object, &"level".into(), &meta.level().to_string().into());
+    let _ = js_sys::Reflect::set(
+        &object,
+        &"target".into(),
+        &meta.module_path().unwrap_or(meta.target()).into(),
+    );
+    let _ = js_sys::Reflect::set(
+        &object,
+        &"fields".into(),
+        &recorder
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+            .into(),
+    );
+    let _ = js_sys::Reflect::set(
+        &object,
+        &"startUnixNano".into(),
+        &timing
+            .map(|value| value.start_unix_nano.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
+    let _ = js_sys::Reflect::set(
+        &object,
+        &"endUnixNano".into(),
+        &unix_nano_now_string().into(),
+    );
+    let _ = emit_wasm_trace_span(&object.into());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_span_to_js(_meta: &tracing::Metadata<'_>, _recorder: Option<&StringRecorder>) {}
+
+#[cfg(target_arch = "wasm32")]
+fn unix_nano_now_string() -> String {
+    format!("{:.0}", js_sys::Date::now() * 1_000_000.0)
 }
 
 fn log(message: String, level: &Level, use_console_methods: bool) {
