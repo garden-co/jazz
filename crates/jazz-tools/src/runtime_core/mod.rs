@@ -48,9 +48,7 @@ use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowBatchKey, ServerId,
-};
+use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLocalOverlay {
@@ -312,12 +310,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (row, branch, logical write batch, requested_tier) → senders.
-    /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Local).
-    ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
-
-    /// Rejected replayable batch ids that should be surfaced once to bindings.
-    rejected_batch_ids: BTreeSet<crate::row_histories::BatchId>,
+    /// Per-batch durability bookkeeping: ack watchers + rejection set.
+    pub(crate) durability: DurabilityTracker,
 
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
@@ -367,8 +361,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             next_subscription_handle: 0,
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
-            ack_watchers: HashMap::new(),
-            rejected_batch_ids: rejected_batch_ids.clone(),
+            durability: DurabilityTracker::with_initial_rejections(rejected_batch_ids.clone()),
             tier_label: "unknown",
             sync_tracer: None,
             auth_failure_callback: None,
@@ -609,10 +602,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 }
 
+mod durability;
 mod subscriptions;
 mod sync;
 mod ticks;
 mod writes;
+
+use durability::DurabilityTracker;
 
 #[cfg(test)]
 mod tests;
