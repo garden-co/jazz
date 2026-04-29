@@ -112,6 +112,7 @@ export interface Runtime {
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
+  rollbackBatch?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -862,6 +863,7 @@ export class InsertHandle<T> extends WriteHandle<T> {
 export class Transaction {
   private committedHandle: WriteHandle | null = null;
   private readonly touchedRowIds = new Set<string>();
+  private state: "open" | "committed" | "rolled_back" = "open";
 
   constructor(
     private readonly client: JazzClient,
@@ -871,12 +873,15 @@ export class Transaction {
   ) {}
 
   private get committed(): boolean {
-    return this.committedHandle !== null;
+    return this.state === "committed";
   }
 
   private ensureActive(): void {
     if (this.committed) {
       throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    }
+    if (this.state === "rolled_back") {
+      throw new Error(`Transaction ${this.batchContext.batchId} is already rolled back`);
     }
   }
 
@@ -901,12 +906,23 @@ export class Transaction {
   }
 
   commit(): WriteHandle {
+    if (this.state === "rolled_back") {
+      throw new Error(`Transaction ${this.batchContext.batchId} is already rolled back`);
+    }
     if (this.committedHandle) {
       return this.committedHandle;
     }
     const handle = this.client.sealBatch(this.batchId());
     this.committedHandle = handle;
+    this.state = "committed";
     return handle;
+  }
+
+  rollback(): void {
+    this.ensureActive();
+    this.client.rollbackBatch(this.batchId());
+    this.touchedRowIds.clear();
+    this.state = "rolled_back";
   }
 
   create(table: string, values: InsertValues): Row {
@@ -1496,6 +1512,11 @@ export class JazzClient {
     return new WriteHandle(batchId, this);
   }
 
+  rollbackBatch(batchId: string): void {
+    this.requireBatchRecordMethod("rollbackBatch")(batchId);
+    this.flushPendingBatchWaiters();
+  }
+
   /**
    * Enable backend-scoped sync auth for this client.
    *
@@ -1600,7 +1621,11 @@ export class JazzClient {
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
+      | "loadLocalBatchRecord"
+      | "loadLocalBatchRecords"
+      | "acknowledgeRejectedBatch"
+      | "sealBatch"
+      | "rollbackBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];

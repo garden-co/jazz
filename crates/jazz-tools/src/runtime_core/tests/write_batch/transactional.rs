@@ -400,6 +400,358 @@ fn rc_transactional_same_row_same_batch_collapses_to_one_live_staged_member() {
 }
 
 #[test]
+fn rc_transactional_rollback_discards_staged_insert_without_rejected_settlement() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+
+    core.rollback_batch(batch_id)
+        .expect("rollback should discard an open transaction");
+
+    assert_eq!(
+        core.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "rollback should remove the local batch record"
+    );
+    assert_eq!(
+        core.storage()
+            .load_visible_region_row(
+                "users",
+                core.schema_manager().branch_name().as_str(),
+                row_id
+            )
+            .unwrap(),
+        None,
+        "rolled-back staged inserts should never become visible"
+    );
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::Rejected
+    );
+    assert!(
+        core.drain_rejected_batch_ids().is_empty(),
+        "client rollback should not surface as an authority rejection"
+    );
+    assert!(
+        core.sync_sender()
+            .take()
+            .into_iter()
+            .all(|entry| !matches!(entry.payload, SyncPayload::SealBatch { .. })),
+        "rollback should not seal or send the discarded transaction upstream"
+    );
+}
+
+#[test]
+fn rc_transactional_rollback_does_not_write_staged_insert_upstream() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    s.a.rollback_batch(batch_id)
+        .expect("rollback should discard the staged transaction");
+
+    s.a.batched_tick();
+    let rollback_outbox = s.a.sync_sender().take();
+    assert!(
+        rollback_outbox.iter().all(|entry| {
+            !matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::RowBatchCreated { row, .. }
+                        | SyncPayload::RowBatchNeeded { row, .. },
+                } if *server_id == s.b_server_for_a
+                    && row.row_id == row_id
+                    && row.batch_id == batch_id
+            )
+        }),
+        "rollback should not send the discarded row upstream, got {rollback_outbox:?}"
+    );
+    assert!(
+        rollback_outbox.iter().all(|entry| {
+            !matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::SealBatch { submission },
+                } if *server_id == s.b_server_for_a && submission.batch_id == batch_id
+            )
+        }),
+        "rollback should not seal the discarded transaction upstream, got {rollback_outbox:?}"
+    );
+
+    pump_a_to_b(&mut s);
+
+    assert!(
+        s.b.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .is_empty(),
+        "rolled-back transactional history should never be written to the worker"
+    );
+    assert_eq!(
+        s.b.storage()
+            .load_visible_region_row("users", s.b.schema_manager().branch_name().as_str(), row_id)
+            .unwrap(),
+        None,
+        "rolled-back staged inserts should not be visible to the worker"
+    );
+
+    s.a.remove_server(s.b_server_for_a);
+    s.a.add_server(s.b_server_for_a);
+    pump_a_to_b(&mut s);
+
+    assert!(
+        s.b.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .is_empty(),
+        "full sync after rollback should not replay rejected local history"
+    );
+}
+
+#[test]
+fn rc_transactional_rollback_cancels_staged_rows_already_sent_upstream() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_a_to_b(&mut s);
+    let worker_rows =
+        s.b.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(worker_rows.len(), 1);
+    assert_eq!(
+        worker_rows[0].state,
+        crate::row_histories::RowState::StagingPending,
+        "worker should hold the transactional row as still-pending before rollback"
+    );
+
+    pump_b_to_c(&mut s);
+    let edge_rows =
+        s.c.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(edge_rows.len(), 1);
+    assert_eq!(
+        edge_rows[0].state,
+        crate::row_histories::RowState::StagingPending,
+        "edge should hold the transactional row as still-pending before rollback"
+    );
+
+    s.a.rollback_batch(batch_id)
+        .expect("rollback should discard the staged transaction locally");
+    s.a.batched_tick();
+    let rollback_outbox = s.a.sync_sender().take();
+    assert!(
+        rollback_outbox.iter().any(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::CancelBatch { batch_id: cancelled },
+                } if *server_id == s.b_server_for_a && *cancelled == batch_id
+            )
+        }),
+        "rollback should explicitly cancel the pending batch upstream, got {rollback_outbox:?}"
+    );
+    for entry in rollback_outbox {
+        if entry.destination == Destination::Server(s.b_server_for_a) {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    pump_b_to_c(&mut s);
+
+    for (node_name, core) in [("worker", &s.b), ("edge", &s.c)] {
+        let rows = core
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "{node_name} should retain only audit history"
+        );
+        assert_eq!(
+            rows[0].state,
+            crate::row_histories::RowState::Rejected,
+            "{node_name} should reject the still-pending row after CancelBatch"
+        );
+        assert_eq!(
+            core.storage()
+                .load_visible_region_row(
+                    "users",
+                    core.schema_manager().branch_name().as_str(),
+                    row_id
+                )
+                .unwrap(),
+            None,
+            "{node_name} should never publish the cancelled staged row"
+        );
+        assert_eq!(
+            core.storage()
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap(),
+            None,
+            "{node_name} should not create a rejected settlement for a client cancel"
+        );
+    }
+}
+
+#[test]
+fn rc_transactional_rollback_restores_visible_state_after_staged_update() {
+    let mut core = create_runtime_with_schema(defaulted_todos_schema(), "tx-rollback-update");
+    let ((row_id, _), _) = core
+        .insert(
+            "todos",
+            HashMap::from([("title".to_string(), Value::Text("Keep me".to_string()))]),
+            None,
+        )
+        .expect("seed visible todo");
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.update(
+        row_id,
+        vec![("title".to_string(), Value::Text("Discard me".to_string()))],
+        Some(&write_context),
+    )
+    .expect("transactional update should stage locally");
+
+    core.rollback_batch(batch_id)
+        .expect("rollback should discard the staged update");
+
+    assert_eq!(
+        execute_query(&mut core, Query::new("todos")),
+        vec![(
+            row_id,
+            vec![Value::Text("Keep me".to_string()), Value::Boolean(false),],
+        )]
+    );
+    assert!(
+        core.storage()
+            .scan_history_row_batches("todos", row_id)
+            .unwrap()
+            .into_iter()
+            .any(|row| row.batch_id == batch_id
+                && matches!(row.state, crate::row_histories::RowState::Rejected)),
+        "rolled-back staged updates should be retained only as rejected history"
+    );
+}
+
+#[test]
+fn rc_transactional_rollback_rejects_sealed_batch_and_preserves_record() {
+    let mut core = create_test_runtime();
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .expect("transactional insert should stage locally");
+    core.seal_batch(batch_id)
+        .expect("commit should seal the transaction");
+    let record_before = core
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("sealed batch record should be retained");
+
+    let error = core
+        .rollback_batch(batch_id)
+        .expect_err("sealed transactions should not be rolled back");
+
+    assert!(format!("{error:?}").contains("sealed"));
+    assert_eq!(
+        core.storage().load_local_batch_record(batch_id).unwrap(),
+        Some(record_before)
+    );
+}
+
+#[test]
 fn rc_transactional_batch_rejects_writes_after_local_seal() {
     let mut s = create_3tier_rc();
     let open_write_context = WriteContext {

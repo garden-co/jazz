@@ -312,6 +312,21 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
+  it("rolls back an open transaction by discarding its runtime batch", () => {
+    const runtime = makeFakeRuntime();
+    const rollbackBatch = vi.fn<(batchId: string) => void>();
+    (runtime as any).rollbackBatch = rollbackBatch;
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    const tx = client.beginTransaction();
+    const batchId = tx.batchId();
+
+    tx.rollback();
+
+    expect(rollbackBatch).toHaveBeenCalledWith(batchId);
+    expect(() => tx.commit()).toThrow(/rolled back/i);
+  });
+
   it("returns a write handle from direct batch commit so callers can wait on the batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());

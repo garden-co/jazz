@@ -339,6 +339,46 @@ describe("Db transactions", () => {
     expect(runtimeTransaction.query).not.toHaveBeenCalled();
   });
 
+  it("rolls back a db transaction and rejects later work", async () => {
+    const table = todoTable();
+    const query = todoQuery();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-rolled-back"),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      query: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-rolled-back").handle),
+      rollback: vi.fn(() => undefined),
+      localBatchRecord: vi.fn((batchId = "batch-rolled-back") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-rolled-back")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-transaction" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+    tx.rollback();
+
+    expect(runtimeTransaction.rollback).toHaveBeenCalledWith();
+    expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/rolled back/i);
+    expect(() => tx.update(table, "todo-1", { done: true })).toThrow(/rolled back/i);
+    expect(() => tx.delete(table, "todo-1")).toThrow(/rolled back/i);
+    expect(() => tx.commit()).toThrow(/rolled back/i);
+    expect(() => tx.rollback()).toThrow(/rolled back/i);
+    await expect(tx.all(query)).rejects.toThrow(/rolled back/i);
+    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+    expect(runtimeTransaction.query).not.toHaveBeenCalled();
+  });
+
   it("rejects db transaction writes against a different client/schema", () => {
     const primaryTable = todoTable();
     const secondaryTable = {

@@ -487,6 +487,24 @@ impl QueryManager {
             self.mark_subscriptions_dirty_local(table);
             self.mark_local_row_deleted_in_subscriptions(table, row_id);
         } else {
+            if let Ok(Some(visible_row)) = storage.load_visible_region_row(table, branch, row_id)
+                && let Err(error) = Self::update_indices_for_insert_on_branch(
+                    storage,
+                    table,
+                    branch,
+                    row_id,
+                    &visible_row.data,
+                    &table_schema.columns,
+                )
+            {
+                tracing::warn!(
+                    table,
+                    branch,
+                    object_id = %row_id,
+                    %error,
+                    "failed to restore visible row indices after retracting local pending transaction row"
+                );
+            }
             self.clear_local_pending_row_overlay(table, row_id);
         }
     }

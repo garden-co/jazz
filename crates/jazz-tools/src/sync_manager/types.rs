@@ -292,6 +292,9 @@ pub enum SyncPayload {
     /// Explicitly seal a transactional batch so the authority can validate it.
     SealBatch { submission: SealedBatchSubmission },
 
+    /// Explicitly cancel an unsealed transactional batch and discard staged rows.
+    CancelBatch { batch_id: BatchId },
+
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
     QuerySubscription {
@@ -444,6 +447,7 @@ impl SyncPayload {
             SyncPayload::SealBatch { submission } => {
                 submission.members.first().map(|member| member.object_id)
             }
+            SyncPayload::CancelBatch { .. } => None,
             SyncPayload::QueryScopeSnapshot { scope, .. } => {
                 scope.first().map(|(object_id, _)| *object_id)
             }
@@ -469,6 +473,7 @@ impl SyncPayload {
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
             SyncPayload::SealBatch { .. } => None,
+            SyncPayload::CancelBatch { .. } => None,
             SyncPayload::QueryScopeSnapshot { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
             }
@@ -486,6 +491,7 @@ impl SyncPayload {
                 | SyncPayload::RowBatchStateChanged { .. }
                 | SyncPayload::BatchSettlement { .. }
                 | SyncPayload::SealBatch { .. }
+                | SyncPayload::CancelBatch { .. }
         )
     }
 
@@ -527,6 +533,7 @@ impl SyncPayload {
             SyncPayload::BatchSettlement { .. } => "BatchSettlement",
             SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
             SyncPayload::SealBatch { .. } => "SealBatch",
+            SyncPayload::CancelBatch { .. } => "CancelBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",

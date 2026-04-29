@@ -69,6 +69,10 @@ impl SyncManager {
         let my_max_tier = self.max_local_durability_tier();
 
         for row in rows.into_iter() {
+            if matches!(row.state, crate::row_histories::RowState::Rejected) {
+                continue;
+            }
+
             // Skip rows already confirmed above our own tier — an upstream
             // server has them. Without this, a user-role client replays every
             // stored row (including ones authored by other users that it only

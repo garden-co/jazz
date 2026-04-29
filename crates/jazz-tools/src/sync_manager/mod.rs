@@ -8,7 +8,7 @@ use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::row_histories::{BatchId, RowVisibilityChange};
+use crate::row_histories::{BatchId, RowState, RowVisibilityChange};
 use crate::storage::Storage;
 
 // Module declarations
@@ -434,6 +434,29 @@ impl SyncManager {
         }
     }
 
+    pub fn cancel_batch_to_servers(&mut self, batch_id: BatchId) {
+        self.cancel_batch_to_servers_except(batch_id, None);
+    }
+
+    pub(super) fn cancel_batch_to_servers_except(
+        &mut self,
+        batch_id: BatchId,
+        except: Option<ServerId>,
+    ) {
+        let server_ids: Vec<_> = self
+            .servers
+            .keys()
+            .copied()
+            .filter(|server_id| Some(*server_id) != except)
+            .collect();
+        for server_id in server_ids {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::CancelBatch { batch_id },
+            });
+        }
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
@@ -535,6 +558,74 @@ impl SyncManager {
         }
         entries.append(&mut self.outbox);
         self.outbox = entries;
+    }
+
+    /// Drop queued, not-yet-transported row/seal messages for a locally discarded batch.
+    pub(crate) fn discard_pending_batch_outbox(&mut self, batch_id: BatchId) {
+        let mut server_rows = Vec::new();
+        let mut client_rows = Vec::new();
+
+        self.outbox.retain(|entry| match &entry.payload {
+            SyncPayload::RowBatchCreated { metadata, row }
+            | SyncPayload::RowBatchNeeded { metadata, row }
+                if row.batch_id == batch_id
+                    && matches!(row.state, RowState::StagingPending | RowState::Superseded) =>
+            {
+                let key = RowBatchKey::from_row(row);
+                match entry.destination {
+                    Destination::Server(server_id) => {
+                        server_rows.push((server_id, key, metadata.is_some()));
+                    }
+                    Destination::Client(client_id) => {
+                        client_rows.push((client_id, key, metadata.is_some()));
+                    }
+                }
+                false
+            }
+            SyncPayload::SealBatch { submission } if submission.batch_id == batch_id => false,
+            _ => true,
+        });
+
+        for (server_id, key, included_metadata) in server_rows {
+            if let Some(server) = self.servers.get_mut(&server_id) {
+                Self::forget_sent_batch(&mut server.sent_batch_ids, key);
+                if included_metadata {
+                    server.sent_metadata.remove(&key.row_id);
+                }
+            }
+        }
+
+        for (client_id, key, included_metadata) in client_rows {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                Self::forget_sent_batch(&mut client.sent_batch_ids, key);
+                if included_metadata {
+                    client.sent_metadata.remove(&key.row_id);
+                }
+            }
+
+            let should_remove_interest =
+                if let Some(clients) = self.row_batch_interest.get_mut(&key) {
+                    clients.remove(&client_id);
+                    clients.is_empty()
+                } else {
+                    false
+                };
+            if should_remove_interest {
+                self.row_batch_interest.remove(&key);
+            }
+        }
+    }
+
+    fn forget_sent_batch(
+        sent_batch_ids: &mut HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
+        key: RowBatchKey,
+    ) {
+        if let Some(sent_batches) = sent_batch_ids.get_mut(&(key.row_id, key.branch_name)) {
+            sent_batches.remove(&key.batch_id);
+            if sent_batches.is_empty() {
+                sent_batch_ids.remove(&(key.row_id, key.branch_name));
+            }
+        }
     }
 
     /// Get a reference to the outbox (for checking if empty).

@@ -118,6 +118,52 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    pub fn rollback_batch(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Result<(), RuntimeError> {
+        let Some(record) = self
+            .storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+        else {
+            return Ok(());
+        };
+
+        if record.mode != crate::batch_fate::BatchMode::Transactional {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot roll back non-transactional batch {batch_id:?}"
+            )));
+        }
+        if record.sealed {
+            return Err(RuntimeError::WriteError(format!(
+                "cannot roll back sealed transaction {batch_id:?}"
+            )));
+        }
+
+        self.mark_local_batch_rows_rejected(batch_id);
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .discard_pending_batch_outbox(batch_id);
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .cancel_batch_to_servers(batch_id);
+        self.storage
+            .delete_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
+        self.reject_ack_watchers_for_batch(
+            batch_id,
+            "rolled_back",
+            "transaction rolled back locally",
+        );
+        self.rejected_batch_ids.remove(&batch_id);
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
+    }
+
     fn apply_received_batch_settlement(&mut self, settlement: crate::batch_fate::BatchSettlement) {
         let batch_id = settlement.batch_id();
         if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
