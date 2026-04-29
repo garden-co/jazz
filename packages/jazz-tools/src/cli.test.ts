@@ -22,6 +22,8 @@ import {
   deploy as rawDeploy,
   exportSchema as rawExportSchema,
   loadDotEnv,
+  loadEnvFile,
+  readEnvFiles,
   permissionsStatus as rawPermissionsStatus,
   pushMigration as rawPushMigration,
   resolveEnvVar,
@@ -457,6 +459,54 @@ describe("loadDotEnv", () => {
     expect(env.JAZZ_ADMIN_SECRET).toBe("single-quoted");
     expect(env.JAZZ_APP_ID).toBe("plain");
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile loads from an explicit absolute path", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const filePath = join(dir, ".env.staging");
+    await writeFile(filePath, "JAZZ_SERVER_URL=http://staging\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(filePath, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://staging");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile keeps real env precedence when called repeatedly — first file wins per key", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, "a.env"), "JAZZ_SERVER_URL=from-a\nA_ONLY=a\n");
+    await writeFile(join(dir, "b.env"), "JAZZ_SERVER_URL=from-b\nB_ONLY=b\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(join(dir, "a.env"), env);
+    loadEnvFile(join(dir, "b.env"), env);
+    expect(env.JAZZ_SERVER_URL).toBe("from-a");
+    expect(env.A_ONLY).toBe("a");
+    expect(env.B_ONLY).toBe("b");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("readEnvFiles collects --env-file=PATH and --env-file PATH in order", () => {
+    expect(
+      readEnvFiles([
+        "--env-file=.env.staging",
+        "deploy",
+        "myAppId",
+        "--env-file",
+        ".env",
+        "--admin-secret=xyz",
+      ]),
+    ).toEqual([".env.staging", ".env"]);
+  });
+
+  it("readEnvFiles returns an empty array when no flag is present", () => {
+    expect(readEnvFiles(["deploy", "myAppId", "--admin-secret=xyz"])).toEqual([]);
+  });
+
+  it("loadEnvFile is a no-op for a missing path", async () => {
+    const env: Record<string, string | undefined> = { KEPT: "yes" };
+    loadEnvFile(join(tmpBase, "no-such-file.env"), env);
+    expect(env).toEqual({ KEPT: "yes" });
   });
 
   it("flows through resolveEnvVar so deploy-style lookups pick up the .env value", async () => {
