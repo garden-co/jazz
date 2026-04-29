@@ -34,7 +34,7 @@ import {
   type JsonValue,
 } from "../schema/app.js";
 
-type DurabilityTier = "worker" | "edge" | "global";
+type DurabilityTier = "edge" | "global" | "local";
 type TimestampInput = Date | string | number;
 
 const DEFAULT_APP_ID = "codex-sessions";
@@ -121,6 +121,27 @@ export interface CodexSyncStateInput {
   sessionId?: string;
   lineCount: number;
   syncedAt?: TimestampInput;
+}
+
+export interface RecordCodexTerminalPresenceInput {
+  terminalSessionId: string;
+  sessionId?: string;
+  turnId?: string;
+  cwd?: string;
+  projectRoot?: string;
+  repoRoot?: string;
+  state?: string;
+  activityPath?: string;
+  active?: boolean;
+  stale?: boolean;
+  updatedAt?: TimestampInput;
+  startedAt?: TimestampInput;
+  updatedAtMs?: number;
+  startedAtMs?: number;
+  pid?: number;
+  runtimePid?: number;
+  runtimeTty?: string;
+  runtimeHost?: string;
 }
 
 export interface CodexCompletionEvent {
@@ -352,7 +373,7 @@ function dedupeRowsByKey<T>(
   return deduped;
 }
 
-function normalizeRow<T extends Record<string, unknown>>(row: T): T {
+function normalizeRow<T extends object>(row: T): T {
   return Object.fromEntries(
     Object.entries(row).map(([key, value]) => [key, value === null ? undefined : value]),
   ) as T;
@@ -375,8 +396,90 @@ function nativeCodexSessionRunStatus(status: string): string {
   }
 }
 
+function dateFromMillis(value: number | undefined): Date | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return new Date(value);
+}
+
+function terminalTimestamp(
+  value: TimestampInput | undefined,
+  valueMs: number | undefined,
+): Date | undefined {
+  if (value !== undefined) {
+    return asDate(value);
+  }
+  return dateFromMillis(valueMs);
+}
+
 function normalizeStatus(value: string | undefined): string {
   return value?.trim().toLowerCase() ?? "";
+}
+
+function normalizeRequiredId(value: string | undefined, label: string): string {
+  const normalized = value?.trim() ?? "";
+  if (!normalized) {
+    throw new Error(`${label} is required`);
+  }
+  return normalized;
+}
+
+function terminalActivityState(input: RecordCodexTerminalPresenceInput): string {
+  if (input.stale) {
+    return "stale";
+  }
+  switch (normalizeStatus(input.state)) {
+    case "running":
+      return input.active === false ? "idle" : "running";
+    case "idle":
+      return "idle";
+    case "unknown":
+      return "unknown";
+    default:
+      return input.active ? "running" : "unknown";
+  }
+}
+
+function terminalSessionStatus(
+  input: RecordCodexTerminalPresenceInput,
+  existingStatus?: string,
+): string {
+  if (input.stale) {
+    return existingStatus && existingStatus !== "in_progress" ? existingStatus : "stale";
+  }
+  switch (normalizeStatus(input.state)) {
+    case "running":
+      return input.active === false ? "idle" : "in_progress";
+    case "idle":
+      return "idle";
+    case "unknown":
+      return existingStatus ?? "unknown";
+    default:
+      return input.active ? "in_progress" : (existingStatus ?? "unknown");
+  }
+}
+
+function terminalTurnStatus(input: RecordCodexTerminalPresenceInput): string {
+  if (input.stale) {
+    return "stale";
+  }
+  switch (normalizeStatus(input.state)) {
+    case "running":
+      return input.active === false ? "idle" : "in_progress";
+    case "idle":
+      return "completed";
+    default:
+      return "unknown";
+  }
+}
+
+function terminalActivityPath(input: RecordCodexTerminalPresenceInput): string {
+  const activityPath = input.activityPath?.trim();
+  if (activityPath) {
+    return activityPath;
+  }
+  return `terminal:${normalizeRequiredId(input.terminalSessionId, "terminalSessionId")}`;
 }
 
 function activeProjectionTurn(
@@ -544,6 +647,51 @@ export class CodexSessionStore {
       const summary = await this.getSessionSummary(projection.sessionId, session);
       if (!summary) {
         throw new Error(`codex session ${projection.sessionId} not found after upsert`);
+      }
+      return summary;
+    });
+  }
+
+  async recordTerminalPresence(
+    input: RecordCodexTerminalPresenceInput,
+    session?: Session,
+  ): Promise<CodexSessionSummary> {
+    return this.withWriteLock(async () => {
+      const db = this.getDb(session);
+      const sessionId = input.sessionId?.trim() || normalizeRequiredId(input.terminalSessionId, "terminalSessionId");
+      const existingSession = await this.getCodexSessionByExternalId(db, sessionId);
+      const updatedAt = terminalTimestamp(input.updatedAt, input.updatedAtMs) ?? new Date();
+      const startedAt = terminalTimestamp(input.startedAt, input.startedAtMs)
+        ?? existingSession?.created_at
+        ?? updatedAt;
+      const codexSession = await this.upsertTerminalSession(
+        db,
+        input,
+        sessionId,
+        startedAt,
+        updatedAt,
+        existingSession,
+      );
+      const currentTurn = await this.upsertTerminalTurn(db, codexSession, input, startedAt, updatedAt);
+      const syncState = await this.upsertSyncState(db, codexSession, {
+        sourceId: `terminal:${normalizeRequiredId(input.terminalSessionId, "terminalSessionId")}`,
+        absolutePath: terminalActivityPath(input),
+        sessionId: codexSession.session_id,
+        lineCount: 0,
+        syncedAt: updatedAt,
+      });
+      await this.upsertTerminalSessionPresence(
+        db,
+        codexSession,
+        input,
+        currentTurn,
+        syncState.synced_at,
+        updatedAt,
+      );
+
+      const summary = await this.getSessionSummary(codexSession.session_id, session);
+      if (!summary) {
+        throw new Error(`codex session ${codexSession.session_id} not found after terminal presence upsert`);
       }
       return summary;
     });
@@ -1348,6 +1496,159 @@ export class CodexSessionStore {
     return db.insertDurable(app.codex_sessions, payload, { tier: this.writeTier });
   }
 
+  private async upsertTerminalSession(
+    db: Db,
+    input: RecordCodexTerminalPresenceInput,
+    sessionId: string,
+    startedAt: Date,
+    updatedAt: Date,
+    existing: CodexSession | null,
+  ): Promise<CodexSession> {
+    const terminalSessionId = normalizeRequiredId(input.terminalSessionId, "terminalSessionId");
+    const cwd = input.cwd?.trim() || existing?.cwd || "";
+    const projectRoot = input.projectRoot?.trim() || existing?.project_root || cwd || terminalSessionId;
+    const repoRoot = input.repoRoot?.trim() || existing?.repo_root;
+    const status = terminalSessionStatus(input, existing?.status);
+
+    if (existing) {
+      await this.updateRow(db, app.codex_sessions, existing.id, {
+        cwd,
+        project_root: projectRoot,
+        repo_root: nullable(repoRoot),
+        status,
+        updated_at: updatedAt,
+        latest_activity_at: updatedAt,
+      });
+      return this.requireCodexSession(db, sessionId);
+    }
+
+    const payload: CodexSessionInit = {
+      session_id: sessionId,
+      rollout_path: terminalActivityPath(input),
+      cwd,
+      project_root: projectRoot,
+      repo_root: nullable(repoRoot),
+      git_branch: null,
+      originator: nullable("lenos"),
+      source: nullable("lenos.codex.terminal"),
+      cli_version: null,
+      model_provider: null,
+      model_name: null,
+      reasoning_effort: null,
+      agent_nickname: nullable("codex"),
+      agent_role: nullable("terminal"),
+      agent_path: null,
+      first_user_message: null,
+      latest_user_message: null,
+      latest_assistant_message: null,
+      latest_assistant_partial: null,
+      latest_preview: nullable(`Terminal ${terminalSessionId}`),
+      status,
+      created_at: startedAt,
+      updated_at: updatedAt,
+      latest_activity_at: updatedAt,
+      last_user_at: null,
+      last_assistant_at: null,
+      last_completion_at: null,
+      metadata_json: {
+        source: "lenos.codex.terminal",
+        terminalSessionId,
+        activityPath: input.activityPath ?? null,
+      },
+    };
+
+    return db.insertDurable(app.codex_sessions, payload, { tier: this.writeTier });
+  }
+
+  private async upsertTerminalTurn(
+    db: Db,
+    codexSession: CodexSession,
+    input: RecordCodexTerminalPresenceInput,
+    startedAt: Date,
+    updatedAt: Date,
+  ): Promise<CodexTurn | null> {
+    const turnId = input.turnId?.trim();
+    if (!turnId) {
+      return null;
+    }
+
+    const existing = await this.getCodexTurnByExternalId(db, codexSession.session_id, turnId);
+    const payload: CodexTurnInit = {
+      turn_id: turnId,
+      session_id: codexSession.session_id,
+      session_row_id: codexSession.id,
+      sequence: existing?.sequence ?? 0,
+      status: terminalTurnStatus(input),
+      user_message: nullable(existing?.user_message),
+      assistant_message: nullable(existing?.assistant_message),
+      assistant_partial: nullable(existing?.assistant_partial),
+      plan_text: nullable(existing?.plan_text),
+      reasoning_summary: nullable(existing?.reasoning_summary),
+      started_at: existing?.started_at ?? startedAt,
+      completed_at: existing?.completed_at ?? null,
+      duration_ms: nullable(existing?.duration_ms),
+      updated_at: updatedAt,
+    };
+
+    if (existing) {
+      await this.updateRow(db, app.codex_turns, existing.id, payload);
+      return this.getCodexTurnByExternalId(db, codexSession.session_id, turnId);
+    }
+
+    await db.insertDurable(app.codex_turns, payload, { tier: this.writeTier });
+    return this.getCodexTurnByExternalId(db, codexSession.session_id, turnId);
+  }
+
+  private async upsertTerminalSessionPresence(
+    db: Db,
+    codexSession: CodexSession,
+    input: RecordCodexTerminalPresenceInput,
+    currentTurn: CodexTurn | null,
+    lastSyncedAt: Date,
+    updatedAt: Date,
+  ): Promise<CodexSessionPresence> {
+    const existing = await db.one(
+      app.codex_session_presence.where({ session_id: codexSession.session_id }),
+    );
+    const payload: CodexSessionPresenceInit = {
+      session_id: codexSession.session_id,
+      session_row_id: codexSession.id,
+      project_root: codexSession.project_root,
+      repo_root: nullable(codexSession.repo_root),
+      cwd: codexSession.cwd,
+      state: terminalActivityState(input),
+      current_turn_id: nullable(currentTurn?.turn_id),
+      current_turn_row_id: nullable(currentTurn?.id),
+      current_turn_status: nullable(currentTurn?.status),
+      started_at: codexSession.created_at,
+      latest_activity_at: updatedAt,
+      last_event_at: updatedAt,
+      last_user_at: nullable(existing?.last_user_at ?? codexSession.last_user_at),
+      last_assistant_at: nullable(existing?.last_assistant_at ?? codexSession.last_assistant_at),
+      last_completion_at: nullable(existing?.last_completion_at ?? codexSession.last_completion_at),
+      last_synced_at: lastSyncedAt,
+      runtime_pid: nullable(input.runtimePid ?? input.pid),
+      runtime_tty: nullable(input.runtimeTty),
+      runtime_host: nullable(input.runtimeHost),
+      last_heartbeat_at: updatedAt,
+      updated_at: updatedAt,
+    };
+
+    if (existing) {
+      await this.updateRow(db, app.codex_session_presence, existing.id, payload);
+    } else {
+      await db.insertDurable(app.codex_session_presence, payload, { tier: this.writeTier });
+    }
+
+    const presence = await db.one(
+      app.codex_session_presence.where({ session_id: codexSession.session_id }),
+    );
+    if (!presence) {
+      throw new Error(`codex session presence ${codexSession.session_id} missing after terminal upsert`);
+    }
+    return presence;
+  }
+
   private async upsertNativeCodexSessionRunFromSession(
     db: Db,
     codexSession: CodexSession,
@@ -1649,6 +1950,7 @@ export function createCodexSessionStore(
   const context = createJazzContext({
     appId: config.appId ?? DEFAULT_APP_ID,
     app,
+    permissions: {},
     driver: { type: "persistent", dataPath: config.dataPath },
     env: config.env ?? "dev",
     userBranch: config.userBranch ?? "main",

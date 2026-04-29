@@ -659,6 +659,9 @@ export interface RecordCommitTurnResultInput {
   runId?: string;
   threadId?: string;
   repoRoot?: string;
+  model?: string;
+  effort?: string;
+  traceRef?: string;
   message?: string;
   classification?: string;
   title?: string;
@@ -690,6 +693,9 @@ export interface CommitTurnResultRecord {
   runId?: string;
   threadId?: string;
   repoRoot?: string;
+  model?: string;
+  effort?: string;
+  traceRef?: string;
   message?: string;
   classification?: string;
   title?: string;
@@ -1128,7 +1134,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return await db.insert(
       app.agents,
       {
         agent_id: input.agentId,
@@ -1140,8 +1146,7 @@ export class AgentDataStore {
         created_at: asDate(input.createdAt),
         updated_at: now,
       },
-      { tier: this.writeTier },
-    );
+    ).wait({ tier: this.writeTier });
   }
 
   async recordRunStarted(
@@ -1183,7 +1188,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return await db.insert(
       app.agent_runs,
       {
         run_id: input.runId,
@@ -1199,8 +1204,7 @@ export class AgentDataStore {
         context_json: input.contextJson,
         source_trace_path: input.sourceTracePath,
       },
-      { tier: this.writeTier },
-    );
+    ).wait({ tier: this.writeTier });
   }
 
   async recordRunCompleted(
@@ -1252,7 +1256,7 @@ export class AgentDataStore {
       return this.requireItemByExternalId(db, input.runId, input.itemId);
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.run_items,
       {
         item_id: input.itemId,
@@ -1321,7 +1325,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return await db.insert(
       app.semantic_events,
       {
         event_id: eventId,
@@ -1334,8 +1338,7 @@ export class AgentDataStore {
         payload_json: input.payloadJson,
         occurred_at: asDate(input.occurredAt),
       },
-      { tier: this.writeTier },
-    );
+    ).wait({ tier: this.writeTier });
   }
 
   async appendWireEvent(
@@ -1368,7 +1371,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.wire_events,
       {
         event_id: eventId,
@@ -1416,7 +1419,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.artifacts,
       {
         artifact_id: artifactId,
@@ -1463,7 +1466,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.workspace_snapshots,
       {
         snapshot_id: snapshotId,
@@ -1512,7 +1515,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return await db.insert(
       app.agent_state_snapshots,
       {
         snapshot_id: snapshotId,
@@ -1523,8 +1526,7 @@ export class AgentDataStore {
         state_json: input.stateJson,
         captured_at: asDate(input.capturedAt),
       },
-      { tier: this.writeTier },
-    );
+    ).wait({ tier: this.writeTier });
   }
 
   async recordMemoryLink(
@@ -1561,7 +1563,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.memory_links,
       {
         link_id: linkId,
@@ -1608,7 +1610,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.source_files,
       {
         source_file_id: sourceFileId,
@@ -1656,7 +1658,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.daemon_log_sources,
       {
         source_id: sourceId,
@@ -1740,7 +1742,7 @@ export class AgentDataStore {
       return this.requireDaemonLogChunkByExternalId(db, chunkId);
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.daemon_log_chunks,
       {
         chunk_id: chunkId,
@@ -1826,7 +1828,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.daemon_log_events,
       {
         event_id: eventId,
@@ -1933,7 +1935,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.daemon_log_checkpoints,
       {
         checkpoint_id: checkpointId,
@@ -1992,7 +1994,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.daemon_log_summaries,
       {
         summary_id: summaryId,
@@ -2075,7 +2077,7 @@ export class AgentDataStore {
       );
     }
 
-    return db.insertDurable(
+    return (db as any).insertDurable(
       app.task_records,
       {
         task_id: input.taskId,
@@ -2410,6 +2412,9 @@ export class AgentDataStore {
           runId: input.runId,
           threadId: input.threadId,
           repoRoot: input.repoRoot,
+          model: input.model,
+          effort: input.effort,
+          traceRef: input.traceRef,
           message: input.message,
           classification: input.classification,
           title: input.title,
@@ -3166,9 +3171,51 @@ export class AgentDataStore {
   }
 
   private getDb(session?: Session): Db {
-    return session
+    const db = session
       ? this.context.forSession(session, app)
       : this.context.db(app);
+    const compatible = db as Db & {
+      insertDurable?: (
+        table: unknown,
+        values: unknown,
+        options?: { readonly tier?: DurabilityTier },
+      ) => Promise<unknown>;
+      updateDurable?: (
+        tableOrId: unknown,
+        idOrValues: unknown,
+        updatesOrOptions?: unknown,
+        options?: { readonly tier?: DurabilityTier },
+      ) => Promise<unknown>;
+    };
+    compatible.insertDurable ??= async (table, values, options) =>
+      await db
+        .insert(table as never, values as never)
+        .wait({ tier: options?.tier ?? this.writeTier });
+    compatible.updateDurable ??= async (
+      tableOrId,
+      idOrValues,
+      updatesOrOptions,
+      options,
+    ) => {
+      if (typeof tableOrId === "string") {
+        await (db as any)
+          .update(tableOrId as never, idOrValues as never)
+          .wait({ tier: options?.tier ?? this.writeTier });
+        return;
+      }
+      await db
+        .update(
+          tableOrId as never,
+          idOrValues as string,
+          updatesOrOptions as never,
+        )
+        .wait({
+          tier:
+            (options ?? (updatesOrOptions as { readonly tier?: DurabilityTier }))
+              ?.tier ?? this.writeTier,
+        });
+    };
+    return db;
   }
 
   private async getAgentByExternalId(
@@ -3517,6 +3564,9 @@ export class AgentDataStore {
       runId: readObjectString(payload, "runId"),
       threadId: readObjectString(payload, "threadId"),
       repoRoot: readObjectString(payload, "repoRoot"),
+      model: readObjectString(payload, "model"),
+      effort: readObjectString(payload, "effort"),
+      traceRef: readObjectString(payload, "traceRef"),
       message:
         readObjectString(payload, "message") ?? event.summary_text ?? undefined,
       classification: readObjectString(payload, "classification"),
@@ -3902,7 +3952,7 @@ export class AgentDataStore {
   ): Promise<void> {
     const payload = pruneUndefined(updates as Record<string, unknown>);
     if (Object.keys(payload).length === 0) return;
-    await db.updateDurable(table as never, id, payload as never, {
+    await db.update(table as never, id, payload as never).wait({
       tier: this.writeTier,
     });
   }
@@ -3920,7 +3970,6 @@ export function createAgentDataStore(
     env: config.env ?? "dev",
     userBranch: config.userBranch ?? "main",
     serverUrl: config.serverUrl,
-    serverPathPrefix: config.serverPathPrefix,
     backendSecret: config.backendSecret,
     adminSecret: config.adminSecret,
     tier,

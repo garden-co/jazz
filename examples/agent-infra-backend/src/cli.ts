@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -469,6 +469,51 @@ function expandHomePath(value: string): string {
     return path.join(homedir(), value.slice(2));
   }
   return path.resolve(value);
+}
+
+async function maybeStat(pathname: string) {
+  return stat(pathname).catch((error: unknown) => {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String((error as { code?: unknown }).code ?? "")
+        : "";
+    if (code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+}
+
+function legacyDirectoryStoreFilename(dataPath: string): string {
+  const baseName = path.basename(dataPath);
+  if (baseName.endsWith(".db")) {
+    return `${baseName.slice(0, -3)}.sqlite`;
+  }
+  return `${baseName}.sqlite`;
+}
+
+async function resolvePersistentDataPath(dataPath: string): Promise<string> {
+  const normalizedPath = expandHomePath(dataPath);
+  const currentStat = await maybeStat(normalizedPath);
+  if (!currentStat?.isDirectory()) {
+    return normalizedPath;
+  }
+
+  const storeFilename = legacyDirectoryStoreFilename(normalizedPath);
+  const directoryCandidate = path.join(normalizedPath, storeFilename);
+  const siblingCandidate = path.join(path.dirname(normalizedPath), storeFilename);
+  for (const candidate of [directoryCandidate, siblingCandidate]) {
+    const candidateStat = await maybeStat(candidate);
+    if (candidateStat?.isFile()) {
+      return candidate;
+    }
+    if (candidateStat?.isDirectory()) {
+      throw new Error(
+        `Jazz data path ${normalizedPath} is a directory, and fallback path ${candidate} is also a directory`,
+      );
+    }
+  }
+  return directoryCandidate;
 }
 
 function readFlag(flag: string): string | undefined {
@@ -1020,7 +1065,7 @@ function renderJson(value: unknown): void {
 
 async function main(): Promise<void> {
   const command = requireCommand();
-  const dataPath = expandHomePath(
+  const dataPath = await resolvePersistentDataPath(
     readFlag("--data-path") ?? "~/.jazz2/agent-infra.db",
   );
   await mkdir(path.dirname(dataPath), { recursive: true });
