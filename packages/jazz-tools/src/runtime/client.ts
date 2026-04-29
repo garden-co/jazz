@@ -860,6 +860,35 @@ export class WriteResult<T> extends WriteHandle<T> {
   }
 }
 
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as PromiseLike<T>).then === "function"
+  );
+}
+
+type RunAndCommitResult<TResult> =
+  TResult extends PromiseLike<unknown>
+    ? Promise<WriteResult<Awaited<TResult>>>
+    : WriteResult<TResult>;
+
+export function runInBatch<TBatchOrTx extends { commit(): WriteHandle }, TResult>(
+  batchOrTx: TBatchOrTx,
+  callback: (target: TBatchOrTx) => TResult,
+  client: JazzClient,
+): RunAndCommitResult<TResult> {
+  const value = callback(batchOrTx);
+  if (isPromiseLike(value)) {
+    return value.then((resolvedValue) => {
+      const committed = batchOrTx.commit();
+      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, client);
+    }) as RunAndCommitResult<TResult>;
+  }
+  const committed = batchOrTx.commit();
+  return new WriteResult(value, committed.batchId, client) as RunAndCommitResult<TResult>;
+}
+
 export class Transaction {
   private committedHandle: WriteHandle | null = null;
   private readonly touchedRowIds = new Set<string>();
@@ -1182,26 +1211,30 @@ export class SessionClient {
     return this.client.beginTransactionInternal(this.session);
   }
 
-  async transaction<TResult>(
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
-    const value = await callback(transaction);
-    const committed = transaction.commit();
-    return new WriteResult(value as Awaited<TResult>, committed.batchId, this.client);
+    return runInBatch(transaction, callback, this.client);
   }
 
   beginDirectBatch(): DirectBatch {
     return this.client.beginDirectBatchInternal(this.session);
   }
 
-  async directBatch<TResult>(
+  directBatch<TResult>(
+    callback: (batch: DirectBatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  directBatch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
+  directBatch<TResult>(
     callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginDirectBatch();
-    const value = await callback(batch);
-    const committed = batch.commit();
-    return new WriteResult(value, committed.batchId, this.client);
+    return runInBatch(batch, callback, this.client);
   }
 
   beginBatch(): DirectBatch {
@@ -1454,36 +1487,45 @@ export class JazzClient {
     return this.beginTransactionInternal();
   }
 
-  async transaction<TResult>(
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
     callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
-    const value = await callback(transaction);
-    const committed = transaction.commit();
-    return new WriteResult(value, committed.batchId, this);
+    return runInBatch(transaction, callback, this);
   }
 
   beginDirectBatch(): DirectBatch {
     return this.beginDirectBatchInternal();
   }
 
-  async directBatch<TResult>(
+  directBatch<TResult>(
+    callback: (batch: DirectBatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  directBatch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
+  directBatch<TResult>(
     callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginDirectBatch();
-    const value = await callback(batch);
-    const committed = batch.commit();
-    return new WriteResult(value, committed.batchId, this);
+    return runInBatch(batch, callback, this);
   }
 
   beginBatch(): DirectBatch {
     return this.beginDirectBatch();
   }
 
-  async batch<TResult>(
+  batch<TResult>(
+    callback: (batch: DirectBatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  batch<TResult>(callback: (batch: DirectBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
     callback: (batch: DirectBatchScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
-    return this.directBatch(callback);
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const batch = this.beginDirectBatch();
+    return runInBatch(batch, callback, this);
   }
 
   private createBatchContext(batchMode: BatchMode): BatchWriteContext {

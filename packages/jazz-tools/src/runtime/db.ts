@@ -31,6 +31,7 @@ import {
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
+  runInBatch,
 } from "./client.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import type { AuthFailureReason } from "./sync-transport.js";
@@ -2341,15 +2342,21 @@ export class Db {
    *
    * @returns a write result containing the result of the callback
    */
-  async transaction<T, Init, TResult>(
+  transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => TResult,
+  ): WriteResult<TResult>;
+  transaction<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const client = this.getClient(table._schema);
     const transaction = this.beginTransaction(table);
-    const value = await callback(transaction);
-    const committed = transaction.commit();
-    return new WriteResult(value, committed.batchId, client);
+    return runInBatch(transaction, callback, client);
   }
 
   /**
@@ -2383,15 +2390,21 @@ export class Db {
    *
    * @returns a write result containing the result of the callback
    */
-  async directBatch<T, Init, TResult>(
+  directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => TResult,
+  ): WriteResult<TResult>;
+  directBatch<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (batch: DbDirectBatchScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const client = this.getClient(table._schema);
     const batch = this.beginDirectBatch(table);
-    const value = await callback(batch);
-    const committed = batch.commit();
-    return new WriteResult(value, committed.batchId, client);
+    return runInBatch(batch, callback, client);
   }
 
   beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
@@ -2886,14 +2899,20 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override async transaction<T, Init, TResult>(
+  override transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  override transaction<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (tx: DbTransactionScope) => TResult,
+  ): WriteResult<TResult>;
+  override transaction<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction(table);
-    const value = await callback(transaction);
-    const committed = transaction.commit();
-    return new WriteResult(value, committed.batchId, this.runtimeClient);
+    return runInBatch(transaction, callback, this.runtimeClient);
   }
 
   override beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
@@ -2906,14 +2925,20 @@ class ClientBackedDb extends Db {
     );
   }
 
-  override async directBatch<T, Init, TResult>(
+  override directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  override directBatch<T, Init, TResult>(
+    table: TableProxy<T, Init>,
+    callback: (batch: DbDirectBatchScope) => TResult,
+  ): WriteResult<TResult>;
+  override directBatch<T, Init, TResult>(
     table: TableProxy<T, Init>,
     callback: (batch: DbDirectBatchScope) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginDirectBatch(table);
-    const value = await callback(batch);
-    const committed = batch.commit();
-    return new WriteResult(value, committed.batchId, this.runtimeClient);
+    return runInBatch(batch, callback, this.runtimeClient);
   }
 
   override beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
