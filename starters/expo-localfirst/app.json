@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "expo-localfirst",
+    "slug": "expo-localfirst",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "android": {
+      "package": "dev.jazz.starter.expolocalfirst"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.starter.expolocalfirst"
+    }
+  }
+}
