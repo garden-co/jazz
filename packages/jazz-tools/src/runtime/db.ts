@@ -390,7 +390,7 @@ function assertTableBelongsToClient<T, Init>(
     return;
   }
   throw new Error(
-    `${operation} is bound to the client chosen at begin time and cannot be used with table "${table._table}" from a different schema/client.`,
+    `${operation} is bound to the client chosen by the first table used and cannot be used with table "${table._table}" from a different schema/client.`,
   );
 }
 
@@ -420,6 +420,38 @@ export interface ColumnTransform {
 }
 
 export type ColumnTransformMap = Record<string, ColumnTransform>;
+
+type DbTransactionBinding = {
+  client: JazzClient;
+  runtimeTransaction: RuntimeTransaction;
+};
+
+type DbDirectBatchBinding = {
+  client: JazzClient;
+  runtimeBatch: RuntimeDirectBatch;
+};
+
+const dbTransactionBindings = new WeakMap<DbTransaction, DbTransactionBinding>();
+const dbDirectBatchBindings = new WeakMap<DbDirectBatch, DbDirectBatchBinding>();
+
+function getDbTransactionBinding(
+  transaction: DbTransaction,
+  operation: string,
+): DbTransactionBinding {
+  const binding = dbTransactionBindings.get(transaction);
+  if (!binding) {
+    throw new Error(`DbTransaction.${operation}() requires at least one table operation first`);
+  }
+  return binding;
+}
+
+function getDbDirectBatchBinding(batch: DbDirectBatch, operation: string): DbDirectBatchBinding {
+  const binding = dbDirectBatchBindings.get(batch);
+  if (!binding) {
+    throw new Error(`DbDirectBatch.${operation}() requires at least one table operation first`);
+  }
+  return binding;
+}
 
 function transformOutputRow<T>(
   source: { readonly _columnTransforms?: ColumnTransformMap },
@@ -494,43 +526,59 @@ export class DbTransaction {
   private committed = false;
 
   constructor(
-    private readonly client: JazzClient,
-    private readonly runtimeTransaction: RuntimeTransaction,
-    private readonly assertOwnsTable: <T, Init>(
-      table: TableProxy<T, Init>,
-      operation: string,
-    ) => void,
+    private readonly resolveClient: (schema: WasmSchema) => JazzClient,
+    private readonly beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
   ) {}
 
   private ensureActive(): void {
     if (this.committed) {
-      throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already committed`);
+      const batchId = dbTransactionBindings.get(this)?.runtimeTransaction.batchId() ?? "unbound";
+      throw new Error(`Transaction ${batchId} is already committed`);
     }
   }
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    this.assertOwnsTable(table, "DbTransaction");
+    const { client } = this.bindTable(table, "DbTransaction");
     return resolveSchemaWithTable(
       table._schema,
-      normalizeRuntimeSchema(this.client.getSchema()),
+      normalizeRuntimeSchema(client.getSchema()),
       table._table,
     );
   }
 
-  private assertOwnsQuery<T>(query: QueryBuilder<T>): void {
-    this.assertOwnsTable(query as unknown as TableProxy<T, never>, "DbTransaction");
+  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbTransactionBinding {
+    const existingBinding = dbTransactionBindings.get(this);
+    if (existingBinding) {
+      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
+      return existingBinding;
+    }
+
+    const client = this.resolveClient(table._schema);
+    const runtimeTransaction = this.beginRuntimeTransaction(client);
+    const binding = { client, runtimeTransaction };
+    dbTransactionBindings.set(this, binding);
+    return binding;
+  }
+
+  private bindQuery<T>(query: QueryBuilder<T>): DbTransactionBinding {
+    return this.bindTable(query as unknown as TableProxy<T, never>, "DbTransaction");
+  }
+
+  private requireRuntimeTransaction(operation: string): RuntimeTransaction {
+    return getDbTransactionBinding(this, operation).runtimeTransaction;
   }
 
   batchId(): string {
-    return this.runtimeTransaction.batchId();
+    return this.requireRuntimeTransaction("batchId").batchId();
   }
 
   /**
    * Commit the transaction. Data will be globally visible once it's accepted by the authority.
    */
   commit(): WriteHandle {
+    const runtimeTransaction = this.requireRuntimeTransaction("commit");
     this.committed = true;
-    return this.runtimeTransaction.commit();
+    return runtimeTransaction.commit();
   }
 
   /**
@@ -543,7 +591,7 @@ export class DbTransaction {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.runtimeTransaction.create(table._table, values);
+    const row = this.requireRuntimeTransaction("insert").create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -557,7 +605,7 @@ export class DbTransaction {
     this.ensureActive();
     const transformedData = transformUpdateInput(table, data);
     const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
-    this.runtimeTransaction.update(id, updates);
+    this.requireRuntimeTransaction("update").update(id, updates);
   }
 
   /**
@@ -568,8 +616,8 @@ export class DbTransaction {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     this.ensureActive();
-    this.assertOwnsTable(table, "DbTransaction");
-    this.runtimeTransaction.delete(id);
+    const { runtimeTransaction } = this.bindTable(table, "DbTransaction");
+    runtimeTransaction.delete(id);
   }
 
   /**
@@ -579,14 +627,14 @@ export class DbTransaction {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.ensureActive();
-    this.assertOwnsQuery(query);
-    const runtimeSchema = normalizeRuntimeSchema(this.client.getSchema());
+    const { client, runtimeTransaction } = this.bindQuery(query);
+    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const rows = await this.runtimeTransaction.query(
+    const rows = await runtimeTransaction.query(
       translateQuery(builderJson, planningSchema),
       options,
     );
@@ -614,15 +662,17 @@ export class DbTransaction {
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.runtimeTransaction.localBatchRecord(batchId);
+    return this.requireRuntimeTransaction("localBatchRecord").localBatchRecord(batchId);
   }
 
   localBatchRecords(): LocalBatchRecord[] {
-    return this.runtimeTransaction.localBatchRecords();
+    return this.requireRuntimeTransaction("localBatchRecords").localBatchRecords();
   }
 
   acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.runtimeTransaction.acknowledgeRejectedBatch(batchId);
+    return this.requireRuntimeTransaction("acknowledgeRejectedBatch").acknowledgeRejectedBatch(
+      batchId,
+    );
   }
 }
 
@@ -641,30 +691,45 @@ export class DbDirectBatch {
   private committedHandle: WriteHandle | null = null;
 
   constructor(
-    private readonly client: JazzClient,
-    private readonly runtimeBatch: RuntimeDirectBatch,
-    private readonly assertOwnsTable: <T, Init>(
-      table: TableProxy<T, Init>,
-      operation: string,
-    ) => void,
+    private readonly resolveClient: (schema: WasmSchema) => JazzClient,
+    private readonly beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
   ) {}
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    this.assertOwnsTable(table, "DbDirectBatch");
+    const { client } = this.bindTable(table, "DbDirectBatch");
     return resolveSchemaWithTable(
       table._schema,
-      normalizeRuntimeSchema(this.client.getSchema()),
+      normalizeRuntimeSchema(client.getSchema()),
       table._table,
     );
   }
 
+  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbDirectBatchBinding {
+    const existingBinding = dbDirectBatchBindings.get(this);
+    if (existingBinding) {
+      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
+      return existingBinding;
+    }
+
+    const client = this.resolveClient(table._schema);
+    const runtimeBatch = this.beginRuntimeBatch(client);
+    const binding = { client, runtimeBatch };
+    dbDirectBatchBindings.set(this, binding);
+    return binding;
+  }
+
+  private requireRuntimeBatch(operation: string): RuntimeDirectBatch {
+    return getDbDirectBatchBinding(this, operation).runtimeBatch;
+  }
+
   batchId(): string {
-    return this.runtimeBatch.batchId();
+    return this.requireRuntimeBatch("batchId").batchId();
   }
 
   private ensureActive(): void {
     if (this.committedHandle) {
-      throw new Error(`Direct batch ${this.runtimeBatch.batchId()} is already committed`);
+      const batchId = dbDirectBatchBindings.get(this)?.runtimeBatch.batchId() ?? "unbound";
+      throw new Error(`Direct batch ${batchId} is already committed`);
     }
   }
 
@@ -676,7 +741,7 @@ export class DbDirectBatch {
     if (this.committedHandle) {
       return this.committedHandle;
     }
-    const handle = this.runtimeBatch.commit();
+    const handle = this.requireRuntimeBatch("commit").commit();
     this.committedHandle = handle;
     return handle;
   }
@@ -685,7 +750,7 @@ export class DbDirectBatch {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.runtimeBatch.create(table._table, values);
+    const row = this.requireRuntimeBatch("insert").create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -693,25 +758,25 @@ export class DbDirectBatch {
     this.ensureActive();
     const transformedData = transformUpdateInput(table, data);
     const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
-    this.runtimeBatch.update(id, updates);
+    this.requireRuntimeBatch("update").update(id, updates);
   }
 
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
     this.ensureActive();
-    this.assertOwnsTable(table, "DbDirectBatch");
-    this.runtimeBatch.delete(id);
+    const { runtimeBatch } = this.bindTable(table, "DbDirectBatch");
+    runtimeBatch.delete(id);
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.runtimeBatch.localBatchRecord(batchId);
+    return this.requireRuntimeBatch("localBatchRecord").localBatchRecord(batchId);
   }
 
   localBatchRecords(): LocalBatchRecord[] {
-    return this.runtimeBatch.localBatchRecords();
+    return this.requireRuntimeBatch("localBatchRecords").localBatchRecords();
   }
 
   acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.runtimeBatch.acknowledgeRejectedBatch(batchId);
+    return this.requireRuntimeBatch("acknowledgeRejectedBatch").acknowledgeRejectedBatch(batchId);
   }
 }
 
@@ -2320,18 +2385,10 @@ export class Db {
    *
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
-  beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
-    const client = this.getClient(table._schema);
+  beginTransaction(): DbTransaction {
     return new DbTransaction(
-      client,
-      client.beginTransactionInternal(),
-      (candidateTable, operation) =>
-        assertTableBelongsToClient(
-          candidateTable,
-          client,
-          (schema) => this.getClient(schema),
-          operation,
-        ),
+      (schema) => this.getClient(schema),
+      (client) => client.beginTransactionInternal(),
     );
   }
 
@@ -2342,21 +2399,19 @@ export class Db {
    *
    * @returns a write result containing the result of the callback
    */
-  transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  transaction<TResult>(
     callback: (tx: DbTransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
-    callback: (tx: DbTransactionScope) => TResult,
-  ): WriteResult<TResult>;
-  transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  transaction<TResult>(callback: (tx: DbTransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const client = this.getClient(table._schema);
-    const transaction = this.beginTransaction(table);
-    return runInBatch(transaction, callback, client);
+    const transaction = this.beginTransaction();
+    return runInBatch(
+      transaction,
+      callback,
+      () => getDbTransactionBinding(transaction, "result").client,
+    );
   }
 
   /**
@@ -2368,15 +2423,10 @@ export class Db {
    *
    * Prefer using {@link Db.batch} when an explicit commit is not required.
    */
-  beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
-    const client = this.getClient(table._schema);
-    return new DbDirectBatch(client, client.beginBatchInternal(), (candidateTable, operation) =>
-      assertTableBelongsToClient(
-        candidateTable,
-        client,
-        (schema) => this.getClient(schema),
-        operation,
-      ),
+  beginBatch(): DbDirectBatch {
+    return new DbDirectBatch(
+      (schema) => this.getClient(schema),
+      (client) => client.beginBatchInternal(),
     );
   }
 
@@ -2387,21 +2437,15 @@ export class Db {
    *
    * @returns a write result containing the result of the callback
    */
-  batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  batch<TResult>(
     callback: (batch: DbBatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
-    callback: (batch: DbBatchScope) => TResult,
-  ): WriteResult<TResult>;
-  batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
     callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const client = this.getClient(table._schema);
-    const batch = this.beginBatch(table);
-    return runInBatch(batch, callback, client);
+    const batch = this.beginBatch();
+    return runInBatch(batch, callback, () => getDbDirectBatchBinding(batch, "result").client);
   }
 
   /**
@@ -2882,56 +2926,48 @@ class ClientBackedDb extends Db {
     return this.runtimeClient.deleteHandleInternal(id, this.session, this.attribution);
   }
 
-  override beginTransaction<T, Init>(table: TableProxy<T, Init>): DbTransaction {
+  override beginTransaction(): DbTransaction {
     const client = this.runtimeClient;
     return new DbTransaction(
-      client,
-      client.beginTransactionInternal(this.session, this.attribution),
-      (candidateTable, operation) =>
-        assertTableBelongsToClient(candidateTable, client, () => client, operation),
+      () => client,
+      () => client.beginTransactionInternal(this.session, this.attribution),
     );
   }
 
-  override transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  override transaction<TResult>(
     callback: (tx: DbTransactionScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  override transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  override transaction<TResult>(
     callback: (tx: DbTransactionScope) => TResult,
   ): WriteResult<TResult>;
-  override transaction<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  override transaction<TResult>(
     callback: (tx: DbTransactionScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const transaction = this.beginTransaction(table);
-    return runInBatch(transaction, callback, this.runtimeClient);
-  }
-
-  override beginBatch<T, Init>(table: TableProxy<T, Init>): DbDirectBatch {
-    const client = this.runtimeClient;
-    return new DbDirectBatch(
-      client,
-      client.beginBatchInternal(this.session, this.attribution),
-      (candidateTable, operation) =>
-        assertTableBelongsToClient(candidateTable, client, () => client, operation),
+    const transaction = this.beginTransaction();
+    return runInBatch(
+      transaction,
+      callback,
+      () => getDbTransactionBinding(transaction, "result").client,
     );
   }
 
-  override batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  override beginBatch(): DbDirectBatch {
+    const client = this.runtimeClient;
+    return new DbDirectBatch(
+      () => client,
+      () => client.beginBatchInternal(this.session, this.attribution),
+    );
+  }
+
+  override batch<TResult>(
     callback: (batch: DbBatchScope) => Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>>;
-  override batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
-    callback: (batch: DbBatchScope) => TResult,
-  ): WriteResult<TResult>;
-  override batch<T, Init, TResult>(
-    table: TableProxy<T, Init>,
+  override batch<TResult>(callback: (batch: DbBatchScope) => TResult): WriteResult<TResult>;
+  override batch<TResult>(
     callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch(table);
-    return runInBatch(batch, callback, this.runtimeClient);
+    const batch = this.beginBatch();
+    return runInBatch(batch, callback, () => getDbDirectBatchBinding(batch, "result").client);
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {

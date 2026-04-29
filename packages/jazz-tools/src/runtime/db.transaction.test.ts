@@ -104,7 +104,7 @@ function makeWriteHandle(batchId: string, mode: LocalBatchRecord["mode"] = "tran
 }
 
 describe("Db transactions", () => {
-  it("creates a typed db transaction seeded by a table schema", async () => {
+  it("creates a typed db transaction bound by its first table operation", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
       id: "todo-1",
@@ -134,7 +134,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const tx = db.beginTransaction(table);
+    const tx = db.beginTransaction();
     const inserted = tx.insert(table, { title: "Transactional", done: false });
     const updated = tx.update(table, "todo-1", { done: true });
     const deleted = tx.delete(table, "todo-1");
@@ -208,7 +208,7 @@ describe("Db transactions", () => {
       "alice@writer",
     );
 
-    const tx = db.beginTransaction(table);
+    const tx = db.beginTransaction();
     const inserted = tx.insert(table, { title: "Session transaction", done: true });
 
     expect(runtimeClient.beginTransactionInternal).toHaveBeenCalledWith(session, "alice@writer");
@@ -253,7 +253,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handle = db.transaction(table, (tx) => {
+    const handle = db.transaction((tx) => {
       const todo = tx.insert(table, { title: "Callback transaction", done: false });
       return todo;
     });
@@ -298,7 +298,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
     const error = new Error("callback failed");
 
-    await expect(db.transaction(table, async () => Promise.reject(error))).rejects.toBe(error);
+    await expect(db.transaction(async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtimeTransaction.commit).not.toHaveBeenCalled();
   });
@@ -332,7 +332,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handlePromise = db.transaction(table, async (tx) => {
+    const handlePromise = db.transaction(async (tx) => {
       const todo = tx.insert(table, { title: "Async callback transaction", done: false });
       expect(runtimeTransaction.commit).not.toHaveBeenCalled();
       return todo;
@@ -387,13 +387,32 @@ describe("Db transactions", () => {
       runtimeClient as unknown as JazzClient,
     );
 
-    const tx = db.beginTransaction(table);
+    const tx = db.beginTransaction();
+    tx.insert(table, { title: "Closed", done: false });
     const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-closed");
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
-    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when committing a db transaction before any actions", () => {
+    const beginTransactionInternal = vi.fn();
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal,
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const tx = db.beginTransaction();
+
+    expect(() => tx.commit()).toThrow(
+      "DbTransaction.commit() requires at least one table operation first",
+    );
+    expect(beginTransactionInternal).not.toHaveBeenCalled();
   });
 
   it("supports typed reads scoped to the open transaction", async () => {
@@ -425,7 +444,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const tx = db.beginTransaction(table);
+    const tx = db.beginTransaction();
     tx.insert(table, { title: "Transactional read", done: false });
 
     await expect(tx.all(query)).resolves.toEqual([
@@ -469,7 +488,8 @@ describe("Db transactions", () => {
       runtimeClient as unknown as JazzClient,
     );
 
-    const tx = db.beginTransaction(table);
+    const tx = db.beginTransaction();
+    tx.update(table, "todo-read-closed", { done: false });
     const committed = tx.commit();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBe("batch-read-closed");
@@ -513,15 +533,17 @@ describe("Db transactions", () => {
       ]),
     );
 
-    const tx = db.beginTransaction(primaryTable);
+    const tx = db.beginTransaction();
+    tx.update(primaryTable, "todo-cross-client", { done: true });
 
     expect(() => tx.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
       /cannot be used with table "todos" from a different schema\/client/,
     );
+    expect(runtimeTransaction.update).toHaveBeenCalledTimes(1);
     expect(runtimeTransaction.create).not.toHaveBeenCalled();
   });
 
-  it("creates a typed db batch seeded by a table schema", async () => {
+  it("creates a typed db batch bound by its first table operation", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
       id: "todo-direct-1",
@@ -553,7 +575,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const batch = db.beginBatch(table);
+    const batch = db.beginBatch();
     const inserted = batch.insert(table, { title: "Direct batch", done: false });
     const updated = batch.update(table, "todo-direct-1", { done: true });
     const deleted = batch.delete(table, "todo-direct-1");
@@ -623,7 +645,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handle = db.batch(table, (batch) => {
+    const handle = db.batch((batch) => {
       const todo = batch.insert(table, { title: "Callback batch", done: false });
       return todo;
     });
@@ -670,7 +692,7 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
     const error = new Error("callback failed");
 
-    await expect(db.batch(table, async () => Promise.reject(error))).rejects.toBe(error);
+    await expect(db.batch(async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtimeBatch.commit).not.toHaveBeenCalled();
   });
@@ -708,7 +730,7 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handlePromise = db.batch(table, async (batch) => {
+    const handlePromise = db.batch(async (batch) => {
       const todo = batch.insert(table, { title: "Async callback batch", done: false });
       expect(runtimeBatch.commit).not.toHaveBeenCalled();
       return todo;
@@ -733,6 +755,24 @@ describe("Db transactions", () => {
       "batch-direct-async-callback",
       "edge",
     );
+  });
+
+  it("throws when committing a db batch before any actions", () => {
+    const beginBatchInternal = vi.fn();
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginBatchInternal,
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const batch = db.beginBatch();
+
+    expect(() => batch.commit()).toThrow(
+      "DbDirectBatch.commit() requires at least one table operation first",
+    );
+    expect(beginBatchInternal).not.toHaveBeenCalled();
   });
 
   it("rejects db batch writes against a different client/schema", () => {
@@ -772,11 +812,13 @@ describe("Db transactions", () => {
       ]),
     );
 
-    const batch = db.beginBatch(primaryTable);
+    const batch = db.beginBatch();
+    batch.update(primaryTable, "todo-cross-client-direct", { done: true });
 
     expect(() => batch.insert(secondaryTable, { title: "Wrong client", done: false })).toThrow(
       /cannot be used with table "todos" from a different schema\/client/,
     );
+    expect(runtimeBatch.update).toHaveBeenCalledTimes(1);
     expect(runtimeBatch.create).not.toHaveBeenCalled();
   });
 });

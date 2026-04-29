@@ -507,12 +507,11 @@ Important APIs:
 - `client.acknowledgeRejectedBatch(batchId)`
 - `tx.commit()`
 - `batch.commit()`
-- `db.beginBatch(table)`
-- `db.beginTransaction(table)`
+- `db.beginBatch()`
+- `db.beginTransaction()`
 
-The `Db` batch handles are intentionally seeded by a table: that first table chooses the runtime
-client/schema, and later writes through the same handle must stay on that client-bound schema
-surface.
+The `Db` batch handles bind lazily: the first table operation chooses the runtime client/schema,
+and later writes through the same handle must stay on that client-bound schema surface.
 
 Transactional handles also support transaction-scoped reads before commit:
 

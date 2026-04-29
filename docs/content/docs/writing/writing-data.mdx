@@ -148,7 +148,7 @@ db.onMutationError((error) => {
 Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
 
 ```ts
-const result = await db.transaction(app.todos, async (tx) => {
+const result = await db.transaction(async (tx) => {
   tx.insert(app.todos, { title: "Draft copy", done: false });
   const stagedDrafts = await tx.all(app.todos.where({ done: false }));
   tx.update(app.todos, todoId, { done: true });
@@ -166,7 +166,7 @@ You can also use a batch when you want to group several ordinary writes under on
 to be locally visible immediately:
 
 ```ts
-const result = db.batch(app.todos, (batch) => {
+const result = db.batch((batch) => {
   batch.insert(app.todos, { title: "Grouped direct write", done: false });
   batch.update(app.todos, todoId, { done: true });
 });

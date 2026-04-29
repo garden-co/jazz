@@ -876,17 +876,18 @@ type RunAndCommitResult<TResult> =
 export function runInBatch<TBatchOrTx extends { commit(): WriteHandle }, TResult>(
   batchOrTx: TBatchOrTx,
   callback: (target: TBatchOrTx) => TResult,
-  client: JazzClient,
+  client: JazzClient | (() => JazzClient),
 ): RunAndCommitResult<TResult> {
   const value = callback(batchOrTx);
+  const resultClient = typeof client === "function" ? client : () => client;
   if (isPromiseLike(value)) {
     return value.then((resolvedValue) => {
       const committed = batchOrTx.commit();
-      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, client);
+      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, resultClient());
     }) as RunAndCommitResult<TResult>;
   }
   const committed = batchOrTx.commit();
-  return new WriteResult(value, committed.batchId, client) as RunAndCommitResult<TResult>;
+  return new WriteResult(value, committed.batchId, resultClient()) as RunAndCommitResult<TResult>;
 }
 
 export class Transaction {
