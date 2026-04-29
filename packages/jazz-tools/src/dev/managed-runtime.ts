@@ -309,6 +309,9 @@ export class ManagedDevRuntime {
         telemetryCollectorUrl =
           process.env[this.envKeys.telemetryCollectorUrl] ??
           resolveTelemetryCollectorUrl(options.telemetry);
+        if (telemetryCollectorUrl) {
+          console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
+        }
 
         const { pushSchemaCatalogue } = await import("./dev-server.js");
         await pushSchemaCatalogue({ serverUrl, appId, adminSecret, schemaDir });

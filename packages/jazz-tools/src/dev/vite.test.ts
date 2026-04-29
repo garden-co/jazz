@@ -271,6 +271,7 @@ describe("jazzPlugin", () => {
   });
 
   it("passes top-level telemetry options to the managed dev server", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: "00000000-0000-0000-0000-000000000061",
       port: 19881,
@@ -314,6 +315,7 @@ describe("jazzPlugin", () => {
     expect(fakeViteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
       "http://127.0.0.1:54418",
     );
+    expect(logSpy).toHaveBeenCalledWith("[jazz] telemetry collector: http://127.0.0.1:54418");
   });
 
   it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {
@@ -361,6 +363,7 @@ describe("jazzPlugin", () => {
   }, 30_000);
 
   it("exposes telemetry collector url when reusing an env-provided server", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     process.env.VITE_JAZZ_SERVER_URL = "http://localhost:4242";
     process.env.VITE_JAZZ_APP_ID = "00000000-0000-0000-0000-000000000090";
     vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
@@ -398,5 +401,6 @@ describe("jazzPlugin", () => {
 
     expect(devServer.startLocalJazzServer).not.toHaveBeenCalled();
     expect(process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe("http://127.0.0.1:54418");
+    expect(logSpy).toHaveBeenCalledWith("[jazz] telemetry collector: http://127.0.0.1:54418");
   });
 });
