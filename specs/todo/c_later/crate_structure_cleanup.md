@@ -103,8 +103,8 @@ Acceptance:
 ## Phase 2 — Builder collapse
 
 Replace the four storage builder variants on `ServerBuilder`
-(`with_persistent_storage`, `with_in_memory_storage`, `with_sqlite_storage`,
-`with_rocksdb_storage` — `server/builder.rs:106, 118, 130, 137`) with a
+(`with_persistent_storage`, `with_sqlite_storage`, `with_rocksdb_storage`,
+`with_in_memory_storage` — `server/builder.rs:106, 118, 130, 137`) with a
 single `.with_storage(StorageBackend)` where `StorageBackend` is an enum:
 
 ```rust
@@ -122,8 +122,12 @@ Internal call sites are mechanical replacements:
 - `server/mod.rs:359`
 - `server/testing.rs:476, 480, 483, 485` (the test-builder façade — see
   below for why this stays)
-- 6 calls in tests inside `routes.rs` (lines 1719, 1731, 1746, 1947, 1989,
-  2053).
+- 8 calls in tests inside `routes.rs` (lines 1752, 1764, 1779, 1980, 2022,
+  2064, 2106, 2170 — all `with_in_memory_storage`).
+- Integration tests under `crates/jazz-tools/tests/` —
+  `sqlite_storage_integration.rs` (7×), `rocksdb_storage_integration.rs`
+  (7×), `history_conflict.rs` (1×), `support/mod.rs` (1×). 16 calls
+  total; mechanical rewrite in the same PR.
 
 Old methods are removed (no deprecation shim — this is prototype-stage code,
 per CLAUDE.md).
@@ -214,8 +218,9 @@ unrelated concerns. Extract three focused owners:
   storage-flush state, scheduling the next tick) stay in `RuntimeCore` —
   the inbox returns enough information for the orchestrator to do them.
 - **`SubscriptionRegistry`** — owns `subscriptions`, `subscription_reverse`,
-  `pending_subscriptions`, `pending_one_shot_queries`. Pure extraction;
-  the one-shot leak claim from earlier audit notes is stale —
+  `pending_subscriptions`, `pending_one_shot_queries`, and the
+  `next_subscription_handle` counter that allocates fresh handles. Pure
+  extraction; the one-shot leak claim from earlier audit notes is stale —
   `PendingOneShotQuery` already stores `subscription_id`
   (`runtime_core.rs:273-274`, populated at `subscriptions.rs:396`).
 
@@ -231,22 +236,39 @@ pub struct RuntimeCore<S, Sch> {
     inbox: SyncInbox,
     durability: DurabilityTracker,
     subscriptions: SubscriptionRegistry,
+    storage_write_pending_flush: bool,
     tier_label: &'static str,
     sync_tracer: Option<SyncTracer>,
     auth_failure_callback: Option<AuthFailureCallback>,
 }
 ```
 
+`storage_write_pending_flush` (the flag set by
+`mark_storage_write_pending_flush`) stays on `RuntimeCore` rather than
+moving into `DurabilityTracker`. Phase 6 reworks how it's set (via a
+`WriteGuard` constructed at mutation entry points), but the orchestrator
+is still the one that flushes, so the field belongs at the orchestrator
+level.
+
 The Scheduler / SyncSender trait boundaries do not move. The FFI scheduler
 glue in `jazz-napi` and `jazz-wasm` continues to talk to the same traits.
 
-Acceptance: existing `runtime_core/tests.rs` passes unchanged. Behavior of
-`immediate_tick` and `batched_tick` is identical (verified by integration
-tests, not internal mocks — see CLAUDE.md TDD note).
+Acceptance:
+
+- Existing `runtime_core/tests.rs` passes unchanged. Behavior of
+  `immediate_tick` and `batched_tick` is identical (verified by integration
+  tests, not internal mocks — see CLAUDE.md TDD note).
+- `runtime_core.rs` (the parent file alongside the `runtime_core/`
+  directory) is folded into `runtime_core/mod.rs`. Every other subsystem
+  (`query_manager`, `schema_manager`, `storage`, `sync_manager`, `server`,
+  `middleware`, `row_histories`, `ws_stream`, `commands`) uses `mod.rs`;
+  `runtime_core` is the lone holdout. The decomposition is the natural
+  moment to align — once orchestration shrinks, folding the parent file is
+  cheap.
 
 ## Phase 5 — Subscribe as typed builder
 
-The two-phase subscribe path (`runtime_core/subscriptions.rs:179-266`)
+The two-phase subscribe path (`runtime_core/subscriptions.rs:173-269`)
 requires the caller to call `create_subscription` followed by
 `execute_subscription`. The pair is enforced by convention only.
 
@@ -324,8 +346,42 @@ re-exporting. `policy_eval` logic that today lives in `policy.rs` (3.1K)
 folds into the existing `graph_nodes/` per-operator files where possible;
 shared evaluation primitives stay in `policy.rs` but shrink.
 
-Acceptance: no public type renamed; `cargo bench` (if present for query
-hot paths) is within ±2% of pre-split numbers.
+Acceptance: no public type renamed. The existing `realistic_phase1` and
+`observer_write_path` benches (`crates/jazz-tools/benches/`) show no
+regression — >5% slowdown is a blocker, <2% is noise. No graph-execution
+micro-bench exists today; the realistic-phase bench is the closest
+stand-in.
+
+## Phase 8 — Remaining 3K-LOC violators
+
+Phase 1 relocates `routes.rs` to `server/routes.rs` but does not split it.
+Two top-level files still exceed the 3K-LOC goal after Phase 1; Phase 8
+addresses both.
+
+- `server/routes.rs` (3654 LOC) — splits along three seams: HTTP endpoint
+  handlers + the `create_router` builder, the WebSocket lifecycle
+  (`ws_handler`, `authenticate_ws_handshake`, `handle_ws_connection`,
+  `ws_cleanup`, etc. — `routes.rs:1178-1675`), and parser/validator
+  helpers. Target: `server/routes/{http,websocket,utils,mod}.rs`. The
+  `mod.rs` re-exports `create_router` so `server::routes::create_router`
+  resolves unchanged for `server/mod.rs` and `commands/server.rs`.
+- `row_histories/mod.rs` (3441 LOC) — three buckets: data types
+  (`BatchId` at line 25, `RowState` at line 102, `QueryRowBatch`,
+  `StoredRowBatch`, `VisibleRowEntry`, error types), descriptor/codec
+  builders + flat encode/decode, and the application algorithms
+  (`apply_row_batch` at line 2068, `patch_row_batch_state` at line 2196).
+  Target: `row_histories/{types,codecs,apply,mod}.rs`.
+
+Watch list (no action this phase): `query_manager/policy.rs` (3181 LOC,
+already shrinks under Phase 7), `schema_manager/manager.rs` (3105 LOC,
+cohesive façade), `query_manager/writes.rs` (2814 LOC but most active
+borderline file, ~100 commits — flag for split if it crosses ~3.5K).
+
+Each split is mechanical and independent of the others. Acceptance: no
+public type renamed; existing imports continue to resolve via
+re-exports from each module's `mod.rs`. `cargo build --all-features`
+and `cargo test --all-features` pass; `pnpm build` and `pnpm test`
+pass.
 
 ## Out of scope (capture only)
 
@@ -350,15 +406,18 @@ These came up in the audit but should be separate specs if pursued:
 
 ## Invariants
 
-- Phases 1, 3, 4, 6, 7 preserve the public API of `jazz-tools`. Phases 2
-  and 5 are deliberate API breaks; they coordinate the corresponding
-  binding updates in the same PR (see _Public API impact_ above).
+- Phases 1, 3, 4, 6, 7, 8 preserve the public API of `jazz-tools`.
+  Phases 2 and 5 are deliberate API breaks; they coordinate the
+  corresponding binding updates in the same PR (see _Public API impact_
+  above).
 - All phases preserve wire format, storage format, sync semantics.
 - Tests are not rewritten; they move with their code. Per CLAUDE.md, an
   unexpectedly failing test is treated as a signal, not as something to
   edit out.
 - Each phase is its own PR. Phases 1–3 are independent of one another;
-  phases 4–7 build on the cleaner module layout from 1–3.
+  phases 4–7 build on the cleaner module layout from 1–3. Phase 8
+  depends on Phase 1 for the `routes.rs` move only; the
+  `row_histories/mod.rs` split is independent of every other phase.
 
 ## Testing Strategy
 
@@ -397,4 +456,9 @@ These came up in the audit but should be separate specs if pursued:
                   v
 7 graph.rs split             (independent; sequenced last to avoid
                               merge conflicts with hot-path PRs)
+                  │
+                  v
+8 3K-LOC violators           (routes.rs split depends on Phase 1's move;
+                              row_histories split is independent of all
+                              other phases)
 ```
