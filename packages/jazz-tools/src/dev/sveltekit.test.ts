@@ -324,6 +324,41 @@ describe("jazzSvelteKit", () => {
     ).rejects.toThrow("appId is required when connecting to an existing server");
   });
 
+  it("sends a full-reload to the browser on a successful schema watch push", async () => {
+    vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000050",
+      port: 19890,
+      url: "http://127.0.0.1:19890",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    let capturedOnPush: ((hash: string) => void) | undefined;
+    vi.spyOn(schemaWatcher, "watchSchema").mockImplementation((opts) => {
+      capturedOnPush = opts.onPush;
+      return { close: vi.fn() };
+    });
+
+    const root = await tempRoots.create("jazz-sveltekit-reload-test-");
+    const wsSend = vi.fn();
+    const viteServer: ViteDevServer & { restart: ReturnType<typeof vi.fn> } = {
+      config: { root, command: "serve", env: {} },
+      httpServer: { once() {} },
+      ws: { send: wsSend },
+      restart: vi.fn(() => Promise.resolve()),
+    };
+
+    const plugin = jazzSvelteKit({
+      server: { port: 19890, adminSecret: "reload-admin" },
+    });
+    await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
+
+    expect(capturedOnPush).toBeDefined();
+    capturedOnPush!("abc123def4567890");
+
+    expect(wsSend).toHaveBeenCalledWith({ type: "full-reload" });
+  });
+
   it("surfaces schema push failures as HMR errors", async () => {
     vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: "00000000-0000-0000-0000-000000000003",
