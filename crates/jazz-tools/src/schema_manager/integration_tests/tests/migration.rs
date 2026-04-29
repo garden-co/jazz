@@ -521,7 +521,7 @@ fn locator_only_storage_returns_old_branch_rows_through_lens() {
     use super::locator_only_storage::LocatorOnlyStorage;
     use crate::metadata::MetadataKey;
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
-    use crate::test_row_history::put_test_row_metadata;
+    use crate::test_support::put_test_row_metadata;
 
     let v1 = SchemaBuilder::new()
         .table(
