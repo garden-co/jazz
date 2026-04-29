@@ -46,7 +46,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Push a sync message to the inbox (from network).
     pub fn push_sync_inbox(&mut self, entry: InboxEntry) {
         if entry.payload.writes_storage() {
-            self.mark_storage_write_pending_flush();
+            let _guard = crate::runtime_core::WriteGuard::new(self);
         }
         self.schema_manager
             .query_manager_mut()

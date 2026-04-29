@@ -248,7 +248,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .sync_manager_mut()
             .recover_completed_sealed_batches_with_storage(&mut self.storage);
         if recovered_sealed_batches {
-            self.mark_storage_write_pending_flush();
+            let _guard = crate::runtime_core::WriteGuard::new(self);
         }
 
         // 1. Process logical updates (sync, subscriptions)
@@ -572,7 +572,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         for msg in messages {
             if msg.payload.writes_storage() {
-                self.mark_storage_write_pending_flush();
+                let _guard = crate::runtime_core::WriteGuard::new(self);
             }
             self.push_sync_inbox(msg);
             applied_messages += 1;
@@ -604,7 +604,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
                 if msg.payload.writes_storage() {
-                    self.mark_storage_write_pending_flush();
+                    let _guard = crate::runtime_core::WriteGuard::new(self);
                 }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;

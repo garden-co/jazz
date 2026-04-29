@@ -300,7 +300,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(row_id, batch_id, batch_mode, true)?;
         debug!(object_id = %row_id, "inserted");
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(((row_id, row_values), batch_id))
     }
@@ -332,7 +332,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(row_id, batch_id, batch_mode, true)?;
         debug!(object_id = %row_id, "inserted");
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(((row_id, row_values), batch_id))
     }
@@ -355,7 +355,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(object_id, batch_id, batch_mode, true)?;
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(batch_id)
     }
@@ -388,7 +388,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.track_local_batch(object_id, batch_id, BatchMode::Transactional, false)?;
         }
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(())
     }
@@ -411,7 +411,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(BatchMode::Direct);
         self.track_local_batch(object_id, batch_id, batch_mode, true)?;
         debug!("deleted");
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(batch_id)
     }
@@ -479,7 +479,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             self.durability
                 .register_watcher(row_batch_key, tier, sender);
         }
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(((row_id, row_values), receiver))
     }
@@ -520,7 +520,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .register_watcher(row_batch_key, tier, sender);
         }
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(((row_id, row_values), batch_id, receiver))
     }
@@ -572,7 +572,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .register_watcher(row_batch_key, tier, sender);
         }
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok((batch_id, receiver))
     }
@@ -629,7 +629,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .register_watcher(row_batch_key, tier, sender);
         }
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(receiver)
     }
@@ -667,7 +667,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .register_watcher(row_batch_key, tier, sender);
         }
 
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok((batch_id, receiver))
     }
@@ -717,7 +717,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .delete_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.durability.forget_batch(batch_id);
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         Ok(true)
     }
 
@@ -748,7 +748,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager_mut()
             .sync_manager_mut()
             .seal_batch_to_servers(submission);
-        self.mark_storage_write_pending_flush();
+        let _guard = crate::runtime_core::WriteGuard::new(self);
         self.immediate_tick();
         Ok(())
     }

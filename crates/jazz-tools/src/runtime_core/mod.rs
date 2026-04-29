@@ -424,6 +424,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub(crate) fn clear_storage_write_pending_flush(&mut self) {
         self.storage_write_pending_flush = false;
     }
+}
+
+/// Marker constructed by mutation entry points in `writes.rs`, `ticks.rs`, and
+/// `sync.rs` to record that storage was touched and a WAL flush is pending.
+///
+/// The act of constructing the guard *is* the side effect — there is no
+/// release-on-drop. The flag is consumed by `batched_tick` when it issues
+/// the next flush. Mutation functions hold no `&mut RuntimeCore` borrow
+/// while the guard is bound, since `WriteGuard` carries no runtime state.
+#[must_use = "WriteGuard exists for its side effect; binding to `_` is fine but discarding without binding misses the flag"]
+pub(crate) struct WriteGuard;
+
+impl WriteGuard {
+    pub(crate) fn new<S: Storage, Sch: Scheduler>(core: &mut RuntimeCore<S, Sch>) -> Self {
+        core.mark_storage_write_pending_flush();
+        Self
+    }
+}
+
+impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    // (continued below — split for the WriteGuard definition above)
 
     /// Consume RuntimeCore and return the Storage.
     /// Used for cold-start testing to transfer driver state.
