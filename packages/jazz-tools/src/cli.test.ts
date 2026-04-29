@@ -21,6 +21,9 @@ import {
   createMigration as rawCreateMigration,
   deploy as rawDeploy,
   exportSchema as rawExportSchema,
+  loadDotEnv,
+  loadEnvFile,
+  readEnvFiles,
   permissionsStatus as rawPermissionsStatus,
   pushMigration as rawPushMigration,
   resolveEnvVar,
@@ -400,6 +403,122 @@ function storedSchemaResponse(
     { status },
   );
 }
+
+describe("loadDotEnv", () => {
+  it("merges values from .env into the supplied env object", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      ["JAZZ_SERVER_URL=http://from-dotenv", "JAZZ_ADMIN_SECRET=secret-123", ""].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-dotenv");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("secret-123");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not override values already set in the environment", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "JAZZ_SERVER_URL=http://from-dotenv\n");
+    const env: Record<string, string | undefined> = {
+      JAZZ_SERVER_URL: "http://from-real-env",
+    };
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-real-env");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("is a no-op when no .env file exists", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const env: Record<string, string | undefined> = { PRE_EXISTING: "kept" };
+    loadDotEnv(dir, env);
+    expect(env).toEqual({ PRE_EXISTING: "kept" });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("ignores comments and blank lines and strips surrounding quotes", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      [
+        "# leading comment",
+        "",
+        'JAZZ_SERVER_URL="http://quoted"',
+        "JAZZ_ADMIN_SECRET='single-quoted'",
+        "JAZZ_APP_ID=plain",
+      ].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://quoted");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("single-quoted");
+    expect(env.JAZZ_APP_ID).toBe("plain");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile loads from an explicit absolute path", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const filePath = join(dir, ".env.staging");
+    await writeFile(filePath, "JAZZ_SERVER_URL=http://staging\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(filePath, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://staging");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("loadEnvFile keeps real env precedence when called repeatedly — first file wins per key", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, "a.env"), "JAZZ_SERVER_URL=from-a\nA_ONLY=a\n");
+    await writeFile(join(dir, "b.env"), "JAZZ_SERVER_URL=from-b\nB_ONLY=b\n");
+    const env: Record<string, string | undefined> = {};
+    loadEnvFile(join(dir, "a.env"), env);
+    loadEnvFile(join(dir, "b.env"), env);
+    expect(env.JAZZ_SERVER_URL).toBe("from-a");
+    expect(env.A_ONLY).toBe("a");
+    expect(env.B_ONLY).toBe("b");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("readEnvFiles collects --env-file=PATH and --env-file PATH in order", () => {
+    expect(
+      readEnvFiles([
+        "--env-file=.env.staging",
+        "deploy",
+        "myAppId",
+        "--env-file",
+        ".env",
+        "--admin-secret=xyz",
+      ]),
+    ).toEqual([".env.staging", ".env"]);
+  });
+
+  it("readEnvFiles returns an empty array when no flag is present", () => {
+    expect(readEnvFiles(["deploy", "myAppId", "--admin-secret=xyz"])).toEqual([]);
+  });
+
+  it("loadEnvFile is a no-op for a missing path", async () => {
+    const env: Record<string, string | undefined> = { KEPT: "yes" };
+    loadEnvFile(join(tmpBase, "no-such-file.env"), env);
+    expect(env).toEqual({ KEPT: "yes" });
+  });
+
+  it("flows through resolveEnvVar so deploy-style lookups pick up the .env value", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "VITE_JAZZ_SERVER_URL=http://vite-from-dotenv\n");
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://vite-from-dotenv");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
 
 describe("resolveEnvVar", () => {
   it("returns the first name that has a defined value", () => {

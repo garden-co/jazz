@@ -52,9 +52,11 @@ export interface ScaffoldOptions {
   /**
    * Runs after git init and before `pnpm install`. Use for anything that must
    * land in the scaffolded project before the install runs — e.g. cloud
-   * provisioning that writes `.env`.
+   * provisioning that writes `.env`. Receives `onStep` so long-running work
+   * (e.g. a provisioning HTTP request) can advance the caller's spinner
+   * rather than leaving it stuck on the previous step.
    */
-  preInstall?: (targetDir: string) => Promise<void>;
+  preInstall?: (ctx: { dir: string; onStep: (label: string) => void }) => Promise<void>;
 }
 
 const SCAFFOLD_COPY_SKIP = new Set(["node_modules", ".next", ".jazz", ".turbo", ".env", ".git"]);
@@ -131,7 +133,10 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
   // Pre-install hook runs after the transactional steps; failures from here
   // on leave the project intact so the user can inspect / retry manually.
   if (options.preInstall) {
-    await options.preInstall(options.targetDir);
+    await options.preInstall({
+      dir: options.targetDir,
+      onStep: (label) => options.onStep?.(label),
+    });
   }
 
   // Install is not transactional for the same reason — failure leaves the

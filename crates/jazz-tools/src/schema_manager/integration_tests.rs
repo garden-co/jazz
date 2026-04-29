@@ -213,7 +213,7 @@ mod tests {
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
     use crate::query_manager::query::{Query, QueryBuilder};
-    use crate::test_row_history::put_test_row_metadata;
+    use crate::test_support::put_test_row_metadata;
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
     fn execute_query(
         manager: &mut SchemaManager,
@@ -425,6 +425,7 @@ mod tests {
     /// Test 6: One-shot query() with settled_tier resolves to empty snapshot after tier settle.
     mod catalogue;
     mod lenses;
+    mod locator_only_storage;
     mod migration;
     mod misc;
     mod query_subscription;

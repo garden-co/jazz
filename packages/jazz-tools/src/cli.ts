@@ -2,6 +2,7 @@
 
 // CLI for jazz-tools schema tooling
 
+import { existsSync, readFileSync } from "fs";
 import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
@@ -200,6 +201,61 @@ export const APP_ID_ENV_VARS = [
   "NEXT_PUBLIC_JAZZ_APP_ID",
   "EXPO_PUBLIC_JAZZ_APP_ID",
 ] as const;
+
+// Real environment variables always win — `.env` is a fallback only.
+// Uses Node's built-in `process.loadEnvFile` when operating on the real
+// process.env; falls back to a small parser for tests and older Node.
+export function loadEnvFile(
+  envPath: string,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (!existsSync(envPath)) return;
+  if (env === process.env && typeof process.loadEnvFile === "function") {
+    process.loadEnvFile(envPath);
+    return;
+  }
+  const content = readFileSync(envPath, "utf8");
+  for (let line of content.split("\n")) {
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (env[key] === undefined) env[key] = value;
+  }
+}
+
+export function loadDotEnv(
+  cwd: string = process.cwd(),
+  env: Record<string, string | undefined> = process.env,
+): void {
+  loadEnvFile(join(cwd, ".env"), env);
+}
+
+// Collect every `--env-file=PATH` and `--env-file PATH` from argv, in
+// the order they appear. Earlier files take precedence over later ones
+// because loadEnvFile only fills in keys that are still undefined.
+export function readEnvFiles(args: string[]): string[] {
+  const files: string[] = [];
+  const prefix = "--env-file=";
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--env-file") {
+      const value = args[i + 1];
+      if (value) files.push(value);
+    } else if (arg.startsWith(prefix)) {
+      files.push(arg.slice(prefix.length));
+    }
+  }
+  return files;
+}
 
 export function resolveEnvVar(
   names: readonly string[],
@@ -1870,6 +1926,14 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
+  const envFiles = readEnvFiles(process.argv.slice(2));
+  if (envFiles.length > 0) {
+    for (const file of envFiles) {
+      loadEnvFile(resolve(process.cwd(), file));
+    }
+  } else {
+    loadDotEnv();
+  }
   const command = process.argv[2] ?? "";
 
   if (command === "validate") {
@@ -2035,6 +2099,10 @@ if (isMainModule()) {
     );
     console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
     console.log("  --name <name>         Optional migration filename label (default: unnamed)");
+    console.log("\nGlobal options:");
+    console.log(
+      "  --env-file <path>     Load env vars from this file (repeatable; first file wins per key). Defaults to .env in cwd.",
+    );
     process.exit(command ? 1 : 0);
   }
 }

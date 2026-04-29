@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::schema_manager::AppId;
-use jazz_tools::server::{CatalogueAuthorityMode, ServerBuilder};
+use jazz_tools::server::{CatalogueAuthorityMode, ServerBuilder, StorageBackend};
 use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
@@ -34,9 +34,14 @@ pub async fn run(
         .with_auth_config(auth_config)
         .with_catalogue_authority(catalogue_authority);
     let built = if in_memory {
-        builder.with_in_memory_storage().build().await
+        builder.with_storage(StorageBackend::InMemory).build().await
     } else {
-        builder.with_persistent_storage(data_dir).build().await
+        builder
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.into(),
+            })
+            .build()
+            .await
     }
     .map_err(|e| format!("failed to build server: {e}"))?;
 

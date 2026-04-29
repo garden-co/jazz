@@ -1,3 +1,4 @@
+pub mod bindings;
 pub mod encoding;
 pub mod graph;
 pub mod graph_nodes;

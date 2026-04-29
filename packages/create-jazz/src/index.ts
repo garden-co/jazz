@@ -1,7 +1,7 @@
 import { intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
 import pc from "picocolors";
 import * as path from "node:path";
-import { scaffold, validateAppName, type StarterName } from "./scaffold.js";
+import { scaffold, validateAppName, type StarterName, type ScaffoldOptions } from "./scaffold.js";
 import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
@@ -186,23 +186,31 @@ async function main() {
 
   const needsBetterAuthSecret = starter.endsWith("-betterauth") || starter.endsWith("-hybrid");
 
-  const preInstall: ((dir: string) => Promise<void>) | undefined =
+  // Buffer log output emitted during scaffolding so it can be printed after
+  // the spinner stops — otherwise clack's active-line redraw concatenates
+  // it onto the current spinner message.
+  const deferredLogs: { kind: "info" | "warn"; message: string }[] = [];
+
+  const preInstall: ScaffoldOptions["preInstall"] =
     hosting === "hosted" || needsBetterAuthSecret
-      ? async (dir: string) => {
+      ? async ({ dir, onStep }) => {
           if (needsBetterAuthSecret) {
             writeBetterAuthSecret(dir);
           }
           if (hosting === "hosted") {
             const envKeys = envKeysForStarter(starter);
             if (!envKeys) {
-              log.warn(
-                `Skipping hosted provisioning: no env key map registered for starter "${starter}".`,
-              );
+              deferredLogs.push({
+                kind: "warn",
+                message: `Skipping hosted provisioning: no env key map registered for starter "${starter}".`,
+              });
             } else {
               await runHostedInit({
                 dir,
                 cloudSyncUrl: CLOUD_SYNC_URL,
                 envKeys,
+                onStep,
+                onLog: (kind, message) => deferredLogs.push({ kind, message }),
               });
             }
           }
@@ -229,6 +237,11 @@ async function main() {
     s.stop(pc.red("Failed."));
     log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
+  }
+
+  for (const entry of deferredLogs) {
+    if (entry.kind === "warn") log.warn(entry.message);
+    else log.info(entry.message);
   }
 
   if (pm) {

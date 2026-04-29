@@ -1,5 +1,7 @@
 # jazz-napi
 
+## 2.0.0-alpha.42
+
 ## 2.0.0-alpha.41
 
 ## 2.0.0-alpha.40

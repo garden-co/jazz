@@ -588,11 +588,13 @@ A later remote update must not become visible until every visible batch for that
 
 This is intentionally batch-wide. If a query sees any part of batch `B`, it gates on batch `B`'s current `confirmed_tier`, not just the specific visible ref.
 
-Ordinary queries do **not** get transactional completeness guarantees. If an accepted transactional batch reaches the visible prefix and its batch `confirmed_tier` satisfies any requested tier, ordinary queries may observe it like any other visible update.
+Queries always get transactional completeness guarantees. If an accepted transactional batch reaches
+the visible prefix and its batch `confirmed_tier` satisfies any requested tier, queries still wait
+until the transaction is complete for the query's current local scope.
 
-### Strict transaction visibility (opt-in)
+### Transaction visibility
 
-Strict transaction visibility adds one more rule on top of ordinary public visibility:
+Transaction visibility adds one more rule on top of ordinary public visibility:
 
 - accepted transaction results are only visible when complete for the query's current local scope
 
