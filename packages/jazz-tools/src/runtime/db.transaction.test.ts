@@ -253,11 +253,12 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handle = await db.transaction(table, (tx) => {
+    const handle = db.transaction(table, (tx) => {
       const todo = tx.insert(table, { title: "Callback transaction", done: false });
       return todo;
     });
 
+    expect(handle).not.toBeInstanceOf(Promise);
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.batchId).toBe("batch-callback");
     expect(handle.value).toEqual({
@@ -300,6 +301,59 @@ describe("Db transactions", () => {
     await expect(db.transaction(table, async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtimeTransaction.commit).not.toHaveBeenCalled();
+  });
+
+  it("commits a typed async callback transaction after the callback resolves", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-async-callback",
+      values: [
+        { type: "Text", value: "Async callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-async-callback",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-async-callback"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-async-callback").handle),
+      localBatchRecord: vi.fn((batchId = "batch-async-callback") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-async-callback")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      waitForPersistedBatch: vi.fn(async () => undefined),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const handlePromise = db.transaction(table, async (tx) => {
+      const todo = tx.insert(table, { title: "Async callback transaction", done: false });
+      expect(runtimeTransaction.commit).not.toHaveBeenCalled();
+      return todo;
+    });
+
+    expect(handlePromise).toBeInstanceOf(Promise);
+    const handle = await handlePromise;
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.batchId).toBe("batch-async-callback");
+    expect(handle.value).toEqual({
+      id: "todo-async-callback",
+      title: "Async callback transaction",
+      done: false,
+    });
+    expect(runtimeTransaction.commit).toHaveBeenCalledTimes(1);
+    await expect(handle.wait({ tier: "global" })).resolves.toEqual({
+      id: "todo-async-callback",
+      title: "Async callback transaction",
+      done: false,
+    });
+    expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-async-callback", "global");
   });
 
   it("rejects db transaction writes after commit", () => {
@@ -569,11 +623,12 @@ describe("Db transactions", () => {
     } as unknown as JazzClient;
     const db = new TestDb(client);
 
-    const handle = await db.directBatch(table, (batch) => {
+    const handle = db.directBatch(table, (batch) => {
       const todo = batch.insert(table, { title: "Callback direct batch", done: false });
       return todo;
     });
 
+    expect(handle).not.toBeInstanceOf(Promise);
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.batchId).toBe("batch-direct-callback");
     expect(handle.value).toEqual({
@@ -618,6 +673,66 @@ describe("Db transactions", () => {
     await expect(db.directBatch(table, async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtimeBatch.commit).not.toHaveBeenCalled();
+  });
+
+  it("commits a typed async callback direct batch after the callback resolves", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-direct-async-callback",
+      values: [
+        { type: "Text", value: "Async callback direct batch" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-direct-async-callback",
+    } as Row;
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-async-callback"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-async-callback", "direct").handle),
+      localBatchRecord: vi.fn((batchId = "batch-direct-async-callback") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [
+        makeLocalBatchRecord("batch-direct-async-callback", "direct"),
+      ]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      waitForPersistedBatch: vi.fn(async () => undefined),
+      beginDirectBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const handlePromise = db.directBatch(table, async (batch) => {
+      const todo = batch.insert(table, { title: "Async callback direct batch", done: false });
+      expect(runtimeBatch.commit).not.toHaveBeenCalled();
+      return todo;
+    });
+
+    expect(handlePromise).toBeInstanceOf(Promise);
+    const handle = await handlePromise;
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.batchId).toBe("batch-direct-async-callback");
+    expect(handle.value).toEqual({
+      id: "todo-direct-async-callback",
+      title: "Async callback direct batch",
+      done: false,
+    });
+    expect(runtimeBatch.commit).toHaveBeenCalledTimes(1);
+    await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
+      id: "todo-direct-async-callback",
+      title: "Async callback direct batch",
+      done: false,
+    });
+    expect(client.waitForPersistedBatch).toHaveBeenCalledWith(
+      "batch-direct-async-callback",
+      "edge",
+    );
   });
 
   it("rejects db direct batch writes against a different client/schema", () => {

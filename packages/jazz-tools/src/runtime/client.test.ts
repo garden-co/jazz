@@ -329,17 +329,18 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
-  it("commits a callback transaction and returns the callback result handle", async () => {
+  it("commits a sync callback transaction and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const waitForPersistedBatch = vi
       .spyOn(client, "waitForPersistedBatch")
       .mockResolvedValue(undefined);
 
-    const handle = await client.transaction(() => {
+    const handle = client.transaction(() => {
       return { title: "Callback transaction" };
     });
 
+    expect(handle).not.toBeInstanceOf(Promise);
     expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Callback transaction" });
@@ -349,17 +350,41 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
-  it("commits a callback direct batch and returns the callback result handle", async () => {
+  it("commits an async callback transaction after the callback resolves", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const waitForPersistedBatch = vi
       .spyOn(client, "waitForPersistedBatch")
       .mockResolvedValue(undefined);
 
-    const handle = await client.directBatch(() => {
+    const handlePromise = client.transaction(async () => {
+      expect(runtime.sealBatch).not.toHaveBeenCalled();
+      return { title: "Async callback transaction" };
+    });
+
+    expect(handlePromise).toBeInstanceOf(Promise);
+    const handle = await handlePromise;
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.value).toEqual({ title: "Async callback transaction" });
+    await expect(handle.wait({ tier: "global" })).resolves.toEqual({
+      title: "Async callback transaction",
+    });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
+  });
+
+  it("commits a sync callback direct batch and returns the callback result handle", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const handle = client.directBatch(() => {
       return { title: "Callback direct batch" };
     });
 
+    expect(handle).not.toBeInstanceOf(Promise);
     expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Callback direct batch" });
@@ -369,30 +394,94 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
   });
 
-  it("does not commit a callback transaction when the callback throws", async () => {
+  it("commits an async callback direct batch after the callback resolves", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const handlePromise = client.directBatch(async () => {
+      expect(runtime.sealBatch).not.toHaveBeenCalled();
+      return { title: "Async callback direct batch" };
+    });
+
+    expect(handlePromise).toBeInstanceOf(Promise);
+    const handle = await handlePromise;
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.value).toEqual({ title: "Async callback direct batch" });
+    await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
+      title: "Async callback direct batch",
+    });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
+  });
+
+  it("commits a sync callback batch alias and returns the callback result handle", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const waitForPersistedBatch = vi
+      .spyOn(client, "waitForPersistedBatch")
+      .mockResolvedValue(undefined);
+
+    const handle = client.batch(() => {
+      return { title: "Callback batch" };
+    });
+
+    expect(handle).not.toBeInstanceOf(Promise);
+    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(handle).toBeInstanceOf(WriteResult);
+    expect(handle.value).toEqual({ title: "Callback batch" });
+    await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
+      title: "Callback batch",
+    });
+    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
+  });
+
+  it("does not commit a callback transaction when the callback throws", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const error = new Error("nope");
 
-    await expect(
+    expect(() =>
       client.transaction(() => {
         throw error;
       }),
-    ).rejects.toBe(error);
+    ).toThrow(error);
 
     expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 
-  it("does not commit a callback direct batch when the callback throws", async () => {
+  it("does not commit a callback transaction when the async callback rejects", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const error = new Error("nope");
 
-    await expect(
+    await expect(client.transaction(async () => Promise.reject(error))).rejects.toBe(error);
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a callback direct batch when the callback throws", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const error = new Error("nope");
+
+    expect(() =>
       client.directBatch(() => {
         throw error;
       }),
-    ).rejects.toBe(error);
+    ).toThrow(error);
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a callback direct batch when the async callback rejects", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const error = new Error("nope");
+
+    await expect(client.directBatch(async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
