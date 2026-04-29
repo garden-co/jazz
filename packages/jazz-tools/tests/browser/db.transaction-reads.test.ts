@@ -65,8 +65,8 @@ describe("db transaction reads browser integration", () => {
       }),
     );
 
-    const aliceTx = db.beginTransaction(todos);
-    const bobTx = db.beginTransaction(todos);
+    const aliceTx = db.beginTransaction();
+    const bobTx = db.beginTransaction();
 
     const aliceDraft = aliceTx.insert(todos, { title: "Alice draft", done: false });
     bobTx.insert(todos, { title: "Bob draft", done: false });
@@ -88,8 +88,8 @@ describe("db transaction reads browser integration", () => {
 
     const { value: base } = db.insert(todos, { title: "Shared", done: false });
 
-    const aliceTx = db.beginTransaction(todos);
-    const bobTx = db.beginTransaction(todos);
+    const aliceTx = db.beginTransaction();
+    const bobTx = db.beginTransaction();
 
     aliceTx.update(todos, base.id, { title: "Alice draft" });
     bobTx.update(todos, base.id, { title: "Bob draft" });
