@@ -425,6 +425,7 @@ mod tests {
     /// Test 6: One-shot query() with settled_tier resolves to empty snapshot after tier settle.
     mod catalogue;
     mod lenses;
+    mod locator_only_storage;
     mod migration;
     mod misc;
     mod query_subscription;

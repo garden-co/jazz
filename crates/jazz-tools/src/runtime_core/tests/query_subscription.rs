@@ -36,7 +36,6 @@ fn rc_query_settled_tier_holds() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -75,7 +74,6 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -121,7 +119,6 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -237,6 +234,13 @@ fn rc_query_local_transaction_overlay_shows_only_the_requested_staged_insert() {
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(alice_rows[0].0, alice_id);
     assert_eq!(alice_rows[0].1[1], Value::Text("alice-draft".into()));
+
+    let visible_rows = execute_runtime_query(&mut core, Query::new("users"), None);
+    assert_eq!(
+        visible_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "ordinary reads should not see staged transactional rows"
+    );
 }
 
 #[test]
@@ -371,7 +375,6 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -491,7 +494,6 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -614,7 +616,6 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -678,7 +679,6 @@ fn rc_query_settled_tier_empty_resolves() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -769,7 +769,6 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -780,7 +779,6 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::GlobalServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -929,7 +927,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -940,7 +937,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -951,7 +947,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::GlobalServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -1002,7 +997,6 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -1118,7 +1112,6 @@ fn rc_subscribe_settled_tier() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1165,7 +1158,6 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1274,7 +1266,6 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1329,7 +1320,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
 }
 
 #[test]
-fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
+fn rc_transaction_visible_subscription_can_overlay_local_pending_batch() {
     // alice strict-subscribes at EdgeServer durability
     //   alice stages one transactional row locally
     //   local frontier completion unblocks the first snapshot
@@ -1351,7 +1342,6 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1409,7 +1399,7 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
 }
 
 #[test]
-fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejected() {
+fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_rejected() {
     // alice strict-subscribes at EdgeServer durability
     //   local frontier first opens the subscription with an empty snapshot
     //   alice then stages one transactional row locally
@@ -1430,7 +1420,6 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1503,7 +1492,7 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
 }
 
 #[test]
-fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_complete() {
+fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_complete() {
     // alice authors one transactional batch with two rows
     //   worker accepts it and reports both rows in the query scope snapshot
     //   downstream strict visibility must hide the first delivered row until the second arrives
@@ -1578,7 +1567,6 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )

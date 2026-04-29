@@ -76,6 +76,8 @@ describe("db transaction reads browser integration", () => {
 
     const bobRows = await bobTx.all<Todo>(makeTodoQuery());
     expect(bobRows.map((row) => row.title)).toEqual(["Bob draft"]);
+
+    await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([]);
   });
 
   it("keeps same-row staged updates isolated to the transaction that issued them", async () => {

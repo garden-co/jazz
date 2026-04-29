@@ -287,12 +287,6 @@ describe("JazzClient.forRequest", () => {
     expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
-  it("passes strict transaction visibility options to runtime query", async () => {
-    const { client, queryCalls } = makeClient();
-    await client.query('{"table":"todos"}', { strictTransactions: true });
-    expect(queryCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
-  });
-
   it("passes transaction overlay options to runtime query for transaction reads", async () => {
     const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
       [];
@@ -377,14 +371,6 @@ describe("JazzClient.forRequest", () => {
       propagation: "local-only",
     });
     expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
-  });
-
-  it("passes strict transaction visibility options to runtime createSubscription", () => {
-    const { client, createSubscriptionCalls } = makeClient();
-    client.subscribe('{"table":"todos"}', () => {}, {
-      strictTransactions: true,
-    });
-    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ strict_transactions: true }));
   });
 
   // =========================================================================
