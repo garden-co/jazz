@@ -10,7 +10,7 @@ use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
 use crate::row_histories::{BatchId, StoredRowBatch, VisibleRowEntry};
 use crate::storage::{MemoryStorage, Storage};
-use crate::test_row_history::{create_test_row_with_id, persist_test_schema};
+use crate::test_support::{create_test_row_with_id, persist_test_schema};
 use std::collections::{HashMap, HashSet};
 
 fn users_test_schema() -> crate::query_manager::types::Schema {
