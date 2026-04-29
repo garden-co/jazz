@@ -108,6 +108,9 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
               },
             });
           },
+          onSchemaPush: () => {
+            viteServer.ws.send({ type: "full-reload" });
+          },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
