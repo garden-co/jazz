@@ -149,7 +149,6 @@ impl FromNapiValue for FfiRecordArg {
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
-    strict_transactions: Option<bool>,
     transaction_overlay: Option<QueryTransactionOverlayWire>,
 }
 
@@ -178,7 +177,6 @@ fn parse_read_durability_options(
             ReadDurabilityOptions {
                 tier: parsed_tier,
                 local_updates: jazz_tools::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             QueryPropagation::Full,
             None,
@@ -225,7 +223,6 @@ fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
-            strict_transactions: options.strict_transactions.unwrap_or(false),
         },
         propagation,
         overlay,

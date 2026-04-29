@@ -210,7 +210,6 @@ export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
-  strictTransactions?: boolean;
   visibility?: QueryVisibility;
 }
 
@@ -228,7 +227,6 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
-  strictTransactions: boolean;
   visibility: QueryVisibility;
 }
 
@@ -382,7 +380,6 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
-    strictTransactions: options?.strictTransactions ?? false,
     visibility: options?.visibility ?? "public",
   };
 }
@@ -557,7 +554,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
-    strict_transactions?: boolean;
     transaction_overlay?: {
       batch_id: string;
       branch_name: string;
@@ -570,9 +566,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.strictTransactions) {
-    payload.strict_transactions = true;
-  }
   if (options.transactionOverlay && options.transactionOverlay.rowIds.length > 0) {
     payload.transaction_overlay = {
       batch_id: options.transactionOverlay.batchId,
@@ -581,12 +574,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     };
   }
 
-  if (
-    !payload.propagation &&
-    !payload.local_updates &&
-    !payload.strict_transactions &&
-    !payload.transaction_overlay
-  ) {
+  if (!payload.propagation && !payload.local_updates && !payload.transaction_overlay) {
     return undefined;
   }
 
