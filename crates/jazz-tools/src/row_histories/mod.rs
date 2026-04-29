@@ -1,18 +1,24 @@
-//! Row-history data types, codecs, and apply algorithms.
+//! Row-history data types, codecs, and the algorithms that turn them into the
+//! row a reader sees and the writes a sync target receives.
 //!
-//! Split into three submodules so each piece is independently navigable:
+//! Split into four submodules so each concern is independently navigable:
 //! - [`types`]: data types (BatchId, RowState, QueryRowBatch, StoredRowBatch,
 //!   RowMetadata, VisibleRowEntry, error types)
 //! - [`codecs`]: descriptor builders and flat-row encode/decode
-//! - [`apply`]: `apply_row_batch`, `patch_row_batch_state`, and the visible-row
-//!   computation helpers they depend on
+//! - [`resolution`]: pure visibility/merge math — frontier walk, latest common
+//!   ancestor, per-column merge, delete-winner, computed visible preview. No
+//!   storage access; called by both `mutations` and `types` (via
+//!   `VisibleRowEntry::rebuild_*`).
+//! - [`mutations`]: the storage-mutating verbs (`apply_row_batch`,
+//!   `patch_row_batch_state`) and their direct support — load history,
+//!   recompute visibility via `resolution`, write through `Storage`, emit a
+//!   `RowVisibilityChange`.
 
-mod apply;
 mod codecs;
+mod mutations;
+mod resolution;
 mod types;
 
-pub(crate) use apply::visible_row_preview_from_history_rows;
-pub use apply::{apply_row_batch, patch_row_batch_state};
 pub(crate) use codecs::{
     FlatRowCodecs, decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
@@ -22,6 +28,8 @@ pub use codecs::{
     encode_flat_history_row, encode_flat_visible_row_entry, history_row_physical_descriptor,
     visible_row_physical_descriptor,
 };
+pub use mutations::{apply_row_batch, patch_row_batch_state};
+pub(crate) use resolution::visible_row_preview_from_history_rows;
 pub use types::{
     ApplyRowBatchResult, BatchId, HistoryScan, QueryRowBatch, RowHistoryError, RowMetadata,
     RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry,
