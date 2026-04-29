@@ -34,13 +34,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
-    use crate::object::{BranchName, ObjectId};
+    use crate::metadata::{DeleteKind, RowProvenance};
+    use crate::object::ObjectId;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Value,
     };
     use crate::row_format::{decode_row, encode_row};
-    use crate::storage::MemoryStorage;
     use crate::sync_manager::DurabilityTier;
 
     fn visible_row(updated_at: u64, confirmed_tier: Option<DurabilityTier>) -> StoredRowBatch {
