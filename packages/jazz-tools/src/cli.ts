@@ -2,6 +2,7 @@
 
 // CLI for jazz-tools schema tooling
 
+import { existsSync, readFileSync } from "fs";
 import { access, mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
@@ -200,6 +201,33 @@ export const APP_ID_ENV_VARS = [
   "NEXT_PUBLIC_JAZZ_APP_ID",
   "EXPO_PUBLIC_JAZZ_APP_ID",
 ] as const;
+
+// Load values from `.env` in the given directory into `env` without
+// overriding entries that are already set. Real environment variables
+// always win — `.env` is a fallback only. No-op when the file is absent.
+export function loadDotEnv(
+  cwd: string = process.cwd(),
+  env: Record<string, string | undefined> = process.env,
+): void {
+  const envPath = join(cwd, ".env");
+  if (!existsSync(envPath)) return;
+  const content = readFileSync(envPath, "utf8");
+  for (let line of content.split("\n")) {
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (env[key] === undefined) env[key] = value;
+  }
+}
 
 export function resolveEnvVar(
   names: readonly string[],
@@ -1870,6 +1898,7 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
+  loadDotEnv();
   const command = process.argv[2] ?? "";
 
   if (command === "validate") {
