@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,23 +38,25 @@ enum ServerSchemaMode {
     Fixed(Schema),
 }
 
-enum ServerStorageMode {
-    Persistent {
-        data_dir: String,
-    },
-    /// Explicitly selects SQLite regardless of which other storage features are
-    /// enabled.  Created via [`ServerBuilder::with_sqlite_storage`].
-    #[cfg(feature = "sqlite")]
-    PersistentSqlite {
-        data_dir: String,
-    },
-    /// Explicitly selects RocksDB regardless of which other storage features
-    /// are enabled.  Created via [`ServerBuilder::with_rocksdb_storage`].
-    #[cfg(feature = "rocksdb")]
-    PersistentRocksDb {
-        data_dir: String,
-    },
+/// Storage backend selection for [`ServerBuilder::with_storage`].
+///
+/// `Persistent` picks the best available backend at compile time
+/// (RocksDB > SQLite > in-memory). `Sqlite` and `RocksDb` pin the backend
+/// regardless of which other storage features are enabled.
+#[derive(Debug, Clone)]
+pub enum StorageBackend {
     InMemory,
+    Persistent {
+        path: PathBuf,
+    },
+    #[cfg(feature = "sqlite")]
+    Sqlite {
+        path: PathBuf,
+    },
+    #[cfg(feature = "rocksdb")]
+    RocksDb {
+        path: PathBuf,
+    },
 }
 
 pub struct ServerBuilder {
@@ -62,7 +64,7 @@ pub struct ServerBuilder {
     auth_config: AuthConfig,
     catalogue_authority: CatalogueAuthorityMode,
     schema_mode: ServerSchemaMode,
-    storage_mode: ServerStorageMode,
+    storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
@@ -76,8 +78,8 @@ impl ServerBuilder {
             },
             catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
-            storage_mode: ServerStorageMode::Persistent {
-                data_dir: "./data".to_string(),
+            storage_backend: StorageBackend::Persistent {
+                path: PathBuf::from("./data"),
             },
             sync_tracer: None,
         }
@@ -103,39 +105,8 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_persistent_storage(mut self, data_dir: impl Into<String>) -> Self {
-        self.storage_mode = ServerStorageMode::Persistent {
-            data_dir: data_dir.into(),
-        };
-        self
-    }
-
-    /// Use SQLite as the persistent storage backend, regardless of which other
-    /// storage features (e.g. `rocksdb`) are enabled.  Prefer this over
-    /// [`with_persistent_storage`] whenever you need to pin the backend to
-    /// SQLite (e.g. in tests or on mobile).
-    #[cfg(feature = "sqlite")]
-    pub fn with_sqlite_storage(mut self, data_dir: impl Into<String>) -> Self {
-        self.storage_mode = ServerStorageMode::PersistentSqlite {
-            data_dir: data_dir.into(),
-        };
-        self
-    }
-
-    /// Use RocksDB as the persistent storage backend, regardless of which
-    /// other storage features are enabled.  Prefer this over
-    /// [`with_persistent_storage`] whenever you need to pin the backend to
-    /// RocksDB (e.g. in tests or on desktop/server deployments).
-    #[cfg(feature = "rocksdb")]
-    pub fn with_rocksdb_storage(mut self, data_dir: impl Into<String>) -> Self {
-        self.storage_mode = ServerStorageMode::PersistentRocksDb {
-            data_dir: data_dir.into(),
-        };
-        self
-    }
-
-    pub fn with_in_memory_storage(mut self) -> Self {
-        self.storage_mode = ServerStorageMode::InMemory;
+    pub fn with_storage(mut self, backend: StorageBackend) -> Self {
+        self.storage_backend = backend;
         self
     }
 
@@ -238,14 +209,14 @@ impl ServerBuilder {
     }
 
     fn build_main_storage(&self) -> Result<DynStorage, String> {
-        match &self.storage_mode {
-            ServerStorageMode::Persistent { data_dir } => {
-                std::fs::create_dir_all(data_dir)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
+        match &self.storage_backend {
+            StorageBackend::Persistent { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
                 #[cfg(feature = "rocksdb")]
                 {
-                    let db_path = Path::new(data_dir).join("jazz.rocksdb");
+                    let db_path = path.join("jazz.rocksdb");
                     let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
                         .map_err(|e| {
                             format!("failed to open storage '{}': {e:?}", db_path.display())
@@ -254,7 +225,7 @@ impl ServerBuilder {
                 }
                 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
                 {
-                    let db_path = Path::new(data_dir).join("jazz.sqlite");
+                    let db_path = path.join("jazz.sqlite");
                     let storage = SqliteStorage::open(&db_path).map_err(|e| {
                         format!("failed to open storage '{}': {e:?}", db_path.display())
                     })?;
@@ -266,27 +237,27 @@ impl ServerBuilder {
                 }
             }
             #[cfg(feature = "sqlite")]
-            ServerStorageMode::PersistentSqlite { data_dir } => {
-                std::fs::create_dir_all(data_dir)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
-                let db_path = Path::new(data_dir).join("jazz.sqlite");
+            StorageBackend::Sqlite { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                let db_path = path.join("jazz.sqlite");
                 let storage = SqliteStorage::open(&db_path).map_err(|e| {
                     format!("failed to open storage '{}': {e:?}", db_path.display())
                 })?;
                 Ok(Box::new(storage))
             }
             #[cfg(feature = "rocksdb")]
-            ServerStorageMode::PersistentRocksDb { data_dir } => {
-                std::fs::create_dir_all(data_dir)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
-                let db_path = Path::new(data_dir).join("jazz.rocksdb");
+            StorageBackend::RocksDb { path } => {
+                std::fs::create_dir_all(path)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                let db_path = path.join("jazz.rocksdb");
                 let storage =
                     RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
                         format!("failed to open storage '{}': {e:?}", db_path.display())
                     })?;
                 Ok(Box::new(storage))
             }
-            ServerStorageMode::InMemory => Ok(Box::new(MemoryStorage::new())),
+            StorageBackend::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
     }
 }
