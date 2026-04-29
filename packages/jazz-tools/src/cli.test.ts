@@ -21,6 +21,7 @@ import {
   createMigration as rawCreateMigration,
   deploy as rawDeploy,
   exportSchema as rawExportSchema,
+  loadDotEnv,
   permissionsStatus as rawPermissionsStatus,
   pushMigration as rawPushMigration,
   resolveEnvVar,
@@ -400,6 +401,74 @@ function storedSchemaResponse(
     { status },
   );
 }
+
+describe("loadDotEnv", () => {
+  it("merges values from .env into the supplied env object", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      ["JAZZ_SERVER_URL=http://from-dotenv", "JAZZ_ADMIN_SECRET=secret-123", ""].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-dotenv");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("secret-123");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not override values already set in the environment", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "JAZZ_SERVER_URL=http://from-dotenv\n");
+    const env: Record<string, string | undefined> = {
+      JAZZ_SERVER_URL: "http://from-real-env",
+    };
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://from-real-env");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("is a no-op when no .env file exists", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    const env: Record<string, string | undefined> = { PRE_EXISTING: "kept" };
+    loadDotEnv(dir, env);
+    expect(env).toEqual({ PRE_EXISTING: "kept" });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("ignores comments and blank lines and strips surrounding quotes", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(
+      join(dir, ".env"),
+      [
+        "# leading comment",
+        "",
+        'JAZZ_SERVER_URL="http://quoted"',
+        "JAZZ_ADMIN_SECRET='single-quoted'",
+        "JAZZ_APP_ID=plain",
+      ].join("\n"),
+    );
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(env.JAZZ_SERVER_URL).toBe("http://quoted");
+    expect(env.JAZZ_ADMIN_SECRET).toBe("single-quoted");
+    expect(env.JAZZ_APP_ID).toBe("plain");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("flows through resolveEnvVar so deploy-style lookups pick up the .env value", async () => {
+    await mkdir(tmpBase, { recursive: true });
+    const dir = await mkdtemp(join(tmpBase, "jazz-tools-dotenv-"));
+    await writeFile(join(dir, ".env"), "VITE_JAZZ_SERVER_URL=http://vite-from-dotenv\n");
+    const env: Record<string, string | undefined> = {};
+    loadDotEnv(dir, env);
+    expect(resolveEnvVar(SERVER_URL_ENV_VARS, env)).toBe("http://vite-from-dotenv");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
 
 describe("resolveEnvVar", () => {
   it("returns the first name that has a defined value", () => {
