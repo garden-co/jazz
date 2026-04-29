@@ -1,4 +1,51 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const otelMocks = vi.hoisted(() => {
+  const logExporterConstructors = vi.fn();
+  const loggerNames: string[] = [];
+  const loggerEmit = vi.fn();
+  const logForceFlush = vi.fn(() => Promise.resolve());
+
+  return {
+    logExporterConstructors,
+    loggerNames,
+    loggerEmit,
+    logForceFlush,
+  };
+});
+
+vi.mock("@opentelemetry/exporter-logs-otlp-http", () => ({
+  OTLPLogExporter: class {
+    constructor(config: unknown) {
+      otelMocks.logExporterConstructors(config);
+    }
+  },
+}));
+
+vi.mock("@opentelemetry/sdk-logs", () => ({
+  LoggerProvider: class {
+    getLogger(name: string) {
+      otelMocks.loggerNames.push(name);
+      return { emit: otelMocks.loggerEmit };
+    }
+
+    forceFlush() {
+      return otelMocks.logForceFlush();
+    }
+  },
+  SimpleLogRecordProcessor: class {
+    constructor(_exporter: unknown) {}
+  },
+}));
+
+vi.mock("@opentelemetry/api-logs", () => ({
+  SeverityNumber: { DEBUG: 5 },
+}));
+
+vi.mock("@opentelemetry/resources", () => ({
+  resourceFromAttributes: vi.fn((attributes: unknown) => ({ attributes })),
+}));
+
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
@@ -8,6 +55,10 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   vi.restoreAllMocks();
+  otelMocks.logExporterConstructors.mockClear();
+  otelMocks.loggerEmit.mockClear();
+  otelMocks.logForceFlush.mockClear();
+  otelMocks.loggerNames.length = 0;
   if (originalFetch === undefined) {
     delete (globalThis as { fetch?: typeof fetch }).fetch;
   } else {
@@ -297,11 +348,12 @@ describe("WorkerBridge", () => {
       payload: [enc({ invalid: "postcard-from-worker" })],
     });
 
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    const records = fetchMock.mock.calls.map((call) => {
-      const body = JSON.parse(String(call[1]?.body));
-      return JSON.parse(body.resourceLogs[0].scopeLogs[0].logRecords[0].body.stringValue);
+    await vi.waitFor(() => expect(otelMocks.loggerEmit).toHaveBeenCalledTimes(2));
+    expect(otelMocks.logExporterConstructors).toHaveBeenCalledWith({
+      url: "http://127.0.0.1:54418/v1/logs",
     });
+    expect(otelMocks.loggerNames).toContain("jazz-browser.sync-payload");
+    const records = otelMocks.loggerEmit.mock.calls.map((call) => JSON.parse(call[0].body));
     expect(records).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -318,6 +370,7 @@ describe("WorkerBridge", () => {
         }),
       ]),
     );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {

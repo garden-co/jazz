@@ -1,3 +1,8 @@
+import type { Logger } from "@opentelemetry/api-logs";
+import type { SpanKind, TimeInput, Tracer } from "@opentelemetry/api";
+import type { LoggerProvider } from "@opentelemetry/sdk-logs";
+import type { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+
 export const DEFAULT_TELEMETRY_COLLECTOR_URL = "http://localhost:4318";
 
 export type TelemetryOptions = boolean | { collectorUrl?: string };
@@ -50,6 +55,37 @@ interface WasmTraceSpan {
   startUnixNano?: unknown;
   endUnixNano?: unknown;
 }
+
+interface PendingWasmTraceSpan {
+  collectorUrl: string;
+  appId: string;
+  runtimeThread: "main" | "worker";
+  span: WasmTraceSpan;
+}
+
+const MAX_WASM_TRACE_SPANS_PER_REQUEST = 256;
+const MAX_PENDING_WASM_TRACE_SPANS = 5_000;
+
+let pendingWasmTraceSpans: PendingWasmTraceSpan[] = [];
+let wasmTraceFlushQueued = false;
+let wasmTraceFlushInFlight = false;
+
+type TelemetryAttributeValue = string | number | boolean;
+
+interface SyncPayloadLogExporterState {
+  logger: Logger;
+  provider: LoggerProvider;
+  severityDebug: number;
+}
+
+interface WasmTraceExporterState {
+  provider: BasicTracerProvider;
+  tracer: Tracer;
+  spanKindInternal: SpanKind;
+}
+
+const syncPayloadLogExporters = new Map<string, Promise<SyncPayloadLogExporterState>>();
+const wasmTraceExporters = new Map<string, Promise<WasmTraceExporterState>>();
 
 const TELEMETRY_ENV_KEYS = [
   "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
@@ -135,11 +171,16 @@ export async function exportSyncPayloadTelemetryRecord(
   record: SyncPayloadTelemetryRecord,
 ): Promise<void> {
   try {
-    await fetch(normalizeOtlpEndpoint(collectorUrl, "logs"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(buildLogRequest(record)),
+    const exporter = await getSyncPayloadLogExporter(collectorUrl);
+    exporter.logger.emit({
+      timestamp: record.recordedAt ? new Date(record.recordedAt) : new Date(),
+      observedTimestamp: new Date(),
+      severityNumber: exporter.severityDebug,
+      severityText: record.severityText,
+      body: JSON.stringify(record),
+      attributes: syncPayloadTelemetryAttributes(record),
     });
+    await exporter.provider.forceFlush();
   } catch {
     // Dev telemetry must never make sync paths noisy or fragile.
   }
@@ -235,92 +276,203 @@ async function exportWasmTraceSpan(
   runtimeThread: "main" | "worker",
   span: WasmTraceSpan,
 ): Promise<void> {
+  enqueueWasmTraceSpan({ collectorUrl, appId, runtimeThread, span });
+}
+
+function enqueueWasmTraceSpan(span: PendingWasmTraceSpan): void {
+  if (pendingWasmTraceSpans.length >= MAX_PENDING_WASM_TRACE_SPANS) {
+    pendingWasmTraceSpans.shift();
+  }
+  pendingWasmTraceSpans.push(span);
+
+  if (wasmTraceFlushQueued || wasmTraceFlushInFlight) return;
+  wasmTraceFlushQueued = true;
+  queueMicrotask(() => {
+    void flushWasmTraceSpans();
+  });
+}
+
+async function flushWasmTraceSpans(): Promise<void> {
+  if (wasmTraceFlushInFlight) return;
+  wasmTraceFlushQueued = false;
+  wasmTraceFlushInFlight = true;
+
   try {
-    const startUnixNano = stringOrNow(span.startUnixNano);
-    const endUnixNano = stringOrNow(span.endUnixNano);
-    await fetch(normalizeOtlpEndpoint(collectorUrl, "traces"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        resourceSpans: [
-          {
-            resource: {
-              attributes: [
-                otlpStringAttribute("service.name", "jazz-browser"),
-                otlpStringAttribute("telemetry.sdk.language", "webjs"),
-                otlpStringAttribute("jazz.app_id", appId),
-              ],
-            },
-            scopeSpans: [
-              {
-                scope: { name: "jazz-wasm.tracing" },
-                spans: [
-                  {
-                    traceId: randomHex(16),
-                    spanId: randomHex(8),
-                    name: String(span.name ?? "wasm span"),
-                    kind: 1,
-                    startTimeUnixNano: startUnixNano,
-                    endTimeUnixNano: endUnixNano,
-                    attributes: [
-                      otlpStringAttribute("jazz.runtime_thread", runtimeThread),
-                      otlpStringAttribute("jazz.span.level", String(span.level ?? "")),
-                      otlpStringAttribute("jazz.span.target", String(span.target ?? "")),
-                      otlpStringAttribute("jazz.span.fields", JSON.stringify(span.fields ?? {})),
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      }),
-    });
+    while (pendingWasmTraceSpans.length > 0) {
+      const batch = takeNextWasmTraceSpanBatch();
+      if (!batch) break;
+      await exportWasmTraceSpanBatch(batch);
+    }
+  } finally {
+    wasmTraceFlushInFlight = false;
+    if (pendingWasmTraceSpans.length > 0) {
+      wasmTraceFlushQueued = true;
+      queueMicrotask(() => {
+        void flushWasmTraceSpans();
+      });
+    }
+  }
+}
+
+function takeNextWasmTraceSpanBatch(): PendingWasmTraceSpan[] | undefined {
+  const first = pendingWasmTraceSpans[0];
+  if (!first) return undefined;
+
+  const batch: PendingWasmTraceSpan[] = [];
+  for (let index = 0; index < pendingWasmTraceSpans.length; ) {
+    const candidate = pendingWasmTraceSpans[index]!;
+    if (
+      candidate.collectorUrl === first.collectorUrl &&
+      candidate.appId === first.appId &&
+      candidate.runtimeThread === first.runtimeThread
+    ) {
+      batch.push(candidate);
+      pendingWasmTraceSpans.splice(index, 1);
+      if (batch.length >= MAX_WASM_TRACE_SPANS_PER_REQUEST) break;
+      continue;
+    }
+    index += 1;
+  }
+  return batch;
+}
+
+async function exportWasmTraceSpanBatch(batch: PendingWasmTraceSpan[]): Promise<void> {
+  const first = batch[0];
+  if (!first) return;
+
+  try {
+    const exporter = await getWasmTraceExporter(first.collectorUrl, first.appId);
+    for (const { runtimeThread, span } of batch) {
+      const otelSpan = exporter.tracer.startSpan(String(span.name ?? "wasm span"), {
+        kind: exporter.spanKindInternal,
+        startTime: unixNanoToTimeInput(span.startUnixNano),
+        attributes: wasmTraceTelemetryAttributes(runtimeThread, span),
+      });
+      otelSpan.end(unixNanoToTimeInput(span.endUnixNano));
+    }
+    await exporter.provider.forceFlush();
   } catch {
     // Silent by design.
   }
 }
 
-function buildLogRequest(record: SyncPayloadTelemetryRecord): unknown {
+function getSyncPayloadLogExporter(collectorUrl: string): Promise<SyncPayloadLogExporterState> {
+  const url = normalizeOtlpEndpoint(collectorUrl, "logs");
+  const cached = syncPayloadLogExporters.get(url);
+  if (cached) return cached;
+
+  const created = createSyncPayloadLogExporter(url).catch((error) => {
+    syncPayloadLogExporters.delete(url);
+    throw error;
+  });
+  syncPayloadLogExporters.set(url, created);
+  return created;
+}
+
+async function createSyncPayloadLogExporter(url: string): Promise<SyncPayloadLogExporterState> {
+  const [
+    { OTLPLogExporter },
+    { LoggerProvider, SimpleLogRecordProcessor },
+    { SeverityNumber },
+    { resourceFromAttributes },
+  ] = await Promise.all([
+    import("@opentelemetry/exporter-logs-otlp-http"),
+    import("@opentelemetry/sdk-logs"),
+    import("@opentelemetry/api-logs"),
+    import("@opentelemetry/resources"),
+  ]);
+  const otlpExporter = new OTLPLogExporter({ url });
+  const provider = new LoggerProvider({
+    resource: resourceFromAttributes({
+      "service.name": "jazz-browser",
+      "telemetry.sdk.language": "webjs",
+    }),
+    processors: [new SimpleLogRecordProcessor(otlpExporter)],
+  });
   return {
-    resourceLogs: [
-      {
-        resource: {
-          attributes: [
-            otlpStringAttribute("service.name", "jazz-browser"),
-            otlpStringAttribute("telemetry.sdk.language", "webjs"),
-          ],
-        },
-        scopeLogs: [
-          {
-            scope: { name: "jazz-browser.sync-payload" },
-            logRecords: [
-              {
-                timeUnixNano: nowUnixNanoString(),
-                severityNumber: 5,
-                severityText: record.severityText,
-                body: { stringValue: JSON.stringify(record) },
-                attributes: ATTRIBUTE_KEYS.flatMap(([field, key]) =>
-                  otlpAttributeFromValue(key, record[field]),
-                ),
-              },
-            ],
-          },
-        ],
-      },
-    ],
+    provider,
+    logger: provider.getLogger("jazz-browser.sync-payload"),
+    severityDebug: SeverityNumber.DEBUG,
   };
 }
 
-function otlpAttributeFromValue(key: string, value: unknown): unknown[] {
-  if (value === undefined || value === null) return [];
-  if (typeof value === "number") return [{ key, value: { intValue: String(value) } }];
-  if (typeof value === "boolean") return [{ key, value: { boolValue: value } }];
-  return [otlpStringAttribute(key, String(value))];
+function getWasmTraceExporter(
+  collectorUrl: string,
+  appId: string,
+): Promise<WasmTraceExporterState> {
+  const url = normalizeOtlpEndpoint(collectorUrl, "traces");
+  const cacheKey = `${url}\n${appId}`;
+  const cached = wasmTraceExporters.get(cacheKey);
+  if (cached) return cached;
+
+  const created = createWasmTraceExporter(url, appId).catch((error) => {
+    wasmTraceExporters.delete(cacheKey);
+    throw error;
+  });
+  wasmTraceExporters.set(cacheKey, created);
+  return created;
 }
 
-function otlpStringAttribute(key: string, value: string): unknown {
-  return { key, value: { stringValue: value } };
+async function createWasmTraceExporter(
+  url: string,
+  appId: string,
+): Promise<WasmTraceExporterState> {
+  const [
+    { OTLPTraceExporter },
+    { BasicTracerProvider, BatchSpanProcessor },
+    { SpanKind },
+    { resourceFromAttributes },
+  ] = await Promise.all([
+    import("@opentelemetry/exporter-trace-otlp-http"),
+    import("@opentelemetry/sdk-trace-base"),
+    import("@opentelemetry/api"),
+    import("@opentelemetry/resources"),
+  ]);
+  const otlpExporter = new OTLPTraceExporter({ url });
+  const provider = new BasicTracerProvider({
+    resource: resourceFromAttributes({
+      "service.name": "jazz-browser",
+      "telemetry.sdk.language": "webjs",
+      "jazz.app_id": appId,
+    }),
+    spanProcessors: [
+      new BatchSpanProcessor(otlpExporter, {
+        maxExportBatchSize: MAX_WASM_TRACE_SPANS_PER_REQUEST,
+        maxQueueSize: MAX_PENDING_WASM_TRACE_SPANS,
+        scheduledDelayMillis: 1_000,
+      }),
+    ],
+  });
+  return {
+    provider,
+    tracer: provider.getTracer("jazz-wasm.tracing"),
+    spanKindInternal: SpanKind.INTERNAL,
+  };
+}
+
+function syncPayloadTelemetryAttributes(
+  record: SyncPayloadTelemetryRecord,
+): Record<string, TelemetryAttributeValue> {
+  const attributes: Record<string, TelemetryAttributeValue> = {};
+  for (const [field, key] of ATTRIBUTE_KEYS) {
+    const value = record[field];
+    if (value === undefined || value === null) continue;
+    attributes[key] =
+      typeof value === "number" || typeof value === "boolean" ? value : String(value);
+  }
+  return attributes;
+}
+
+function wasmTraceTelemetryAttributes(
+  runtimeThread: "main" | "worker",
+  span: WasmTraceSpan,
+): Record<string, TelemetryAttributeValue> {
+  return {
+    "jazz.runtime_thread": runtimeThread,
+    "jazz.span.level": String(span.level ?? ""),
+    "jazz.span.target": String(span.target ?? ""),
+    "jazz.span.fields": JSON.stringify(span.fields ?? {}),
+  };
 }
 
 function payloadByteLength(payload: Uint8Array | string): number {
@@ -328,16 +480,18 @@ function payloadByteLength(payload: Uint8Array | string): number {
   return payload.byteLength;
 }
 
-function nowUnixNanoString(): string {
-  return (BigInt(Date.now()) * 1_000_000n).toString();
-}
+function unixNanoToTimeInput(value: unknown): TimeInput {
+  const fallback = BigInt(Date.now()) * 1_000_000n;
+  let nanoseconds = fallback;
+  if (typeof value === "bigint") {
+    nanoseconds = value;
+  } else if (typeof value === "number" && Number.isFinite(value)) {
+    nanoseconds = BigInt(Math.trunc(value));
+  } else if (typeof value === "string" && /^[0-9]+$/.test(value)) {
+    nanoseconds = BigInt(value);
+  }
 
-function stringOrNow(value: unknown): string {
-  return typeof value === "string" && value.length > 0 ? value : nowUnixNanoString();
-}
-
-function randomHex(bytes: number): string {
-  const values = new Uint8Array(bytes);
-  crypto.getRandomValues(values);
-  return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
+  const seconds = nanoseconds / 1_000_000_000n;
+  const nanos = nanoseconds % 1_000_000_000n;
+  return [Number(seconds), Number(nanos)];
 }
