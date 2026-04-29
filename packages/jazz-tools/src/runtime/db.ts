@@ -490,7 +490,8 @@ function backendScopedAuthState(session?: Session | null): AuthState {
  * accepted by the authority.
  */
 export class DbTransaction {
-  private committed = false;
+  private state: "open" | "committed" | "rolled_back" = "open";
+  private committedHandle: WriteHandle | null = null;
 
   constructor(
     private readonly client: JazzClient,
@@ -502,8 +503,11 @@ export class DbTransaction {
   ) {}
 
   private ensureActive(): void {
-    if (this.committed) {
+    if (this.state === "committed") {
       throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already committed`);
+    }
+    if (this.state === "rolled_back") {
+      throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already rolled back`);
     }
   }
 
@@ -528,8 +532,26 @@ export class DbTransaction {
    * Commit the transaction. Data will be globally visible once it's accepted by the authority.
    */
   commit(): WriteHandle {
-    this.committed = true;
-    return this.runtimeTransaction.commit();
+    if (this.state === "rolled_back") {
+      throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already rolled back`);
+    }
+    if (this.committedHandle) {
+      return this.committedHandle;
+    }
+    const handle = this.runtimeTransaction.commit();
+    this.committedHandle = handle;
+    this.state = "committed";
+    return handle;
+  }
+
+  /**
+   * Roll back the transaction, discarding staged local changes.
+   */
+  rollback(): void {
+    this.ensureActive();
+    this.runtimeTransaction.rollback();
+    this.committedHandle = null;
+    this.state = "rolled_back";
   }
 
   /**

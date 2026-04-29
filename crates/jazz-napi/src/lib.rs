@@ -802,6 +802,17 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Seal batch failed: {e}")))
     }
 
+    #[napi(js_name = "rollbackBatch")]
+    pub fn rollback_batch(&self, batch_id: String) -> napi::Result<()> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.rollback_batch(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Rollback batch failed: {e}")))
+    }
+
     // =========================================================================
     // Queries
     // =========================================================================

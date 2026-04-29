@@ -1510,6 +1510,14 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
     }
 
+    #[wasm_bindgen(js_name = rollbackBatch)]
+    pub fn rollback_batch(&self, batch_id: &str) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.rollback_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Rollback batch failed: {e}")))
+    }
+
     // =========================================================================
     // Subscriptions
     // =========================================================================

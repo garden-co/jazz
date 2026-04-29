@@ -537,6 +537,73 @@ impl SyncManager {
         self.outbox = entries;
     }
 
+    /// Drop queued, not-yet-transported row/seal messages for a locally discarded batch.
+    pub(crate) fn discard_pending_batch_outbox(&mut self, batch_id: BatchId) {
+        let mut server_rows = Vec::new();
+        let mut client_rows = Vec::new();
+
+        self.outbox.retain(|entry| match &entry.payload {
+            SyncPayload::RowBatchCreated { metadata, row }
+            | SyncPayload::RowBatchNeeded { metadata, row }
+                if row.batch_id == batch_id =>
+            {
+                let key = RowBatchKey::from_row(row);
+                match entry.destination {
+                    Destination::Server(server_id) => {
+                        server_rows.push((server_id, key, metadata.is_some()));
+                    }
+                    Destination::Client(client_id) => {
+                        client_rows.push((client_id, key, metadata.is_some()));
+                    }
+                }
+                false
+            }
+            SyncPayload::SealBatch { submission } if submission.batch_id == batch_id => false,
+            _ => true,
+        });
+
+        for (server_id, key, included_metadata) in server_rows {
+            if let Some(server) = self.servers.get_mut(&server_id) {
+                Self::forget_sent_batch(&mut server.sent_batch_ids, key);
+                if included_metadata {
+                    server.sent_metadata.remove(&key.row_id);
+                }
+            }
+        }
+
+        for (client_id, key, included_metadata) in client_rows {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                Self::forget_sent_batch(&mut client.sent_batch_ids, key);
+                if included_metadata {
+                    client.sent_metadata.remove(&key.row_id);
+                }
+            }
+
+            let should_remove_interest =
+                if let Some(clients) = self.row_batch_interest.get_mut(&key) {
+                    clients.remove(&client_id);
+                    clients.is_empty()
+                } else {
+                    false
+                };
+            if should_remove_interest {
+                self.row_batch_interest.remove(&key);
+            }
+        }
+    }
+
+    fn forget_sent_batch(
+        sent_batch_ids: &mut HashMap<(ObjectId, BranchName), HashSet<BatchId>>,
+        key: RowBatchKey,
+    ) {
+        if let Some(sent_batches) = sent_batch_ids.get_mut(&(key.row_id, key.branch_name)) {
+            sent_batches.remove(&key.batch_id);
+            if sent_batches.is_empty() {
+                sent_batch_ids.remove(&(key.row_id, key.branch_name));
+            }
+        }
+    }
+
     /// Get a reference to the outbox (for checking if empty).
     pub fn outbox(&self) -> &[OutboxEntry] {
         &self.outbox
