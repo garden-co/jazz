@@ -989,6 +989,17 @@ impl RnRuntime {
         })
     }
 
+    pub fn rollback_batch(&self, batch_id: String) -> Result<(), JazzRnError> {
+        with_panic_boundary("rollback_batch", || {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            core.rollback_batch(batch_id).map_err(runtime_err)
+        })
+    }
+
     /// Flush and close the underlying storage, releasing filesystem locks.
     pub fn close(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("close", || {

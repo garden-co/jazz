@@ -112,6 +112,9 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -238,6 +241,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(

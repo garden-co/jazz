@@ -167,6 +167,11 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
+    ptr: bigint,
+    batchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
     ptr: bigint,
     batchId: Uint8Array,
@@ -257,6 +262,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_sync_message_received_from_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_remove_server(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_seal_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_set_client_role(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_subscribe(): number;

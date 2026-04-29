@@ -767,6 +767,7 @@ export interface RnRuntimeInterface {
     tier: string | undefined
   ) /*throws*/ : string;
   removeServer() /*throws*/ : void;
+  rollbackBatch(batchId: string) /*throws*/ : void;
   sealBatch(batchId: string) /*throws*/ : void;
   setClientRole(clientId: string, role: string) /*throws*/ : void;
   subscribe(
@@ -1294,6 +1295,22 @@ export class RnRuntime
     );
   }
 
+  rollbackBatch(batchId: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_rollback_batch(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(batchId),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   sealBatch(batchId: string): void /*throws*/ {
     uniffiCaller.rustCallWithError(
       /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1764,6 +1781,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_remove_server'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch() !==
+    56959
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_rollback_batch'
     );
   }
   if (

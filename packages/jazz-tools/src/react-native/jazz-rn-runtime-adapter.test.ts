@@ -483,6 +483,7 @@ describe("JazzRnRuntimeAdapter", () => {
       drainRejectedBatchIds: vi.fn(() => ["batch-1"]),
       acknowledgeRejectedBatch: vi.fn(() => true),
       sealBatch: vi.fn(),
+      rollbackBatch: vi.fn(),
     });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
@@ -507,11 +508,13 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(adapter.drainRejectedBatchIds()).toEqual(["batch-1"]);
     expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
     adapter.sealBatch("batch-1");
+    adapter.rollbackBatch("batch-1");
 
     expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
     expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
     expect(binding.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
     expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
     expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.rollbackBatch).toHaveBeenCalledWith("batch-1");
   });
 });

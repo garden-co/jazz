@@ -77,6 +77,7 @@ export interface JazzRnRuntimeBinding {
   ): string;
   acknowledgeRejectedBatch?(batchId: string): boolean;
   sealBatch?(batchId: string): void;
+  rollbackBatch?(batchId: string): void;
   uniffiDestroy?(): void;
 }
 
@@ -185,7 +186,8 @@ export class JazzRnRuntimeAdapter implements Runtime {
       | "loadLocalBatchRecords"
       | "drainRejectedBatchIds"
       | "acknowledgeRejectedBatch"
-      | "sealBatch",
+      | "sealBatch"
+      | "rollbackBatch",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
     const runtimeMethod = this.binding[method];
     if (!runtimeMethod) {
@@ -486,6 +488,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
   sealBatch(batch_id: string): void {
     try {
       this.requireBatchRecordMethod("sealBatch")(batch_id);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  rollbackBatch(batch_id: string): void {
+    try {
+      this.requireBatchRecordMethod("rollbackBatch")(batch_id);
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
