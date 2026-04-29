@@ -17,6 +17,19 @@ export interface RunHostedInitOptions {
   };
   /** Override the provisioning endpoint (defaults to the production cloud dashboard). */
   apiUrl?: string;
+  /**
+   * Progress hook — called with a short step label before long-running work
+   * (e.g. the provisioning HTTP request). Lets the caller keep an outer
+   * spinner message in sync with what's actually happening.
+   */
+  onStep?: (label: string) => void;
+  /**
+   * Output hook — when provided, credential banners and warnings are routed
+   * here instead of `console.log` / `console.warn`. Required when the caller
+   * has an active clack spinner, since raw `console.*` calls would bleed
+   * onto the spinner's active line.
+   */
+  onLog?: (kind: "info" | "warn", message: string) => void;
 }
 
 function readEnvValues(envPath: string): Record<string, string> {
@@ -34,8 +47,17 @@ function readEnvValues(envPath: string): Record<string, string> {
 }
 
 export async function runHostedInit(options: RunHostedInitOptions): Promise<void> {
-  const { dir, cloudSyncUrl, envKeys, apiUrl } = options;
+  const { dir, cloudSyncUrl, envKeys, apiUrl, onStep, onLog } = options;
   const keys = [envKeys.appId, envKeys.serverUrl, envKeys.adminSecret, envKeys.backendSecret];
+
+  const emitInfo = (message: string) => {
+    if (onLog) onLog("info", message);
+    else console.log(message);
+  };
+  const emitWarn = (message: string) => {
+    if (onLog) onLog("warn", message);
+    else console.warn(message);
+  };
 
   const existing = readEnvValues(join(dir, ".env"));
   if (keys.some((k) => existing[k] && existing[k].length > 0)) {
@@ -46,10 +68,11 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
     let provisioned: { appId: string; adminSecret: string; backendSecret: string } | null = null;
 
     try {
+      onStep?.("Provisioning Jazz Cloud app");
       provisioned = await provisionHostedApp({ apiUrl });
     } catch (err) {
       const name = err instanceof Error ? err.name : "Error";
-      console.warn(
+      emitWarn(
         `[jazz] Provisioning failed (${name}: ${err instanceof Error ? err.message : String(err)}). ` +
           `Writing placeholder .env — visit https://v2.dashboard.jazz.tools to provision manually.`,
       );
@@ -70,15 +93,21 @@ export async function runHostedInit(options: RunHostedInitOptions): Promise<void
       keys,
     });
 
-    console.log("Jazz app provisioned successfully and written to .env:");
-    console.log(`  ${envKeys.appId}=${appId}`);
-    console.log(`  ${envKeys.serverUrl}=${cloudSyncUrl}`);
-    console.log(`  ${envKeys.adminSecret}=${adminSecret}`);
-    console.log(`  ${envKeys.backendSecret}=${backendSecret}`);
-    console.log("");
-    console.log("Visit https://v2.dashboard.jazz.tools to sign up and claim your app!");
+    emitInfo(
+      [
+        "Jazz app provisioned successfully and written to .env:",
+        `  ${envKeys.appId}=${appId}`,
+        `  ${envKeys.serverUrl}=${cloudSyncUrl}`,
+        `  ${envKeys.adminSecret}=${adminSecret}`,
+        `  ${envKeys.backendSecret}=${backendSecret}`,
+        "",
+        "Visit https://v2.dashboard.jazz.tools to sign up and claim your app!",
+      ].join("\n"),
+    );
   } catch (err) {
-    console.warn("[jazz] init-env failed unexpectedly:", err instanceof Error ? err.message : err);
+    emitWarn(
+      `[jazz] init-env failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+    );
     try {
       writeHostedEnv({ dir, values: {}, keys });
     } catch {

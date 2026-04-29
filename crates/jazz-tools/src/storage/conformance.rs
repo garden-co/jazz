@@ -26,7 +26,7 @@ use crate::storage::{
     StorageError, scan_row_raw_table_headers_with_storage,
 };
 use crate::sync_manager::DurabilityTier;
-use crate::test_row_history::persist_test_schema;
+use crate::test_support::persist_test_schema;
 
 /// Factory type for persistence tests that reopen storage at a given path.
 pub type PersistentStorageFactory = dyn Fn(&std::path::Path) -> Box<dyn Storage>;

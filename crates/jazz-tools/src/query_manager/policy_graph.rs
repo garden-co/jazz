@@ -119,8 +119,10 @@ impl PolicyGraph {
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
         graph.index_scan_nodes.push((scan_id, *table, id_column));
 
-        // Materialize node: load row content
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        // Materialize node: load row content. Carry the resolved table name so
+        // `LensTransformer::new` can translate old-branch rows; an empty hint
+        // would degrade to `TableNotFound("")` and silently drop the row.
+        let tuple_desc = TupleDescriptor::single(*table, descriptor.clone());
         let mat_node = MaterializeNode::new_all(tuple_desc);
         let mat_id = graph.add_node_with_id(GraphNode::Materialize(mat_node));
         graph.add_edge(mat_id, scan_id);
@@ -208,8 +210,10 @@ impl PolicyGraph {
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
         graph.index_scan_nodes.push((scan_id, *table, id_column));
 
-        // Materialize node: load row content
-        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        // Materialize node: load row content. Carry the resolved table name so
+        // `LensTransformer::new` can translate old-branch rows; an empty hint
+        // would degrade to `TableNotFound("")` and silently drop the row.
+        let tuple_desc = TupleDescriptor::single(*table, descriptor.clone());
         let mat_node = MaterializeNode::new_all(tuple_desc);
         let mat_id = graph.add_node_with_id(GraphNode::Materialize(mat_node));
         graph.add_edge(mat_id, scan_id);

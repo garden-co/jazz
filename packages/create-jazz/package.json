@@ -1,6 +1,6 @@
 {
   "name": "create-jazz",
-  "version": "2.0.0-alpha.41",
+  "version": "2.0.0-alpha.42",
   "description": "Scaffold a new Jazz app from a starter template.",
   "license": "MIT",
   "bin": {
@@ -22,7 +22,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --out-dir dist",
     "prepublishOnly": "pnpm build",
-    "test": "vitest run"
+    "check": "tsc --noEmit",
+    "test": "pnpm check && vitest run"
   },
   "dependencies": {
     "@clack/prompts": "^0.10.0",

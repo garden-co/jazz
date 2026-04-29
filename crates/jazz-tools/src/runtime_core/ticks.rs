@@ -65,59 +65,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         rows
     }
 
-    fn resolve_ack_watchers_for_key(
-        &mut self,
-        row_batch_key: crate::sync_manager::RowBatchKey,
-        acked_tier: DurabilityTier,
-    ) {
-        if let Some(watchers) = self.ack_watchers.remove(&row_batch_key) {
-            let mut remaining = Vec::new();
-            for (requested_tier, sender) in watchers {
-                if acked_tier >= requested_tier {
-                    tracing::debug!(
-                        ?row_batch_key,
-                        ?acked_tier,
-                        ?requested_tier,
-                        "ack watcher resolved"
-                    );
-                    let _ = sender.send(Ok(()));
-                } else {
-                    remaining.push((requested_tier, sender));
-                }
-            }
-            if !remaining.is_empty() {
-                self.ack_watchers.insert(row_batch_key, remaining);
-            }
-        }
-    }
-
-    fn reject_ack_watchers_for_batch(
-        &mut self,
-        batch_id: crate::row_histories::BatchId,
-        code: &str,
-        reason: &str,
-    ) {
-        let rejection = crate::runtime_core::PersistedWriteRejection {
-            batch_id,
-            code: code.to_string(),
-            reason: reason.to_string(),
-        };
-
-        let affected_keys: Vec<_> = self
-            .ack_watchers
-            .keys()
-            .copied()
-            .filter(|key| key.batch_id == batch_id)
-            .collect();
-        for key in affected_keys {
-            if let Some(watchers) = self.ack_watchers.remove(&key) {
-                for (_requested_tier, sender) in watchers {
-                    let _ = sender.send(Err(rejection.clone()));
-                }
-            }
-        }
-    }
-
     fn apply_received_batch_settlement(&mut self, settlement: crate::batch_fate::BatchSettlement) {
         let batch_id = settlement.batch_id();
         if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
@@ -131,15 +78,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
 
-        if matches!(
-            settlement,
-            crate::batch_fate::BatchSettlement::Rejected { .. }
-        ) {
-            self.rejected_batch_ids.insert(batch_id);
+        if let crate::batch_fate::BatchSettlement::Rejected { code, reason, .. } = &settlement {
             self.mark_local_batch_rows_rejected(batch_id);
-            if let crate::batch_fate::BatchSettlement::Rejected { code, reason, .. } = &settlement {
-                self.reject_ack_watchers_for_batch(batch_id, code, reason);
-            }
+            self.durability.record_rejection(batch_id, code, reason);
         } else if matches!(
             settlement,
             crate::batch_fate::BatchSettlement::Missing { .. }
@@ -156,7 +97,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     visible_members, ..
                 } => {
                     for member in visible_members {
-                        self.resolve_ack_watchers_for_key(
+                        self.durability.record_ack(
                             crate::sync_manager::RowBatchKey::new(
                                 member.object_id,
                                 member.branch_name,
@@ -481,7 +422,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .sync_manager_mut()
             .take_received_row_batch_acks();
         for (row_batch_key, acked_tier) in received_acks {
-            self.resolve_ack_watchers_for_key(row_batch_key, acked_tier);
+            self.durability.record_ack(row_batch_key, acked_tier);
         }
 
         // 4. Schedule batched_tick if outbound messages exist or a WAL flush

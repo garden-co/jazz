@@ -25,7 +25,7 @@ describe("create-jazz CLI end-to-end", () => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-"));
 
       const starterPath = path.join(repoRoot, "starters/next-betterauth");
-      const env = {
+      const env: NodeJS.ProcessEnv = {
         ...process.env,
         JAZZ_STARTER_PATH: starterPath,
         // CI runners have no global git identity; inject fallbacks so the

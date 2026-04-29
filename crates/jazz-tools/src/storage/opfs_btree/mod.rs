@@ -12,14 +12,17 @@
 //! ```
 
 use std::cell::RefCell;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
 
 #[cfg(target_arch = "wasm32")]
 use opfs_btree::OpfsFile;
 #[cfg(not(target_arch = "wasm32"))]
 use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 use crate::object::ObjectId;
 use crate::row_histories::{HistoryScan, RowState, StoredRowBatch};
@@ -39,7 +42,7 @@ use super::{
 const MIN_CACHE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-enum AnyFile {
+pub(super) enum AnyFile {
     Memory(MemoryFile),
     #[cfg(not(target_arch = "wasm32"))]
     Std(StdFile),
@@ -136,33 +139,14 @@ impl OpfsBTreeStorage {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let file = StdFile::open(path).map_err(map_storage_err)?;
-        Self::open_with_file(AnyFile::Std(file), cache_size_bytes)
-    }
-
     pub fn memory(cache_size_bytes: usize) -> Result<Self, StorageError> {
         Self::open_with_file(AnyFile::Memory(MemoryFile::new()), cache_size_bytes)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn with_opfs(file: OpfsFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        Self::open_with_file(AnyFile::Opfs(file), cache_size_bytes)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub async fn open_opfs(namespace: &str, cache_size_bytes: usize) -> Result<Self, StorageError> {
-        let file = OpfsFile::open(namespace).await.map_err(map_storage_err)?;
-        Self::with_opfs(file, cache_size_bytes)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub async fn destroy_opfs(namespace: &str) -> Result<(), StorageError> {
-        OpfsFile::destroy(namespace).await.map_err(map_storage_err)
-    }
-
-    fn open_with_file(file: AnyFile, cache_size_bytes: usize) -> Result<Self, StorageError> {
+    pub(super) fn open_with_file(
+        file: AnyFile,
+        cache_size_bytes: usize,
+    ) -> Result<Self, StorageError> {
         let options = Self::options(cache_size_bytes);
         let mut tree = OpfsBTree::open(file, options).map_err(map_storage_err)?;
         Self::ensure_store_manifest(&mut tree)?;
@@ -462,7 +446,7 @@ impl Storage for OpfsBTreeStorage {
     }
 }
 
-fn map_storage_err(error: BTreeError) -> StorageError {
+pub(super) fn map_storage_err(error: BTreeError) -> StorageError {
     match error {
         BTreeError::SecurityError(msg) => StorageError::SecurityError(msg),
         other => StorageError::IoError(format!("opfs-btree: {}", other)),
@@ -481,7 +465,7 @@ mod tests {
     use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
     use crate::row_histories::{HistoryScan, RowState, StoredRowBatch, VisibleRowEntry};
     use crate::sync_manager::DurabilityTier;
-    use crate::test_row_history::persist_test_schema;
+    use crate::test_support::persist_test_schema;
 
     fn users_test_schema() -> crate::query_manager::types::Schema {
         SchemaBuilder::new()

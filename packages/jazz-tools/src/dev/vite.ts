@@ -104,7 +104,13 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
 
       let managed;
       try {
-        managed = await runtime.initialize({ ...options, schemaDir });
+        managed = await runtime.initialize({
+          ...options,
+          schemaDir,
+          onSchemaPush: () => {
+            viteServer.ws.send({ type: "full-reload" });
+          },
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         viteServer.ws.send({
