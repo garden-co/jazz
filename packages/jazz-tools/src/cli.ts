@@ -205,12 +205,21 @@ export const APP_ID_ENV_VARS = [
 // Load values from `.env` in the given directory into `env` without
 // overriding entries that are already set. Real environment variables
 // always win — `.env` is a fallback only. No-op when the file is absent.
+//
+// In production (`env === process.env`) we delegate to Node's built-in
+// `process.loadEnvFile` when available (Node 20.12+/21.7+), which gets us
+// quoting/escape edge cases for free. Older Node and tests passing a
+// custom env object fall through to the in-house parser.
 export function loadDotEnv(
   cwd: string = process.cwd(),
   env: Record<string, string | undefined> = process.env,
 ): void {
   const envPath = join(cwd, ".env");
   if (!existsSync(envPath)) return;
+  if (env === process.env && typeof process.loadEnvFile === "function") {
+    process.loadEnvFile(envPath);
+    return;
+  }
   const content = readFileSync(envPath, "utf8");
   for (let line of content.split("\n")) {
     if (line.endsWith("\r")) line = line.slice(0, -1);
