@@ -270,6 +270,52 @@ describe("jazzPlugin", () => {
     expect(wsSend).toHaveBeenCalledWith({ type: "full-reload" });
   });
 
+  it("passes top-level telemetry options to the managed dev server", async () => {
+    const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
+      appId: "00000000-0000-0000-0000-000000000061",
+      port: 19881,
+      url: "http://127.0.0.1:19881",
+      dataDir: undefined as unknown as string,
+      stop: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(devServer, "pushSchemaCatalogue").mockResolvedValue({ hash: "abc123def4567890" });
+    vi.spyOn(schemaWatcher, "watchSchema").mockReturnValue({ close: vi.fn() });
+
+    const schemaDir = await tempRoots.create("jazz-vite-top-level-telemetry-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const plugin = jazzPlugin({
+      server: { port: 19881, adminSecret: "vite-telemetry-admin" },
+      telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      schemaDir,
+    });
+
+    const fakeViteServer = {
+      config: {
+        root: schemaDir,
+        command: "serve" as const,
+        env: {} as Record<string, string>,
+      },
+      httpServer: {
+        once(_event: string, _cb: () => void) {},
+      },
+      ws: { send() {} },
+    };
+    const configureServer = plugin.configureServer as (
+      server: typeof fakeViteServer,
+    ) => Promise<void>;
+    await configureServer(fakeViteServer);
+
+    expect(startSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      }),
+    );
+    expect(fakeViteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
+      "http://127.0.0.1:54418",
+    );
+  });
+
   it("does not overwrite an existing JAZZ_APP_ID in .env when one is already set", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-existing-env-test-");
@@ -327,9 +373,7 @@ describe("jazzPlugin", () => {
     const plugin = jazzPlugin({
       appId: "00000000-0000-0000-0000-000000000090",
       adminSecret: "vite-telemetry-admin",
-      server: {
-        telemetry: { collectorUrl: "http://127.0.0.1:54418" },
-      } as never,
+      telemetry: { collectorUrl: "http://127.0.0.1:54418" },
       schemaDir,
     });
     const configureServer = plugin.configureServer as (server: {

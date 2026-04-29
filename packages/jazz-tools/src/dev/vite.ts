@@ -31,7 +31,6 @@ export interface JazzServerOptions {
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
   catalogueAuthorityAdminSecret?: string;
-  telemetry?: TelemetryOptions;
 }
 
 export interface JazzPluginOptions {
@@ -39,6 +38,7 @@ export interface JazzPluginOptions {
   adminSecret?: string;
   schemaDir?: string;
   appId?: string;
+  telemetry?: TelemetryOptions;
 }
 
 const LOG_PREFIX = "[jazz]";

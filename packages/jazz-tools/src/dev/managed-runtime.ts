@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
-import { resolveTelemetryCollectorUrl } from "../runtime/sync-telemetry.js";
+import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -70,6 +70,7 @@ type ManagedRuntimeConfig = {
   publicServerUrl: string | null;
   publicAppId: string | null;
   publicTelemetryCollectorUrl: string | null;
+  telemetry: TelemetryOptions | null;
 };
 
 export interface ManagedRuntimeEnvKeys {
@@ -148,6 +149,7 @@ export class ManagedDevRuntime {
       publicServerUrl: process.env[this.envKeys.serverUrl] ?? null,
       publicAppId: process.env[this.envKeys.appId] ?? null,
       publicTelemetryCollectorUrl: process.env[this.envKeys.telemetryCollectorUrl] ?? null,
+      telemetry: options.telemetry ?? null,
     };
   }
 
@@ -291,7 +293,7 @@ export class ManagedDevRuntime {
             catalogueAuthority: serverConfig.catalogueAuthority,
             catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
             catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
-            telemetry: serverConfig.telemetry,
+            telemetry: options.telemetry,
           });
 
           serverUrl = this.serverHandle.url;
@@ -306,9 +308,7 @@ export class ManagedDevRuntime {
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
         telemetryCollectorUrl =
           process.env[this.envKeys.telemetryCollectorUrl] ??
-          resolveTelemetryCollectorUrl(
-            typeof serverOpt === "object" && serverOpt !== null ? serverOpt.telemetry : undefined,
-          );
+          resolveTelemetryCollectorUrl(options.telemetry);
 
         const { pushSchemaCatalogue } = await import("./dev-server.js");
         await pushSchemaCatalogue({ serverUrl, appId, adminSecret, schemaDir });

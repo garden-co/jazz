@@ -99,6 +99,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
           envDir: viteServer.config.root,
           adminSecret: options.adminSecret,
           appId: options.appId,
+          telemetry: options.telemetry,
           backendSecret,
           onSchemaError: (error) => {
             viteServer.ws.send({
