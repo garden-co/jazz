@@ -119,6 +119,8 @@ export interface InitializeOptions extends JazzPluginOptions {
   envDir?: string;
   /** Called when a schema watch push fails after initialisation. Use this to forward errors to e.g. Vite's HMR overlay. */
   onSchemaError?: (error: Error) => void;
+  /** Called when the schema watcher successfully pushes an updated schema. Use this to e.g. trigger a Vite full-reload. */
+  onSchemaPush?: (hash: string) => void;
 }
 
 export class ManagedDevRuntime {
@@ -308,6 +310,7 @@ export class ManagedDevRuntime {
           adminSecret,
           onPush: (hash) => {
             console.log(`${LOG_PREFIX} schema updated (${hash.slice(0, 12)})`);
+            options.onSchemaPush?.(hash);
           },
           onError: (error) => {
             console.error(`${LOG_PREFIX} schema push failed:`, error.message);
