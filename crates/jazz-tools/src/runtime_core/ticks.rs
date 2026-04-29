@@ -223,7 +223,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         batch_id: crate::row_histories::BatchId,
     ) {
         let mut cleared_rows = Vec::new();
-        let mut batch_patch_succeeded_by_table = std::collections::HashMap::new();
 
         for (member, row_locator, row) in self.local_batch_rows(batch_id) {
             if !matches!(
@@ -244,40 +243,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             ));
         }
 
-        for (table, _, _, _, _, _, _) in &cleared_rows {
-            batch_patch_succeeded_by_table
-                .entry(table.clone())
-                .or_insert_with(|| {
-                    self.storage
-                        .patch_row_region_rows_by_batch(
-                            table,
-                            batch_id,
-                            Some(RowState::Rejected),
-                            None,
-                        )
-                        .is_ok()
-                });
-        }
-
         let query_manager = self.schema_manager.query_manager_mut();
         for (table, schema_hash, branch, row_id, member_batch_id, row_data, was_visible) in
             cleared_rows
         {
-            if !batch_patch_succeeded_by_table
-                .get(&table)
-                .copied()
-                .unwrap_or(false)
-            {
-                let _ = self.storage.patch_exact_row_batch_for_schema_hash(
-                    &table,
-                    schema_hash,
-                    &branch,
-                    row_id,
-                    member_batch_id,
-                    Some(RowState::Rejected),
-                    None,
-                );
-            }
+            let _ = self.storage.patch_exact_row_batch_for_schema_hash(
+                &table,
+                schema_hash,
+                &branch,
+                row_id,
+                member_batch_id,
+                Some(RowState::Rejected),
+                None,
+            );
             if was_visible {
                 let _ = self
                     .storage

@@ -54,6 +54,8 @@ fn rc_local_row_writes_batch_row_and_index_mutations() {
             row_mutation_calls: 3,
             separate_index_mutation_calls: 0,
             flush_wal_calls: 0,
+            batch_patch_calls: 0,
+            exact_schema_hash_patch_calls: 0,
         },
         "local row writes should persist row history, visible heads, and index changes in one storage mutation"
     );

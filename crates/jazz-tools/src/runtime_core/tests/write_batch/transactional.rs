@@ -463,6 +463,58 @@ fn rc_transactional_rollback_discards_staged_insert_without_rejected_settlement(
 }
 
 #[test]
+fn rc_transactional_rollback_patches_exact_staged_members() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let storage = RowMutationObservingStorage::new(calls.clone());
+    let app_id = AppId::from_name("tx-rollback-exact-members");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, storage, NoopScheduler);
+    core.immediate_tick();
+
+    let batch_id = BatchId::new();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: Some(batch_id),
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), _) = core
+        .insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+
+    core.rollback_batch(batch_id)
+        .expect("rollback should discard the staged transaction");
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(
+        history_rows[0].state,
+        crate::row_histories::RowState::Rejected,
+        "rollback should reject the staged row"
+    );
+
+    let calls = *calls.lock().unwrap();
+    assert_eq!(
+        calls.batch_patch_calls, 0,
+        "rollback should use exact local batch members instead of table-wide batch patching"
+    );
+    assert_eq!(
+        calls.exact_schema_hash_patch_calls, 1,
+        "rollback should patch the exact staged member"
+    );
+}
+
+#[test]
 fn rc_transactional_rollback_does_not_write_staged_insert_upstream() {
     let mut s = create_3tier_rc();
     let write_context = WriteContext {

@@ -197,6 +197,53 @@ fn cancel_batch_from_unrelated_client_keeps_pending_permission_check() {
 }
 
 #[test]
+fn cancel_batch_from_owner_uses_exact_pending_members_without_locator_scan() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut seeded = MemoryStorage::new();
+    let alice = ClientId::new();
+    let row_id = ObjectId::new();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"Alice draft"),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    seed_users_schema(&mut seeded);
+    add_client(&mut sm, &seeded, alice);
+    sm.set_client_role(alice, ClientRole::Peer);
+
+    let mut io = RowLocatorScanDisabledStorage::new(seeded);
+    sm.process_from_client(
+        &mut io,
+        alice,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+    sm.take_outbox();
+    sm.process_from_client(
+        &mut io,
+        alice,
+        SyncPayload::CancelBatch {
+            batch_id: row.batch_id,
+        },
+    );
+
+    let rows = io
+        .scan_history_row_batches("users", row_id)
+        .expect("cancel should leave readable row history");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].state,
+        crate::row_histories::RowState::Rejected,
+        "owner cancel should reject the exact pending row without discovering it through a locator scan"
+    );
+}
+
+#[test]
 fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_check() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();

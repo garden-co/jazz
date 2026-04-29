@@ -51,6 +51,8 @@ struct RowMutationCallCounts {
     row_mutation_calls: usize,
     separate_index_mutation_calls: usize,
     flush_wal_calls: usize,
+    batch_patch_calls: usize,
+    exact_schema_hash_patch_calls: usize,
 }
 
 struct RowMutationObservingStorage {
@@ -1057,6 +1059,7 @@ impl Storage for RowMutationObservingStorage {
         state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
+        self.calls.lock().unwrap().batch_patch_calls += 1;
         self.inner
             .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
@@ -1084,6 +1087,7 @@ impl Storage for RowMutationObservingStorage {
         state: Option<crate::row_histories::RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<bool, StorageError> {
+        self.calls.lock().unwrap().exact_schema_hash_patch_calls += 1;
         self.inner.patch_exact_row_batch_for_schema_hash(
             table,
             schema_hash,

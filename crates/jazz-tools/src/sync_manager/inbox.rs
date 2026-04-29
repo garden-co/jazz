@@ -509,6 +509,33 @@ impl SyncManager {
         }
     }
 
+    fn remember_pending_batch_member(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        row: &StoredRowBatch,
+    ) {
+        let Some(table) = metadata.get(MetadataKey::Table.as_str()) else {
+            return;
+        };
+
+        self.pending_batch_members
+            .entry(row.batch_id)
+            .or_default()
+            .insert(PendingBatchMember {
+                table: table.clone(),
+                row_batch_key: RowBatchKey::new(
+                    row.row_id,
+                    BranchName::new(&row.branch),
+                    row.batch_id,
+                ),
+            });
+    }
+
+    fn forget_pending_batch(&mut self, batch_id: crate::row_histories::BatchId) {
+        self.pending_batch_owners.remove(&batch_id);
+        self.pending_batch_members.remove(&batch_id);
+    }
+
     fn client_owns_pending_batch(
         &self,
         client_id: ClientId,
@@ -523,28 +550,32 @@ impl SyncManager {
         &self,
         storage: &H,
         batch_id: crate::row_histories::BatchId,
-    ) -> Vec<(String, StoredRowBatch)> {
-        let Ok(row_locators) = storage.scan_row_locators() else {
-            return Vec::new();
+    ) -> Vec<(PendingBatchMember, StoredRowBatch)> {
+        let mut rows = Vec::new();
+        let Some(members) = self.pending_batch_members.get(&batch_id) else {
+            return rows;
         };
 
-        let mut rows = Vec::new();
-        for (row_id, row_locator) in row_locators {
-            let Ok(history_rows) =
-                storage.scan_history_row_batches(row_locator.table.as_str(), row_id)
-            else {
+        for member in members {
+            let row_batch_key = member.row_batch_key;
+            let Ok(Some(row)) = storage.load_history_row_batch(
+                member.table.as_str(),
+                row_batch_key.branch_name.as_str(),
+                row_batch_key.row_id,
+                row_batch_key.batch_id,
+            ) else {
                 continue;
             };
 
-            rows.extend(history_rows.into_iter().filter_map(|row| {
-                (row.batch_id == batch_id
-                    && matches!(row.state, RowState::StagingPending | RowState::Superseded))
-                .then(|| (row_locator.table.to_string(), row))
-            }));
+            if row.batch_id == batch_id
+                && matches!(row.state, RowState::StagingPending | RowState::Superseded)
+            {
+                rows.push((member.clone(), row));
+            }
         }
 
-        rows.sort_by(|(left_table, left), (right_table, right)| {
-            left_table.cmp(right_table).then_with(|| {
+        rows.sort_by(|(left_member, left), (right_member, right)| {
+            left_member.table.cmp(&right_member.table).then_with(|| {
                 left.row_id
                     .uuid()
                     .as_bytes()
@@ -568,23 +599,37 @@ impl SyncManager {
         }
 
         self.discard_pending_batch_outbox(batch_id);
-        self.pending_batch_owners.remove(&batch_id);
+        self.forget_pending_batch(batch_id);
         self.row_batch_interest
             .retain(|key, _clients| key.batch_id != batch_id);
 
-        for (table, row) in pending_rows {
+        for (member, row) in pending_rows {
             let row_id = row.row_id;
             let branch_name = BranchName::new(&row.branch);
-            let visibility_change = patch_row_batch_state(
+            let patched_exact = crate::storage::patch_exact_row_batch_with_storage(
                 storage,
+                &member.table,
+                &row.branch,
                 row_id,
-                &branch_name,
                 row.batch_id(),
                 Some(RowState::Rejected),
                 None,
             )
-            .ok()
-            .flatten();
+            .unwrap_or(false);
+            let visibility_change = if patched_exact {
+                None
+            } else {
+                patch_row_batch_state(
+                    storage,
+                    row_id,
+                    &branch_name,
+                    row.batch_id(),
+                    Some(RowState::Rejected),
+                    None,
+                )
+                .ok()
+                .flatten()
+            };
 
             if let Some(update) = visibility_change {
                 self.pending_row_visibility_changes.push(update);
@@ -593,7 +638,7 @@ impl SyncManager {
 
             tracing::debug!(
                 ?batch_id,
-                table,
+                table = member.table,
                 %row_id,
                 "cancelled pending transactional row"
             );
@@ -808,7 +853,7 @@ impl SyncManager {
                 "failed to delete rejected sealed batch submission"
             );
         }
-        self.pending_batch_owners.remove(&settlement.batch_id());
+        self.forget_pending_batch(settlement.batch_id());
         self.apply_transactional_batch_settlement_to_rows(
             storage,
             origin_client_id,
@@ -898,7 +943,7 @@ impl SyncManager {
             if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
                 tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
             }
-            self.pending_batch_owners.remove(&batch_id);
+            self.forget_pending_batch(batch_id);
         }
         let rows_to_patch: &[(String, StoredRowBatch)] = match settlement {
             BatchSettlement::AcceptedTransaction { .. } => &declared_rows,
@@ -1107,6 +1152,12 @@ impl SyncManager {
                 );
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
                     let batch_id = applied.row.batch_id;
+                    if matches!(
+                        applied.row.state,
+                        RowState::StagingPending | RowState::Superseded
+                    ) {
+                        self.remember_pending_batch_member(&applied.metadata, &applied.row);
+                    }
 
                     for tier in self.my_tiers.iter().copied() {
                         self.outbox.push(OutboxEntry {
@@ -1689,6 +1740,12 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                    if matches!(
+                        applied.row.state,
+                        RowState::StagingPending | RowState::Superseded
+                    ) {
+                        self.remember_pending_batch_member(&applied.metadata, &applied.row);
+                    }
                     self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
                     if !matches!(
                         applied.row.state,

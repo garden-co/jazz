@@ -36,6 +36,12 @@ pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 // SyncManager
 // ============================================================================
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct PendingBatchMember {
+    pub table: String,
+    pub row_batch_key: RowBatchKey,
+}
+
 /// Manages synchronization state atop storage-backed row and catalogue state.
 ///
 /// Coordinates:
@@ -72,6 +78,8 @@ pub struct SyncManager {
     pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
     /// Tracks the client that introduced each still-pending transactional batch.
     pub(super) pending_batch_owners: HashMap<BatchId, ClientId>,
+    /// Tracks exact row members for each still-pending transactional batch.
+    pub(super) pending_batch_members: HashMap<BatchId, HashSet<PendingBatchMember>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -120,6 +128,7 @@ impl std::fmt::Debug for SyncManager {
             .field("my_tiers", &self.my_tiers)
             .field("row_batch_interest", &self.row_batch_interest)
             .field("pending_batch_owners", &self.pending_batch_owners)
+            .field("pending_batch_members", &self.pending_batch_members)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
@@ -219,6 +228,7 @@ impl SyncManager {
             my_tiers: HashSet::new(),
             row_batch_interest: HashMap::new(),
             pending_batch_owners: HashMap::new(),
+            pending_batch_members: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
@@ -343,6 +353,15 @@ impl SyncManager {
         }
         subscriptions += self.pending_batch_owners.len()
             * (std::mem::size_of::<BatchId>() + std::mem::size_of::<ClientId>() + 48);
+        for (batch_id, members) in &self.pending_batch_members {
+            subscriptions += std::mem::size_of_val(batch_id);
+            subscriptions += members.len() * std::mem::size_of::<PendingBatchMember>();
+            subscriptions += members
+                .iter()
+                .map(|member| member.table.len())
+                .sum::<usize>();
+            subscriptions += 48;
+        }
         for (query_id, clients) in &self.query_origin {
             subscriptions += std::mem::size_of_val(query_id);
             subscriptions += clients.len() * std::mem::size_of::<ClientId>();
@@ -505,6 +524,8 @@ impl SyncManager {
         // Clean up pending batch ownership
         self.pending_batch_owners
             .retain(|_, owner| *owner != client_id);
+        self.pending_batch_members
+            .retain(|batch_id, _| self.pending_batch_owners.contains_key(batch_id));
         // Clean up query origin map
         self.query_origin.retain(|_, clients| {
             clients.remove(&client_id);

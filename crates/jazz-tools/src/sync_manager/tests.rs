@@ -9,9 +9,174 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema, Value};
 use crate::row_histories::{BatchId, StoredRowBatch, VisibleRowEntry};
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::{MemoryStorage, RawTableKeys, RawTableRows, Storage, StorageError};
 use crate::test_support::{create_test_row_with_id, persist_test_schema};
 use std::collections::{HashMap, HashSet};
+
+struct RowLocatorScanDisabledStorage {
+    inner: MemoryStorage,
+}
+
+impl RowLocatorScanDisabledStorage {
+    fn new(inner: MemoryStorage) -> Self {
+        Self { inner }
+    }
+}
+
+impl Storage for RowLocatorScanDisabledStorage {
+    fn scan_row_locators(&self) -> Result<crate::storage::RowLocatorRows, StorageError> {
+        Err(StorageError::IoError(
+            "row locator scans are disabled in this test".to_string(),
+        ))
+    }
+
+    fn load_row_locator(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<crate::storage::RowLocator>, StorageError> {
+        self.inner.load_row_locator(id)
+    }
+
+    fn put_row_locator(
+        &mut self,
+        id: ObjectId,
+        locator: Option<&crate::storage::RowLocator>,
+    ) -> Result<(), StorageError> {
+        self.inner.put_row_locator(id, locator)
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn raw_table_scan_prefix_keys(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_prefix_keys(table, prefix)
+    }
+
+    fn raw_table_scan_range_keys(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableKeys, StorageError> {
+        self.inner.raw_table_scan_range_keys(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_histories::StoredRowBatch],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn apply_encoded_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_encoded_row_mutation(table, history_rows, visible_rows, index_mutations)
+    }
+
+    fn apply_prepared_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        encoded_history_rows: &[crate::storage::OwnedHistoryRowBytes],
+        encoded_visible_rows: &[crate::storage::OwnedVisibleRowBytes],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner.apply_prepared_row_mutation(
+            table,
+            history_rows,
+            visible_entries,
+            encoded_history_rows,
+            encoded_visible_rows,
+            index_mutations,
+        )
+    }
+
+    fn apply_row_mutation(
+        &mut self,
+        table: &str,
+        history_rows: &[crate::row_histories::StoredRowBatch],
+        visible_entries: &[crate::row_histories::VisibleRowEntry],
+        index_mutations: &[crate::storage::IndexMutation<'_>],
+    ) -> Result<(), StorageError> {
+        self.inner
+            .apply_row_mutation(table, history_rows, visible_entries, index_mutations)
+    }
+
+    fn delete_visible_region_row(
+        &mut self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_visible_region_row(table, branch, row_id)
+    }
+
+    fn load_history_row_batch(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        batch_id: BatchId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner
+            .load_history_row_batch(table, branch, row_id, batch_id)
+    }
+
+    fn scan_history_row_batches(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.scan_history_row_batches(table, row_id)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<crate::row_histories::StoredRowBatch>, StorageError> {
+        self.inner.load_visible_region_row(table, branch, row_id)
+    }
+}
 
 fn users_test_schema() -> crate::query_manager::types::Schema {
     SchemaBuilder::new()
