@@ -218,9 +218,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Begin a subscription that defers callback registration. Returns a
     /// [`PendingSubscriptionRequest`] whose only legal next step is
     /// `.execute(callback)`, giving a compile-time guarantee against the
-    /// flat create/execute pair being misused. Prefer this over the
-    /// [`Self::create_subscription`] / [`Self::execute_subscription`] pair
-    /// from new Rust call sites.
+    /// flat create/execute pair being misused.
+    ///
+    /// Rust callers must use this; the flat `*_for_ffi` methods below are
+    /// reserved for binding crates that need separate JS-/UniFFI-side
+    /// entry points and are explicitly opted into the misuse risk.
     pub fn subscribe_pending(
         &mut self,
         query: Query,
@@ -228,7 +230,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         durability: ReadDurabilityOptions,
         propagation: QueryPropagation,
     ) -> PendingSubscriptionRequest<'_, S, Sch> {
-        let handle = self.create_subscription(query, session, durability, propagation);
+        let handle = self.create_subscription_for_ffi(query, session, durability, propagation);
         PendingSubscriptionRequest {
             runtime: self,
             handle,
@@ -236,16 +238,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     // =========================================================================
-    // Two-phase subscribe: create + execute (kept for FFI bindings)
+    // FFI-only flat pair — napi/wasm/UniFFI wrappers must allocate a handle
+    // synchronously, hand it back to JS, and re-enter Rust later with a
+    // callback. They cannot hold a `PendingSubscriptionRequest` (which borrows
+    // `&mut RuntimeCore`) across two FFI calls, so they call these.
+    //
+    // **Do not call these from Rust.** Use `subscribe_pending(...).execute(cb)`
+    // instead — the typed builder makes pair misuse a compile error.
     // =========================================================================
 
-    /// Phase 1: allocate a handle and store query params. No compilation, no
-    /// sync, no tick — just bookkeeping.
-    ///
-    /// Rust callers should prefer [`Self::subscribe`] which returns a typed
-    /// builder; this flat method exists for the napi/wasm/UniFFI wrappers
-    /// that need separate JS-/UniFFI-side entry points.
-    pub fn create_subscription(
+    /// FFI-only Phase 1: allocate a handle and store query params. No
+    /// compilation, no sync, no tick — just bookkeeping.
+    #[doc(hidden)]
+    pub fn create_subscription_for_ffi(
         &mut self,
         query: Query,
         session: Option<Session>,
@@ -270,13 +275,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         handle
     }
 
-    /// Phase 2: compile graph, register with QueryManager, sync to servers,
-    /// attach callback, and run `immediate_tick` to deliver the first delta.
-    ///
-    /// No-ops silently if the handle was already unsubscribed between create
-    /// and execute.
+    /// FFI-only Phase 2: compile graph, register with QueryManager, sync to
+    /// servers, attach callback, run `immediate_tick`. No-ops if the handle
+    /// was unsubscribed between create and execute.
+    #[doc(hidden)]
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn execute_subscription<F>(
+    pub fn execute_subscription_for_ffi<F>(
         &mut self,
         handle: SubscriptionHandle,
         callback: F,
@@ -287,9 +291,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.execute_subscription_impl(handle, Box::new(callback))
     }
 
-    /// Phase 2 (WASM version — no Send required).
+    /// FFI-only Phase 2 (WASM variant — no `Send` bound).
+    #[doc(hidden)]
     #[cfg(target_arch = "wasm32")]
-    pub fn execute_subscription<F>(
+    pub fn execute_subscription_for_ffi<F>(
         &mut self,
         handle: SubscriptionHandle,
         callback: F,

@@ -1582,10 +1582,12 @@ impl WasmRuntime {
         let (query, session, durability, propagation) =
             parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
 
-        let handle =
-            self.core
-                .borrow_mut()
-                .create_subscription(query, session, durability, propagation);
+        let handle = self.core.borrow_mut().create_subscription_for_ffi(
+            query,
+            session,
+            durability,
+            propagation,
+        );
 
         tracing::debug!(handle = handle.0, "subscription created (pending)");
         Ok(handle.0 as f64)
@@ -1609,7 +1611,7 @@ impl WasmRuntime {
 
         self.core
             .borrow_mut()
-            .execute_subscription(sub_handle, callback)
+            .execute_subscription_for_ffi(sub_handle, callback)
             .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
 
         Ok(())

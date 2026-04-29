@@ -938,7 +938,7 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = core.create_subscription(query, session, durability, propagation);
+        let handle = core.create_subscription_for_ffi(query, session, durability, propagation);
         drop(core);
 
         if query_rows_can_be_schema_aligned(&query_for_alignment) {
@@ -980,7 +980,7 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.execute_subscription(sub_handle, callback)
+        core.execute_subscription_for_ffi(sub_handle, callback)
             .map_err(|e| {
                 napi::Error::from_reason(format!("Execute subscription failed: {:?}", e))
             })?;

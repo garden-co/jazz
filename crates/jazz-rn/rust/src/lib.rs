@@ -709,8 +709,12 @@ impl RnRuntime {
                 message: "lock poisoned".into(),
             })?;
 
-            let handle =
-                core.create_subscription(query, session, durability, QueryPropagation::Full);
+            let handle = core.create_subscription_for_ffi(
+                query,
+                session,
+                durability,
+                QueryPropagation::Full,
+            );
             drop(core);
 
             if query_rows_can_be_schema_aligned(&query_for_alignment) {
@@ -752,7 +756,7 @@ impl RnRuntime {
                 alignment_table,
             );
 
-            core.execute_subscription(SubscriptionHandle(handle), callback)
+            core.execute_subscription_for_ffi(SubscriptionHandle(handle), callback)
                 .map_err(runtime_err)?;
 
             Ok(())
