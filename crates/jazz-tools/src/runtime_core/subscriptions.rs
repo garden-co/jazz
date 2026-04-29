@@ -27,6 +27,47 @@ pub(super) struct PendingSubscription {
     pub propagation: QueryPropagation,
 }
 
+/// Typed builder returned by [`RuntimeCore::subscribe`] — the only thing it
+/// can do is have [`Self::execute`] called on it. Forgetting to call execute
+/// produces a `must_use` warning at compile time; calling it twice is
+/// impossible because `execute` consumes the builder.
+///
+/// The flat `create_subscription` / `execute_subscription` pair on
+/// [`RuntimeCore`] remains for FFI bindings that need separate JS/UniFFI
+/// entry points; new Rust callers should prefer the builder.
+#[must_use = "PendingSubscriptionRequest must be consumed by .execute(callback) — \
+              dropping it leaves a phantom subscription registered in the runtime"]
+pub struct PendingSubscriptionRequest<'a, S: Storage, Sch: Scheduler> {
+    runtime: &'a mut RuntimeCore<S, Sch>,
+    handle: SubscriptionHandle,
+}
+
+impl<'a, S: Storage, Sch: Scheduler> PendingSubscriptionRequest<'a, S, Sch> {
+    /// Execute the pending subscription with `callback` and return its
+    /// stable [`SubscriptionHandle`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn execute<F>(self, callback: F) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + Send + 'static,
+    {
+        self.runtime
+            .execute_subscription_impl(self.handle, Box::new(callback))?;
+        Ok(self.handle)
+    }
+
+    /// Execute the pending subscription with `callback` and return its
+    /// stable [`SubscriptionHandle`] (WASM variant — no `Send` bound).
+    #[cfg(target_arch = "wasm32")]
+    pub fn execute<F>(self, callback: F) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + 'static,
+    {
+        self.runtime
+            .execute_subscription_impl(self.handle, Box::new(callback))?;
+        Ok(self.handle)
+    }
+}
+
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn allocate_subscription_handle(&mut self) -> SubscriptionHandle {
         let handle = SubscriptionHandle(self.next_subscription_handle);
@@ -171,11 +212,39 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     // =========================================================================
-    // Two-phase subscribe: create + execute
+    // Typed-builder subscribe entry point — preferred over create + execute.
+    // =========================================================================
+
+    /// Begin a subscription that defers callback registration. Returns a
+    /// [`PendingSubscriptionRequest`] whose only legal next step is
+    /// `.execute(callback)`, giving a compile-time guarantee against the
+    /// flat create/execute pair being misused. Prefer this over the
+    /// [`Self::create_subscription`] / [`Self::execute_subscription`] pair
+    /// from new Rust call sites.
+    pub fn subscribe_pending(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        durability: ReadDurabilityOptions,
+        propagation: QueryPropagation,
+    ) -> PendingSubscriptionRequest<'_, S, Sch> {
+        let handle = self.create_subscription(query, session, durability, propagation);
+        PendingSubscriptionRequest {
+            runtime: self,
+            handle,
+        }
+    }
+
+    // =========================================================================
+    // Two-phase subscribe: create + execute (kept for FFI bindings)
     // =========================================================================
 
     /// Phase 1: allocate a handle and store query params. No compilation, no
     /// sync, no tick — just bookkeeping.
+    ///
+    /// Rust callers should prefer [`Self::subscribe`] which returns a typed
+    /// builder; this flat method exists for the napi/wasm/UniFFI wrappers
+    /// that need separate JS-/UniFFI-side entry points.
     pub fn create_subscription(
         &mut self,
         query: Query,
