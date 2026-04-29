@@ -666,6 +666,89 @@ fn rc_transactional_rollback_cancels_staged_rows_already_sent_upstream() {
 }
 
 #[test]
+fn rc_cancel_batch_from_unrelated_client_does_not_cancel_or_relay_pending_batch() {
+    let mut s = create_3tier_rc();
+    let bob_client_of_b = ClientId::new();
+    s.b.add_client(bob_client_of_b, None);
+    s.b.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(bob_client_of_b, ClientRole::Peer);
+    s.b.batched_tick();
+    s.b.sync_sender().take();
+
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _), _) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice draft"),
+            Some(&write_context),
+        )
+        .expect("transactional insert should stage locally");
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    pump_a_to_b(&mut s);
+    pump_b_to_c(&mut s);
+
+    s.b.park_sync_message(InboxEntry {
+        source: Source::Client(bob_client_of_b),
+        payload: SyncPayload::CancelBatch { batch_id },
+    });
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    s.b.batched_tick();
+    let bob_cancel_outbox = s.b.sync_sender().take();
+
+    assert!(
+        bob_cancel_outbox.iter().all(|entry| {
+            !matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::CancelBatch {
+                        batch_id: cancelled
+                    },
+                } if *server_id == s.c_server_for_b && *cancelled == batch_id
+            )
+        }),
+        "worker should not relay Bob's spoofed cancel upstream, got {bob_cancel_outbox:?}"
+    );
+
+    for (node_name, core) in [("worker", &s.b), ("edge", &s.c)] {
+        let rows = core
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{node_name} should retain Alice's row");
+        assert_eq!(
+            rows[0].state,
+            crate::row_histories::RowState::StagingPending,
+            "{node_name} should keep Alice's row pending after Bob's spoofed cancel"
+        );
+        assert_eq!(
+            core.storage()
+                .load_authoritative_batch_settlement(batch_id)
+                .unwrap(),
+            None,
+            "{node_name} should not create a settlement for Bob's spoofed cancel"
+        );
+    }
+}
+
+#[test]
 fn rc_transactional_rollback_restores_visible_state_after_staged_update() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "tx-rollback-update");
     let ((row_id, _), _) = core

@@ -70,6 +70,8 @@ pub struct SyncManager {
     pub(super) my_tiers: HashSet<DurabilityTier>,
     /// Tracks which clients are interested in row batch-member state updates.
     pub(super) row_batch_interest: HashMap<RowBatchKey, HashSet<ClientId>>,
+    /// Tracks the client that introduced each still-pending transactional batch.
+    pub(super) pending_batch_owners: HashMap<BatchId, ClientId>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -117,6 +119,7 @@ impl std::fmt::Debug for SyncManager {
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
             .field("row_batch_interest", &self.row_batch_interest)
+            .field("pending_batch_owners", &self.pending_batch_owners)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
@@ -215,6 +218,7 @@ impl SyncManager {
             next_pending_id: 0,
             my_tiers: HashSet::new(),
             row_batch_interest: HashMap::new(),
+            pending_batch_owners: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
             pending_query_settled: Vec::new(),
@@ -337,6 +341,8 @@ impl SyncManager {
             subscriptions += clients.len() * std::mem::size_of::<ClientId>();
             subscriptions += 48;
         }
+        subscriptions += self.pending_batch_owners.len()
+            * (std::mem::size_of::<BatchId>() + std::mem::size_of::<ClientId>() + 48);
         for (query_id, clients) in &self.query_origin {
             subscriptions += std::mem::size_of_val(query_id);
             subscriptions += clients.len() * std::mem::size_of::<ClientId>();
@@ -496,6 +502,9 @@ impl SyncManager {
             clients.remove(&client_id);
             !clients.is_empty()
         });
+        // Clean up pending batch ownership
+        self.pending_batch_owners
+            .retain(|_, owner| *owner != client_id);
         // Clean up query origin map
         self.query_origin.retain(|_, clients| {
             clients.remove(&client_id);

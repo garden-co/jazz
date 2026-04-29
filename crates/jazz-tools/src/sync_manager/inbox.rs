@@ -491,6 +491,34 @@ impl SyncManager {
         before != self.pending_permission_checks.len()
     }
 
+    pub(super) fn remember_pending_batch_owner_for_payload(
+        &mut self,
+        client_id: ClientId,
+        payload: &SyncPayload,
+    ) {
+        let (SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. }) =
+            payload
+        else {
+            return;
+        };
+
+        if matches!(row.state, RowState::StagingPending | RowState::Superseded) {
+            self.pending_batch_owners
+                .entry(row.batch_id)
+                .or_insert(client_id);
+        }
+    }
+
+    fn client_owns_pending_batch(
+        &self,
+        client_id: ClientId,
+        batch_id: crate::row_histories::BatchId,
+    ) -> bool {
+        self.pending_batch_owners
+            .get(&batch_id)
+            .is_some_and(|owner| *owner == client_id)
+    }
+
     fn cancellable_pending_batch_rows<H: Storage>(
         &self,
         storage: &H,
@@ -532,14 +560,15 @@ impl SyncManager {
         &mut self,
         storage: &mut H,
         batch_id: crate::row_histories::BatchId,
-    ) {
+    ) -> bool {
         let pending_rows = self.cancellable_pending_batch_rows(storage, batch_id);
         let removed_pending_checks = self.discard_pending_permission_checks_for_batch(batch_id);
         if pending_rows.is_empty() && !removed_pending_checks {
-            return;
+            return false;
         }
 
         self.discard_pending_batch_outbox(batch_id);
+        self.pending_batch_owners.remove(&batch_id);
         self.row_batch_interest
             .retain(|key, _clients| key.batch_id != batch_id);
 
@@ -573,6 +602,8 @@ impl SyncManager {
         if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
             tracing::warn!(?batch_id, %error, "failed to delete cancelled sealed batch submission");
         }
+
+        true
     }
 
     fn transactional_batch_rows<H: Storage>(
@@ -777,6 +808,7 @@ impl SyncManager {
                 "failed to delete rejected sealed batch submission"
             );
         }
+        self.pending_batch_owners.remove(&settlement.batch_id());
         self.apply_transactional_batch_settlement_to_rows(
             storage,
             origin_client_id,
@@ -866,6 +898,7 @@ impl SyncManager {
             if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
                 tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
             }
+            self.pending_batch_owners.remove(&batch_id);
         }
         let rows_to_patch: &[(String, StoredRowBatch)] = match settlement {
             BatchSettlement::AcceptedTransaction { .. } => &declared_rows,
@@ -1645,6 +1678,11 @@ impl SyncManager {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
                 let batch_id = row.batch_id;
+                if matches!(row.state, RowState::StagingPending | RowState::Superseded) {
+                    self.pending_batch_owners
+                        .entry(batch_id)
+                        .or_insert(client_id);
+                }
                 self.row_batch_interest
                     .entry(RowBatchKey::new(object_id, branch_name, batch_id))
                     .or_default()
@@ -1750,8 +1788,17 @@ impl SyncManager {
                 );
             }
             SyncPayload::CancelBatch { batch_id } => {
-                self.cancel_pending_batch(storage, batch_id);
-                self.cancel_batch_to_servers_except(batch_id, None);
+                if !self.client_owns_pending_batch(client_id, batch_id) {
+                    tracing::warn!(
+                        %client_id,
+                        ?batch_id,
+                        "client attempted to cancel a pending batch it does not own"
+                    );
+                    return;
+                }
+                if self.cancel_pending_batch(storage, batch_id) {
+                    self.cancel_batch_to_servers_except(batch_id, None);
+                }
             }
             SyncPayload::BatchSettlement { settlement } => {
                 self.pending_batch_settlements.push(settlement);

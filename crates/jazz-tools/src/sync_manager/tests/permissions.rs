@@ -124,6 +124,79 @@ fn row_batch_created_from_user_with_same_batch_correction_queues_permission_chec
 }
 
 #[test]
+fn cancel_batch_from_unrelated_client_keeps_pending_permission_check() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    let upstream = ServerId::new();
+    let row_id = ObjectId::new();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"Alice draft"),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, alice);
+    sm.set_client_role(alice, ClientRole::User);
+    sm.set_client_session(alice, crate::query_manager::session::Session::new("alice"));
+    add_client(&mut sm, &io, bob);
+    sm.set_client_role(bob, ClientRole::Peer);
+    add_server(&mut sm, &io, upstream);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        alice,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+    assert_eq!(
+        sm.pending_permission_checks.len(),
+        1,
+        "Alice's staged row should be waiting on permission evaluation"
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        bob,
+        SyncPayload::CancelBatch {
+            batch_id: row.batch_id,
+        },
+    );
+
+    assert_eq!(
+        sm.pending_permission_checks.len(),
+        1,
+        "Bob's spoofed cancel should not remove Alice's pending permission check"
+    );
+    assert_eq!(sm.pending_permission_checks[0].client_id, alice);
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().all(|entry| {
+            !matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::CancelBatch {
+                        batch_id: cancelled
+                    },
+                } if *server_id == upstream && *cancelled == row.batch_id
+            )
+        }),
+        "Bob's spoofed cancel should not be forwarded upstream, got {outbox:?}"
+    );
+}
+
+#[test]
 fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_check() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();

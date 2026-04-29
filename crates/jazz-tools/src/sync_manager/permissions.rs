@@ -127,6 +127,7 @@ impl SyncManager {
     ) -> PendingUpdateId {
         let id = PendingUpdateId(self.next_pending_id);
         self.next_pending_id += 1;
+        self.remember_pending_batch_owner_for_payload(client_id, &payload);
         self.pending_permission_checks.push(PendingPermissionCheck {
             id,
             client_id,
