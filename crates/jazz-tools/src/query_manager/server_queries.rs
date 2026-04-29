@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
-use crate::row_histories::BatchId;
+use crate::row_histories::{BatchId, StoredRowBatch};
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{
@@ -102,6 +102,71 @@ impl QueryManager {
             }
             _ => None,
         }
+    }
+
+    fn payload_has_parents(payload: &SyncPayload) -> bool {
+        match payload {
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                !row.parents.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    fn payload_pre_batch_visible_row(
+        storage: &dyn Storage,
+        table: &str,
+        payload: &SyncPayload,
+    ) -> Option<StoredRowBatch> {
+        let row = match payload {
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                row
+            }
+            _ => return None,
+        };
+        if row.parents.is_empty() {
+            return None;
+        }
+
+        let context =
+            crate::storage::resolve_history_row_write_context(storage, table, row).ok()?;
+        let history_rows = storage.scan_history_row_batches(table, row.row_id).ok()?;
+        let visible_rows = history_rows
+            .into_iter()
+            .filter(|candidate| {
+                candidate.branch.as_str() == row.branch.as_str()
+                    && candidate.batch_id != row.batch_id
+                    && candidate.state.is_visible()
+            })
+            .collect::<Vec<_>>();
+        let visible_rows_by_batch = visible_rows
+            .iter()
+            .cloned()
+            .map(|candidate| (candidate.batch_id(), candidate))
+            .collect::<HashMap<_, _>>();
+
+        let mut included_batch_ids = HashSet::new();
+        let mut frontier = row.parents.iter().copied().collect::<Vec<_>>();
+        while let Some(batch_id) = frontier.pop() {
+            if !included_batch_ids.insert(batch_id) {
+                continue;
+            }
+            if let Some(parent_row) = visible_rows_by_batch.get(&batch_id) {
+                frontier.extend(parent_row.parents.iter().copied());
+            }
+        }
+
+        let pre_batch_rows = visible_rows
+            .into_iter()
+            .filter(|candidate| included_batch_ids.contains(&candidate.batch_id()))
+            .collect::<Vec<_>>();
+        crate::row_histories::visible_row_preview_from_history_rows(
+            context.user_descriptor.as_ref(),
+            &pre_batch_rows,
+            None,
+        )
+        .ok()
+        .flatten()
     }
 
     pub(super) fn build_server_subscription_context(
@@ -1432,7 +1497,7 @@ impl QueryManager {
     fn evaluate_update_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
         request: UpdatePermissionRequest<'_>,
     ) {
         let UpdatePermissionRequest {
@@ -1467,7 +1532,17 @@ impl QueryManager {
         let using_policy = table_schema.policies.update_using_policy();
         let check_policy = table_schema.policies.update_check_policy();
         let source_branch_schema_map = self.branch_schema_map.clone();
-        let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
+        let pre_batch_old_row =
+            Self::payload_pre_batch_visible_row(storage, table_name.as_str(), &check.payload);
+        if check.old_content.is_none()
+            && let Some(row) = pre_batch_old_row.as_ref()
+        {
+            check.old_content = Some(row.data.as_ref().to_vec());
+        }
+        let old_provenance = pre_batch_old_row
+            .as_ref()
+            .map(|row| row.row_provenance())
+            .or_else(|| self.current_row_provenance(storage, object_id, branch_name));
         let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
@@ -1490,6 +1565,25 @@ impl QueryManager {
             let old_content = match check.old_content.as_ref() {
                 Some(c) if !c.is_empty() => c,
                 _ => {
+                    if Self::payload_has_parents(&check.payload) {
+                        let wait_started_at = check
+                            .schema_wait_started_at
+                            .get_or_insert_with(Instant::now);
+                        let wait_elapsed = wait_started_at.elapsed();
+
+                        if wait_elapsed < SCHEMA_RESOLUTION_TIMEOUT {
+                            tracing::debug!(
+                                table = %table_name,
+                                branch = %branch_name,
+                                object_id = %object_id,
+                                waited_ms = wait_elapsed.as_millis() as u64,
+                                "deferring update permission check until old content becomes visible"
+                            );
+                            self.sync_manager
+                                .requeue_pending_permission_checks(vec![check]);
+                            return;
+                        }
+                    }
                     let reason = format!(
                         "Update denied by USING policy on table {} - no old content",
                         table_name.0

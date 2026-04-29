@@ -62,6 +62,133 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
 }
 
 #[test]
+fn rapid_updates_sync_every_parent_batch_to_server_outbox() {
+    let mut core = create_test_runtime();
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.sync_sender().take();
+
+    let user_id = ObjectId::new();
+    let ((row_object_id, _), insert_batch_id) = core
+        .insert("users", user_insert_values(user_id, "cursor-0"), None)
+        .expect("initial cursor insert should succeed");
+
+    let update_count = 1_000;
+    let mut expected_batch_ids = vec![insert_batch_id];
+    for idx in 1..=update_count {
+        let batch_id = core
+            .update(
+                row_object_id,
+                vec![("name".to_string(), Value::Text(format!("cursor-{idx}")))],
+                None,
+            )
+            .expect("rapid cursor update should succeed");
+        expected_batch_ids.push(batch_id);
+    }
+
+    core.batched_tick();
+    let outbox = core.sync_sender().take();
+    let cursor_rows = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchCreated { row, .. } if row.row_id == row_object_id => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cursor_rows.len(),
+        expected_batch_ids.len(),
+        "client-to-server sync should send every rapid cursor row version, not only the newest"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for row in cursor_rows {
+        for parent in row.parents.iter().copied() {
+            assert!(
+                seen.contains(&parent),
+                "outgoing row batch {:?} referenced parent {:?} before that parent was sent; outbox contained {} row batches",
+                row.batch_id,
+                parent,
+                expected_batch_ids.len()
+            );
+        }
+        assert!(
+            seen.insert(row.batch_id),
+            "same row batch {:?} should not be sent twice in one rapid update burst",
+            row.batch_id
+        );
+    }
+
+    for batch_id in expected_batch_ids {
+        assert!(
+            seen.contains(&batch_id),
+            "locally authored batch {batch_id:?} was not sent to the server"
+        );
+    }
+}
+
+#[test]
+fn rapid_offline_updates_full_sync_every_parent_batch_on_reconnect() {
+    let mut core = create_test_runtime();
+
+    let user_id = ObjectId::new();
+    let ((row_object_id, _), insert_batch_id) = core
+        .insert("users", user_insert_values(user_id, "cursor-0"), None)
+        .expect("initial offline cursor insert should succeed");
+
+    let update_count = 1_000;
+    let mut expected_batch_ids = vec![insert_batch_id];
+    for idx in 1..=update_count {
+        let batch_id = core
+            .update(
+                row_object_id,
+                vec![("name".to_string(), Value::Text(format!("cursor-{idx}")))],
+                None,
+            )
+            .expect("rapid offline cursor update should succeed");
+        expected_batch_ids.push(batch_id);
+    }
+
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+
+    let outbox = core.sync_sender().take();
+    let cursor_rows = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowBatchCreated { row, .. } if row.row_id == row_object_id => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cursor_rows.len(),
+        expected_batch_ids.len(),
+        "full sync should replay every rapid offline cursor row version, not only the newest"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for row in cursor_rows {
+        for parent in row.parents.iter().copied() {
+            assert!(
+                seen.contains(&parent),
+                "full sync emitted row batch {:?} before its parent {:?}",
+                row.batch_id,
+                parent
+            );
+        }
+        seen.insert(row.batch_id);
+    }
+
+    for batch_id in expected_batch_ids {
+        assert!(
+            seen.contains(&batch_id),
+            "locally authored offline batch {batch_id:?} was not replayed on reconnect"
+        );
+    }
+}
+
+#[test]
 fn test_runtime_core_insert_materializes_schema_defaults() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "todos-with-defaults");
 

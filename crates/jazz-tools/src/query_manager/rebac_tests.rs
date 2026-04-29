@@ -372,6 +372,18 @@ fn authorship_permissions_schema() -> Schema {
     schema
 }
 
+fn permissive_cursors_schema() -> Schema {
+    let mut schema = Schema::new();
+    let policies = TablePolicies::new()
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True);
+    schema.insert(
+        TableName::new("cursors"),
+        TableSchema::with_policies(provenance_notes_descriptor(), policies),
+    );
+    schema
+}
+
 fn query_rows(
     qm: &mut QueryManager,
     storage: &mut MemoryStorage,
@@ -430,6 +442,226 @@ fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
     );
 
     schema
+}
+
+#[test]
+fn parented_update_waits_for_old_content_before_using_policy_evaluation() {
+    let schema = permissive_cursors_schema();
+    let branch = ComposedBranchName::new("dev", SchemaHash::compute(&schema), "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+    let mut qm = create_query_manager(SyncManager::new(), schema);
+    let mut storage = MemoryStorage::new();
+    let alice = ClientId::new();
+    connect_client(&mut qm, &storage, alice);
+    qm.sync_manager_mut()
+        .set_client_session(alice, Session::new("alice"));
+
+    let cursor_id = ObjectId::new();
+    let metadata = HashMap::from([(MetadataKey::Table.to_string(), "cursors".to_string())]);
+    let parent = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &provenance_notes_descriptor(),
+            &[Value::Text("first cursor position".into())],
+        )
+        .expect("parent cursor row should encode"),
+        1_000,
+        "alice",
+        None,
+    );
+    let child = stored_row_commit(
+        smallvec![parent.batch_id],
+        encode_row(
+            &provenance_notes_descriptor(),
+            &[Value::Text("second cursor position".into())],
+        )
+        .expect("child cursor row should encode"),
+        1_100,
+        "alice",
+        None,
+    );
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: row_batch_created_payload(
+            cursor_id,
+            &branch,
+            Some(RowMetadata {
+                id: cursor_id,
+                metadata: metadata.clone(),
+            }),
+            &child,
+        ),
+    });
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        !client_write_was_rejected(&outbox, alice, cursor_id, &branch, child.batch_id),
+        "permissive update policy should not reject before the parent row has arrived: {outbox:?}"
+    );
+    let pending = qm.sync_manager_mut().take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "parented update should stay pending until old content is visible"
+    );
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(pending);
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: row_batch_created_payload(
+            cursor_id,
+            &branch,
+            Some(RowMetadata {
+                id: cursor_id,
+                metadata,
+            }),
+            &parent,
+        ),
+    });
+    qm.process(&mut storage);
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        !client_write_was_rejected(&outbox, alice, cursor_id, &branch, child.batch_id),
+        "parented update should be approved after the parent supplies old content: {outbox:?}"
+    );
+    let visible = storage
+        .load_visible_region_row("cursors", &branch, cursor_id)
+        .expect("visible row lookup should succeed")
+        .expect("cursor row should be visible");
+    assert_eq!(visible.batch_id(), child.batch_id);
+}
+
+#[test]
+fn parented_update_waits_for_declared_parent_not_unrelated_visible_content() {
+    let schema = permissive_cursors_schema();
+    let branch = ComposedBranchName::new("dev", SchemaHash::compute(&schema), "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+    let mut qm = create_query_manager(SyncManager::new(), schema);
+    let mut storage = MemoryStorage::new();
+    let alice = ClientId::new();
+    connect_client(&mut qm, &storage, alice);
+    qm.sync_manager_mut()
+        .set_client_session(alice, Session::new("alice"));
+
+    let cursor_id = ObjectId::new();
+    let metadata = HashMap::from([(MetadataKey::Table.to_string(), "cursors".to_string())]);
+    let unrelated_visible = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &provenance_notes_descriptor(),
+            &[Value::Text("unrelated visible cursor position".into())],
+        )
+        .expect("unrelated cursor row should encode"),
+        1_000,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: row_batch_created_payload(
+            cursor_id,
+            &branch,
+            Some(RowMetadata {
+                id: cursor_id,
+                metadata: metadata.clone(),
+            }),
+            &unrelated_visible,
+        ),
+    });
+    qm.process(&mut storage);
+    qm.sync_manager_mut().take_outbox();
+
+    let declared_parent_batch_id = BatchId::new();
+    let child = stored_row_commit(
+        smallvec![declared_parent_batch_id],
+        encode_row(
+            &provenance_notes_descriptor(),
+            &[Value::Text("child cursor position".into())],
+        )
+        .expect("child cursor row should encode"),
+        1_200,
+        "alice",
+        None,
+    );
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: row_batch_created_payload(
+            cursor_id,
+            &branch,
+            Some(RowMetadata {
+                id: cursor_id,
+                metadata: metadata.clone(),
+            }),
+            &child,
+        ),
+    });
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        !client_write_was_rejected(&outbox, alice, cursor_id, &branch, child.batch_id),
+        "parented update should wait for its declared parent, not reject: {outbox:?}"
+    );
+    let pending = qm.sync_manager_mut().take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "unrelated visible content must not satisfy the child update's old-content requirement"
+    );
+    let visible = storage
+        .load_visible_region_row("cursors", &branch, cursor_id)
+        .expect("visible row lookup should succeed")
+        .expect("unrelated cursor row should still be visible");
+    assert_eq!(visible.batch_id(), unrelated_visible.batch_id);
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(pending);
+
+    let declared_parent = IncomingRowBatch {
+        batch_id: declared_parent_batch_id,
+        parents: smallvec![],
+        content: encode_row(
+            &provenance_notes_descriptor(),
+            &[Value::Text("declared parent cursor position".into())],
+        )
+        .expect("declared parent cursor row should encode"),
+        timestamp: 1_100,
+        author: "alice".into(),
+        delete_kind: None,
+    };
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: row_batch_created_payload(
+            cursor_id,
+            &branch,
+            Some(RowMetadata {
+                id: cursor_id,
+                metadata,
+            }),
+            &declared_parent,
+        ),
+    });
+    qm.process(&mut storage);
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    assert!(
+        !client_write_was_rejected(&outbox, alice, cursor_id, &branch, child.batch_id),
+        "parented update should be approved after its declared parent is visible: {outbox:?}"
+    );
+    let visible = storage
+        .load_visible_region_row("cursors", &branch, cursor_id)
+        .expect("visible row lookup should succeed")
+        .expect("child cursor row should be visible");
+    assert_eq!(visible.batch_id(), child.batch_id);
 }
 
 /// Helper to encode a document row
