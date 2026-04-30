@@ -34,6 +34,12 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 
+There is no separate Jazz server CLI flag for cookie-based auth. The sync server validates bearer
+JWTs, local-first bearer JWTs, or backend impersonation headers. If your app uses an HttpOnly cookie,
+resolve that cookie in your own app server and either exchange it for a bearer JWT before creating
+the Jazz client, or pass a mirrored `cookieSession` to the browser client while the cookie remains
+the transport credential.
+
 ## Backend context setup
 
 Every backend needs an app ID, typed schema, and usually a permissions bundle. If the backend syncs through a Jazz server, also pass `serverUrl` and the relevant secrets. For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication). For frontend/browser context creation, see [Client Setup](/docs/getting-started/client-setup).
@@ -65,6 +71,10 @@ On the client side, queries automatically run as the logged-in user. On a server
 In TypeScript backends, create the context once with both `app` and `permissions`, then use `context.asBackend()` for server-owned work and `await context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
 `forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work. Configure `jwksUrl` or `jwtPublicKey` on `createJazzContext(...)` if those bearer tokens come from an external IdP, but do not set both at once. Without either one, backend `forRequest()` only accepts Jazz self-signed tokens; set `allowLocalFirstAuth: false` to disable those too.
+
+For cookie-based auth on your own backend, resolve the cookie with your framework or auth provider
+first, then call `context.forSession(session)` once you have a Jazz `Session`. `forRequest(...)`
+does not parse application cookies by itself.
 
 <Callout type="info">
   For embedded or local-only runtime setups where your backend is not connected to a server, use
