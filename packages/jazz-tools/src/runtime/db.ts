@@ -591,12 +591,28 @@ export class DbTransaction {
    * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed with {@link DbTransaction.commit}.
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.requireRuntimeTransaction("insert").create(table._table, values);
+    const runtimeTransaction = this.requireRuntimeTransaction("insert");
+    const row = options
+      ? runtimeTransaction.create(table._table, values, options)
+      : runtimeTransaction.create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id.
+   *
+   * The upsert is scoped to this transaction, and will only be globally visible
+   * once it's committed with {@link DbTransaction.commit}.
+   */
+  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+    this.ensureActive();
+    const transformedData = transformUpdateInput(table, data);
+    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    this.requireRuntimeTransaction("upsert").upsert(table._table, values, options);
   }
 
   /**
@@ -750,12 +766,22 @@ export class DbDirectBatch {
     return handle;
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.requireRuntimeBatch("insert").create(table._table, values);
+    const runtimeBatch = this.requireRuntimeBatch("insert");
+    const row = options
+      ? runtimeBatch.create(table._table, values, options)
+      : runtimeBatch.create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
+  }
+
+  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+    this.ensureActive();
+    const transformedData = transformUpdateInput(table, data);
+    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    this.requireRuntimeBatch("upsert").upsert(table._table, values, options);
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
