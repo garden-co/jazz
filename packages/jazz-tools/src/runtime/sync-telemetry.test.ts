@@ -131,7 +131,7 @@ describe("telemetry OTLP helpers", () => {
     expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
   });
 
-  it("installs a WASM span callback that exports OPFS spans through the official trace exporter", async () => {
+  it("installs a WASM span callback that records OPFS spans through the official trace exporter", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -152,7 +152,7 @@ describe("telemetry OTLP helpers", () => {
       endUnixNano: "1775000000000123000",
     });
 
-    await vi.waitFor(() => expect(otelMocks.traceForceFlush).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(otelMocks.startSpan).toHaveBeenCalledTimes(1));
     expect(otelMocks.traceExporterConstructors).toHaveBeenCalledWith({
       url: "http://127.0.0.1:54418/v1/traces",
     });
@@ -166,11 +166,11 @@ describe("telemetry OTLP helpers", () => {
       }),
     );
     expect(otelMocks.traceSpans[0]!.end).toHaveBeenCalled();
-    expect(otelMocks.traceForceFlush).toHaveBeenCalledTimes(1);
+    expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("buffers multiple WASM trace spans into one official trace provider flush", async () => {
+  it("records multiple WASM trace spans without direct fetches or explicit flushes", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -210,7 +210,7 @@ describe("telemetry OTLP helpers", () => {
       endUnixNano: "1775000000000005000",
     });
 
-    await vi.waitFor(() => expect(otelMocks.traceForceFlush).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(otelMocks.startSpan).toHaveBeenCalledTimes(3));
     expect(otelMocks.traceExporterConstructors).toHaveBeenCalledWith({
       url: "http://127.0.0.1:54419/v1/traces",
     });
@@ -219,7 +219,66 @@ describe("telemetry OTLP helpers", () => {
       "OpfsBTree::get",
       "OpfsBTree::range",
     ]);
+    expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not wait for a slow provider flush before recording later spans", async () => {
+    let releaseFlush = () => {};
+    const slowFlush = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    otelMocks.traceForceFlush.mockImplementationOnce(() => slowFlush);
+
+    installWasmTraceTelemetry({
+      collectorUrl: "http://127.0.0.1:54420",
+      appId: "telemetry-app",
+      runtimeThread: "worker",
+    });
+
+    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__ as
+      | ((span: unknown) => void)
+      | undefined;
+    expect(callback).toBeTypeOf("function");
+
+    let assertionError: unknown;
+    try {
+      callback!({
+        name: "OpfsBTree::put",
+        target: "opfs_btree::db",
+        level: "TRACE",
+        fields: { key_len: "8" },
+        startUnixNano: "1775000000000000000",
+        endUnixNano: "1775000000000001000",
+      });
+
+      await vi.waitFor(() => {
+        expect(otelMocks.traceSpans.map((span) => span.name)).toEqual(["OpfsBTree::put"]);
+      });
+
+      callback!({
+        name: "OpfsBTree::get",
+        target: "opfs_btree::db",
+        level: "TRACE",
+        fields: { key_len: "8" },
+        startUnixNano: "1775000000000002000",
+        endUnixNano: "1775000000000003000",
+      });
+
+      await Promise.resolve();
+      expect(otelMocks.traceSpans.map((span) => span.name)).toEqual([
+        "OpfsBTree::put",
+        "OpfsBTree::get",
+      ]);
+      expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
+    } catch (error) {
+      assertionError = error;
+    } finally {
+      releaseFlush();
+      await Promise.resolve();
+    }
+
+    if (assertionError) throw assertionError;
   });
 
   it("returns a disposer that only clears its owned WASM span callback", () => {

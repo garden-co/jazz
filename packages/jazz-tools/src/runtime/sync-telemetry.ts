@@ -14,19 +14,8 @@ interface WasmTraceSpan {
   endUnixNano?: unknown;
 }
 
-interface PendingWasmTraceSpan {
-  collectorUrl: string;
-  appId: string;
-  runtimeThread: "main" | "worker";
-  span: WasmTraceSpan;
-}
-
 const MAX_WASM_TRACE_SPANS_PER_REQUEST = 256;
 const MAX_PENDING_WASM_TRACE_SPANS = 5_000;
-
-let pendingWasmTraceSpans: PendingWasmTraceSpan[] = [];
-let wasmTraceFlushQueued = false;
-let wasmTraceFlushInFlight = false;
 
 type TelemetryAttributeValue = string | number | boolean;
 
@@ -110,7 +99,7 @@ export function installWasmTraceTelemetry(options: {
   if (!options.collectorUrl) return () => undefined;
   const globalRef = globalThis as Record<string, unknown>;
   const callback = (span: WasmTraceSpan) => {
-    void exportWasmTraceSpan(options.collectorUrl!, options.appId, options.runtimeThread, span);
+    void recordWasmTraceSpan(options.collectorUrl!, options.appId, options.runtimeThread, span);
   };
   globalRef.__JAZZ_WASM_TRACE_SPAN__ = callback;
   return () => {
@@ -120,87 +109,20 @@ export function installWasmTraceTelemetry(options: {
   };
 }
 
-async function exportWasmTraceSpan(
+async function recordWasmTraceSpan(
   collectorUrl: string,
   appId: string,
   runtimeThread: "main" | "worker",
   span: WasmTraceSpan,
 ): Promise<void> {
-  enqueueWasmTraceSpan({ collectorUrl, appId, runtimeThread, span });
-}
-
-function enqueueWasmTraceSpan(span: PendingWasmTraceSpan): void {
-  if (pendingWasmTraceSpans.length >= MAX_PENDING_WASM_TRACE_SPANS) {
-    pendingWasmTraceSpans.shift();
-  }
-  pendingWasmTraceSpans.push(span);
-
-  if (wasmTraceFlushQueued || wasmTraceFlushInFlight) return;
-  wasmTraceFlushQueued = true;
-  queueMicrotask(() => {
-    void flushWasmTraceSpans();
-  });
-}
-
-async function flushWasmTraceSpans(): Promise<void> {
-  if (wasmTraceFlushInFlight) return;
-  wasmTraceFlushQueued = false;
-  wasmTraceFlushInFlight = true;
-
   try {
-    while (pendingWasmTraceSpans.length > 0) {
-      const batch = takeNextWasmTraceSpanBatch();
-      if (!batch) break;
-      await exportWasmTraceSpanBatch(batch);
-    }
-  } finally {
-    wasmTraceFlushInFlight = false;
-    if (pendingWasmTraceSpans.length > 0) {
-      wasmTraceFlushQueued = true;
-      queueMicrotask(() => {
-        void flushWasmTraceSpans();
-      });
-    }
-  }
-}
-
-function takeNextWasmTraceSpanBatch(): PendingWasmTraceSpan[] | undefined {
-  const first = pendingWasmTraceSpans[0];
-  if (!first) return undefined;
-
-  const batch: PendingWasmTraceSpan[] = [];
-  for (let index = 0; index < pendingWasmTraceSpans.length; ) {
-    const candidate = pendingWasmTraceSpans[index]!;
-    if (
-      candidate.collectorUrl === first.collectorUrl &&
-      candidate.appId === first.appId &&
-      candidate.runtimeThread === first.runtimeThread
-    ) {
-      batch.push(candidate);
-      pendingWasmTraceSpans.splice(index, 1);
-      if (batch.length >= MAX_WASM_TRACE_SPANS_PER_REQUEST) break;
-      continue;
-    }
-    index += 1;
-  }
-  return batch;
-}
-
-async function exportWasmTraceSpanBatch(batch: PendingWasmTraceSpan[]): Promise<void> {
-  const first = batch[0];
-  if (!first) return;
-
-  try {
-    const exporter = await getWasmTraceExporter(first.collectorUrl, first.appId);
-    for (const { runtimeThread, span } of batch) {
-      const otelSpan = exporter.tracer.startSpan(String(span.name ?? "wasm span"), {
-        kind: exporter.spanKindInternal,
-        startTime: unixNanoToTimeInput(span.startUnixNano),
-        attributes: wasmTraceTelemetryAttributes(runtimeThread, span),
-      });
-      otelSpan.end(unixNanoToTimeInput(span.endUnixNano));
-    }
-    await exporter.provider.forceFlush();
+    const exporter = await getWasmTraceExporter(collectorUrl, appId);
+    const otelSpan = exporter.tracer.startSpan(String(span.name ?? "wasm span"), {
+      kind: exporter.spanKindInternal,
+      startTime: unixNanoToTimeInput(span.startUnixNano),
+      attributes: wasmTraceTelemetryAttributes(runtimeThread, span),
+    });
+    otelSpan.end(unixNanoToTimeInput(span.endUnixNano));
   } catch {
     // Silent by design.
   }
