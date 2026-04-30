@@ -255,10 +255,13 @@ fn transactional_insert_uses_frozen_target_branch_schema() {
         )
         .expect("frozen-target insert should use the target branch schema");
 
-    let target_rows = execute_query(
+    let target_rows = execute_query_with_local_overlay(
         &mut manager,
         &mut storage,
         QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        inserted.row_id,
+        &v1_branch,
+        inserted.batch_id,
     );
     assert_eq!(target_rows.len(), 1);
     assert_eq!(target_rows[0].0, inserted.row_id);
@@ -389,7 +392,7 @@ fn transactional_update_uses_frozen_target_branch_schema() {
         .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
         .with_target_branch_name(v1_branch.clone());
 
-    manager
+    let batch_id = manager
         .update_with_write_context(
             &mut storage,
             row_id,
@@ -401,10 +404,13 @@ fn transactional_update_uses_frozen_target_branch_schema() {
         )
         .expect("frozen-target update should use the target branch schema");
 
-    let target_rows = execute_query(
+    let target_rows = execute_query_with_local_overlay(
         &mut manager,
         &mut storage,
         QueryBuilder::new("users").branch(v1_branch.clone()).build(),
+        row_id,
+        &v1_branch,
+        batch_id,
     );
     assert_eq!(target_rows.len(), 1);
     assert_eq!(target_rows[0].0, row_id);
