@@ -562,32 +562,31 @@ impl QueryManager {
 
         let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
 
-        Some(
-            graph
-                .sync_scope_tuples()
-                .into_iter()
-                .filter_map(|tuple| {
-                    tuple
-                        .provenance()
-                        .iter()
-                        .copied()
-                        .all(|(object_id, branch_name)| {
-                            *authorization_cache
-                                .entry((object_id, branch_name))
-                                .or_insert_with(|| {
-                                    self.provenance_row_matches_current_select_policy(
-                                        storage,
-                                        object_id,
-                                        branch_name,
-                                        session,
-                                        &auth_schema,
-                                        &auth_context,
-                                        source_branch_schema_map,
-                                    )
-                                })
+        let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
+            tuple
+                .provenance()
+                .iter()
+                .copied()
+                .all(|(object_id, branch_name)| {
+                    *authorization_cache
+                        .entry((object_id, branch_name))
+                        .or_insert_with(|| {
+                            self.provenance_row_matches_current_select_policy(
+                                storage,
+                                object_id,
+                                branch_name,
+                                session,
+                                &auth_schema,
+                                &auth_context,
+                                source_branch_schema_map,
+                            )
                         })
-                        .then_some(tuple)
                 })
+        });
+
+        Some(
+            authorized_scope_tuples
+                .into_iter()
                 .flat_map(|tuple| tuple.provenance().clone().into_iter())
                 .collect(),
         )
