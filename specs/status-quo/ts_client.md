@@ -96,9 +96,8 @@ The current `Db` API centers around a small set of predictable operations:
 - `update(...)`
 - `delete(...)`
 - `subscribeAll(...)`
-- `beginDirectBatch(...)`
-- `beginBatch(...)`
-- `beginTransaction(...)`
+- `beginBatch()`
+- `beginTransaction()`
 
 Simple write calls are one-member direct batches under the hood. They seal immediately and return
 handles that callers can wait on for a specific durability tier.
@@ -110,7 +109,6 @@ now exposes explicit batch handles.
 
 At the runtime-client layer:
 
-- `client.beginDirectBatch()`
 - `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
@@ -119,14 +117,13 @@ At the runtime-client layer:
 
 At the typed `Db` layer:
 
-- `db.beginDirectBatch(table)`
-- `db.beginBatch(table)`
-- `db.beginTransaction(table)`
+- `db.beginBatch()`
+- `db.beginTransaction()`
 
 The returned handles (`DirectBatch`, `Transaction`, `DbDirectBatch`, `DbTransaction`) reuse the
 same CRUD surface as normal writes, but with one shared logical `BatchId`.
-For the typed `Db` wrappers, the begin-time table also fixes which underlying runtime
-client/schema owns that handle.
+For the typed `Db` wrappers, the first table operation fixes which underlying runtime client/schema
+owns that handle.
 
 Open batch writes are intentionally not individually waitable:
 
@@ -138,8 +135,13 @@ Open batch writes are intentionally not individually waitable:
 That makes the common durable path explicit in the type shape:
 
 ```ts
-await db.beginBatch(app.todos).commit().wait({ tier: "edge" });
-await db.beginTransaction(app.todos).commit().wait({ tier: "global" });
+const batch = db.beginBatch();
+batch.insert(app.todos, { title: "Ship it", done: false });
+await batch.commit().wait({ tier: "edge" });
+
+const tx = db.beginTransaction();
+tx.update(app.todos, "todo-1", { done: true });
+await tx.commit().wait({ tier: "global" });
 ```
 
 Transactional handles also expose transaction-scoped reads over their own staged rows:

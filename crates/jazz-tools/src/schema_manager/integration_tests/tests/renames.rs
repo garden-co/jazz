@@ -708,12 +708,15 @@ fn transactional_insert_uses_frozen_target_branch_renamed_table_schema() {
         )
         .expect("frozen-target insert should use the renamed target table schema");
 
-    let target_rows = execute_query(
+    let target_rows = execute_query_with_local_overlay(
         &mut manager,
         &mut storage,
         QueryBuilder::new("people")
             .branch(v1_branch.clone())
             .build(),
+        inserted.row_id,
+        &v1_branch,
+        inserted.batch_id,
     );
     assert_eq!(target_rows.len(), 1);
     assert_eq!(target_rows[0].0, inserted.row_id);

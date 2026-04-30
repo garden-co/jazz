@@ -210,7 +210,6 @@ export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
-  strictTransactions?: boolean;
   visibility?: QueryVisibility;
 }
 
@@ -228,7 +227,6 @@ export interface ResolvedQueryExecutionOptions {
   tier: DurabilityTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
-  strictTransactions: boolean;
   visibility: QueryVisibility;
 }
 
@@ -382,7 +380,6 @@ export function resolveEffectiveQueryExecutionOptions(
     tier: options?.tier ?? resolveDefaultDurabilityTier(context),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
-    strictTransactions: options?.strictTransactions ?? false,
     visibility: options?.visibility ?? "public",
   };
 }
@@ -557,7 +554,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
-    strict_transactions?: boolean;
     transaction_overlay?: {
       batch_id: string;
       branch_name: string;
@@ -570,9 +566,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.strictTransactions) {
-    payload.strict_transactions = true;
-  }
   if (options.transactionOverlay && options.transactionOverlay.rowIds.length > 0) {
     payload.transaction_overlay = {
       batch_id: options.transactionOverlay.batchId,
@@ -581,12 +574,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     };
   }
 
-  if (
-    !payload.propagation &&
-    !payload.local_updates &&
-    !payload.strict_transactions &&
-    !payload.transaction_overlay
-  ) {
+  if (!payload.propagation && !payload.local_updates && !payload.transaction_overlay) {
     return undefined;
   }
 
@@ -803,8 +791,8 @@ export class PersistedWriteRejectedError extends Error {
 }
 
 /**
- * Returned by upsert, update, and delete operations. Allows waiting for the
- * write to be persisted at a given durability tier.
+ * Returned by upsert, update, and delete operations, and explicitly-committed transactions.
+ * Allows waiting for the write to be persisted at a given durability tier.
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
@@ -831,10 +819,11 @@ export class WriteHandle<T = void> {
 }
 
 /**
- * Returned by insert operations. Allows getting the inserted value and
- * waiting for the write to be persisted at a given durability tier.
+ * Returned by insert operations and auto-committed transactions.
+ * Allows getting the inserted value and waiting for the write
+ * to be persisted at a given durability tier.
  */
-export class InsertHandle<T> extends WriteHandle<T> {
+export class WriteResult<T> extends WriteHandle<T> {
   constructor(
     readonly value: T,
     batchId: string,
@@ -854,9 +843,39 @@ export class InsertHandle<T> extends WriteHandle<T> {
     return this.value;
   }
 
-  mapValue<U>(transformValue: (value: T) => U): InsertHandle<U> {
-    return new InsertHandle(transformValue(this.value), this.batchId, this.client());
+  mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
+    return new WriteResult(transformValue(this.value), this.batchId, this.client());
   }
+}
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as PromiseLike<T>).then === "function"
+  );
+}
+
+type RunAndCommitResult<TResult> =
+  TResult extends PromiseLike<unknown>
+    ? Promise<WriteResult<Awaited<TResult>>>
+    : WriteResult<TResult>;
+
+export function runInBatch<TBatchOrTx extends { commit(): WriteHandle }, TResult>(
+  batchOrTx: TBatchOrTx,
+  callback: (target: TBatchOrTx) => TResult,
+  client: JazzClient | (() => JazzClient),
+): RunAndCommitResult<TResult> {
+  const value = callback(batchOrTx);
+  const resultClient = typeof client === "function" ? client : () => client;
+  if (isPromiseLike(value)) {
+    return value.then((resolvedValue) => {
+      const committed = batchOrTx.commit();
+      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, resultClient());
+    }) as RunAndCommitResult<TResult>;
+  }
+  const committed = batchOrTx.commit();
+  return new WriteResult(value, committed.batchId, resultClient()) as RunAndCommitResult<TResult>;
 }
 
 export class Transaction {
@@ -961,6 +980,11 @@ export class Transaction {
   }
 }
 
+/**
+ * Transaction object available inside {@link JazzClient.transaction}'s callback.
+ */
+export type TransactionScope = Omit<Transaction, "commit">;
+
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
 
@@ -1030,6 +1054,11 @@ export class DirectBatch {
     return this.client.acknowledgeRejectedBatch(batchId);
   }
 }
+
+/**
+ * Batch object available inside {@link JazzClient.batch}'s callback.
+ */
+export type BatchScope = Omit<DirectBatch, "commit">;
 
 /**
  * Session-scoped client for backend operations.
@@ -1173,12 +1202,30 @@ export class SessionClient {
     return this.client.beginTransactionInternal(this.session);
   }
 
-  beginDirectBatch(): DirectBatch {
-    return this.client.beginDirectBatchInternal(this.session);
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const transaction = this.beginTransaction();
+    return runInBatch(transaction, callback, this.client);
   }
 
   beginBatch(): DirectBatch {
-    return this.beginDirectBatch();
+    return this.client.beginBatchInternal(this.session);
+  }
+
+  batch<TResult>(
+    callback: (batch: BatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const batch = this.beginBatch();
+    return runInBatch(batch, callback, this.client);
   }
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
@@ -1427,12 +1474,30 @@ export class JazzClient {
     return this.beginTransactionInternal();
   }
 
-  beginDirectBatch(): DirectBatch {
-    return this.beginDirectBatchInternal();
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
+  transaction<TResult>(
+    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const transaction = this.beginTransaction();
+    return runInBatch(transaction, callback, this);
   }
 
   beginBatch(): DirectBatch {
-    return this.beginDirectBatch();
+    return this.beginBatchInternal();
+  }
+
+  batch<TResult>(
+    callback: (batch: BatchScope) => Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>>;
+  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
+  batch<TResult>(
+    callback: (batch: BatchScope) => TResult | Promise<TResult>,
+  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    const batch = this.beginBatch();
+    return runInBatch(batch, callback, this);
   }
 
   private createBatchContext(batchMode: BatchMode): BatchWriteContext {
@@ -1452,7 +1517,7 @@ export class JazzClient {
     );
   }
 
-  beginDirectBatchInternal(session?: Session, attribution?: string): DirectBatch {
+  beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
     return new DirectBatch(
       this,
       this.createBatchContext("direct"),
@@ -1806,7 +1871,7 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: InsertValues, options?: CreateOptions): InsertHandle<Row> {
+  create(table: string, values: InsertValues, options?: CreateOptions): WriteResult<Row> {
     return this.createHandleInternal(table, values, undefined, undefined, options);
   }
 
@@ -1817,12 +1882,12 @@ export class JazzClient {
     attribution?: string,
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
-  ): InsertHandle<Row> {
+  ): WriteResult<Row> {
     const row = this.createInternal(table, values, session, attribution, options, batchContext);
     if (!batchContext) {
       this.sealBatch(row.batchId);
     }
-    return new InsertHandle(row, row.batchId, this);
+    return new WriteResult(row, row.batchId, this);
   }
 
   /**
