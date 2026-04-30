@@ -131,6 +131,15 @@ describe("telemetry OTLP helpers", () => {
     expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
   });
 
+  it("uses the first configured public env key", () => {
+    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = " http://127.0.0.1:54418 ";
+    process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54419";
+    process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54420";
+    process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54421";
+
+    expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
+  });
+
   it("installs a WASM span callback that records OPFS spans through the official trace exporter", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;

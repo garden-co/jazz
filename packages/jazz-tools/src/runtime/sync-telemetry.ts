@@ -16,6 +16,12 @@ interface WasmTraceSpan {
 
 const MAX_WASM_TRACE_SPANS_PER_REQUEST = 256;
 const MAX_PENDING_WASM_TRACE_SPANS = 5_000;
+const TELEMETRY_COLLECTOR_URL_ENV_KEYS = [
+  "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
+  "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
+  "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
+  "EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
+] as const;
 
 type TelemetryAttributeValue = string | number | boolean;
 
@@ -41,38 +47,17 @@ export function resolveTelemetryCollectorUrl(
 }
 
 export function resolveTelemetryCollectorUrlFromEnv(): string | undefined {
-  const processViteUrl =
-    typeof process !== "undefined" && process.env
-      ? process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL
-      : undefined;
-  const processNextPublicUrl =
-    typeof process !== "undefined" && process.env
-      ? process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
-      : undefined;
-  const processPublicUrl =
-    typeof process !== "undefined" && process.env
-      ? process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
-      : undefined;
-  const processExpoPublicUrl =
-    typeof process !== "undefined" && process.env
-      ? process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL
-      : undefined;
+  const processEnv = typeof process !== "undefined" ? process.env : undefined;
   const metaEnv = (import.meta as ImportMetaWithEnv).env;
 
-  return firstNonEmptyTelemetryUrl([
-    processViteUrl,
-    processNextPublicUrl,
-    processPublicUrl,
-    processExpoPublicUrl,
-    metaEnv?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL,
-    metaEnv?.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
-    metaEnv?.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
-    metaEnv?.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
-  ]);
+  return firstTelemetryUrlFromEnv(processEnv) ?? firstTelemetryUrlFromEnv(metaEnv);
 }
 
-function firstNonEmptyTelemetryUrl(values: Array<string | undefined>): string | undefined {
-  for (const value of values) {
+function firstTelemetryUrlFromEnv(
+  env: Record<string, string | undefined> | undefined,
+): string | undefined {
+  for (const key of TELEMETRY_COLLECTOR_URL_ENV_KEYS) {
+    const value = env?.[key];
     const trimmed = value?.trim();
     if (trimmed) return trimmed;
   }
