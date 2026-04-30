@@ -63,15 +63,15 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
 
       const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
 
-      const messageInsertHandle = db.insert(app.messages, {
+      const messageWriteResult = db.insert(app.messages, {
         chatId,
         text: "",
         senderId: myProfile.id,
         createdAt: new Date(),
       });
-      const message = messageInsertHandle.value;
+      const message = messageWriteResult.value;
 
-      const attachmentInsertHandle = db.insert(app.attachments, {
+      const attachmentWriteResult = db.insert(app.attachments, {
         messageId: message.id,
         type: attachment.type,
         name: attachment.file.name,
@@ -81,7 +81,7 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
 
       if (sharedWriteOptions) {
         await Promise.all(
-          [messageInsertHandle, attachmentInsertHandle].map((handle) =>
+          [messageWriteResult, attachmentWriteResult].map((handle) =>
             handle.wait(sharedWriteOptions),
           ),
         );

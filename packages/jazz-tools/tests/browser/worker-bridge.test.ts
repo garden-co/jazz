@@ -962,8 +962,8 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     // insert("local") should resolve once the worker's OPFS has it
-    const insertHandle = db.insert(todos, { title: "Durable", done: false });
-    await insertHandle.wait({ tier: "local" });
+    const result = db.insert(todos, { title: "Durable", done: false });
+    await result.wait({ tier: "local" });
   });
 
   // -------------------------------------------------------------------------
@@ -1270,7 +1270,7 @@ describe("Worker Bridge with OPFS", () => {
       "local",
     );
 
-    // `InsertHandle.wait` rejects
+    // `WriteResult.wait` rejects
     await expect(
       withTimeout(waitPromise, 20_000, "offline rejected insert wait(edge) timed out"),
     ).rejects.toMatchObject({
