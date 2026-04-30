@@ -77,17 +77,36 @@ impl LimitOffsetNode {
         &self.windowed_tuples
     }
 
+    /// Full ordered input before offset/limit are applied.
+    pub fn ordered_input_tuples(&self) -> &[Tuple] {
+        &self.all_tuples
+    }
+
     /// Tuples that must be present locally to reproduce this paginated window.
     ///
     /// For offset-based pagination, the client must have the ordered prefix up to
     /// `offset + limit` so it can reapply the same windowing logic locally.
     /// When no limit is present, that means the full ordered input.
     pub fn sync_input_tuples(&self) -> &[Tuple] {
-        let end = match self.limit {
-            Some(limit) => self.offset.saturating_add(limit).min(self.all_tuples.len()),
-            None => self.all_tuples.len(),
+        Self::sync_input_tuples_from_ordered(self.limit, self.offset, &self.all_tuples)
+    }
+
+    /// Tuples from an already-filtered ordered input that must be present locally
+    /// to reproduce this paginated window.
+    pub fn filtered_sync_input_tuples<'a>(&self, ordered_tuples: &'a [Tuple]) -> &'a [Tuple] {
+        Self::sync_input_tuples_from_ordered(self.limit, self.offset, ordered_tuples)
+    }
+
+    fn sync_input_tuples_from_ordered(
+        limit: Option<usize>,
+        offset: usize,
+        ordered_tuples: &[Tuple],
+    ) -> &[Tuple] {
+        let end = match limit {
+            Some(limit) => offset.saturating_add(limit).min(ordered_tuples.len()),
+            None => ordered_tuples.len(),
         };
-        &self.all_tuples[..end]
+        &ordered_tuples[..end]
     }
 }
 

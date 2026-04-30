@@ -516,6 +516,33 @@ impl QueryGraph {
         self.current_output_tuples()
     }
 
+    /// Returns sync-scope tuples after applying a caller-provided visibility
+    /// filter. For paginated queries, filtering must happen before selecting the
+    /// ordered prefix so denied rows do not count toward offset/limit replay.
+    pub fn filtered_sync_scope_tuples(
+        &self,
+        mut tuple_is_visible: impl FnMut(&Tuple) -> bool,
+    ) -> Vec<Tuple> {
+        if let Some(node_id) = self.pagination_node
+            && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
+        {
+            let visible_ordered_tuples: Vec<_> = limit_offset
+                .ordered_input_tuples()
+                .iter()
+                .filter(|tuple| tuple_is_visible(tuple))
+                .cloned()
+                .collect();
+            return limit_offset
+                .filtered_sync_input_tuples(&visible_ordered_tuples)
+                .to_vec();
+        }
+
+        self.current_output_tuples()
+            .into_iter()
+            .filter(|tuple| tuple_is_visible(tuple))
+            .collect()
+    }
+
     fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
         tuples
             .iter()
