@@ -15,6 +15,8 @@ Jazz also exposes explicit batch builders:
 
 Writes made through an open transaction or explicit direct batch are not individually waitable.
 Call `commit()` when the batch is complete, then call `.wait({ tier })` on the returned handle.
+Call `rollback()` on an open transaction if you want to close that transaction handle without
+committing it.
 
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
@@ -168,6 +170,18 @@ The changes made as part of the transaction are scoped to it, and will only be
 globally visible once it's committed and accepted by the authority.
 
 `DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
+Call `tx.rollback()` to explicitly abandon an open transaction handle without committing it:
+
+```ts
+const tx = db.beginTransaction(app.todos);
+
+tx.insert(app.todos, { title: "Maybe later", done: false });
+tx.rollback();
+
+// Any later write, read, commit, or rollback call on this transaction throws.
+```
+
+Rollback prevents the same transaction handle from being committed or used again.
 
 Use a direct batch when you want to group several ordinary writes under one batch id, but still want them
 to be locally visible immediately:
