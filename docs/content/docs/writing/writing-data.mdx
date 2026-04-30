@@ -68,6 +68,25 @@ Mutations are methods on the database handle. All three take a table as their fi
   </Tab>
 </Tabs>
 
+### Upsert with a known ID
+
+Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
+not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
+and returns a write handle that can be awaited for durability.
+
+```ts
+const write = db.upsert(
+  app.todos,
+  {
+    title: "Imported task",
+    done: false,
+  },
+  { id: importedTodoId },
+);
+
+await write.wait({ tier: "edge" });
+```
+
 ### Partial updates and nullable fields
 
 `update(...)` only modifies the keys you pass.
@@ -113,7 +132,7 @@ When using `insert(...).wait({ tier })`, `update(...).wait({ tier })`, or `delet
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
-Need to clear local data during development? See [How do I reset browser storage?](/docs/faq#reset-browser-storage)
+Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
 `wait({ tier })` resolves when the batch reaches the requested durability tier. If the batch is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
 
