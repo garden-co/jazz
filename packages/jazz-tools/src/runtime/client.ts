@@ -53,40 +53,14 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
-  insertDurable(
-    table: string,
-    values: InsertValues,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
-  insertDurableWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
-  updateDurableWithSession?(
-    object_id: string,
-    values: Record<string, Value>,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  deleteDurable(object_id: string, tier: string): Promise<void>;
-  deleteDurableWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
   insertPersistedWithSession?(
     table: string,
