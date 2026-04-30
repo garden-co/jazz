@@ -1,92 +1,170 @@
 "use client";
 
-import { PresentationNotesProvider } from "@/components/presentations/slide";
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { startTransition, useEffect, useEffectEvent, useState, type ReactNode } from "react";
+import {
+  getPresentationNavigationTargetIndex,
+  useActivePresentationSlideIndex,
+} from "@/components/presentations/slide";
+import { readLetterCanvasArrowNavigationDirection } from "@/lib/presentation-deck";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 
 type SlideLink = {
   estimatedDurationSeconds: number;
   href: string;
+  notesHref: string;
+  slug: string;
   title: string;
 };
 
 type PresentationShellProps = {
   children: ReactNode;
   deckTitle: string;
+  preloadImageSrcs?: string[];
   slides: SlideLink[];
 };
 
-export function PresentationShell({ children, deckTitle, slides }: PresentationShellProps) {
-  const pathname = usePathname();
-  const router = useRouter();
-  const [showNotes, setShowNotes] = useState(false);
+const NOTES_WINDOW_NAME = "jazz-presentation-notes";
+const NOTES_WINDOW_FEATURES =
+  "popup=yes,width=960,height=1080,left=80,top=80,resizable=yes,scrollbars=yes";
+const LETTER_CANVAS_IFRAME_ID = "letter-canvas";
 
-  const currentIndex = slides.findIndex((slide) => slide.href === pathname);
-  const activeIndex = currentIndex === -1 ? 0 : currentIndex;
+export function PresentationShell({
+  children,
+  deckTitle,
+  preloadImageSrcs = [],
+  slides,
+}: PresentationShellProps) {
+  const preloadedImagesRef = useRef<HTMLImageElement[]>([]);
+  const notesWindowRef = useRef<Window | null>(null);
+  const [showNotesWindow, setShowNotesWindow] = useState(false);
+
+  const activeIndex = useActivePresentationSlideIndex(slides);
   const currentSlide = slides[activeIndex] ?? slides[0];
-  const currentDurationSeconds = currentSlide?.estimatedDurationSeconds ?? 0;
-  const cumulativeDurationSeconds = slides
-    .slice(0, activeIndex + 1)
-    .reduce((total, slide) => total + slide.estimatedDurationSeconds, 0);
-  const previousSlide = slides[activeIndex - 1];
-  const nextSlide = slides[activeIndex + 1];
+
+  const syncNotesWindow = useEffectEvent((notesHref: string, focus = false) => {
+    const notesWindow = notesWindowRef.current;
+
+    if (!notesWindow || notesWindow.closed) {
+      notesWindowRef.current = null;
+      setShowNotesWindow(false);
+      return;
+    }
+
+    const currentNotesHref = `${notesWindow.location.pathname}${notesWindow.location.hash}`;
+
+    if (currentNotesHref !== notesHref) {
+      notesWindow.location.replace(notesHref);
+    }
+
+    if (focus) {
+      notesWindow.focus();
+    }
+  });
 
   const navigateTo = useEffectEvent((index: number) => {
     const target = slides[index];
 
     if (!target || index === activeIndex) return;
 
-    startTransition(() => {
-      router.push(target.href);
-    });
+    syncNotesWindow(target.notesHref);
+    window.location.hash = new URL(target.href, window.location.href).hash;
   });
 
-  const toggleNotes = useEffectEvent(() => {
-    setShowNotes((current) => !current);
+  const closeNotesWindow = useEffectEvent(() => {
+    const notesWindow = notesWindowRef.current;
+
+    if (notesWindow && !notesWindow.closed) {
+      notesWindow.close();
+    }
+
+    notesWindowRef.current = null;
+    setShowNotesWindow(false);
   });
 
-  const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  const openNotesWindow = useEffectEvent(() => {
+    const existingNotesWindow = notesWindowRef.current;
 
-    const target = event.target;
-    if (
-      target instanceof HTMLElement &&
-      (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))
-    ) {
+    if (existingNotesWindow && !existingNotesWindow.closed) {
+      syncNotesWindow(currentSlide.notesHref, true);
+      setShowNotesWindow(true);
       return;
     }
 
-    switch (event.key) {
-      case "ArrowRight":
-      case "ArrowDown":
-      case "PageDown":
-      case " ":
-        event.preventDefault();
-        navigateTo(activeIndex + 1);
+    const notesWindow = window.open(
+      currentSlide.notesHref,
+      NOTES_WINDOW_NAME,
+      NOTES_WINDOW_FEATURES,
+    );
+
+    if (!notesWindow) {
+      setShowNotesWindow(false);
+      return;
+    }
+
+    notesWindowRef.current = notesWindow;
+    notesWindow.focus();
+    setShowNotesWindow(true);
+  });
+
+  const toggleNotesWindow = useEffectEvent(() => {
+    const notesWindow = notesWindowRef.current;
+
+    if (notesWindow && !notesWindow.closed) {
+      closeNotesWindow();
+      return;
+    }
+
+    openNotesWindow();
+  });
+
+  const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (!event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const target = event.target;
+
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))
+      ) {
         return;
-      case "ArrowLeft":
-      case "ArrowUp":
-      case "PageUp":
-      case "Backspace":
-        event.preventDefault();
-        navigateTo(activeIndex - 1);
-        return;
-      case "Home":
-        event.preventDefault();
-        navigateTo(0);
-        return;
-      case "End":
-        event.preventDefault();
-        navigateTo(slides.length - 1);
-        return;
-      case "s":
-      case "S":
-        event.preventDefault();
-        toggleNotes();
-        return;
-      default:
-        return;
+      }
+
+      switch (event.key) {
+        case "s":
+        case "S":
+          event.preventDefault();
+          toggleNotesWindow();
+          return;
+      }
+    }
+
+    const targetIndex = getPresentationNavigationTargetIndex(event, activeIndex, slides.length);
+
+    if (targetIndex === null) return;
+
+    event.preventDefault();
+    navigateTo(targetIndex);
+  });
+
+  const onMessage = useEffectEvent((event: MessageEvent<unknown>) => {
+    const iframe = document.querySelector<HTMLIFrameElement>(`#${LETTER_CANVAS_IFRAME_ID}`);
+
+    if (!iframe || event.source !== iframe.contentWindow) return;
+
+    const iframeSrc = iframe.getAttribute("src");
+
+    if (!iframeSrc) return;
+
+    const iframeOrigin = new URL(iframeSrc, window.location.href).origin;
+
+    if (event.origin !== iframeOrigin) return;
+
+    const direction = readLetterCanvasArrowNavigationDirection(event.data);
+
+    if (direction === "next") {
+      navigateTo(Math.min(activeIndex + 1, slides.length - 1));
+    }
+
+    if (direction === "previous") {
+      navigateTo(Math.max(activeIndex - 1, 0));
     }
   });
 
@@ -98,63 +176,79 @@ export function PresentationShell({ children, deckTitle, slides }: PresentationS
     };
   }, [onKeyDown]);
 
-  return (
-    <PresentationNotesProvider
-      cumulativeDurationSeconds={cumulativeDurationSeconds}
-      currentDurationSeconds={currentDurationSeconds}
-      hideNotes={() => setShowNotes(false)}
-      showNotes={showNotes}
-    >
-      <div className="min-h-screen bg-fd-background text-fd-foreground">
-        <div className="flex min-h-screen flex-col">
-          <header className="flex items-center justify-between gap-6 px-6 py-4 text-[0.72rem] font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground sm:px-8">
-            <div className="min-w-0">
-              <p className="truncate">{deckTitle}</p>
-            </div>
-            <div className="hidden shrink-0 md:block">
-              <p>
-                Arrows / Space navigate. <kbd className="font-mono normal-case">S</kbd> toggles
-                notes.
-              </p>
-            </div>
-            <div className="shrink-0">
-              <p>
-                {activeIndex + 1} / {slides.length}
-              </p>
-            </div>
-          </header>
+  useEffect(() => {
+    preloadedImagesRef.current = preloadImageSrcs.map((src) => {
+      const image = new Image();
 
-          <main className="flex flex-1 items-stretch px-4 pb-4 sm:px-6 sm:pb-6 lg:px-8 lg:pb-8">
-            <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col rounded-[2rem] border border-fd-border/70 bg-fd-card/40 shadow-[0_24px_80px_rgba(0,0,0,0.08)] backdrop-blur">
-              <div className="flex-1 overflow-auto px-6 py-8 sm:px-10 sm:py-10 lg:px-16 lg:py-14">
-                {children}
-              </div>
-              <footer className="flex items-center justify-between gap-4 border-t border-fd-border/70 px-6 py-4 sm:px-10 lg:px-16">
-                {previousSlide ? (
-                  <Link
-                    href={previousSlide.href}
-                    className="text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-                  >
-                    Previous
-                  </Link>
-                ) : (
-                  <span className="text-sm text-fd-muted-foreground/60">Beginning</span>
-                )}
-                {nextSlide ? (
-                  <Link
-                    href={nextSlide.href}
-                    className="text-sm font-medium text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-                  >
-                    Next
-                  </Link>
-                ) : (
-                  <span className="text-sm text-fd-muted-foreground/60">End</span>
-                )}
-              </footer>
-            </div>
-          </main>
-        </div>
+      image.decoding = "sync";
+      image.loading = "eager";
+      image.src = src;
+      void image.decode?.().catch(() => {
+        // The mounted hidden <img> below still keeps the resource warm if decode() is unavailable.
+      });
+
+      return image;
+    });
+
+    return () => {
+      preloadedImagesRef.current = [];
+    };
+  }, [preloadImageSrcs]);
+
+  useEffect(() => {
+    window.addEventListener("message", onMessage);
+
+    return () => {
+      window.removeEventListener("message", onMessage);
+    };
+  }, [onMessage]);
+
+  useEffect(() => {
+    if (!showNotesWindow) return;
+
+    syncNotesWindow(currentSlide.notesHref);
+  }, [currentSlide.notesHref, showNotesWindow, syncNotesWindow]);
+
+  useEffect(() => {
+    if (!showNotesWindow) return;
+
+    const poll = window.setInterval(() => {
+      const notesWindow = notesWindowRef.current;
+
+      if (notesWindow && !notesWindow.closed) return;
+
+      notesWindowRef.current = null;
+      setShowNotesWindow(false);
+    }, 500);
+
+    return () => {
+      window.clearInterval(poll);
+    };
+  }, [showNotesWindow]);
+
+  useEffect(() => {
+    return () => {
+      const notesWindow = notesWindowRef.current;
+      if (notesWindow && !notesWindow.closed) {
+        notesWindow.close();
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      className="min-h-screen bg-fd-background text-fd-foreground"
+      aria-label={`${deckTitle} slide ${activeIndex + 1} of ${slides.length}`}
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed left-[-9999px] top-0 h-px w-px overflow-hidden opacity-0"
+      >
+        {preloadImageSrcs.map((src) => (
+          <img key={src} src={src} alt="" decoding="sync" loading="eager" />
+        ))}
       </div>
-    </PresentationNotesProvider>
+      <main className="w-screen h-screen">{children}</main>
+    </div>
   );
 }
