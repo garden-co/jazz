@@ -66,6 +66,8 @@ Subscribe to query results reactively. See [Reading Data](/docs/reading/queries)
 The `?? []` guard handles the `undefined` (not yet connected) case. See
 [Reading Data: The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for patterns that depend on this signal.
 
+In Vue and Svelte, the binding reconciles updates into the existing reactive array in place, so only fields that actually changed trigger re-renders. See [Fine-grained updates](/docs/reading/queries#fine-grained-updates) for the full behaviour.
+
 ## Accessing the database for writes
 
 Get a handle to the database for inserts, updates, and deletes. See [Writing Data](/docs/writing/writing-data) for the full API.
