@@ -312,6 +312,38 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
+  it("rolls back an open transaction without sealing the batch", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.rollback();
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+    expect(() => tx.commit()).toThrow(/rolled back/i);
+    expect(() => tx.rollback()).toThrow(/rolled back/i);
+  });
+
+  it("rejects rollback after a transaction has been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.commit();
+
+    expect(() => tx.rollback()).toThrow(/committed/i);
+  });
+
+  it("rejects commit after a transaction has already been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.commit();
+
+    expect(() => tx.commit()).toThrow(/committed/i);
+  });
+
   it("returns a write handle from direct batch commit so callers can wait on the batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());

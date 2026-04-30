@@ -860,7 +860,7 @@ export class InsertHandle<T> extends WriteHandle<T> {
 }
 
 export class Transaction {
-  private committedHandle: WriteHandle | null = null;
+  private transactionStatus: "active" | "committed" | "rolledBack" = "active";
   private readonly touchedRowIds = new Set<string>();
 
   constructor(
@@ -870,13 +870,12 @@ export class Transaction {
     private readonly attribution?: string,
   ) {}
 
-  private get committed(): boolean {
-    return this.committedHandle !== null;
-  }
-
   private ensureActive(): void {
-    if (this.committed) {
+    if (this.transactionStatus === "committed") {
       throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    }
+    if (this.transactionStatus === "rolledBack") {
+      throw new Error(`Transaction ${this.batchContext.batchId} has already been rolled back`);
     }
   }
 
@@ -901,12 +900,15 @@ export class Transaction {
   }
 
   commit(): WriteHandle {
-    if (this.committedHandle) {
-      return this.committedHandle;
-    }
+    this.ensureActive();
     const handle = this.client.sealBatch(this.batchId());
-    this.committedHandle = handle;
+    this.transactionStatus = "committed";
     return handle;
+  }
+
+  rollback(): void {
+    this.ensureActive();
+    this.transactionStatus = "rolledBack";
   }
 
   create(table: string, values: InsertValues): Row {

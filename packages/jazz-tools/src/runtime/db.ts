@@ -490,8 +490,6 @@ function backendScopedAuthState(session?: Session | null): AuthState {
  * accepted by the authority.
  */
 export class DbTransaction {
-  private committed = false;
-
   constructor(
     private readonly client: JazzClient,
     private readonly runtimeTransaction: RuntimeTransaction,
@@ -500,12 +498,6 @@ export class DbTransaction {
       operation: string,
     ) => void,
   ) {}
-
-  private ensureActive(): void {
-    if (this.committed) {
-      throw new Error(`Transaction ${this.runtimeTransaction.batchId()} is already committed`);
-    }
-  }
 
   private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
     this.assertOwnsTable(table, "DbTransaction");
@@ -528,8 +520,16 @@ export class DbTransaction {
    * Commit the transaction. Data will be globally visible once it's accepted by the authority.
    */
   commit(): WriteHandle {
-    this.committed = true;
     return this.runtimeTransaction.commit();
+  }
+
+  /**
+   * Roll back this transaction locally.
+   *
+   * Pending rows remain pending, but this transaction handle can no longer be committed.
+   */
+  rollback(): void {
+    this.runtimeTransaction.rollback();
   }
 
   /**
@@ -539,7 +539,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
-    this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
     const row = this.runtimeTransaction.create(table._table, values);
@@ -553,7 +552,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.ensureActive();
     const transformedData = transformUpdateInput(table, data);
     const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
     this.runtimeTransaction.update(id, updates);
@@ -566,7 +564,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    this.ensureActive();
     this.assertOwnsTable(table, "DbTransaction");
     this.runtimeTransaction.delete(id);
   }
@@ -577,7 +574,6 @@ export class DbTransaction {
    * Read data is scoped to this transaction.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    this.ensureActive();
     this.assertOwnsQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(this.client.getSchema());
     const builderJson = query._build();

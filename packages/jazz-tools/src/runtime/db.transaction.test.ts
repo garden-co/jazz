@@ -97,6 +97,17 @@ function makeWriteHandle(batchId: string, mode: LocalBatchRecord["mode"] = "tran
   };
 }
 
+type TestTransactionStatus = "active" | "committed" | "rolledBack";
+
+function assertTestTransactionActive(status: TestTransactionStatus, batchId: string): void {
+  if (status === "committed") {
+    throw new Error(`Transaction ${batchId} is already committed`);
+  }
+  if (status === "rolledBack") {
+    throw new Error(`Transaction ${batchId} has already been rolled back`);
+  }
+}
+
 describe("Db transactions", () => {
   it("creates a typed db transaction seeded by a table schema", async () => {
     const table = todoTable();
@@ -227,12 +238,20 @@ describe("Db transactions", () => {
       ],
       batchId: "batch-closed",
     } as Row;
+    let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-closed"),
-      create: vi.fn(() => runtimeRow),
+      create: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-closed");
+        return runtimeRow;
+      }),
       update: vi.fn(),
       delete: vi.fn(),
-      commit: vi.fn(() => makeWriteHandle("batch-closed").handle),
+      commit: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-closed");
+        status = "committed";
+        return makeWriteHandle("batch-closed").handle;
+      }),
       localBatchRecord: vi.fn((batchId = "batch-closed") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-closed")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -254,7 +273,7 @@ describe("Db transactions", () => {
     expect(committed.batchId).toBe("batch-closed");
 
     expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/committed/i);
-    expect(runtimeTransaction.create).not.toHaveBeenCalled();
+    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
   });
 
   it("supports typed reads scoped to the open transaction", async () => {
@@ -308,13 +327,21 @@ describe("Db transactions", () => {
   it("rejects db transaction reads after commit", async () => {
     const table = todoTable();
     const query = todoQuery();
+    let status: TestTransactionStatus = "active";
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-read-closed"),
       create: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
-      query: vi.fn(),
-      commit: vi.fn(() => makeWriteHandle("batch-read-closed").handle),
+      query: vi.fn(async () => {
+        assertTestTransactionActive(status, "batch-read-closed");
+        return [];
+      }),
+      commit: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-read-closed");
+        status = "committed";
+        return makeWriteHandle("batch-read-closed").handle;
+      }),
       localBatchRecord: vi.fn((batchId = "batch-read-closed") => makeLocalBatchRecord(batchId)),
       localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-read-closed")]),
       acknowledgeRejectedBatch: vi.fn(() => false),
@@ -336,7 +363,166 @@ describe("Db transactions", () => {
     expect(committed.batchId).toBe("batch-read-closed");
 
     await expect(tx.all(query)).rejects.toThrow(/committed/i);
-    expect(runtimeTransaction.query).not.toHaveBeenCalled();
+    expect(runtimeTransaction.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back db transactions without committing the underlying batch", () => {
+    const table = todoTable();
+    let status: TestTransactionStatus = "active";
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-rollback"),
+      create: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-rollback");
+        return {} as Row;
+      }),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-rollback");
+        status = "committed";
+        return makeWriteHandle("batch-rollback").handle;
+      }),
+      rollback: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-rollback");
+        status = "rolledBack";
+      }),
+      localBatchRecord: vi.fn((batchId = "batch-rollback") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-rollback")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-rollback" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+    tx.rollback();
+
+    expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(1);
+    expect(runtimeTransaction.commit).not.toHaveBeenCalled();
+    expect(() => tx.commit()).toThrow(/rolled back/i);
+    expect(() => tx.rollback()).toThrow(/rolled back/i);
+    expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(/rolled back/i);
+    expect(runtimeTransaction.commit).toHaveBeenCalledTimes(1);
+    expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(2);
+    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects db transaction rollback after commit", () => {
+    const table = todoTable();
+    let status: TestTransactionStatus = "active";
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-commit-before-rollback"),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-commit-before-rollback");
+        status = "committed";
+        return makeWriteHandle("batch-commit-before-rollback").handle;
+      }),
+      rollback: vi.fn(() => {
+        assertTestTransactionActive(status, "batch-commit-before-rollback");
+        status = "rolledBack";
+      }),
+      localBatchRecord: vi.fn((batchId = "batch-commit-before-rollback") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-commit-before-rollback")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-commit-before-rollback" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+    tx.commit();
+
+    expect(() => tx.rollback()).toThrow(/committed/i);
+    expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates terminal transaction errors to runtime operations", () => {
+    const table = todoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-runtime-rolled-back"),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => {
+        throw new Error("runtime transaction has already been rolled back");
+      }),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-runtime-rolled-back") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-runtime-rolled-back")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-runtime-status" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+
+    expect(() => tx.commit()).toThrow(/runtime transaction has already been rolled back/);
+    expect(runtimeTransaction.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates terminal write errors to runtime transaction operations", () => {
+    const table = todoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-runtime-write-rolled-back"),
+      create: vi.fn(() => {
+        throw new Error("runtime write rejected after rollback");
+      }),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-runtime-write-rolled-back").handle),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-runtime-write-rolled-back") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-runtime-write-rolled-back")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const runtimeClient = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const db = createDbFromClient(
+      { appId: "client-backed-runtime-write-status" },
+      runtimeClient as unknown as JazzClient,
+    );
+
+    const tx = db.beginTransaction(table);
+
+    expect(() => tx.insert(table, { title: "Nope", done: false })).toThrow(
+      /runtime write rejected after rollback/,
+    );
+    expect(runtimeTransaction.create).toHaveBeenCalledTimes(1);
   });
 
   it("rejects db transaction writes against a different client/schema", () => {
