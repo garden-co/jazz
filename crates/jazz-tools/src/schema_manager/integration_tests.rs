@@ -22,7 +22,9 @@ mod tests {
         HistoryRowBytes, IndexMutation, MemoryStorage, OwnedHistoryRowBytes, OwnedVisibleRowBytes,
         RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
     };
-    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
+    use crate::sync_manager::{
+        InboxEntry, QueryPropagation, RowBatchKey, ServerId, Source, SyncManager, SyncPayload,
+    };
 
     fn make_commit_id(n: u8) -> crate::row_histories::BatchId {
         crate::row_histories::BatchId([n; 16])
@@ -222,6 +224,36 @@ mod tests {
     ) -> Vec<(ObjectId, Vec<Value>)> {
         let qm = manager.query_manager_mut();
         let sub_id = qm.subscribe(query).unwrap();
+        qm.process(storage);
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe_with_sync(sub_id);
+        results
+    }
+
+    fn execute_query_with_local_overlay(
+        manager: &mut SchemaManager,
+        storage: &mut MemoryStorage,
+        query: Query,
+        row_id: ObjectId,
+        branch: &str,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(ObjectId, Vec<Value>)> {
+        let qm = manager.query_manager_mut();
+        let sub_id = qm
+            .subscribe_with_sync_and_propagation_with_local_overlay(
+                query,
+                None,
+                None,
+                crate::query_manager::subscriptions::SubscriptionExecutionOptions {
+                    local_updates: LocalUpdates::Immediate,
+                    propagation: QueryPropagation::Full,
+                    local_overlay_rows: HashMap::from([(
+                        row_id,
+                        RowBatchKey::new(row_id, BranchName::new(branch), batch_id),
+                    )]),
+                },
+            )
+            .unwrap();
         qm.process(storage);
         let results = qm.get_subscription_results(sub_id);
         qm.unsubscribe_with_sync(sub_id);
