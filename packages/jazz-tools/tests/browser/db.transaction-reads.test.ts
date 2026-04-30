@@ -155,7 +155,7 @@ describe("db transaction reads browser integration", () => {
 
     const createdByUpsertId = "00000000-0000-0000-0000-000000000124";
     tx.upsert(todos, { title: "Bob wrote release notes", done: false }, { id: createdByUpsertId });
-    tx.upsert(todos, { done: true }, { id: existingTodo.id });
+    tx.upsert(todos, { title: "Bob drafted release notes", done: true }, { id: existingTodo.id });
 
     expect(insertedTodo).toEqual({
       id: customId,
@@ -183,6 +183,21 @@ describe("db transaction reads browser integration", () => {
         },
       ]),
     );
+  });
+
+  it("rejects partial upserts for missing rows inside transactions", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-transaction-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-partial-upsert-missing") },
+      }),
+    );
+
+    const tx = db.beginTransaction();
+
+    expect(() =>
+      tx.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000125" }),
+    ).toThrow("missing required field `title`");
   });
 
   it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
@@ -279,7 +294,7 @@ describe("db batch reads browser integration", () => {
 
     const createdByUpsertId = "00000000-0000-0000-0000-000000000224";
     batch.upsert(todos, { title: "Bob checked the docs", done: false }, { id: createdByUpsertId });
-    batch.upsert(todos, { done: true }, { id: existingTodo.id });
+    batch.upsert(todos, { title: "Bob queued docs review", done: true }, { id: existingTodo.id });
 
     expect(insertedTodo).toEqual({
       id: customId,
@@ -305,6 +320,21 @@ describe("db batch reads browser integration", () => {
     );
 
     batch.commit();
+  });
+
+  it("rejects partial upserts for missing rows inside direct batches", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("batch-partial-upsert-missing") },
+      }),
+    );
+
+    const batch = db.beginBatch();
+
+    expect(() =>
+      batch.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000225" }),
+    ).toThrow("missing required field `title`");
   });
 
   it("does not rollback changes if the callback rejects", async () => {
