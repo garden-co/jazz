@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
+function response(ok: boolean, statusText: string, body: unknown = {}): Response {
+  return {
+    ok,
+    statusText,
+    json: async () => body,
+  } as Response;
+}
+
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
@@ -243,6 +251,25 @@ describe("JazzClient mutation durability split", () => {
     });
   });
 
+  it("does not fall back to update when upsert insert shape validation fails", () => {
+    const validationError = new Error("encoding error: missing required column title");
+    const insert = vi.fn(() => {
+      throw validationError;
+    });
+    const update = vi.fn(() => ({ batchId: "should-not-update" }));
+    const { client } = makeClient({ insert, update });
+
+    expect(() =>
+      client.upsert(
+        "todos",
+        { done: { type: "Boolean" as const, value: true } },
+        { id: "todo-missing-title" },
+      ),
+    ).toThrow(validationError);
+
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("encodes session and attribution together when both are provided", () => {
     const { client, insertWithSessionCalls } = makeClient();
     const session: Session = {
@@ -317,5 +344,117 @@ describe("JazzClient mutation durability split", () => {
 
     expect(insertWithSession).toHaveBeenCalledWith("todos", values, updatedAtContext, externalId);
     expect(updateWithSession).toHaveBeenCalledWith(externalId, values, updatedAtContext);
+  });
+
+  it("uses the same conflict-only upsert fallback in transactions and direct batches", () => {
+    const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
+    const values = { title: { type: "Text" as const, value: "Updated title" } };
+    const insertError = new Error(`encoding error: object already exists: ${externalId}`);
+    const insertWithSession = vi.fn(() => {
+      throw insertError;
+    });
+    const updateWithSession = vi.fn(
+      (
+        _objectId: string,
+        _updates: Record<string, unknown>,
+        _writeContextJson?: string | null,
+      ) => ({
+        batchId: "fallback-update-batch",
+      }),
+    );
+    const { client } = makeClient({ insertWithSession, updateWithSession });
+
+    client.beginTransactionInternal().upsert("todos", values, { id: externalId });
+    client.beginBatchInternal().upsert("todos", values, { id: externalId });
+
+    expect(updateWithSession).toHaveBeenCalledTimes(2);
+    expect(updateWithSession.mock.calls[0]?.[0]).toBe(externalId);
+    expect(updateWithSession.mock.calls[0]?.[1]).toBe(values);
+    expect(JSON.parse(updateWithSession.mock.calls[0]?.[2] ?? "{}")).toMatchObject({
+      batch_mode: "transactional",
+    });
+    expect(updateWithSession.mock.calls[1]?.[0]).toBe(externalId);
+    expect(updateWithSession.mock.calls[1]?.[1]).toBe(values);
+    expect(JSON.parse(updateWithSession.mock.calls[1]?.[2] ?? "{}")).toMatchObject({
+      batch_mode: "direct",
+    });
+  });
+
+  it("does not fall back to update in transactions or direct batches when insert validation fails", () => {
+    const validationError = new Error("encoding error: missing required column title");
+    const insertWithSession = vi.fn(() => {
+      throw validationError;
+    });
+    const updateWithSession = vi.fn(() => ({ batchId: "should-not-update" }));
+    const { client } = makeClient({ insertWithSession, updateWithSession });
+    const values = { done: { type: "Boolean" as const, value: true } };
+
+    expect(() =>
+      client.beginTransactionInternal().upsert("todos", values, { id: "todo-missing-title" }),
+    ).toThrow(validationError);
+    expect(() =>
+      client.beginBatchInternal().upsert("todos", values, { id: "todo-missing-title" }),
+    ).toThrow(validationError);
+
+    expect(updateWithSession).not.toHaveBeenCalled();
+  });
+
+  it("uses create then update-on-conflict for SessionClient upsert", async () => {
+    const { client } = makeClient();
+    const session: Session = {
+      user_id: "backend-user",
+      claims: { role: "admin" },
+      authMode: "external",
+    };
+    const values = { title: { type: "Text" as const, value: "Backend todo" } };
+    const sendRequest = vi
+      .spyOn(client, "sendRequest")
+      .mockResolvedValueOnce(response(true, "Created", { object_id: "todo-session" }))
+      .mockResolvedValueOnce(response(false, "Conflict"))
+      .mockResolvedValueOnce(response(true, "OK"));
+    const scoped = client.forSession(session);
+
+    await expect(scoped.upsert("todos", values, { id: "todo-session-create" })).resolves.toBe(
+      undefined,
+    );
+    await expect(scoped.upsert("todos", values, { id: "todo-session-existing" })).resolves.toBe(
+      undefined,
+    );
+
+    expect(sendRequest.mock.calls.map((call) => call[1])).toEqual(["POST", "POST", "PUT"]);
+    expect(sendRequest.mock.calls[0]?.[2]).toMatchObject({
+      table: "todos",
+      values,
+      object_id: "todo-session-create",
+    });
+    expect(sendRequest.mock.calls[2]?.[2]).toMatchObject({
+      object_id: "todo-session-existing",
+      updates: Object.entries(values),
+    });
+  });
+
+  it("does not fall back to SessionClient update when insert shape validation fails", async () => {
+    const { client } = makeClient();
+    const session: Session = {
+      user_id: "backend-user",
+      claims: { role: "admin" },
+      authMode: "external",
+    };
+    const sendRequest = vi
+      .spyOn(client, "sendRequest")
+      .mockResolvedValueOnce(response(false, "Bad Request"));
+
+    await expect(
+      client
+        .forSession(session)
+        .upsert(
+          "todos",
+          { done: { type: "Boolean" as const, value: true } },
+          { id: "todo-missing-title" },
+        ),
+    ).rejects.toThrow("Create failed: Bad Request");
+
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(sendRequest.mock.calls[0]?.[1]).toBe("POST");
   });
 });
