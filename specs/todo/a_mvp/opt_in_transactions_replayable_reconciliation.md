@@ -96,7 +96,7 @@ The intent of this spec is not to make every write transactional. It is to keep 
 - **schema family**: the set of live composed prefixes sharing one `(env, user_branch)` family and connected by the current non-draft schema-lens graph
 - **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted visible-batch-member set
 - **remote visibility**: whether a change is allowed to affect what another runtime, or any non-local subscription result, can see over sync
-- **strict transaction visibility**: an opt-in query mode that waits for accepted transactional results to be complete for the query's current local scope before showing them
+- **transaction visibility**: query behavior that waits for accepted transactional results to be complete for the query's current local scope before showing them
 - **row digest**: a content hash for one concrete batch member payload, used to detect freshness and exact-member equality without making content hash the public row identity
 - **batch digest**: a digest over the sorted set of current batch members and their row digests. This is used when a protocol step needs to prove "these are the latest members for batch `B`" without introducing a second batch id
 
@@ -317,19 +317,15 @@ In plain terms:
 - `BatchSettlement.DurableDirect` answers "this direct visible batch exists durably at tier T"
 - `BatchSettlement.AcceptedTransaction` answers "this transaction was accepted and its published visible batch members currently sit at tier T"
 
-### 8. Strict transaction visibility is opt-in and has one optional local overlay
+### 8. Transaction visibility has one optional local overlay
 
-Queries and subscriptions keep ordinary behavior by default.
-
-A caller may opt into strict transaction visibility. In that mode:
+Queries and subscriptions always use transaction visibility:
 
 - only accepted visible transactional results may affect the visible query result
 - a transaction is visible only when it is complete for the query's current local scope
 - any requested durability tier must be satisfied by the visible accepted batches
 
-Queries that do not opt into this mode keep ordinary visible-prefix behavior. Accepted transactional results become atomic only for queries that explicitly ask for strict transaction visibility.
-
-Strict mode may additionally enable one optional local overlay:
+Transaction visibility may additionally enable one optional local overlay:
 
 - the current runtime may also show its own pending transactional state locally
 
@@ -592,11 +588,13 @@ A later remote update must not become visible until every visible batch for that
 
 This is intentionally batch-wide. If a query sees any part of batch `B`, it gates on batch `B`'s current `confirmed_tier`, not just the specific visible ref.
 
-Ordinary queries do **not** get transactional completeness guarantees. If an accepted transactional batch reaches the visible prefix and its batch `confirmed_tier` satisfies any requested tier, ordinary queries may observe it like any other visible update.
+Queries always get transactional completeness guarantees. If an accepted transactional batch reaches
+the visible prefix and its batch `confirmed_tier` satisfies any requested tier, queries still wait
+until the transaction is complete for the query's current local scope.
 
-### Strict transaction visibility (opt-in)
+### Transaction visibility
 
-Strict transaction visibility adds one more rule on top of ordinary public visibility:
+Transaction visibility adds one more rule on top of ordinary public visibility:
 
 - accepted transaction results are only visible when complete for the query's current local scope
 
@@ -800,7 +798,7 @@ Authority validates B7
        visible_members=[todo member, project member],
      )
 
-Bob runs a strict transaction-visible query
+Bob runs a transaction-visible query
   -> Bob sees nothing until:
      - AcceptedTransaction is present
      - accepted visible batch members relevant to Bob's local query scope are present
@@ -883,7 +881,7 @@ Prefer RuntimeCore and SchemaManager integration tests with realistic actors and
 
 - `alice` writes a direct visible batch with `tier: "global"`, the live tier update is dropped, reconnect happens, and the write resolves from replay or snapshot rather than hanging.
 - `alice` and `carol` subscribe with `tier: "global"` on different edges, `bob` writes one direct visible batch on one edge, and neither sees that batch until its batch settlement reaches global.
-- `alice` starts transactional batch `B7` touching two objects on one target composed prefix, one touched object currently has an older schema winner in the same schema family, the authority validates against family-visible state, and a strict transaction-visible subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
+- `alice` starts transactional batch `B7` touching two objects on one target composed prefix, one touched object currently has an older schema winner in the same schema family, the authority validates against family-visible state, and a transaction-visible subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
 - `alice` starts transactional batch `B8`, the authority rejects it, the local pending view rolls back, and the rejected outcome survives restart until acknowledged.
 - `alice` writes the same object twice inside transactional batch `B9`, seals it, and the authority validates only the final per-object write-set member rather than two staged intermediate edits.
 - `alice` opens one explicit direct batch `D4`, writes two rows, rewrites one of them, reconnects, and replay/snapshot state still converges on exactly the final two `(object_id, batch_id)` members rather than an append/supersede trail.

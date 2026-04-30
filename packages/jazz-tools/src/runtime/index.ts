@@ -11,6 +11,8 @@ export {
   PersistedWriteRejectedError,
   SessionClient,
   Transaction,
+  type BatchScope,
+  type TransactionScope,
   type VisibleBatchMember,
   loadWasmModule,
   type DurabilityTier,
@@ -25,7 +27,7 @@ export {
   type UpdateOptions,
   type UpsertOptions,
   type WasmModule,
-  type InsertHandle,
+  type WriteResult,
   type WriteHandle,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
@@ -37,6 +39,8 @@ export {
   type LogoutOptions,
   DbDirectBatch,
   DbTransaction,
+  type DbBatchScope,
+  type DbTransactionScope,
   type QueryBuilder,
   type QueryOptions,
   type TableProxy,

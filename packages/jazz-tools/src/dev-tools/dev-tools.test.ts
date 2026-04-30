@@ -8,7 +8,7 @@ import {
   type DevtoolsResponseEnvelope,
 } from "./protocol.js";
 import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
-import { InsertHandle, WriteHandle } from "../runtime/client.js";
+import { WriteResult, WriteHandle } from "../runtime/client.js";
 
 type MessageListener = (event: { source: FakeWindow; data: unknown }) => void;
 
@@ -215,7 +215,7 @@ describe("attachDevTools mutation bridge", () => {
     const waitForPersistedBatch = vi.fn(async () => undefined);
     const create = vi.fn(
       () =>
-        new InsertHandle(insertedRow, insertedRow.batchId, {
+        new WriteResult(insertedRow, insertedRow.batchId, {
           waitForPersistedBatch,
         } as any),
     );
@@ -267,7 +267,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeClient = {
       create: vi.fn(
         () =>
-          new InsertHandle(
+          new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },
             "batch-insert-unused",
             { waitForPersistedBatch } as any,
@@ -321,7 +321,7 @@ describe("attachDevTools mutation bridge", () => {
     const fakeClient = {
       create: vi.fn(
         () =>
-          new InsertHandle(
+          new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },
             "batch-insert-unused",
             { waitForPersistedBatch } as any,

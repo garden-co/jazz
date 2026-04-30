@@ -8,13 +8,8 @@ reviewedAt: "4059cdef"
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
-Jazz also exposes explicit batch builders:
-
-- `beginTransaction(...)` returns `DbTransaction`
-- `beginDirectBatch(...)` / `beginBatch(...)` returns `DbDirectBatch`
-
-Writes made through an open transaction or explicit direct batch are not individually waitable.
-Call `commit()` when the batch is complete, then call `.wait({ tier })` on the returned handle.
+Jazz also allows grouping writes together using [batches and transactions](#transactions-and-batches).
+Writes made through an open transaction or batch are not individually waitable. Call `.wait({ tier })` on the returned write result instead.
 
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
@@ -148,37 +143,33 @@ db.onMutationError((error) => {
 });
 ```
 
-## Explicit batches
+## Transactions and batches
 
 Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
 
 ```ts
-const tx = db.beginTransaction(app.todos);
-
-tx.insert(app.todos, { title: "Draft copy", done: false });
-const stagedDrafts = await tx.all(app.todos.where({ done: false }));
-tx.update(app.todos, todoId, { done: true });
-
-const committed = tx.commit();
-await committed.wait({ tier: "edge" });
-console.log(committed.batchId);
+const result = await db.transaction(async (tx) => {
+  tx.insert(app.todos, { title: "Draft copy", done: false });
+  const stagedDrafts = await tx.all(app.todos.where({ done: false }));
+  tx.update(app.todos, todoId, { done: true });
+});
+await result.wait({ tier: "edge" });
+console.log(result.batchId);
 ```
 
 The changes made as part of the transaction are scoped to it, and will only be
 globally visible once it's committed and accepted by the authority.
 
-`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
+`DbTransaction` can read its own staged state through `all(...)` and `one(...)` before commit.
 
-Use a direct batch when you want to group several ordinary writes under one batch id, but still want them
+You can also use a batch when you want to group several ordinary writes under one batch id, but still want them
 to be locally visible immediately:
 
 ```ts
-const batch = db.beginBatch(app.todos);
-
-batch.insert(app.todos, { title: "Grouped direct write", done: false });
-batch.update(app.todos, todoId, { done: true });
-
-const committed = batch.commit();
-await committed.wait({ tier: "edge" });
-console.log(committed.batchId);
+const result = db.batch((batch) => {
+  batch.insert(app.todos, { title: "Grouped direct write", done: false });
+  batch.update(app.todos, todoId, { done: true });
+});
+await result.wait({ tier: "edge" });
+console.log(result.batchId);
 ```

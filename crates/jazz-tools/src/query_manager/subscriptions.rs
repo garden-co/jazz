@@ -32,7 +32,6 @@ type ReplayableQuerySubscription = (
 
 pub(crate) struct SubscriptionExecutionOptions {
     pub(crate) local_updates: LocalUpdates,
-    pub(crate) strict_transactions: bool,
     pub(crate) propagation: QueryPropagation,
     pub(crate) local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
 }
@@ -102,7 +101,6 @@ impl QueryManager {
             durability_tier,
             SubscriptionExecutionOptions {
                 local_updates,
-                strict_transactions: false,
                 propagation: QueryPropagation::Full,
                 local_overlay_rows: HashMap::new(),
             },
@@ -118,7 +116,6 @@ impl QueryManager {
     ) -> Result<QuerySubscriptionId, QueryError> {
         let SubscriptionExecutionOptions {
             local_updates,
-            strict_transactions,
             propagation,
             local_overlay_rows,
         } = options;
@@ -180,7 +177,6 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier,
                 local_updates,
-                strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows,
@@ -262,7 +258,6 @@ impl QueryManager {
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
-                strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows: HashMap::new(),
@@ -318,7 +313,6 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
-            false,
             QueryPropagation::Full,
         )
     }
@@ -336,7 +330,6 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
-            false,
             propagation,
         )
     }
@@ -347,7 +340,6 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
-        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         self.subscribe_with_sync_and_propagation_with_local_overlay(
@@ -356,7 +348,6 @@ impl QueryManager {
             durability_tier,
             SubscriptionExecutionOptions {
                 local_updates,
-                strict_transactions,
                 propagation,
                 local_overlay_rows: HashMap::new(),
             },
