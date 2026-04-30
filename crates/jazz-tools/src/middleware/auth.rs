@@ -1098,8 +1098,8 @@ pub fn validate_backend_secret(
 /// Check if admin secret is valid.
 ///
 /// Admin publication endpoints require admin authentication. Development-mode
-/// schema auto-push from ordinary clients flows through `/sync` and does not
-/// use this helper.
+/// schema auto-push from ordinary clients flows through the WebSocket transport
+/// and does not use this helper.
 pub fn validate_admin_secret(
     provided: Option<&str>,
     config: &AuthConfig,

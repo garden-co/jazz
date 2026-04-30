@@ -1,24 +1,19 @@
-//! Binary HTTP streaming transport protocol types for Jazz.
+//! Binary WebSocket transport protocol types for Jazz.
 //!
-//! This crate defines the wire format for communication between Jazz clients
-//! and servers over HTTP with length-prefixed binary streaming.
+//! This module defines the wire format for communication between Jazz clients
+//! and servers over a single bidirectional WebSocket with length-prefixed
+//! binary frames.
 //!
 //! # Protocol Overview
 //!
-//! - Clients connect to `/events` for a long-lived binary stream (length-prefixed frames)
-//! - All client→server communication flows through a single `/sync` endpoint
-//! - Session is bound at connection time via HTTP headers
+//! - Clients connect to `/ws` and authenticate via an initial `AuthHandshake` frame
+//! - Both directions use the same length-prefixed binary framing
+//! - Server → client frames carry [`ServerEvent`] values
+//! - Client → server frames carry [`SyncBatchRequest`] payloads
 //!
 //! # Wire Format
 //!
-//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON-encoded ServerEvent]`
-//!
-//! # Endpoints
-//!
-//! | Route | Method | Description |
-//! |-------|--------|-------------|
-//! | `/events` | GET | Binary streaming for all subscription updates |
-//! | `/sync` | POST | Unified sync endpoint for all SyncPayload variants |
+//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON]`
 
 use serde::{Deserialize, Serialize};
 
@@ -200,7 +195,7 @@ pub enum UnauthenticatedCode {
     Disabled,
 }
 
-/// Structured unauthenticated response for `/sync` and `/events`.
+/// Structured unauthenticated response for the WebSocket transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnauthenticatedResponse {
     pub error: &'static str,

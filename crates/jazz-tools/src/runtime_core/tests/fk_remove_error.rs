@@ -136,7 +136,7 @@ fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
 #[test]
 fn remove_client_blocked_by_parked_sync_messages() {
     //
-    // alice ──/sync──▶ server (message parked in RuntimeCore, not yet in SyncManager inbox)
+    // alice ──WS──▶ server (message parked in RuntimeCore, not yet in SyncManager inbox)
     //
     // Sweep tries to reap alice → remove_client returns false because
     // parked_sync_messages contains an entry from alice.
@@ -182,7 +182,7 @@ fn remove_client_blocked_by_parked_sync_messages() {
 #[test]
 fn remove_client_succeeds_after_parked_messages_drained() {
     //
-    // alice ──/sync──▶ server (message parked) ──batched_tick──▶ inbox drained
+    // alice ──WS──▶ server (message parked) ──batched_tick──▶ inbox drained
     //
     // After batched_tick processes the parked message, remove_client succeeds.
     //
@@ -228,7 +228,7 @@ fn remove_client_succeeds_after_parked_messages_drained() {
 #[test]
 fn remove_client_ignores_parked_messages_from_other_clients() {
     //
-    // bob ──/sync──▶ server (message parked)
+    // bob ──WS──▶ server (message parked)
     //
     // alice disconnects → remove_client(alice) succeeds because
     // the parked message is from bob, not alice.
