@@ -18,7 +18,11 @@ export default async function PresentationDeckLayout(props: LayoutProps<"/presen
 
   return (
     <Suspense>
-      <PresentationShell deckTitle={deck.data.title} slides={slides} preloadImageSrcs={preloadImageSrcs}>
+      <PresentationShell
+        deckTitle={deck.data.title}
+        slides={slides}
+        preloadImageSrcs={preloadImageSrcs}
+      >
         {props.children}
       </PresentationShell>
     </Suspense>

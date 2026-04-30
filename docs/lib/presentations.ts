@@ -72,7 +72,9 @@ export async function getPresentationImageSrcsForPage(page: PresentationDeckPage
 
   if (cached) return cached;
 
-  const imageSrcs = getRawDeckSource(page).then((rawMdx) => extractPresentationImageSrcsFromMdx(rawMdx));
+  const imageSrcs = getRawDeckSource(page).then((rawMdx) =>
+    extractPresentationImageSrcsFromMdx(rawMdx),
+  );
 
   presentationImageSrcCache.set(deckSlug, imageSrcs);
 
