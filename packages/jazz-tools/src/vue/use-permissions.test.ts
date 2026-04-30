@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { effectScope, nextTick, ref } from "vue";
+import { effectScope, nextTick, reactive, ref } from "vue";
 import type { PermissionDecision, TableProxy } from "../runtime/index.js";
 
 const mocks = vi.hoisted(() => {
@@ -109,6 +109,28 @@ describe("vue/permission composables", () => {
     scope.stop();
   });
 
+  it("rechecks canInsert when a reactive draft mutates in place", async () => {
+    mocks.canInsert.mockResolvedValue(true);
+    const draft = reactive({ title: "Ship auth chat", done: false });
+    const scope = effectScope();
+
+    const result = scope.run(() => useCanInsert(todos, draft))!;
+    await nextTick();
+    await Promise.resolve();
+
+    expect(result.value).toBe(true);
+    expect(mocks.canInsert).toHaveBeenCalledTimes(1);
+
+    draft.done = true;
+    await nextTick();
+    await Promise.resolve();
+
+    expect(result.value).toBe(true);
+    expect(mocks.canInsert).toHaveBeenCalledTimes(2);
+    expect(mocks.canInsert).toHaveBeenLastCalledWith(todos, draft);
+    scope.stop();
+  });
+
   it("returns unknown until canUpdate resolves, then returns the decision", async () => {
     const decision = deferred<PermissionDecision>();
     mocks.canUpdate.mockReturnValue(decision.promise);
@@ -125,6 +147,28 @@ describe("vue/permission composables", () => {
     await nextTick();
 
     expect(result.value).toBe(false);
+    scope.stop();
+  });
+
+  it("rechecks canUpdate when a reactive patch mutates in place", async () => {
+    mocks.canUpdate.mockResolvedValue(true);
+    const patch = reactive({ done: false });
+    const scope = effectScope();
+
+    const result = scope.run(() => useCanUpdate(todos, "todo-1", patch))!;
+    await nextTick();
+    await Promise.resolve();
+
+    expect(result.value).toBe(true);
+    expect(mocks.canUpdate).toHaveBeenCalledTimes(1);
+
+    patch.done = true;
+    await nextTick();
+    await Promise.resolve();
+
+    expect(result.value).toBe(true);
+    expect(mocks.canUpdate).toHaveBeenCalledTimes(2);
+    expect(mocks.canUpdate).toHaveBeenLastCalledWith(todos, "todo-1", patch);
     scope.stop();
   });
 });

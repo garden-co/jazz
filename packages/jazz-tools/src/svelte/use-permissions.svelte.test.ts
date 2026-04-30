@@ -126,6 +126,30 @@ describe("svelte/permission helpers", () => {
     cleanup();
   });
 
+  it("rechecks canInsert when a draft mutates in place", async () => {
+    mocks.canInsert.mockResolvedValue(true);
+    let draft = $state({ title: "Ship auth chat", done: false });
+    let permission!: InstanceType<typeof CanInsertPermission<TodoRow, TodoInput>>;
+
+    const cleanup = $effect.root(() => {
+      permission = new CanInsertPermission(todos, () => draft);
+    });
+    await settle();
+    await settle();
+
+    expect(permission.current).toBe(true);
+    expect(mocks.canInsert).toHaveBeenCalledTimes(1);
+
+    draft.done = true;
+    await settle();
+    await settle();
+
+    expect(permission.current).toBe(true);
+    expect(mocks.canInsert).toHaveBeenCalledTimes(2);
+    expect(mocks.canInsert).toHaveBeenLastCalledWith(todos, draft);
+    cleanup();
+  });
+
   it("returns unknown until canUpdate resolves, then returns the decision", async () => {
     const decision = deferred<PermissionDecision>();
     mocks.canUpdate.mockReturnValue(decision.promise);
@@ -145,6 +169,30 @@ describe("svelte/permission helpers", () => {
     await settle();
 
     expect(permission.current).toBe(false);
+    cleanup();
+  });
+
+  it("rechecks canUpdate when a patch mutates in place", async () => {
+    mocks.canUpdate.mockResolvedValue(true);
+    let patch = $state({ done: false });
+    let permission!: InstanceType<typeof CanUpdatePermission<TodoRow, TodoInput>>;
+
+    const cleanup = $effect.root(() => {
+      permission = new CanUpdatePermission(todos, "todo-1", () => patch);
+    });
+    await settle();
+    await settle();
+
+    expect(permission.current).toBe(true);
+    expect(mocks.canUpdate).toHaveBeenCalledTimes(1);
+
+    patch.done = true;
+    await settle();
+    await settle();
+
+    expect(permission.current).toBe(true);
+    expect(mocks.canUpdate).toHaveBeenCalledTimes(2);
+    expect(mocks.canUpdate).toHaveBeenLastCalledWith(todos, "todo-1", patch);
     cleanup();
   });
 });

@@ -19,6 +19,16 @@ function resolve<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
 }
 
+let unkeyableDataVersion = 0;
+
+function dataKey(value: unknown): string {
+  try {
+    return JSON.stringify($state.snapshot(value)) ?? "undefined";
+  } catch {
+    return `unkeyable:${++unkeyableDataVersion}`;
+  }
+}
+
 /**
  * Reactive Svelte permission preflight for inserts.
  *
@@ -31,6 +41,7 @@ export class CanInsertPermission<T, Init> {
   #runId = 0;
   #lastTable: TableProxy<T, Init> | null = null;
   #lastData: Init | null = null;
+  #lastDataKey: string | null = null;
 
   constructor(
     table: MaybeGetter<Optional<TableProxy<T, Init>>>,
@@ -43,17 +54,25 @@ export class CanInsertPermission<T, Init> {
       if (!resolvedTable || resolvedData == null) {
         this.#lastTable = null;
         this.#lastData = null;
+        this.#lastDataKey = null;
         this.#runId += 1;
         this.current = "unknown";
         return;
       }
 
-      if (this.#lastTable === resolvedTable && this.#lastData === resolvedData) {
+      const resolvedDataKey = dataKey(resolvedData);
+
+      if (
+        this.#lastTable === resolvedTable &&
+        this.#lastData === resolvedData &&
+        this.#lastDataKey === resolvedDataKey
+      ) {
         return;
       }
 
       this.#lastTable = resolvedTable;
       this.#lastData = resolvedData;
+      this.#lastDataKey = resolvedDataKey;
 
       const activeRunId = ++this.#runId;
       this.current = "unknown";
@@ -91,6 +110,7 @@ export class CanUpdatePermission<T, Init> {
   #lastTable: TableProxy<T, Init> | null = null;
   #lastId: string | null = null;
   #lastData: Partial<Init> | null = null;
+  #lastDataKey: string | null = null;
 
   constructor(
     table: MaybeGetter<Optional<TableProxy<T, Init>>>,
@@ -106,15 +126,19 @@ export class CanUpdatePermission<T, Init> {
         this.#lastTable = null;
         this.#lastId = null;
         this.#lastData = null;
+        this.#lastDataKey = null;
         this.#runId += 1;
         this.current = "unknown";
         return;
       }
 
+      const resolvedDataKey = dataKey(resolvedData);
+
       if (
         this.#lastTable === resolvedTable &&
         this.#lastId === resolvedId &&
-        this.#lastData === resolvedData
+        this.#lastData === resolvedData &&
+        this.#lastDataKey === resolvedDataKey
       ) {
         return;
       }
@@ -122,6 +146,7 @@ export class CanUpdatePermission<T, Init> {
       this.#lastTable = resolvedTable;
       this.#lastId = resolvedId;
       this.#lastData = resolvedData;
+      this.#lastDataKey = resolvedDataKey;
 
       const activeRunId = ++this.#runId;
       this.current = "unknown";

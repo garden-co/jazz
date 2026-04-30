@@ -52,7 +52,7 @@ export function useCanInsert<T, Init>(
         },
       );
     },
-    { immediate: true },
+    { immediate: true, deep: true },
   );
 
   return decision;
@@ -98,7 +98,7 @@ export function useCanUpdate<T, Init>(
         },
       );
     },
-    { immediate: true },
+    { immediate: true, deep: true },
   );
 
   return decision;
