@@ -498,7 +498,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 /// ```text
 /// alice (v1) ──create user──► server
 ///                                │
-///              push v2 schema + lens via HTTP /sync
+///              push v2 schema + lens via WS sync
 ///                                │
 ///                  bob (v2) connects and queries
 ///                                │

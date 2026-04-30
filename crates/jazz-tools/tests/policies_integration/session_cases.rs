@@ -1307,7 +1307,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
         .expect("optimistic local create")
         .0;
 
-    // Alice's legitimate insert is the causal barrier: her /sync request is
+    // Alice's legitimate insert is the causal barrier: her sync push is
     // sent after mallory's, so once the server has committed alice's row the
     // inbox has already processed (and rejected) mallory's earlier request.
     let legit_id = create_document(&alice, "alice", "legitimate").await;
