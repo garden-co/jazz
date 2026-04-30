@@ -1,11 +1,11 @@
 import * as React from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
+import { canInsertChatMessage, chatMessageInput } from "./chat-permissions.js";
 
 export type ChatPanelProps = {
   chatId: string;
   title: string;
-  canSend: boolean;
   authorName: string | null;
   placeholder?: string;
   readOnlyNotice?: string;
@@ -21,7 +21,6 @@ function formatTimestamp(date: Date | number): string {
 export function ChatPanel({
   chatId,
   title,
-  canSend,
   authorName,
   placeholder,
   readOnlyNotice,
@@ -40,27 +39,56 @@ export function ChatPanel({
 
   const [messageText, setMessageText] = React.useState("");
   const [messagePending, setMessagePending] = React.useState(false);
+  const [canSend, setCanSend] = React.useState(false);
   const [messageError, setMessageError] = React.useState<string | null>(null);
   const [deletingMessageId, setDeletingMessageId] = React.useState<string | null>(null);
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
 
+  React.useEffect(() => {
+    let cancelled = false;
+
+    if (!sessionUserId || !authorName) {
+      setCanSend(false);
+      return;
+    }
+
+    setCanSend(false);
+    void canInsertChatMessage(db, app.messages, chatMessageInput(chatId, authorName, "")).then(
+      (allowed) => {
+        if (!cancelled) {
+          setCanSend(allowed);
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setCanSend(false);
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authorName, chatId, db, session, sessionUserId]);
+
   async function handleMessageSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canSend || !sessionUserId || !authorName || !messageText.trim()) return;
+    const trimmedText = messageText.trim();
+    if (!sessionUserId || !authorName || !trimmedText) return;
 
     setMessagePending(true);
     setMessageError(null);
     setDeleteError(null);
 
     try {
-      await db
-        .insert(app.messages, {
-          author_name: authorName,
-          chat_id: chatId,
-          text: messageText.trim(),
-          sent_at: new Date(),
-        })
-        .wait({ tier: "edge" });
+      const message = chatMessageInput(chatId, authorName, trimmedText);
+      if (!(await canInsertChatMessage(db, app.messages, message))) {
+        setCanSend(false);
+        setMessageError("You cannot send messages in this chat.");
+        return;
+      }
+
+      await db.insert(app.messages, message).wait({ tier: "edge" });
       setMessageText("");
     } catch (error) {
       setMessageError(error instanceof Error ? error.message : String(error));
