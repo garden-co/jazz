@@ -1854,7 +1854,7 @@ impl SyncManager {
                     return;
                 }
                 if self.cancel_pending_batch(storage, batch_id) {
-                    self.cancel_batch_to_servers_except(batch_id, None);
+                    self.cancel_batch_to_servers(batch_id);
                 }
             }
             SyncPayload::BatchSettlement { settlement } => {

@@ -460,20 +460,7 @@ impl SyncManager {
     }
 
     pub fn cancel_batch_to_servers(&mut self, batch_id: BatchId) {
-        self.cancel_batch_to_servers_except(batch_id, None);
-    }
-
-    pub(super) fn cancel_batch_to_servers_except(
-        &mut self,
-        batch_id: BatchId,
-        except: Option<ServerId>,
-    ) {
-        let server_ids: Vec<_> = self
-            .servers
-            .keys()
-            .copied()
-            .filter(|server_id| Some(*server_id) != except)
-            .collect();
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
         for server_id in server_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
