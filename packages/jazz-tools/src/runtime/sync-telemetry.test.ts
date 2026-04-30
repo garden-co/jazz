@@ -1,13 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const otelMocks = vi.hoisted(() => {
-  const logExporterConstructors = vi.fn();
-  const logProviderConstructors = vi.fn();
-  const logProcessorConstructors = vi.fn();
-  const loggerNames: string[] = [];
-  const loggerEmit = vi.fn();
-  const logForceFlush = vi.fn(() => Promise.resolve());
-
   const traceExporterConstructors = vi.fn();
   const traceProviderConstructors = vi.fn();
   const traceProcessorConstructors = vi.fn();
@@ -25,12 +18,6 @@ const otelMocks = vi.hoisted(() => {
   const traceForceFlush = vi.fn(() => Promise.resolve());
 
   return {
-    logExporterConstructors,
-    logProviderConstructors,
-    logProcessorConstructors,
-    loggerNames,
-    loggerEmit,
-    logForceFlush,
     traceExporterConstructors,
     traceProviderConstructors,
     traceProcessorConstructors,
@@ -40,40 +27,6 @@ const otelMocks = vi.hoisted(() => {
     traceForceFlush,
   };
 });
-
-vi.mock("@opentelemetry/exporter-logs-otlp-http", () => ({
-  OTLPLogExporter: class {
-    constructor(config: unknown) {
-      otelMocks.logExporterConstructors(config);
-    }
-  },
-}));
-
-vi.mock("@opentelemetry/sdk-logs", () => ({
-  LoggerProvider: class {
-    constructor(config: unknown) {
-      otelMocks.logProviderConstructors(config);
-    }
-
-    getLogger(name: string) {
-      otelMocks.loggerNames.push(name);
-      return { emit: otelMocks.loggerEmit };
-    }
-
-    forceFlush() {
-      return otelMocks.logForceFlush();
-    }
-  },
-  SimpleLogRecordProcessor: class {
-    constructor(exporter: unknown) {
-      otelMocks.logProcessorConstructors(exporter);
-    }
-  },
-}));
-
-vi.mock("@opentelemetry/api-logs", () => ({
-  SeverityNumber: { DEBUG: 5 },
-}));
 
 vi.mock("@opentelemetry/exporter-trace-otlp-http", () => ({
   OTLPTraceExporter: class {
@@ -114,22 +67,22 @@ vi.mock("@opentelemetry/resources", () => ({
 }));
 
 import {
-  exportSyncPayloadTelemetryRecord,
   installWasmTraceTelemetry,
   normalizeOtlpEndpoint,
-  type SyncPayloadTelemetryRecord,
+  resolveTelemetryCollectorUrlFromEnv,
 } from "./sync-telemetry.js";
 
 const originalFetch = globalThis.fetch;
+const originalTelemetryEnv = {
+  VITE_JAZZ_TELEMETRY_COLLECTOR_URL: process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL,
+  NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL: process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+  PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL: process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+  EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL: process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
   for (const mock of [
-    otelMocks.logExporterConstructors,
-    otelMocks.logProviderConstructors,
-    otelMocks.logProcessorConstructors,
-    otelMocks.loggerEmit,
-    otelMocks.logForceFlush,
     otelMocks.traceExporterConstructors,
     otelMocks.traceProviderConstructors,
     otelMocks.traceProcessorConstructors,
@@ -138,7 +91,6 @@ afterEach(() => {
   ]) {
     mock.mockClear();
   }
-  otelMocks.loggerNames.length = 0;
   otelMocks.tracerNames.length = 0;
   otelMocks.traceSpans.length = 0;
   if (originalFetch === undefined) {
@@ -147,61 +99,36 @@ afterEach(() => {
     globalThis.fetch = originalFetch;
   }
   delete (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
+
+  for (const [key, value] of Object.entries(originalTelemetryEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
-describe("sync telemetry OTLP helpers", () => {
+describe("telemetry OTLP helpers", () => {
   it("normalizes collector base urls and full OTLP endpoints", () => {
-    expect(normalizeOtlpEndpoint("http://localhost:4318", "logs")).toBe(
-      "http://localhost:4318/v1/logs",
+    expect(normalizeOtlpEndpoint("http://localhost:4318", "traces")).toBe(
+      "http://localhost:4318/v1/traces",
     );
-    expect(normalizeOtlpEndpoint("http://localhost:4318/v1/logs", "logs")).toBe(
-      "http://localhost:4318/v1/logs",
+    expect(normalizeOtlpEndpoint("http://localhost:4318/v1/traces", "traces")).toBe(
+      "http://localhost:4318/v1/traces",
     );
     expect(normalizeOtlpEndpoint("http://localhost:4318/v1/logs", "traces")).toBe(
       "http://localhost:4318/v1/traces",
     );
   });
 
-  it("exports one sync payload record through the official OTLP log exporter", async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error("collector unavailable"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  it("resolves collector url from literal public env keys", () => {
+    delete process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL;
+    process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = " http://127.0.0.1:54418 ";
+    delete process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
+    delete process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL;
 
-    const record: SyncPayloadTelemetryRecord = {
-      appId: "telemetry-app",
-      severityText: "DEBUG",
-      scope: "worker_bridge",
-      direction: "main_to_worker",
-      sourcePayloadIndex: 0,
-      sourcePayloadCount: 1,
-      messageBytes: 3,
-      messageEncoding: "binary",
-      payloadVariant: "RowBatchCreated",
-    };
-
-    await expect(
-      exportSyncPayloadTelemetryRecord("http://127.0.0.1:54418", record),
-    ).resolves.toBeUndefined();
-
-    expect(otelMocks.logExporterConstructors).toHaveBeenCalledWith({
-      url: "http://127.0.0.1:54418/v1/logs",
-    });
-    expect(otelMocks.loggerNames).toContain("jazz-browser.sync-payload");
-    expect(otelMocks.loggerEmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        severityNumber: 5,
-        severityText: "DEBUG",
-        body: JSON.stringify(record),
-        attributes: expect.objectContaining({
-          "jazz.payload_variant": "RowBatchCreated",
-        }),
-      }),
-    );
-    expect(JSON.parse(otelMocks.loggerEmit.mock.calls[0]![0].body)).toMatchObject({
-      appId: "telemetry-app",
-      payloadVariant: "RowBatchCreated",
-    });
-    expect(otelMocks.logForceFlush).toHaveBeenCalledTimes(1);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
   });
 
   it("installs a WASM span callback that exports OPFS spans through the official trace exporter", async () => {
@@ -293,5 +220,34 @@ describe("sync telemetry OTLP helpers", () => {
       "OpfsBTree::range",
     ]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a disposer that only clears its owned WASM span callback", () => {
+    const dispose = installWasmTraceTelemetry({
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "telemetry-app",
+      runtimeThread: "main",
+    });
+    const installedCallback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
+    expect(installedCallback).toBeTypeOf("function");
+
+    const replacementCallback = () => {};
+    (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__ = replacementCallback;
+    dispose();
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBe(
+      replacementCallback,
+    );
+
+    const disposeReplacement = installWasmTraceTelemetry({
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "telemetry-app",
+      runtimeThread: "main",
+    });
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).not.toBe(
+      replacementCallback,
+    );
+
+    disposeReplacement();
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
   });
 });

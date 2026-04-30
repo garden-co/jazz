@@ -50,7 +50,6 @@ use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
-use jazz_tools::sync_payload_telemetry::{TelemetryOptions, resolve_telemetry_collector_url};
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
@@ -374,7 +373,6 @@ struct DevServerStartOptions {
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
     catalogue_authority_admin_secret: Option<String>,
-    telemetry: Option<TelemetryOptions>,
 }
 
 fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
@@ -1704,7 +1702,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetry?: boolean | { collectorUrl?: string } }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1751,10 +1749,6 @@ impl DevServer {
         let mut server_builder = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_catalogue_authority(catalogue_authority);
-        if let Some(collector_url) = resolve_telemetry_collector_url(opts.telemetry.as_ref()) {
-            server_builder =
-                server_builder.with_sync_payload_telemetry_collector_url(collector_url);
-        }
 
         if in_memory {
             server_builder = server_builder.with_storage(StorageBackend::InMemory);

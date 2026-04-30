@@ -111,7 +111,7 @@ export interface DbConfig {
   dbName?: string;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
-  /** Optional OTLP/HTTP collector URL for dev sync payload telemetry. */
+  /** Optional OTLP/HTTP collector URL for WASM trace telemetry. */
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;

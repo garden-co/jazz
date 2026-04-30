@@ -52,7 +52,6 @@ otel = [
   "dep:opentelemetry-stdout",
   "dep:tracing-opentelemetry",
 ]
-otel-logs = ["server"]
 
 [dependencies]
 opfs-btree = { path = "../opfs-btree", version = "0.1.0" }

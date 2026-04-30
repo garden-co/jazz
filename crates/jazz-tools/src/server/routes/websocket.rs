@@ -14,7 +14,6 @@ use axum::{
 use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
-use uuid::Uuid;
 
 use super::utils::connection_schema_diagnostics_from_handshake;
 
@@ -375,25 +374,10 @@ async fn handle_ws_connection(
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(data))) => {
                     let Some(inner) = crate::transport_manager::frame_decode(&data) else {
-                        state.emit_ws_decode_failure_telemetry(
-                            client_id,
-                            connection_id,
-                            data.len(),
-                            "invalid transport frame",
-                        );
                         continue;
                     };
                     let inner = inner.to_vec();
-                    let source_frame_id = Uuid::now_v7().to_string();
-                    if let Err(e) = state
-                        .process_ws_client_frame_with_telemetry(
-                            client_id,
-                            &inner,
-                            Some(connection_id),
-                            Some(source_frame_id),
-                        )
-                        .await
-                    {
+                    if let Err(e) = state.process_ws_client_frame(client_id, &inner).await {
                         tracing::warn!(error = ?e, "ws client frame rejected");
                     }
                 }
@@ -402,7 +386,6 @@ async fn handle_ws_connection(
             },
             update = sync_rx.recv() => {
                 let Some(u) = update else { break };
-                let telemetry_payload = u.payload.clone();
                 let event = crate::jazz_transport::ServerEvent::SyncUpdate {
                     seq: Some(u.seq),
                     payload: Box::new(u.payload),
@@ -411,13 +394,6 @@ async fn handle_ws_connection(
                     Ok(b) => b,
                     Err(_) => continue,
                 };
-                state.emit_ws_server_payload_telemetry(
-                    client_id,
-                    connection_id,
-                    u.seq,
-                    Some(bytes.len()),
-                    &telemetry_payload,
-                );
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),

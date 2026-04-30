@@ -270,7 +270,7 @@ describe("jazzPlugin", () => {
     expect(wsSend).toHaveBeenCalledWith({ type: "full-reload" });
   });
 
-  it("passes top-level telemetry options to the managed dev server", async () => {
+  it("exposes top-level telemetry options without starting server-side telemetry", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: "00000000-0000-0000-0000-000000000061",
@@ -307,11 +307,8 @@ describe("jazzPlugin", () => {
     ) => Promise<void>;
     await configureServer(fakeViteServer);
 
-    expect(startSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        telemetry: { collectorUrl: "http://127.0.0.1:54418" },
-      }),
-    );
+    const startOptions = startSpy.mock.calls[0]![0] as Record<string, unknown>;
+    expect("telemetry" in startOptions).toBe(false);
     expect(fakeViteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
       "http://127.0.0.1:54418",
     );

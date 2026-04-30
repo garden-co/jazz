@@ -1,69 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-const otelMocks = vi.hoisted(() => {
-  const logExporterConstructors = vi.fn();
-  const loggerNames: string[] = [];
-  const loggerEmit = vi.fn();
-  const logForceFlush = vi.fn(() => Promise.resolve());
-
-  return {
-    logExporterConstructors,
-    loggerNames,
-    loggerEmit,
-    logForceFlush,
-  };
-});
-
-vi.mock("@opentelemetry/exporter-logs-otlp-http", () => ({
-  OTLPLogExporter: class {
-    constructor(config: unknown) {
-      otelMocks.logExporterConstructors(config);
-    }
-  },
-}));
-
-vi.mock("@opentelemetry/sdk-logs", () => ({
-  LoggerProvider: class {
-    getLogger(name: string) {
-      otelMocks.loggerNames.push(name);
-      return { emit: otelMocks.loggerEmit };
-    }
-
-    forceFlush() {
-      return otelMocks.logForceFlush();
-    }
-  },
-  SimpleLogRecordProcessor: class {
-    constructor(_exporter: unknown) {}
-  },
-}));
-
-vi.mock("@opentelemetry/api-logs", () => ({
-  SeverityNumber: { DEBUG: 5 },
-}));
-
-vi.mock("@opentelemetry/resources", () => ({
-  resourceFromAttributes: vi.fn((attributes: unknown) => ({ attributes })),
-}));
+import { afterEach, describe, expect, it } from "vitest";
 
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
 import { OutboxDestinationKind, type AuthFailureReason } from "./sync-transport.js";
 
-const originalFetch = globalThis.fetch;
-
 afterEach(() => {
-  vi.restoreAllMocks();
-  otelMocks.logExporterConstructors.mockClear();
-  otelMocks.loggerEmit.mockClear();
-  otelMocks.logForceFlush.mockClear();
-  otelMocks.loggerNames.length = 0;
-  if (originalFetch === undefined) {
-    delete (globalThis as { fetch?: typeof fetch }).fetch;
-  } else {
-    globalThis.fetch = originalFetch;
-  }
+  delete (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
 });
 
 class MockWorker {
@@ -322,10 +265,7 @@ describe("WorkerBridge", () => {
     await initPromise;
   });
 
-  it("exports telemetry for sync payloads in both worker bridge directions", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
+  it("clears its owned WASM trace callback on shutdown", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
@@ -341,36 +281,14 @@ describe("WorkerBridge", () => {
     worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
     await initPromise;
 
-    runtimeMock.emitSyncPayload("server", "server-1", enc({ invalid: "postcard" }), false);
-    await Promise.resolve();
-    worker.emitFromWorker({
-      type: "sync",
-      payload: [enc({ invalid: "postcard-from-worker" })],
-    });
+    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
+    expect(callback).toBeTypeOf("function");
 
-    await vi.waitFor(() => expect(otelMocks.loggerEmit).toHaveBeenCalledTimes(2));
-    expect(otelMocks.logExporterConstructors).toHaveBeenCalledWith({
-      url: "http://127.0.0.1:54418/v1/logs",
-    });
-    expect(otelMocks.loggerNames).toContain("jazz-browser.sync-payload");
-    const records = otelMocks.loggerEmit.mock.calls.map((call) => JSON.parse(call[0].body));
-    expect(records).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          appId: "app-1",
-          scope: "worker_bridge",
-          direction: "main_to_worker",
-          decodeError: expect.any(String),
-        }),
-        expect.objectContaining({
-          appId: "app-1",
-          scope: "worker_bridge",
-          direction: "worker_to_main",
-          decodeError: expect.any(String),
-        }),
-      ]),
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
+    const shutdownPromise = bridge.shutdown(worker as unknown as Worker);
+    worker.emitFromWorker({ type: "shutdown-ok" });
+    await shutdownPromise;
+
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {
