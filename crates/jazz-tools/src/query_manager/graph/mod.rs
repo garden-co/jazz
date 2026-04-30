@@ -501,13 +501,19 @@ impl QueryGraph {
     /// Returns ObjectIds that must be synced for the client to reproduce the
     /// current query result locally.
     pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        self.scope_from_tuples(&self.sync_scope_tuples())
+    }
+
+    /// Returns tuples that must be synced for the client to reproduce the current
+    /// query result locally.
+    pub fn sync_scope_tuples(&self) -> Vec<Tuple> {
         if let Some(node_id) = self.pagination_node
             && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
         {
-            return self.scope_from_tuples(limit_offset.sync_input_tuples());
+            return limit_offset.sync_input_tuples().to_vec();
         }
 
-        self.contributing_object_ids()
+        self.current_output_tuples()
     }
 
     fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
