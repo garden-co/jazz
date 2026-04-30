@@ -197,6 +197,70 @@ fn cancel_batch_from_unrelated_client_keeps_pending_permission_check() {
 }
 
 #[test]
+fn cancel_batch_from_owner_without_local_pending_work_does_not_forward_upstream() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let alice = ClientId::new();
+    let upstream = ServerId::new();
+    let row_id = ObjectId::new();
+    let row = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"Alice draft"),
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, alice);
+    sm.set_client_role(alice, ClientRole::User);
+    sm.set_client_session(alice, crate::query_manager::session::Session::new("alice"));
+    add_server(&mut sm, &io, upstream);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        alice,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "Alice's staged row should be waiting on permission evaluation"
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        alice,
+        SyncPayload::CancelBatch {
+            batch_id: row.batch_id,
+        },
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().all(|entry| {
+            !matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(server_id),
+                    payload: SyncPayload::CancelBatch {
+                        batch_id: cancelled
+                    },
+                } if *server_id == upstream && *cancelled == row.batch_id
+            )
+        }),
+        "owner cancel with no matching local pending rows or checks should not fan out upstream, got {outbox:?}"
+    );
+}
+
+#[test]
 fn cancel_batch_from_owner_uses_exact_pending_members_without_locator_scan() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut seeded = MemoryStorage::new();
