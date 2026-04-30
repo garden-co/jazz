@@ -595,7 +595,10 @@ export class DbTransaction {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.requireRuntimeTransaction("insert").create(table._table, values, options);
+    const runtimeTransaction = this.requireRuntimeTransaction("insert");
+    const row = options
+      ? runtimeTransaction.create(table._table, values, options)
+      : runtimeTransaction.create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
@@ -767,7 +770,10 @@ export class DbDirectBatch {
     this.ensureActive();
     const transformedData = transformInsertInput(table, data);
     const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
-    const row = this.requireRuntimeBatch("insert").create(table._table, values, options);
+    const runtimeBatch = this.requireRuntimeBatch("insert");
+    const row = options
+      ? runtimeBatch.create(table._table, values, options)
+      : runtimeBatch.create(table._table, values);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
