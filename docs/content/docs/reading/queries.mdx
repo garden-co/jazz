@@ -173,6 +173,18 @@ Each framework has a reactive binding that re-renders when query results change.
   data exists yet.
 </Callout>
 
+### Fine-grained updates
+
+Vue's `useAll` and Svelte's `QuerySubscription` reconcile new query results into the existing reactive array in place rather than swapping the reference. When an upstream change touches a single row, only that row's affected fields write into the reactive proxy, so `$effect` (Svelte) and `watch` / template bindings (Vue) only re-fire for components that depend on the fields that actually changed.
+
+In practice this means:
+
+- Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
+- Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
+- Vue's `useAll` returns a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+
+React's `useAll` follows React's own re-render model and returns a fresh array each tick; the granularity benefit there comes from React's diffing, not from in-place reconciliation.
+
 ### Conditional queries
 
 Pass `undefined` instead of a query to skip evaluation. This is useful when building dynamic queries.

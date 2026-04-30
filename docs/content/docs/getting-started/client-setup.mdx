@@ -35,7 +35,7 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
     const secret = await BrowserAuthSecretStore.getOrCreateSecret();
 
-    const client = createJazzClient({
+    const client = await createJazzClient({
       appId: "<your-app-id>",
       secret,
     });
@@ -62,8 +62,8 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
       let client = $state<ReturnType<typeof createJazzClient> | null>(null);
 
-      BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
-        client = createJazzClient({ appId: '<your-app-id>', secret });
+      BrowserAuthSecretStore.getOrCreateSecret().then(async (secret) => {
+        client = await createJazzClient({ appId: '<your-app-id>', secret });
       });
     </script>
 
@@ -126,6 +126,28 @@ For React Native and Expo clients, make sure `serverUrl` points to a host your r
 ### Storage driver
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+#### Browser storage eviction
+
+`{ type: "persistent" }` writes to the [Origin Private File System (OPFS)](https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.
+
+The trade-offs are:
+
+- **Best-effort (default).** No prompt, no friction. Acceptable when the server holds a copy of every row the user cares about, or when the app gracefully reseeds from sync. Anything that exists only on this device is at risk.
+- **Persistent.** Storage is only cleared by an explicit user action (clearing site data, uninstalling). Required for true offline-first apps and for any data that doesn't round-trip through a server. Browsers gate this behind [`navigator.storage.persist()`](https://developer.mozilla.org/docs/Web/API/StorageManager/persist), which may show a prompt or grant silently based on engagement heuristics.
+
+To request persistent storage, call it once after the user has signed in or interacted enough that a prompt makes sense:
+
+```ts
+if (navigator.storage?.persist) {
+  const granted = await navigator.storage.persist();
+  if (!granted) {
+    // Fall back: rely on sync, warn the user, or retry later.
+  }
+}
+```
+
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
 
 ## Dev plugins
 
