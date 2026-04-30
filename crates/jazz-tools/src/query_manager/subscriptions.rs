@@ -659,7 +659,7 @@ impl QueryManager {
     ) -> std::collections::HashSet<(crate::object::ObjectId, crate::object::BranchName)> {
         self.subscriptions
             .get(&sub_id)
-            .map(|sub| sub.graph.contributing_object_ids())
+            .map(|sub| sub.graph.sync_scope_object_ids())
             .unwrap_or_default()
     }
 }
