@@ -50,7 +50,23 @@ impl SyncManager {
         }
 
         for (object_id, metadata, row) in row_sync {
-            self.queue_row_to_server(server_id, object_id, metadata, row);
+            let Some(table) = metadata
+                .get(crate::metadata::MetadataKey::Table.as_str())
+                .cloned()
+            else {
+                self.queue_row_to_server(server_id, object_id, metadata, row);
+                continue;
+            };
+
+            let mut visiting = std::collections::HashSet::new();
+            self.queue_row_to_server_with_missing_parents(
+                storage,
+                table.as_str(),
+                server_id,
+                metadata,
+                row,
+                &mut visiting,
+            );
         }
     }
 
