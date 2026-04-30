@@ -230,8 +230,15 @@ impl QueryGraph {
         if let Some(node_id) = self.pagination_node
             && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
         {
-            let visible_ordered_tuples: Vec<_> = limit_offset
-                .ordered_input_tuples()
+            let ordered_input = self
+                .get_inputs(node_id)
+                .first()
+                .and_then(|dep| match self.get_node(*dep) {
+                    Some(GraphNode::Sort(sort_node)) => Some(sort_node.sorted_tuples()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| limit_offset.sync_input_tuples());
+            let visible_ordered_tuples: Vec<_> = ordered_input
                 .iter()
                 .filter(|tuple| tuple_is_visible(tuple))
                 .cloned()
