@@ -23,7 +23,7 @@ use crate::query_manager::types::{
     ComposedBranchName, PermissionPreflightDecision, RowDescriptor, RowPolicyMode, Schema,
     SchemaHash, TableName, TablePolicies, Value,
 };
-use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
+use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite, SchemaUpdateRowLoad};
 use crate::row_format::decode_row;
 use crate::schema_manager::rehydrate::latest_catalogue_content;
 use crate::storage::Storage;
@@ -1889,13 +1889,7 @@ impl SchemaManager {
             .into_iter()
             .map(|branch_name| branch_name.as_str().to_string())
             .collect::<Vec<_>>();
-        let Some((
-            table,
-            _source_branch,
-            old_current_data,
-            _source_commit_id,
-            old_current_provenance,
-        )) = write_context
+        let loaded_row = write_context
             .filter(|ctx| ctx.batch_mode() == crate::batch_fate::BatchMode::Transactional)
             .and_then(WriteContext::batch_id)
             .and_then(|batch_id| {
@@ -1907,28 +1901,45 @@ impl SchemaManager {
                         batch_id,
                     )
                     .map(|(table, row)| {
-                        (
-                            table,
-                            target_branch.clone(),
-                            row.data.to_vec(),
-                            row.batch_id(),
-                            row.row_provenance(),
-                        )
+                        if row.is_hard_deleted() {
+                            SchemaUpdateRowLoad::HardDeleted
+                        } else {
+                            SchemaUpdateRowLoad::Found {
+                                table,
+                                branch: target_branch.clone(),
+                                data: row.data.to_vec(),
+                                batch_id: row.batch_id(),
+                                provenance: row.row_provenance(),
+                            }
+                        }
                     })
             })
             .or_else(|| {
                 self.query_manager
-                    .load_row_for_schema_update_in_context_for_tier(
+                    .load_schema_update_row_in_context_for_tier(
                         storage,
                         object_id,
                         &branches,
                         &target_context,
                         None,
                     )
-            })
-        else {
+            });
+        let Some(loaded_row) = loaded_row else {
             return Ok(PermissionPreflightDecision::Unknown);
         };
+        let (table, _source_branch, old_current_data, _source_commit_id, old_current_provenance) =
+            match loaded_row {
+                SchemaUpdateRowLoad::Found {
+                    table,
+                    branch,
+                    data,
+                    batch_id,
+                    provenance,
+                } => (table, branch, data, batch_id, provenance),
+                SchemaUpdateRowLoad::HardDeleted => {
+                    return Ok(PermissionPreflightDecision::Deny);
+                }
+            };
 
         let table_name = TableName::new(&table);
         let descriptor = target_schema

@@ -52,6 +52,32 @@ struct PreparedUpdateCommit<'a> {
     index_mutations: &'a [crate::storage::IndexMutation<'a>],
 }
 
+pub(crate) enum SchemaUpdateRowLoad {
+    Found {
+        table: String,
+        branch: String,
+        data: Vec<u8>,
+        batch_id: BatchId,
+        provenance: RowProvenance,
+    },
+    HardDeleted,
+}
+
+impl SchemaUpdateRowLoad {
+    fn into_found_parts(self) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
+        match self {
+            Self::Found {
+                table,
+                branch,
+                data,
+                batch_id,
+                provenance,
+            } => Some((table, branch, data, batch_id, provenance)),
+            Self::HardDeleted => None,
+        }
+    }
+}
+
 struct RowBatchAuthoring<'a> {
     provenance: &'a RowProvenance,
     delete_kind: Option<DeleteKind>,
@@ -798,23 +824,18 @@ impl QueryManager {
         branches: &[String],
         schema_context: &SchemaContext,
     ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
-        self.load_row_for_schema_update_in_context_for_tier(
-            storage,
-            id,
-            branches,
-            schema_context,
-            None,
-        )
+        self.load_schema_update_row_in_context_for_tier(storage, id, branches, schema_context, None)
+            .and_then(SchemaUpdateRowLoad::into_found_parts)
     }
 
-    pub fn load_row_for_schema_update_in_context_for_tier<H: Storage>(
+    pub(crate) fn load_schema_update_row_in_context_for_tier<H: Storage>(
         &mut self,
         storage: &mut H,
         id: ObjectId,
         branches: &[String],
         schema_context: &SchemaContext,
         durability_tier: Option<DurabilityTier>,
-    ) -> Option<(String, String, Vec<u8>, BatchId, RowProvenance)> {
+    ) -> Option<SchemaUpdateRowLoad> {
         let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
         let (table, row) = self.load_best_visible_row_batch(
             storage,
@@ -831,6 +852,9 @@ impl QueryManager {
             schema_context,
             schema_warnings: &mut schema_warnings,
         };
+        if row.is_hard_deleted() {
+            return Some(SchemaUpdateRowLoad::HardDeleted);
+        }
         if row.data.is_empty() {
             return None;
         }
@@ -842,14 +866,12 @@ impl QueryManager {
             BranchName::new(&row.branch),
             &mut transform_context,
         )
-        .map(|resolved| {
-            (
-                table,
-                resolved.branch_name.as_str().to_string(),
-                resolved.content,
-                resolved.batch_id,
-                row.row_provenance(),
-            )
+        .map(|resolved| SchemaUpdateRowLoad::Found {
+            table,
+            branch: resolved.branch_name.as_str().to_string(),
+            data: resolved.content,
+            batch_id: resolved.batch_id,
+            provenance: row.row_provenance(),
         })
     }
 
