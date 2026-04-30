@@ -691,11 +691,6 @@ function isObjectAlreadyExistsError(error: unknown): boolean {
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
 
-function isInsertShapeValidationError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("missing required field");
-}
-
 type BatchWriteContext = {
   batchMode: BatchMode;
   batchId: string;
@@ -1144,7 +1139,7 @@ export class SessionClient {
       await this.create(table, values, options);
       return;
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error) && !isInsertShapeValidationError(error)) {
+      if (!isObjectAlreadyExistsError(error)) {
         throw error;
       }
     }
@@ -2034,7 +2029,7 @@ export class JazzClient {
       );
       return { batchId: created.batchId };
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error) && !isInsertShapeValidationError(error)) {
+      if (!isObjectAlreadyExistsError(error)) {
         throw error;
       }
     }
