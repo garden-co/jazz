@@ -86,7 +86,7 @@ describe("Profile E2E", () => {
     }
     mounts.length = 0;
     window.location.hash = "";
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------

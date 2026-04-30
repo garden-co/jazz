@@ -187,7 +187,7 @@ describe("Chat App E2E", () => {
     window.location.hash = "";
     // Wait for the JazzProvider's async shutdown (worker termination,
     // OPFS lock release) to complete before starting the next test.
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------

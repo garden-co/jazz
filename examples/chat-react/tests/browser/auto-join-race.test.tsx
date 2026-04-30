@@ -86,7 +86,7 @@ describe("auto-join race on first message send", () => {
     window.location.hash = "";
     // Allow JazzProvider's async shutdown (worker termination, OPFS lock
     // release) to complete before the next test starts.
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   it("composer is disabled until membership is confirmed, then message delivers", async () => {
