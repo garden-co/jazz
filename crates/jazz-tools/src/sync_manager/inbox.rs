@@ -1538,7 +1538,18 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
+                    if let Some(table) = applied.metadata.get(MetadataKey::Table.as_str()).cloned()
+                    {
+                        self.forward_row_batch_to_servers_with_storage(
+                            storage,
+                            table.as_str(),
+                            object_id,
+                            applied.metadata.clone(),
+                            row,
+                        );
+                    } else {
+                        self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
+                    }
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
