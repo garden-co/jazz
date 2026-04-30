@@ -34,25 +34,24 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     // TODO: Accept app-name aliases in app-scoped route matching
     // Nesting all non-health routes under a fixed "/apps/{state.app_id}" path makes the server only match the canonical UUID string, but JavaScript callers frequently propagate human-readable app IDs (e.g. "test-app") that are valid elsewhere via AppId::from_name(...). In that non-UUID case, the client now builds /apps/test-app/... URLs while the server only serves /apps/<derived-uuid>/..., so websocket and admin/schema requests return 404 for otherwise valid app IDs.
     let app_route_prefix = format!("/apps/{}", state.app_id);
+    let admin_routes = Router::new()
+        .route("/schemas", post(publish_schema_handler))
+        .route("/schema-connectivity", get(schema_connectivity_handler))
+        .route("/permissions/head", get(permissions_head_handler))
+        .route(
+            "/permissions",
+            get(permissions_handler).post(publish_permissions_handler),
+        )
+        .route("/migrations", post(publish_migration_handler))
+        .route(
+            "/introspection/subscriptions",
+            get(admin_subscription_introspection_handler),
+        );
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
-        .route("/admin/schemas", post(publish_schema_handler))
-        .route(
-            "/admin/schema-connectivity",
-            get(schema_connectivity_handler),
-        )
-        .route("/admin/permissions/head", get(permissions_head_handler))
-        .route(
-            "/admin/permissions",
-            get(permissions_handler).post(publish_permissions_handler),
-        )
-        .route("/admin/migrations", post(publish_migration_handler))
-        .route(
-            "/admin/introspection/subscriptions",
-            get(admin_subscription_introspection_handler),
-        )
+        .nest("/admin", admin_routes)
         .layer(TraceLayer::new_for_http());
 
     Router::new()
