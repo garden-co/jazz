@@ -1,5 +1,11 @@
 # create-jazz
 
+## 2.0.0-alpha.43
+
+### Patch Changes
+
+- 5dec68f: Advance the `create-jazz` spinner to "Provisioning Jazz Cloud app" during the dashboard call, and stop credential/banner output from concatenating onto the active spinner line.
+
 ## 2.0.0-alpha.42
 
 ## 2.0.0-alpha.41
