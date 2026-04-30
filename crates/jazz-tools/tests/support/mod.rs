@@ -9,14 +9,11 @@ use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
-use jazz_tools::transport_protocol::SyncBatchRequest;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
-use reqwest::Client;
-use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -39,58 +36,6 @@ pub use permissions::{
     PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
     publish_allow_all_permissions, publish_permissions,
 };
-
-struct SyncServerClient {
-    http_client: Client,
-    base_url: String,
-    route_prefix: String,
-    admin_secret: String,
-}
-
-impl SyncServerClient {
-    async fn connect(
-        server_url: &str,
-        admin_secret: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let http_client = Client::new();
-        let (base_url, route_prefix) = split_base_url(server_url)?;
-
-        let health_url = format!("{base_url}/health");
-        http_client
-            .get(health_url)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(Self {
-            http_client,
-            base_url,
-            route_prefix,
-            admin_secret: admin_secret.to_string(),
-        })
-    }
-
-    async fn push_sync(
-        &self,
-        payload: jazz_tools::sync_manager::SyncPayload,
-        client_id: ClientId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let request = SyncBatchRequest {
-            payloads: vec![payload],
-            client_id,
-        };
-        let sync_url = format!("{}{}/sync", self.base_url, self.route_prefix);
-        self.http_client
-            .post(sync_url)
-            .header(CONTENT_TYPE, "application/json")
-            .header("X-Jazz-Admin-Secret", &self.admin_secret)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(())
-    }
-}
 
 fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     let mut url = reqwest::Url::parse(server_url)?;

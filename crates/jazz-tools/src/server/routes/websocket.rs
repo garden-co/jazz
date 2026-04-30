@@ -25,8 +25,7 @@ pub(super) async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, headers))
 }
 
-/// Outcome of authenticating a WS handshake — mirrors `ClientSetup` in
-/// the old `/sync` + `/events` handlers.
+/// Outcome of authenticating a WS handshake.
 #[derive(Debug)]
 pub(super) enum WsClientSetup {
     Backend,
