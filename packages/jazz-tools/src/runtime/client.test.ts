@@ -15,11 +15,8 @@ function makeFakeRuntime() {
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(),
-    insertDurable: vi.fn(),
     update: vi.fn(),
-    updateDurable: vi.fn(),
     delete: vi.fn(),
-    deleteDurable: vi.fn(),
     query:
       vi.fn<
         (
