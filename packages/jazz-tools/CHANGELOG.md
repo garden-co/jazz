@@ -1,5 +1,29 @@
 # jazz-tools
 
+## 2.0.0-alpha.43
+
+### Patch Changes
+
+- bca70a5: - Transactions and batches no longer require a table when being created. The schema is determined by the first CRUD operation performed inside the transaction.
+  - Add new `Db.transaction` and `Db.batch` methods. These methods receive a callback as parameter and commit automatically once the callback finishes running. They are preferred over their `beginTransaction`/`beginBatch` counterparts.
+- 51cbb09: Fix `jazz-tools/expo` fetch polyfill rejecting URL and Request inputs.
+
+  `expo/fetch`'s native bridge only accepts a string for the first argument, so calling `fetch(new URL(...))` or `fetch(new Request(...))` — both valid per the WHATWG spec, and the form better-auth's client uses — failed with "The 2nd argument cannot be cast to type URL". The polyfill now normalises URL and Request inputs to a string URL plus a merged init (including the request body) before delegating to `expo/fetch`.
+
+- b092cec: The `jazz-tools` CLI now loads `.env` from the working directory at startup, so `deploy` and other commands pick up `JAZZ_ADMIN_SECRET`, `JAZZ_SERVER_URL` (and framework-prefixed equivalents) from the same dotenv file your app uses. Pass `--env-file <path>` (repeatable) to load from a specific file — useful for staging/production splits like `--env-file .env.staging`. Real environment variables still take precedence.
+- e71f3f0: Fix `jazzPlugin()` (`jazz-tools/dev/vite`) so its return type matches Vite's `Plugin`. The `config` hook's parameter previously typed `ssr.external` as `string[] | undefined`, but Vite's `UserConfig` allows `true | string[] | undefined` (`true` = externalize everything), causing `TS2769` in consumer `vite.config.ts` files. Widen the param and preserve `external: true` when the user already opts into it.
+- bb60ab4: Fix MaterializeNode passing an empty table name to the row loader, which caused old-branch rows to be silently dropped after a schema migration on storage backends that resolve rows by locator. Apps with persistent local data from a previous schema would see all their old rows disappear from query results until a fresh sync.
+- c1c873f: Speed up per-row history lookups in `MemoryStorage` by nesting the history map by `row_id`, so reads scale with the row's own history rather than the table size.
+- 3a9726e: Trigger a Vite full-reload from the Jazz Vite and SvelteKit dev plugins
+  whenever the schema watcher successfully pushes an updated schema, so the
+  browser picks up the new schema without a manual refresh.
+- 31c9562: Remove the unused `insertDurable` / `insertDurableWithSession` / `updateDurable` / `updateDurableWithSession` / `deleteDurable` / `deleteDurableWithSession` methods from the `Runtime` interface and from the jazz-napi, jazz-wasm, and React Native runtime adapters. These were superseded by the `insert(...).wait({ tier })` / `update(...).wait({ tier })` / `delete(...).wait({ tier })` API and had no remaining callers.
+- 826d1bc: Fix `getLocalFirstIdentityProof` on React Native by minting the proof token through `jazz-rn` instead of the (unavailable) WASM module, restoring the local-first → upgrade-to-account sign-up flow on RN.
+- 3e2564a: Queue unsent parent row batches before child row batches when syncing to servers. This keeps server-side permission checks from evaluating updates before their prior row content has arrived.
+- fafdd2c: Align batch and transaction writes with the simple write API by supporting custom insert ids and upserts.
+  - jazz-wasm@2.0.0-alpha.43
+  - jazz-rn@2.0.0-alpha.43
+
 ## 2.0.0-alpha.42
 
 ### Patch Changes
