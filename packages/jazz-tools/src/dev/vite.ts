@@ -74,14 +74,21 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
   return {
     name: "jazz",
 
-    config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
-      const existingSsr = config.ssr?.external ?? [];
+    config(config: {
+      ssr?: { external?: true | string[] };
+      optimizeDeps?: { exclude?: string[] };
+    }) {
+      const existingSsr = config.ssr?.external;
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       const jazzWasmEntry = resolveJazzWasmEntry();
+      // `ssr.external: true` means "externalize everything", so jazz-napi is
+      // already covered — preserve the bool rather than coercing to an array.
+      const ssrExternal: true | string[] =
+        existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
       return {
         worker: { format: "es" as const },
         optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
-        ssr: { external: Array.from(new Set([...existingSsr, "jazz-napi"])) },
+        ssr: { external: ssrExternal },
         ...(jazzWasmEntry
           ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
           : {}),
