@@ -2,7 +2,8 @@ use super::*;
 use crate::batch_fate::BatchSettlement;
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{BatchId, HistoryScan, StoredRowBatch};
-use crate::storage::{RowLocator, metadata_from_row_locator};
+use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 impl SyncManager {
@@ -108,11 +109,113 @@ impl SyncManager {
             self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
             let metadata = metadata_from_row_locator(&row_locator);
-            for server_id in server_ids {
-                self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
-            }
+            self.forward_row_batch_to_servers_with_storage(
+                storage,
+                row_locator.table.as_str(),
+                object_id,
+                metadata,
+                row,
+            );
             return;
         }
+    }
+
+    pub(crate) fn forward_row_batch_to_servers_with_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+        table: &str,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowBatch,
+    ) {
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        if !server_ids.is_empty() {
+            tracing::trace!(
+                %object_id,
+                branch = row.branch.as_str(),
+                servers = server_ids.len(),
+                "forwarding row batch entry with parent closure to servers"
+            );
+        }
+
+        for server_id in server_ids {
+            let mut visiting = HashSet::new();
+            self.queue_row_to_server_with_missing_parents(
+                storage,
+                table,
+                server_id,
+                metadata.clone(),
+                row.clone(),
+                &mut visiting,
+            );
+        }
+    }
+
+    pub(super) fn queue_row_to_server_with_missing_parents<H: Storage>(
+        &mut self,
+        storage: &H,
+        table: &str,
+        server_id: ServerId,
+        metadata: HashMap<String, String>,
+        row: StoredRowBatch,
+        visiting: &mut HashSet<BatchId>,
+    ) {
+        let object_id = row.row_id;
+        let branch_name = BranchName::new(&row.branch);
+        let already_sent = self
+            .servers
+            .get(&server_id)
+            .and_then(|server| {
+                server
+                    .sent_batch_ids
+                    .get(&(object_id, branch_name))
+                    .cloned()
+            })
+            .unwrap_or_default();
+
+        for parent_batch_id in row.parents.iter().copied() {
+            if already_sent.contains(&parent_batch_id) {
+                continue;
+            }
+            if !visiting.insert(parent_batch_id) {
+                continue;
+            }
+
+            match storage.load_history_row_batch(
+                table,
+                row.branch.as_str(),
+                object_id,
+                parent_batch_id,
+            ) {
+                Ok(Some(parent_row)) => self.queue_row_to_server_with_missing_parents(
+                    storage,
+                    table,
+                    server_id,
+                    metadata.clone(),
+                    parent_row,
+                    visiting,
+                ),
+                Ok(None) => tracing::warn!(
+                    %server_id,
+                    %object_id,
+                    %branch_name,
+                    ?parent_batch_id,
+                    "missing parent row batch in local storage while queueing row batch to server"
+                ),
+                Err(error) => tracing::warn!(
+                    %server_id,
+                    %object_id,
+                    %branch_name,
+                    ?parent_batch_id,
+                    %error,
+                    "failed to load parent row batch while queueing row batch to server"
+                ),
+            }
+
+            visiting.remove(&parent_batch_id);
+        }
+
+        self.queue_row_to_server(server_id, object_id, metadata, row);
     }
 
     pub(crate) fn forward_row_batch_to_servers(

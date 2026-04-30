@@ -373,7 +373,9 @@ impl QueryManager {
                 }
             })?;
 
-        self.sync_manager.forward_row_batch_to_servers(
+        self.sync_manager.forward_row_batch_to_servers_with_storage(
+            storage,
+            table,
             row_id,
             metadata_from_row_locator(&applied.row_locator),
             forwarded_row,
