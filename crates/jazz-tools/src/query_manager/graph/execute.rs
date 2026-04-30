@@ -290,6 +290,41 @@ impl QueryGraph {
         result
     }
 
+    fn process_limit_offset_with_ordered_sort_input(
+        &mut self,
+        node_id: NodeId,
+        input_node: NodeId,
+    ) -> Option<TupleDelta> {
+        let node_idx = node_id.0 as usize;
+        let input_idx = input_node.0 as usize;
+
+        if node_idx == input_idx || node_idx >= self.nodes.len() || input_idx >= self.nodes.len() {
+            return None;
+        }
+
+        if input_idx < node_idx {
+            let (before_node, from_node) = self.nodes.split_at_mut(node_idx);
+            let input = &before_node[input_idx].node;
+            let node = &mut from_node[0].node;
+            return match (input, node) {
+                (GraphNode::Sort(sort_node), GraphNode::LimitOffset(limit_offset_node)) => {
+                    Some(limit_offset_node.process_with_ordered_input(sort_node.sorted_tuples()))
+                }
+                _ => None,
+            };
+        }
+
+        let (before_input, from_input) = self.nodes.split_at_mut(input_idx);
+        let node = &mut before_input[node_idx].node;
+        let input = &from_input[0].node;
+        match (input, node) {
+            (GraphNode::Sort(sort_node), GraphNode::LimitOffset(limit_offset_node)) => {
+                Some(limit_offset_node.process_with_ordered_input(sort_node.sorted_tuples()))
+            }
+            _ => None,
+        }
+    }
+
     /// Settle the graph - process all dirty nodes in topological order.
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
@@ -593,22 +628,22 @@ impl QueryGraph {
                 }
                 Some(GraphNode::LimitOffset(_)) => {
                     let input_node = self.get_inputs(node_id).first().copied();
-                    let ordered_input = input_node.and_then(|dep| match self.get_node(dep) {
-                        Some(GraphNode::Sort(sort_node)) => {
-                            Some(sort_node.sorted_tuples().to_vec())
-                        }
-                        _ => None,
-                    });
-
-                    if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
-                        let delta = if let Some(ordered) = ordered_input {
-                            lo_node.process_with_ordered_input(&ordered)
-                        } else {
+                    let delta = input_node
+                        .and_then(|dep| {
+                            self.process_limit_offset_with_ordered_sort_input(node_id, dep)
+                        })
+                        .or_else(|| {
+                            let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id)
+                            else {
+                                return None;
+                            };
                             let input_delta = input_node
                                 .and_then(|dep| tuple_deltas.get(&dep).cloned())
                                 .unwrap_or_default();
-                            RowNode::process(lo_node, input_delta)
-                        };
+                            Some(RowNode::process(lo_node, input_delta))
+                        });
+
+                    if let Some(delta) = delta {
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
