@@ -1,11 +1,12 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::SharedString;
 use crate::row_histories::StoredRowBatch;
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashMap;
 
-type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowBatch);
+type RowSyncData = (SharedString, HashMap<String, String>, StoredRowBatch);
 
 impl SyncManager {
     fn scope_delivery_row(mut row: StoredRowBatch) -> StoredRowBatch {
@@ -49,15 +50,7 @@ impl SyncManager {
             self.collect_row_sync_versions(storage, object_id, &row_locator, &mut row_sync);
         }
 
-        for (object_id, metadata, row) in row_sync {
-            let Some(table) = metadata
-                .get(crate::metadata::MetadataKey::Table.as_str())
-                .cloned()
-            else {
-                self.queue_row_to_server(server_id, object_id, metadata, row);
-                continue;
-            };
-
+        for (table, metadata, row) in row_sync {
             let mut visiting = std::collections::HashSet::new();
             self.queue_row_to_server_with_missing_parents(
                 storage,
@@ -98,7 +91,7 @@ impl SyncManager {
             if already_upstream {
                 continue;
             }
-            row_sync.push((object_id, metadata.clone(), row));
+            row_sync.push((row_locator.table.clone(), metadata.clone(), row));
         }
     }
 
