@@ -56,18 +56,9 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
-        let sync_scope = self.sync_scope_provenance();
         self.windowed_tuples.clear();
         self.windowed_tuples
-            .extend(
-                self.all_tuples[start..end]
-                    .iter()
-                    .cloned()
-                    .map(|mut tuple| {
-                        tuple.merge_provenance(&sync_scope);
-                        tuple
-                    }),
-            );
+            .extend(self.all_tuples[start..end].iter().cloned());
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
@@ -86,24 +77,36 @@ impl LimitOffsetNode {
         &self.windowed_tuples
     }
 
+    /// Full ordered input before offset/limit are applied.
+    pub fn ordered_input_tuples(&self) -> &[Tuple] {
+        &self.all_tuples
+    }
+
     /// Tuples that must be present locally to reproduce this paginated window.
     ///
     /// For offset-based pagination, the client must have the ordered prefix up to
     /// `offset + limit` so it can reapply the same windowing logic locally.
     /// When no limit is present, that means the full ordered input.
     pub fn sync_input_tuples(&self) -> &[Tuple] {
-        let end = match self.limit {
-            Some(limit) => self.offset.saturating_add(limit).min(self.all_tuples.len()),
-            None => self.all_tuples.len(),
-        };
-        &self.all_tuples[..end]
+        Self::sync_input_tuples_from_ordered(self.limit, self.offset, &self.all_tuples)
     }
 
-    fn sync_scope_provenance(&self) -> crate::query_manager::types::TupleProvenance {
-        self.sync_input_tuples()
-            .iter()
-            .flat_map(|tuple| tuple.provenance().iter().copied())
-            .collect()
+    /// Tuples from an already-filtered ordered input that must be present locally
+    /// to reproduce this paginated window.
+    pub fn filtered_sync_input_tuples<'a>(&self, ordered_tuples: &'a [Tuple]) -> &'a [Tuple] {
+        Self::sync_input_tuples_from_ordered(self.limit, self.offset, ordered_tuples)
+    }
+
+    fn sync_input_tuples_from_ordered(
+        limit: Option<usize>,
+        offset: usize,
+        ordered_tuples: &[Tuple],
+    ) -> &[Tuple] {
+        let end = match limit {
+            Some(limit) => offset.saturating_add(limit).min(ordered_tuples.len()),
+            None => ordered_tuples.len(),
+        };
+        &ordered_tuples[..end]
     }
 }
 
@@ -184,6 +187,14 @@ mod tests {
             batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
+    }
+
+    fn make_scoped_tuple(id: ObjectId, n: i32, name: &str) -> Tuple {
+        make_tuple(id, n, name).with_provenance(
+            [(id, crate::object::BranchName::new("main"))]
+                .into_iter()
+                .collect(),
+        )
     }
 
     fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
@@ -280,6 +291,37 @@ mod tests {
         assert_eq!(windowed_ids.len(), 2);
         assert_eq!(windowed_ids[0], ids[1]);
         assert_eq!(windowed_ids[1], ids[2]);
+    }
+
+    #[test]
+    fn windowed_tuples_keep_row_provenance_separate_from_sync_prefix() {
+        let mut node = make_limit_offset_node(Some(2), 1);
+
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_scoped_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        assert_eq!(node.sync_input_tuples().len(), 3);
+        assert_eq!(node.windowed_tuples().len(), 2);
+        assert_eq!(node.windowed_tuples()[0].first_id(), Some(ids[1]));
+        assert_eq!(node.windowed_tuples()[1].first_id(), Some(ids[2]));
+        assert_eq!(node.windowed_tuples()[0].provenance().len(), 1);
+        assert_eq!(node.windowed_tuples()[1].provenance().len(), 1);
+        assert!(
+            node.windowed_tuples()[0]
+                .provenance()
+                .contains(&(ids[1], crate::object::BranchName::new("main")))
+        );
+        assert!(
+            node.windowed_tuples()[1]
+                .provenance()
+                .contains(&(ids[2], crate::object::BranchName::new("main")))
+        );
     }
 
     #[test]
