@@ -144,6 +144,10 @@ harness = false
 name = "observer_write_path"
 harness = false
 
+[[bench]]
+name = "limit_offset_benchmark"
+harness = false
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
