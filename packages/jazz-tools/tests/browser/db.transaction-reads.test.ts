@@ -131,6 +131,60 @@ describe("db transaction reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
+  it("supports custom ids and upserts inside transactions", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-transaction-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-write-api-parity") },
+      }),
+    );
+
+    const { value: existingTodo } = db.insert(todos, {
+      title: "Bob drafted release notes",
+      done: false,
+    });
+
+    const tx = db.beginTransaction();
+
+    const customId = "00000000-0000-0000-0000-000000000123";
+    const insertedTodo = tx.insert(
+      todos,
+      { title: "Alice planned the launch", done: false },
+      { id: customId },
+    );
+
+    const createdByUpsertId = "00000000-0000-0000-0000-000000000124";
+    tx.upsert(todos, { title: "Bob wrote release notes", done: false }, { id: createdByUpsertId });
+    tx.upsert(todos, { done: true }, { id: existingTodo.id });
+
+    expect(insertedTodo).toEqual({
+      id: customId,
+      title: "Alice planned the launch",
+      done: false,
+    });
+    expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
+
+    tx.commit();
+
+    const committedRows = await db.all<Todo>(makeTodoQuery());
+    expect(committedRows).toHaveLength(3);
+    expect(committedRows).toEqual(
+      expect.arrayContaining([
+        insertedTodo,
+        {
+          id: createdByUpsertId,
+          title: "Bob wrote release notes",
+          done: false,
+        },
+        {
+          id: existingTodo.id,
+          title: "Bob drafted release notes",
+          done: true,
+        },
+      ]),
+    );
+  });
+
   it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
     const db = track(
       await createDb({
@@ -199,6 +253,58 @@ describe("db batch reads browser integration", () => {
     const insertedTodo = batchResult.value;
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
+  it("supports custom ids and upserts inside direct batches", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("batch-write-api-parity") },
+      }),
+    );
+
+    const { value: existingTodo } = db.insert(todos, {
+      title: "Bob queued docs review",
+      done: false,
+    });
+
+    const batch = db.beginBatch();
+
+    const customId = "00000000-0000-0000-0000-000000000223";
+    const insertedTodo = batch.insert(
+      todos,
+      { title: "Alice staged screenshots", done: false },
+      { id: customId },
+    );
+
+    const createdByUpsertId = "00000000-0000-0000-0000-000000000224";
+    batch.upsert(todos, { title: "Bob checked the docs", done: false }, { id: createdByUpsertId });
+    batch.upsert(todos, { done: true }, { id: existingTodo.id });
+
+    expect(insertedTodo).toEqual({
+      id: customId,
+      title: "Alice staged screenshots",
+      done: false,
+    });
+    const visibleRows = await db.all<Todo>(makeTodoQuery());
+    expect(visibleRows).toHaveLength(3);
+    expect(visibleRows).toEqual(
+      expect.arrayContaining([
+        {
+          id: existingTodo.id,
+          title: "Bob queued docs review",
+          done: true,
+        },
+        insertedTodo,
+        {
+          id: createdByUpsertId,
+          title: "Bob checked the docs",
+          done: false,
+        },
+      ]),
+    );
+
+    batch.commit();
   });
 
   it("does not rollback changes if the callback rejects", async () => {

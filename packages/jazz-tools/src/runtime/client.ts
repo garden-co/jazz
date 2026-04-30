@@ -691,6 +691,11 @@ function isObjectAlreadyExistsError(error: unknown): boolean {
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
 
+function isInsertShapeValidationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("missing required field");
+}
+
 type BatchWriteContext = {
   batchMode: BatchMode;
   batchId: string;
@@ -928,18 +933,32 @@ export class Transaction {
     return handle;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
     this.ensureActive();
     const row = this.client.createInternal(
       table,
       values,
       this.session,
       this.attribution,
-      undefined,
+      options,
       this.batchContext,
     );
     this.markTouchedRow(row.id);
     return row;
+  }
+
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.ensureActive();
+    this.client.upsertInternal(
+      table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
+      this.batchContext,
+    );
+    this.markTouchedRow(options.id);
   }
 
   update(objectId: string, updates: Record<string, Value>): void {
@@ -1012,14 +1031,27 @@ export class DirectBatch {
     return handle;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
     this.ensureActive();
     return this.client.createInternal(
       table,
       values,
       this.session,
       this.attribution,
-      undefined,
+      options,
+      this.batchContext,
+    );
+  }
+
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.ensureActive();
+    this.client.upsertInternal(
+      table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
       this.batchContext,
     );
   }
@@ -1112,7 +1144,7 @@ export class SessionClient {
       await this.create(table, values, options);
       return;
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!isObjectAlreadyExistsError(error) && !isInsertShapeValidationError(error)) {
         throw error;
       }
     }
@@ -1909,9 +1941,20 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
+    batchContext?: BatchWriteContext,
   ): WriteHandle {
-    const result = this.upsertInternal(table, values, objectId, session, attribution, updatedAt);
-    this.sealBatch(result.batchId);
+    const result = this.upsertInternal(
+      table,
+      values,
+      objectId,
+      session,
+      attribution,
+      updatedAt,
+      batchContext,
+    );
+    if (!batchContext) {
+      this.sealBatch(result.batchId);
+    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1975,15 +2018,23 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
+    batchContext?: BatchWriteContext,
   ): DirectMutationResult {
     try {
-      const created = this.createInternal(table, values, session, attribution, {
-        id: objectId,
-        updatedAt,
-      });
+      const created = this.createInternal(
+        table,
+        values,
+        session,
+        attribution,
+        {
+          id: objectId,
+          updatedAt,
+        },
+        batchContext,
+      );
       return { batchId: created.batchId };
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!isObjectAlreadyExistsError(error) && !isInsertShapeValidationError(error)) {
         throw error;
       }
     }
@@ -1993,7 +2044,7 @@ export class JazzClient {
       values as Record<string, Value>,
       session,
       attribution,
-      undefined,
+      batchContext,
       updatedAt,
     );
   }
