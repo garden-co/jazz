@@ -303,6 +303,38 @@ describe("Db transactions", () => {
     expect(runtimeTransaction.commit).not.toHaveBeenCalled();
   });
 
+  it("routes typed transaction upserts through the runtime transaction", () => {
+    const table = todoTable();
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-upsert-tx"),
+      create: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-upsert-tx").handle),
+      localBatchRecord: vi.fn((batchId = "batch-upsert-tx") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-upsert-tx")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    db.transaction((tx) => {
+      tx.upsert(table, { title: "Updated in transaction" }, { id: "todo-upsert-tx" });
+    });
+
+    expect(runtimeTransaction.upsert).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "Updated in transaction" } },
+      { id: "todo-upsert-tx" },
+    );
+  });
+
   it("commits a typed async callback transaction after the callback resolves", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
@@ -695,6 +727,40 @@ describe("Db transactions", () => {
     await expect(db.batch(async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtimeBatch.commit).not.toHaveBeenCalled();
+  });
+
+  it("routes typed direct batch upserts through the runtime batch", () => {
+    const table = todoTable();
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-upsert-direct"),
+      create: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-upsert-direct", "direct").handle),
+      localBatchRecord: vi.fn((batchId = "batch-upsert-direct") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-upsert-direct", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    db.batch((batch) => {
+      batch.upsert(table, { title: "Updated in direct batch" }, { id: "todo-upsert-direct" });
+    });
+
+    expect(runtimeBatch.upsert).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "Updated in direct batch" } },
+      { id: "todo-upsert-direct" },
+    );
   });
 
   it("commits a typed async callback batch after the callback resolves", async () => {
