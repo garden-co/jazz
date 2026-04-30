@@ -123,7 +123,7 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
 
-Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. It is mutually exclusive with `secret` and `jwtToken`; call `db.updateCookieSession(nextSession)` after the cookie-backed session changes, or recreate `JazzProvider` / `Db` on sign-in and sign-out.
+Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
 
 ### Storage driver
 

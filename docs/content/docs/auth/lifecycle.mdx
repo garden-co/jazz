@@ -39,7 +39,8 @@ identity.
 <Callout type="warn">
   The local-first secret is the user's identity. If it is lost, rows owned only by that identity may
   become inaccessible unless the user restores the same secret from a recovery passphrase, passkey
-  backup, or linked external account.
+  backup, or linked external account. The secret should be protected carefully: anyone with the secret can
+  authenticate as the user. 
 </Callout>
 
 Use [Local-first auth](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) to add
@@ -47,7 +48,7 @@ recovery before shipping flows that clear or replace a local-first secret.
 
 ## Switching users
 
-Do not use `db.updateAuthToken(null)` to sign out or switch principals on a live `Db`. Recreate the
+Recreate the
 client with a new auth config whenever the active principal changes:
 
 ```tsx
@@ -56,13 +57,13 @@ client with a new auth config whenever the active principal changes:
 </JazzProvider>
 ```
 
-For the same external principal, `db.updateAuthToken(freshJwt)` is fine for refreshing an expiring
-bearer token. For cookie-based auth, `db.updateCookieSession(nextSession)` updates the mirrored
-session for the same principal while the HttpOnly cookie remains the transport credential.
+For the same external user, `db.updateAuthToken(freshJwt)` is fine for refreshing an expiring
+bearer token. Do not use `db.updateAuthToken(null)` to sign out or switch users on a live `Db`. For cookie-based auth, `db.updateCookieSession(nextSession)` updates the mirrored
+session for the same user while the HttpOnly cookie remains the transport credential.
 
 ## Logout
 
-Use `db.logout()` when you are done with a `Db` instance during logout or a principal switch. It
+Use `db.logout()` when you are done with a `Db` instance during logout or switching users. It
 shuts down subscriptions, workers, and cached runtime clients. Your auth provider is still
 responsible for clearing its own token or cookie, and your app should recreate `Db` or
 `JazzProvider` with the next auth config.

@@ -104,10 +104,7 @@ recommended path for login, logout, and any principal change. See
 
 ### Cookie-based auth
 
-Use `cookieSession` when your browser app authenticates sync with an HttpOnly cookie and therefore
-does not have a bearer JWT available in JavaScript. The cookie remains the transport credential;
-`cookieSession` is a mirrored Jazz session used for local permission evaluation, `useSession()`, and
-`db.getAuthState()`.
+Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active.
 
 ```ts
 const db = await createDb({
@@ -121,9 +118,7 @@ const db = await createDb({
 });
 ```
 
-`cookieSession` is mutually exclusive with `secret` and `jwtToken`. When the cookie-backed session
-changes for the same principal, call `db.updateCookieSession(nextSession)`. For sign-in, sign-out,
-or a different user, recreate `Db` or `JazzProvider` with a new config.
+You must choose between `cookieSession` and `secret`/`jwtToken`. If the same user is signed in, but their session changes (e.g. new claims, refreshed cookie), call `db.updateCookieSession(nextSession)`. To sign in, sign out, or authenticate as a different user, recreate `Db` or `JazzProvider` with a new config.
 
 ### Reacting to expiry and unauthenticated responses
 
