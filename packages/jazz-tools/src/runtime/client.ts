@@ -686,7 +686,7 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims, authMode };
 }
 
-function isObjectAlreadyExistsError(error: unknown): boolean {
+function shouldFallbackToUpsertUpdate(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
@@ -1139,7 +1139,7 @@ export class SessionClient {
       await this.create(table, values, options);
       return;
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!shouldFallbackToUpsertUpdate(error)) {
         throw error;
       }
     }
@@ -2029,7 +2029,7 @@ export class JazzClient {
       );
       return { batchId: created.batchId };
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!shouldFallbackToUpsertUpdate(error)) {
         throw error;
       }
     }
