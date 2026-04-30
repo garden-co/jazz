@@ -69,15 +69,16 @@ describe("db transaction reads browser integration", () => {
     const bobTx = db.beginTransaction();
 
     const aliceDraft = aliceTx.insert(todos, { title: "Alice draft", done: false });
-    bobTx.insert(todos, { title: "Bob draft", done: false });
+    const bobDraft = bobTx.insert(todos, { title: "Bob draft", done: false });
 
     const aliceRows = await aliceTx.all<Todo>(makeTodoQuery());
     expect(aliceRows).toEqual([aliceDraft]);
 
     const bobRows = await bobTx.all<Todo>(makeTodoQuery());
-    expect(bobRows.map((row) => row.title)).toEqual(["Bob draft"]);
+    expect(bobRows).toEqual([bobDraft]);
 
-    await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([]);
+    const globalRows = await db.all<Todo>(makeTodoQuery());
+    expect(globalRows).toEqual([]);
   });
 
   it("keeps same-row staged updates isolated to the transaction that issued them", async () => {
@@ -108,6 +109,26 @@ describe("db transaction reads browser integration", () => {
       title: "Bob draft",
       done: false,
     });
+  });
+
+  it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-transaction-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-commit-reads") },
+      }),
+    );
+
+    const tx = db.beginTransaction();
+    const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+
+    const _txResult = tx.commit();
+    // No need to wait in this case, because the Db is not connected to a server
+    // await _txResult.wait({ tier: "global" });
+
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
   it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
@@ -148,6 +169,22 @@ describe("db transaction reads browser integration", () => {
 });
 
 describe("db batch reads browser integration", () => {
+  it("changes in an uncommited batch are visible globally", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-batch-reads-test",
+        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
+      }),
+    );
+
+    const batch = db.beginBatch();
+    const insertedTodo = batch.insert(todos, { title: "Batch", done: false });
+
+    // Changes are visible globally even without a batch.commit()
+
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
   it("commits changes once the callback resolves", async () => {
     const db = track(
       await createDb({
@@ -164,7 +201,7 @@ describe("db batch reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
-  it("does not commit changes if the callback rejects", async () => {
+  it("does not rollback changes if the callback rejects", async () => {
     const db = track(
       await createDb({
         appId: "db-batch-reads-test",
@@ -172,13 +209,16 @@ describe("db batch reads browser integration", () => {
       }),
     );
 
+    let insertedTodo: Todo | undefined;
     expect(() =>
       db.batch((batch) => {
-        batch.insert(todos, { title: "Batch", done: false });
+        insertedTodo = batch.insert(todos, { title: "Batch", done: false });
         throw new Error("callback failed");
       }),
     ).toThrow("callback failed");
 
-    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+    const globalTodo = await db.one<Todo>(makeTodoQuery());
+    expect(globalTodo).toBeDefined();
+    expect(globalTodo).toEqual(insertedTodo);
   });
 });
