@@ -7,7 +7,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
@@ -64,9 +63,7 @@ describe("Invite Flow E2E", () => {
     const appId =
       config.appId ?? `test-invite-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    await act(async () => {
-      r.render(<App config={{ appId, ...config }} />);
-    });
+    r.render(<App config={{ appId, ...config }} />);
 
     await waitFor(
       () =>
@@ -84,7 +81,7 @@ describe("Invite Flow E2E", () => {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
     const { root } = mounts[idx];
-    await act(async () => root.unmount());
+    root.unmount();
     el.remove();
     mounts.splice(idx, 1);
     await new Promise((r) => setTimeout(r, 200));
@@ -94,7 +91,7 @@ describe("Invite Flow E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -139,7 +136,7 @@ describe("Invite Flow E2E", () => {
     const aliceMenuButton = aliceContainer.querySelector<HTMLElement>(
       'header [data-slot="dropdown-menu-trigger"]',
     )!;
-    await act(async () => simulateClick(aliceMenuButton));
+    simulateClick(aliceMenuButton);
 
     await waitFor(
       () =>
@@ -153,7 +150,7 @@ describe("Invite Flow E2E", () => {
     const chatListItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
       (i) => i.textContent?.includes("Chat List"),
     ) as HTMLElement;
-    await act(async () => simulateClick(chatListItem));
+    simulateClick(chatListItem);
 
     await waitFor(
       () =>
@@ -167,7 +164,7 @@ describe("Invite Flow E2E", () => {
     const privateChatButton = [...aliceContainer.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("New Private Chat"),
     ) as HTMLElement;
-    await act(async () => simulateClick(privateChatButton));
+    simulateClick(privateChatButton);
 
     await waitFor(
       () => aliceContainer.textContent?.includes("This is a private chat.") ?? false,
@@ -187,9 +184,9 @@ describe("Invite Flow E2E", () => {
       b.querySelector(".lucide-send"),
     );
 
-    await act(async () => typeIntoEditor(aliceEditor, randomSecret));
+    typeIntoEditor(aliceEditor, randomSecret);
     if (aliceSendButton) {
-      await act(async () => simulateClick(aliceSendButton));
+      simulateClick(aliceSendButton);
     }
 
     await waitFor(
@@ -217,7 +214,7 @@ describe("Invite Flow E2E", () => {
       '[data-testid="chat-header"] button:has(.lucide-settings)',
     );
     expect(gearButton).toBeTruthy();
-    await act(async () => simulateClick(gearButton!));
+    simulateClick(gearButton!);
 
     await waitFor(
       () => document.querySelector('[data-slot="sheet-content"]') !== null,
@@ -230,7 +227,7 @@ describe("Invite Flow E2E", () => {
       (b) => b.textContent?.toLowerCase().includes("invite"),
     ) as HTMLElement;
     expect(inviteButton).toBeTruthy();
-    await act(async () => simulateClick(inviteButton));
+    simulateClick(inviteButton);
 
     // Wait for the share modal and read the invite link
     await waitFor(
@@ -248,7 +245,7 @@ describe("Invite Flow E2E", () => {
       b.textContent?.includes("Done"),
     ) as HTMLElement;
     if (doneButton) {
-      await act(async () => simulateClick(doneButton));
+      simulateClick(doneButton);
     }
 
     // Give the server time to persist

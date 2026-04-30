@@ -6,7 +6,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
@@ -64,9 +63,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const appId =
       config.appId ?? `test-settings-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    await act(async () => {
-      r.render(<App config={{ appId, ...config }} />);
-    });
+    r.render(<App config={{ appId, ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -81,7 +78,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -107,7 +104,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       '[data-testid="chat-header"] button:has(.lucide-settings)',
     );
     expect(gearButton).toBeTruthy();
-    await act(async () => simulateClick(gearButton!));
+    simulateClick(gearButton!);
 
     await waitFor(
       () => document.querySelector('[data-slot="sheet-content"]') !== null,
@@ -153,16 +150,14 @@ describe("ChatHeader + ChatSettings E2E", () => {
       "Chat name input should appear",
     );
 
-    await act(async () => {
-      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Weekend plans");
-    });
+    typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Weekend plans");
 
     // Close the sheet
     const closeButton = document
       .querySelector('[data-slot="sheet-content"] .lucide-x')
       ?.closest("button");
     if (closeButton) {
-      await act(async () => simulateClick(closeButton as HTMLElement));
+      simulateClick(closeButton as HTMLElement);
     }
 
     // Verify the header now shows the custom name
@@ -190,24 +185,20 @@ describe("ChatHeader + ChatSettings E2E", () => {
       5000,
       "Chat name input should appear",
     );
-    await act(async () => {
-      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Temporary name");
-    });
+    typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "Temporary name");
 
     // Wait for the name to take effect
     await new Promise((r) => setTimeout(r, 500));
 
     // Clear it
-    await act(async () => {
-      typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "");
-    });
+    typeInto(document.querySelector<HTMLInputElement>("#chat-name")!, "");
 
     // Close the sheet
     const closeButton = document
       .querySelector('[data-slot="sheet-content"] .lucide-x')
       ?.closest("button");
     if (closeButton) {
-      await act(async () => simulateClick(closeButton as HTMLElement));
+      simulateClick(closeButton as HTMLElement);
     }
 
     // Header should revert to the date (solo user) and not show the old name
@@ -269,7 +260,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       ...document.querySelectorAll<HTMLElement>('[data-slot="sheet-content"] button'),
     ].find((b) => b.textContent?.toLowerCase().includes("leave chat"));
     expect(leaveButton).toBeTruthy();
-    await act(async () => simulateClick(leaveButton!));
+    simulateClick(leaveButton!);
 
     // Confirm in the AlertDialog
     await waitFor(
@@ -281,7 +272,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
     const confirmButton = document.querySelector(
       '[data-slot="alert-dialog-action"]',
     ) as HTMLElement;
-    await act(async () => simulateClick(confirmButton));
+    simulateClick(confirmButton);
 
     // Should navigate to chat list
     await waitFor(
@@ -350,7 +341,7 @@ describe("ChatHeader + ChatSettings E2E", () => {
       '[data-testid="chat-header"] button:has(.lucide-settings)',
     );
     if (gearButton) {
-      await act(async () => simulateClick(gearButton));
+      simulateClick(gearButton);
 
       await waitFor(
         () => document.querySelector('[data-slot="sheet-content"]') !== null,
