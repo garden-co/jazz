@@ -10,7 +10,6 @@ import {
 describe("JazzClient schema order", () => {
   it("passes create values through in the declared schema order", async () => {
     const insert = vi.fn(() => mockRow());
-    const insertDurable = vi.fn(async () => mockRow());
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert,
@@ -81,7 +80,6 @@ describe("JazzClient schema order", () => {
       title: { type: "Text", value: "Buy milk" },
       done: { type: "Boolean", value: false },
     });
-    expect(insertDurable).not.toHaveBeenCalled();
   });
 
   it("reorders query rows back to the declared schema order", async () => {
