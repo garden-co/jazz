@@ -1,5 +1,3 @@
-import type { Db, TableProxy } from "jazz-tools";
-
 export type ChatMessageInput = {
   author_name: string;
   chat_id: string;
@@ -18,12 +16,4 @@ export function chatMessageInput(
     text,
     sent_at: new Date(),
   };
-}
-
-export async function canInsertChatMessage<T, Init>(
-  db: Pick<Db, "canInsert">,
-  messages: TableProxy<T, Init>,
-  message: Init,
-): Promise<boolean> {
-  return (await db.canInsert(messages, message)) === true;
 }
