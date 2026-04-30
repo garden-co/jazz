@@ -539,14 +539,58 @@ impl QueryManager {
             source_branch_schema_map,
             session,
         ) {
-            AuthorizedTuplesResult::Ready(tuples) => Some(
-                tuples
-                    .into_iter()
-                    .flat_map(|tuple| tuple.provenance().clone().into_iter())
-                    .collect(),
-            ),
-            AuthorizedTuplesResult::PermissionsUnavailable => None,
+            AuthorizedTuplesResult::Ready(_) => {}
+            AuthorizedTuplesResult::PermissionsUnavailable => return None,
         }
+
+        let Some((auth_schema, auth_context)) =
+            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
+        else {
+            if !self.authorization_schema_required {
+                return Some(graph.sync_scope_object_ids());
+            }
+            return None;
+        };
+
+        if !self.row_policy_mode.denies_missing_explicit_policy()
+            && auth_schema
+                .values()
+                .all(|table_schema| table_schema.policies.select.using.is_none())
+        {
+            return Some(graph.sync_scope_object_ids());
+        }
+
+        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+
+        Some(
+            graph
+                .sync_scope_tuples()
+                .into_iter()
+                .filter_map(|tuple| {
+                    tuple
+                        .provenance()
+                        .iter()
+                        .copied()
+                        .all(|(object_id, branch_name)| {
+                            *authorization_cache
+                                .entry((object_id, branch_name))
+                                .or_insert_with(|| {
+                                    self.provenance_row_matches_current_select_policy(
+                                        storage,
+                                        object_id,
+                                        branch_name,
+                                        session,
+                                        &auth_schema,
+                                        &auth_context,
+                                        source_branch_schema_map,
+                                    )
+                                })
+                        })
+                        .then_some(tuple)
+                })
+                .flat_map(|tuple| tuple.provenance().clone().into_iter())
+                .collect(),
+        )
     }
 
     pub(super) fn resolved_server_query_branches(
