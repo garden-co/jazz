@@ -1,4 +1,4 @@
-# Jazz
+# <img src="docs/public/jazz-logo.svg" alt="Jazz" width="100" />
 
 Jazz is a local-first relational database. It runs across your frontend, backend and our global storage cloud. Sync partial tables, durable streams and files, fast. Feels like simple reactive state.
 
@@ -72,7 +72,7 @@ pnpm release:publish
 pnpm release:publish:alpha
 ```
 
-## License
+# License
 
 Jazz is MIT licensed. The webfont files bundled with the homepage under
 `docs/public/fonts/` are expressly excluded from the repo MIT license and
