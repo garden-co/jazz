@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
@@ -24,7 +24,7 @@ export async function setup(): Promise<void> {
     serverUrl: handle.url,
     appId: handle.appId,
     adminSecret: handle.adminSecret,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../.."),
+    schemaDir: fileURLToPath(new URL("../..", import.meta.url)),
   });
 }
 

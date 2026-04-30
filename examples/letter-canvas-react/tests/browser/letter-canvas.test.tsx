@@ -236,13 +236,10 @@ describe("Letter Canvas E2E", () => {
     window.history.replaceState({}, "", "/");
 
     const originalInsert = Db.prototype.insert;
-    vi.spyOn(Db.prototype, "insert").mockImplementation(function (table, data, options) {
+    vi.spyOn(Db.prototype, "insert").mockImplementation(function (this: Db, table, data, options) {
       const pendingInsert = originalInsert.call(this, table, data, options);
       if ((table as { _table?: string })._table === "canvases") {
-        return {
-          ...pendingInsert,
-          wait: () => new Promise(() => {}),
-        };
+        pendingInsert.wait = () => new Promise(() => {});
       }
 
       return pendingInsert;
@@ -272,19 +269,19 @@ describe("Letter Canvas E2E", () => {
 
     const originalInsert = Db.prototype.insert;
     const cursorWaitSpy = vi.fn();
-    vi.spyOn(Db.prototype, "insert").mockImplementation(function (table, data, options) {
+    vi.spyOn(Db.prototype, "insert").mockImplementation(function (this: Db, table, data, options) {
       const pendingInsert = originalInsert.call(this, table, data, options);
       if ((table as { _table?: string })._table !== "cursors") {
         return pendingInsert;
       }
 
-      return {
-        ...pendingInsert,
-        wait: async (waitOptions: { tier: "local" | "edge" | "global" }) => {
-          cursorWaitSpy(waitOptions);
-          return pendingInsert.wait(waitOptions);
-        },
+      const originalWait = pendingInsert.wait.bind(pendingInsert);
+      pendingInsert.wait = async (waitOptions: { tier: "local" | "edge" | "global" }) => {
+        cursorWaitSpy(waitOptions);
+        return originalWait(waitOptions);
       };
+
+      return pendingInsert;
     });
 
     const container = await mountApp({

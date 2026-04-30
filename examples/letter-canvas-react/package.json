@@ -19,6 +19,7 @@
   "devDependencies": {
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/node": "^20.0.0",
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
