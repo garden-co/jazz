@@ -18,6 +18,8 @@ interface SerializeRuntimeSchemaOptions {
   loadedPolicyBundle?: boolean;
 }
 
+const runtimeSchemaCacheKeys = new WeakMap<WasmSchema, Map<boolean, string>>();
+
 function isRuntimeSchemaEnvelope(value: unknown): value is RuntimeSchemaEnvelope {
   return (
     isRecord(value) &&
@@ -59,6 +61,28 @@ export function serializeRuntimeSchema(
     loadedPolicyBundle: options?.loadedPolicyBundle ?? false,
   };
   return JSON.stringify(envelope, runtimeSchemaJsonReplacer);
+}
+
+export function getRuntimeSchemaCacheKey(
+  schema: WasmSchema,
+  options?: SerializeRuntimeSchemaOptions,
+): string {
+  const loadedPolicyBundle = options?.loadedPolicyBundle ?? false;
+  let keysByPolicyBundle = runtimeSchemaCacheKeys.get(schema);
+
+  if (!keysByPolicyBundle) {
+    keysByPolicyBundle = new Map();
+    runtimeSchemaCacheKeys.set(schema, keysByPolicyBundle);
+  }
+
+  const cached = keysByPolicyBundle.get(loadedPolicyBundle);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const key = serializeRuntimeSchema(schema, options);
+  keysByPolicyBundle.set(loadedPolicyBundle, key);
+  return key;
 }
 
 export function normalizeRuntimeSchemaJson(schemaJson: string): string {
