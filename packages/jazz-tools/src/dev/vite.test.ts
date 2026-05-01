@@ -287,7 +287,7 @@ describe("jazzPlugin", () => {
 
     const plugin = jazzPlugin({
       server: { port: 19881, adminSecret: "vite-telemetry-admin" },
-      telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      telemetry: "http://127.0.0.1:54418",
       schemaDir,
     });
 
@@ -373,7 +373,7 @@ describe("jazzPlugin", () => {
     const plugin = jazzPlugin({
       appId: "00000000-0000-0000-0000-000000000090",
       adminSecret: "vite-telemetry-admin",
-      telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      telemetry: "http://127.0.0.1:54418",
       schemaDir,
     });
     const configureServer = plugin.configureServer as (server: {

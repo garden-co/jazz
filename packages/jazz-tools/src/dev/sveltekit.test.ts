@@ -122,7 +122,7 @@ describe("jazzSvelteKit", () => {
     const root = await tempRoots.create("jazz-sveltekit-top-level-telemetry-test-");
     const plugin = jazzSvelteKit({
       server: { port: 19882, adminSecret: "sveltekit-telemetry-admin" },
-      telemetry: { collectorUrl: "http://127.0.0.1:54418" },
+      telemetry: "http://127.0.0.1:54418",
     });
     const viteServer = makeViteServer("serve", root);
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);

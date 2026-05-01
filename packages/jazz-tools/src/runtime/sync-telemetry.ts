@@ -1,9 +1,8 @@
-import type { SpanKind, TimeInput, Tracer } from "@opentelemetry/api";
-import type { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import type { TimeInput, Tracer } from "@opentelemetry/api";
 
 export const DEFAULT_TELEMETRY_COLLECTOR_URL = "http://localhost:4318";
 
-export type TelemetryOptions = boolean | { collectorUrl?: string };
+export type TelemetryOptions = boolean | string;
 
 interface WasmTraceSpan {
   name?: unknown;
@@ -16,22 +15,11 @@ interface WasmTraceSpan {
 
 const MAX_WASM_TRACE_SPANS_PER_REQUEST = 256;
 const MAX_PENDING_WASM_TRACE_SPANS = 5_000;
-const TELEMETRY_COLLECTOR_URL_ENV_KEYS = [
-  "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
-  "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
-  "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
-  "EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
-] as const;
+// SpanKind.INTERNAL — inlined to avoid a dynamic import of @opentelemetry/api.
+const SPAN_KIND_INTERNAL = 1;
 
-type TelemetryAttributeValue = string | number | boolean;
-
-interface WasmTraceExporterState {
-  provider: BasicTracerProvider;
-  tracer: Tracer;
-  spanKindInternal: SpanKind;
-}
-
-const wasmTraceExporters = new Map<string, Promise<WasmTraceExporterState>>();
+let cachedExporter: Promise<{ tracer: Tracer }> | null = null;
+let warnedOnExportFailure = false;
 
 type ImportMetaWithEnv = ImportMeta & {
   env?: Record<string, string | undefined>;
@@ -41,27 +29,27 @@ export function resolveTelemetryCollectorUrl(
   telemetry: TelemetryOptions | undefined,
 ): string | undefined {
   if (telemetry === true) return DEFAULT_TELEMETRY_COLLECTOR_URL;
-  if (telemetry === false || telemetry === undefined) return undefined;
-  const collectorUrl = telemetry.collectorUrl?.trim();
-  return collectorUrl || DEFAULT_TELEMETRY_COLLECTOR_URL;
+  if (typeof telemetry !== "string") return undefined;
+  return telemetry.trim() || undefined;
 }
 
+// Bundlers (Vite, Next/Webpack DefinePlugin, esbuild) only inline
+// `process.env.X` / `import.meta.env.X` when both the object chain and the
+// property name are literal in the source — computed keys, aliased env
+// objects, and dynamic indexing all defeat static replacement.
 export function resolveTelemetryCollectorUrlFromEnv(): string | undefined {
-  const processEnv = typeof process !== "undefined" ? process.env : undefined;
-  const metaEnv = (import.meta as ImportMetaWithEnv).env;
-
-  return firstTelemetryUrlFromEnv(processEnv) ?? firstTelemetryUrlFromEnv(metaEnv);
+  const hasProcess = typeof process !== "undefined";
+  return (
+    trim(hasProcess ? process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim((import.meta as ImportMetaWithEnv).env?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL)
+  );
 }
 
-function firstTelemetryUrlFromEnv(
-  env: Record<string, string | undefined> | undefined,
-): string | undefined {
-  for (const key of TELEMETRY_COLLECTOR_URL_ENV_KEYS) {
-    const value = env?.[key];
-    const trimmed = value?.trim();
-    if (trimmed) return trimmed;
-  }
-  return undefined;
+function trim(value: string | undefined): string | undefined {
+  return value?.trim() || undefined;
 }
 
 export function normalizeOtlpEndpoint(collectorUrl: string, _signal: "traces"): string {
@@ -82,9 +70,13 @@ export function installWasmTraceTelemetry(options: {
   runtimeThread: "main" | "worker";
 }): () => void {
   if (!options.collectorUrl) return () => undefined;
+  cachedExporter = null;
+  warnedOnExportFailure = false;
+  const url = normalizeOtlpEndpoint(options.collectorUrl, "traces");
+  const { appId, runtimeThread } = options;
   const globalRef = globalThis as Record<string, unknown>;
   const callback = (span: WasmTraceSpan) => {
-    void recordWasmTraceSpan(options.collectorUrl!, options.appId, options.runtimeThread, span);
+    void recordWasmTraceSpan(url, appId, runtimeThread, span);
   };
   globalRef.__JAZZ_WASM_TRACE_SPAN__ = callback;
   return () => {
@@ -95,57 +87,43 @@ export function installWasmTraceTelemetry(options: {
 }
 
 async function recordWasmTraceSpan(
-  collectorUrl: string,
+  url: string,
   appId: string,
   runtimeThread: "main" | "worker",
   span: WasmTraceSpan,
 ): Promise<void> {
   try {
-    const exporter = await getWasmTraceExporter(collectorUrl, appId);
-    const otelSpan = exporter.tracer.startSpan(String(span.name ?? "wasm span"), {
-      kind: exporter.spanKindInternal,
+    if (!cachedExporter) cachedExporter = createWasmTraceExporter(url, appId);
+    const { tracer } = await cachedExporter;
+    const otelSpan = tracer.startSpan(String(span.name ?? "wasm span"), {
+      kind: SPAN_KIND_INTERNAL,
       startTime: unixNanoToTimeInput(span.startUnixNano),
-      attributes: wasmTraceTelemetryAttributes(runtimeThread, span),
+      attributes: {
+        "jazz.runtime_thread": runtimeThread,
+        "jazz.span.level": String(span.level ?? ""),
+        "jazz.span.target": String(span.target ?? ""),
+        "jazz.span.fields": String(span.fields ?? ""),
+      },
     });
     otelSpan.end(unixNanoToTimeInput(span.endUnixNano));
-  } catch {
-    // Silent by design.
+  } catch (error) {
+    if (!warnedOnExportFailure) {
+      warnedOnExportFailure = true;
+      console.warn("[jazz] WASM trace telemetry export failed:", error);
+    }
   }
 }
 
-function getWasmTraceExporter(
-  collectorUrl: string,
-  appId: string,
-): Promise<WasmTraceExporterState> {
-  const url = normalizeOtlpEndpoint(collectorUrl, "traces");
-  const cacheKey = `${url}\n${appId}`;
-  const cached = wasmTraceExporters.get(cacheKey);
-  if (cached) return cached;
-
-  const created = createWasmTraceExporter(url, appId).catch((error) => {
-    wasmTraceExporters.delete(cacheKey);
-    throw error;
-  });
-  wasmTraceExporters.set(cacheKey, created);
-  return created;
-}
-
-async function createWasmTraceExporter(
-  url: string,
-  appId: string,
-): Promise<WasmTraceExporterState> {
+async function createWasmTraceExporter(url: string, appId: string): Promise<{ tracer: Tracer }> {
   const [
     { OTLPTraceExporter },
     { BasicTracerProvider, BatchSpanProcessor },
-    { SpanKind },
     { resourceFromAttributes },
   ] = await Promise.all([
     import("@opentelemetry/exporter-trace-otlp-http"),
     import("@opentelemetry/sdk-trace-base"),
-    import("@opentelemetry/api"),
     import("@opentelemetry/resources"),
   ]);
-  const otlpExporter = new OTLPTraceExporter({ url });
   const provider = new BasicTracerProvider({
     resource: resourceFromAttributes({
       "service.name": "jazz-browser",
@@ -153,43 +131,21 @@ async function createWasmTraceExporter(
       "jazz.app_id": appId,
     }),
     spanProcessors: [
-      new BatchSpanProcessor(otlpExporter, {
+      new BatchSpanProcessor(new OTLPTraceExporter({ url }), {
         maxExportBatchSize: MAX_WASM_TRACE_SPANS_PER_REQUEST,
         maxQueueSize: MAX_PENDING_WASM_TRACE_SPANS,
         scheduledDelayMillis: 1_000,
       }),
     ],
   });
-  return {
-    provider,
-    tracer: provider.getTracer("jazz-wasm.tracing"),
-    spanKindInternal: SpanKind.INTERNAL,
-  };
-}
-
-function wasmTraceTelemetryAttributes(
-  runtimeThread: "main" | "worker",
-  span: WasmTraceSpan,
-): Record<string, TelemetryAttributeValue> {
-  return {
-    "jazz.runtime_thread": runtimeThread,
-    "jazz.span.level": String(span.level ?? ""),
-    "jazz.span.target": String(span.target ?? ""),
-    "jazz.span.fields": JSON.stringify(span.fields ?? {}),
-  };
+  return { tracer: provider.getTracer("jazz-wasm.tracing") };
 }
 
 function unixNanoToTimeInput(value: unknown): TimeInput {
-  const fallback = BigInt(Date.now()) * 1_000_000n;
-  let nanoseconds = fallback;
-  if (typeof value === "bigint") {
-    nanoseconds = value;
-  } else if (typeof value === "number" && Number.isFinite(value)) {
-    nanoseconds = BigInt(Math.trunc(value));
-  } else if (typeof value === "string" && /^[0-9]+$/.test(value)) {
-    nanoseconds = BigInt(value);
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new TypeError(`expected nanosecond string, got ${typeof value}: ${String(value)}`);
   }
-
+  const nanoseconds = BigInt(value);
   const seconds = nanoseconds / 1_000_000_000n;
   const nanos = nanoseconds % 1_000_000_000n;
   return [Number(seconds), Number(nanos)];
