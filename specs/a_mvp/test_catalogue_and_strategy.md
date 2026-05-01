@@ -15,9 +15,9 @@ This catalogue was built from test/spec filenames and test declarations across t
 | Examples and starters                           |    72 |           199 | Todo/chat/game/example flows, starter app e2e smoke tests, docs examples, walkthrough screenshots                          |
 | Dev tools, MCP, Better Auth, CLI, orchestration |    33 |           393 | Package-side utilities, CLI, dev server plugins, MCP backends/server, Better Auth adapter, subscription orchestration      |
 | Benchmarks and stress                           |     4 |            12 | Realistic performance scenarios and stress-test config                                                                     |
-| Docs and root utilities                         |     4 |            16 | Presentation deck helper and root SVG plotter tests                                                                        |
+| Docs and root utilities                         |     1 |             6 | Presentation deck helper tests                                                                                             |
 
-Total: 237 test/spec files, about 2,066 declared tests.
+Total: 234 test/spec files, about 2,056 declared tests.
 
 ## Current Test Shapes
 
@@ -623,6 +623,3 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `starters/sveltekit-localfirst/e2e/auth-backup.spec.ts`
 - `starters/sveltekit-localfirst/e2e/todo-flow.spec.ts`
 - `dev/stress-tests/todo-react/vitest.config.browser.ts`
-- `dev/tests/svg-plotter-geometry.test.ts`
-- `dev/tests/svg-plotter-render.test.ts`
-- `dev/tests/svg-plotter-style.test.ts`
