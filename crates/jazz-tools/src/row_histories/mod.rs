@@ -21,6 +21,7 @@ mod types;
 
 pub(crate) use codecs::{
     FlatRowCodecs, decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
+    encode_flat_history_row_with_codecs, encode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
 };
 pub use codecs::{

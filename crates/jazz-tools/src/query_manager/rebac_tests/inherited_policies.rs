@@ -208,13 +208,17 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         1000,
         ObjectId::new().to_string(),
     );
+    let folders_layout = crate::row_format::compiled_row_layout(&folders_descriptor);
     QueryManager::update_indices_for_insert_on_branch(
         &mut storage,
         "folders",
         &branch,
         folder_id,
         &encode_folder("alice", "Dev Folder"),
-        &folders_descriptor,
+        super::super::indices::RowIndexContext {
+            descriptor: &folders_descriptor,
+            row_layout: folders_layout.as_ref(),
+        },
     )
     .unwrap();
     seed_qm.persist_row_region_tip(&mut storage, "folders", folder_id, &branch);
