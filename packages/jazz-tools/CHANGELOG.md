@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 2.0.0-alpha.44
+
+### Patch Changes
+
+- e5c9441: Memoize runtime schema cache keys by schema object identity so repeated writes do not reserialize the full schema on every `Db.getClient` lookup.
+- 53a4d4c: Optimize paginated query settling while preserving authorized sync scope for offset/limit queries.
+  - jazz-wasm@2.0.0-alpha.44
+  - jazz-rn@2.0.0-alpha.44
+
 ## 2.0.0-alpha.43
 
 ### Patch Changes
