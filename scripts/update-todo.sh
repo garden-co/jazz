@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Regenerates TODO.md from the todo/ directory structure.
+# Regenerates specs/TODO.md from the specs/todo/ directory structure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TODO="$ROOT/TODO.md"
-TODO_DIR="$ROOT/todo"
+TODO="$ROOT/specs/TODO.md"
+TODO_DIR="$ROOT/specs/todo"
+TODO_LINK_ROOT="$ROOT/specs/"
 
 extract_what() {
   # Pull the first non-empty line after "## What"
@@ -33,7 +34,7 @@ extract_what() {
         echo ""
         for f in "${items[@]}"; do
           name=$(basename "$f" .md)
-          rel_path="${f#$ROOT/}"
+          rel_path="${f#$TODO_LINK_ROOT}"
           what=$(extract_what "$f")
           if [ -n "$what" ]; then
             echo "- [**$name**]($rel_path) — $what"
@@ -62,7 +63,7 @@ extract_what() {
         [ -f "$f" ] || continue
         found=1
         name=$(basename "$f" .md)
-        rel_path="${f#$ROOT/}"
+        rel_path="${f#$TODO_LINK_ROOT}"
         what=$(extract_what "$f")
         if [ -n "$what" ]; then
           echo "- [**$name**]($rel_path) — $what"
@@ -85,7 +86,7 @@ extract_what() {
     for proj_dir in "$TODO_DIR/projects"/*/; do
       [ -d "$proj_dir" ] || continue
       name=$(basename "$proj_dir")
-      rel_path="${proj_dir#$ROOT/}"
+      rel_path="${proj_dir#$TODO_LINK_ROOT}"
       echo "- [**$name**]($rel_path)"
     done
   fi

@@ -30,9 +30,9 @@ Repo-local skills live in `.agents/skills/`. Check them proactively.
 
 ## Quick Capture: Ideas & Issues
 
-Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `todo/`, run `bash scripts/update-todo.sh`.
+Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `specs/todo/`, run `bash scripts/update-todo.sh`.
 
-### Ideas → `todo/ideas/{priority}/{idea-name}.md`
+### Ideas → `specs/todo/ideas/{priority}/{idea-name}.md`
 
 Use `1_mvp/`, `2_launch/`, or `3_later/`. Default to `1_mvp/`.
 
@@ -48,7 +48,7 @@ Template:
 
 After saving, list ideas by bucket with their `What` line. Plain English only. Ideas are uncommitted.
 
-### Issues → `todo/issues/{issue-name}.md`
+### Issues → `specs/todo/issues/{issue-name}.md`
 
 For bugs and focused problems, not feature ideas. Use kebab-case filenames. Prefix `test_` for test-related issues.
 
