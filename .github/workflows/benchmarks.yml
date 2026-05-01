@@ -645,8 +645,11 @@ jobs:
 
       - name: Commit updated history and site
         if: ${{ github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          update_branch="github-actions/realistic-benchmark-site"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/ci_skip_set.json benchmarks/realistic/site
@@ -655,5 +658,45 @@ jobs:
             exit 0
           fi
           git commit -m "bench: update realistic benchmark site (${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT})"
-          git pull --rebase origin main
-          git push origin HEAD:main
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+          if git ls-remote --exit-code --heads origin "${update_branch}" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/${update_branch}:refs/remotes/origin/${update_branch}"
+          fi
+          git rebase origin/main
+          git push --force-with-lease origin "HEAD:${update_branch}"
+
+          pr_title="bench: update realistic benchmark site"
+          pr_body="$(cat <<EOF
+          Updates the checked-in realistic benchmark history and static site from workflow run ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}.
+
+          Source commit: ${BENCH_SHA}
+          Production site: ${BENCH_SITE_URL:-not published}
+          EOF
+          )"
+          pr_number="$(
+            gh pr list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --head "${update_branch}" \
+              --base main \
+              --state open \
+              --json number \
+              --jq '.[0].number // ""'
+          )"
+          if [ -n "${pr_number}" ]; then
+            gh pr edit "${pr_number}" --repo "${GITHUB_REPOSITORY}" --title "${pr_title}" --body "${pr_body}"
+            pr_url="$(gh pr view "${pr_number}" --repo "${GITHUB_REPOSITORY}" --json url --jq '.url')"
+          else
+            pr_url="$(
+              gh pr create \
+                --repo "${GITHUB_REPOSITORY}" \
+                --base main \
+                --head "${update_branch}" \
+                --title "${pr_title}" \
+                --body "${pr_body}"
+            )"
+          fi
+          {
+            echo "### Benchmark History PR"
+            echo ""
+            echo "${pr_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
