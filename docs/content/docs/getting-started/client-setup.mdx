@@ -35,7 +35,7 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
     const secret = await BrowserAuthSecretStore.getOrCreateSecret();
 
-    const client = createJazzClient({
+    const client = await createJazzClient({
       appId: "<your-app-id>",
       secret,
     });
@@ -62,8 +62,8 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
 
       let client = $state<ReturnType<typeof createJazzClient> | null>(null);
 
-      BrowserAuthSecretStore.getOrCreateSecret().then((secret) => {
-        client = createJazzClient({ appId: '<your-app-id>', secret });
+      BrowserAuthSecretStore.getOrCreateSecret().then(async (secret) => {
+        client = await createJazzClient({ appId: '<your-app-id>', secret });
       });
     </script>
 
@@ -123,9 +123,33 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
 
+Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
+
 ### Storage driver
 
 Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+
+#### Browser storage eviction
+
+`{ type: "persistent" }` writes to the [Origin Private File System (OPFS)](https://developer.mozilla.org/docs/Web/API/File_System_API/Origin_private_file_system). By default browsers treat this as **best-effort** storage&hairsp;—&hairsp;under disk pressure, or after long inactivity, the browser can clear it without warning. For a local-first app that means a returning user can find their identity (the local-first secret) and any data owned only by that user wiped.
+
+The trade-offs are:
+
+- **Best-effort (default).** No prompt, no friction. Acceptable when the server holds a copy of every row the user cares about, or when the app gracefully reseeds from sync. Anything that exists only on this device is at risk.
+- **Persistent.** Storage is only cleared by an explicit user action (clearing site data, uninstalling). Required for true offline-first apps and for any data that doesn't round-trip through a server. Browsers gate this behind [`navigator.storage.persist()`](https://developer.mozilla.org/docs/Web/API/StorageManager/persist), which may show a prompt or grant silently based on engagement heuristics.
+
+To request persistent storage, call it once after the user has signed in or interacted enough that a prompt makes sense:
+
+```ts
+if (navigator.storage?.persist) {
+  const granted = await navigator.storage.persist();
+  if (!granted) {
+    // Fall back: rely on sync, warn the user, or retry later.
+  }
+}
+```
+
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
 
 ## Dev plugins
 
@@ -216,6 +240,10 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     ```
 
     Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
+
+    Expo and React Native apps still need the runtime polyfills from the quickstart. Import
+    `jazz-tools/expo/polyfills` as the first line of your app entry point before any other Jazz
+    import.
 
   </Tab>
 </Tabs>

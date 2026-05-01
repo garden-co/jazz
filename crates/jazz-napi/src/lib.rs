@@ -55,21 +55,6 @@ fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
 }
 
-fn runtime_error_to_napi(
-    err: jazz_tools::runtime_core::RuntimeError,
-    fallback_prefix: &str,
-) -> napi::Error {
-    match err {
-        jazz_tools::runtime_core::RuntimeError::AnonymousWriteDenied { table, operation } => {
-            napi::Error::from_reason(format!(
-                "anonymous session cannot {} on table {}",
-                operation, table
-            ))
-        }
-        other => napi::Error::from_reason(format!("{fallback_prefix}: {other}")),
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "value")]
 enum FfiValue {
@@ -149,7 +134,6 @@ impl FromNapiValue for FfiRecordArg {
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
-    strict_transactions: Option<bool>,
     transaction_overlay: Option<QueryTransactionOverlayWire>,
 }
 
@@ -178,7 +162,6 @@ fn parse_read_durability_options(
             ReadDurabilityOptions {
                 tier: parsed_tier,
                 local_updates: jazz_tools::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             QueryPropagation::Full,
             None,
@@ -225,7 +208,6 @@ fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
-            strict_transactions: options.strict_transactions.unwrap_or(false),
         },
         propagation,
         overlay,
@@ -1018,196 +1000,6 @@ impl NapiRuntime {
                 napi::Error::from_reason(format!("Execute subscription failed: {:?}", e))
             })?;
 
-        Ok(())
-    }
-
-    // =========================================================================
-    // Persisted CRUD Operations
-    // =========================================================================
-
-    #[napi(js_name = "insertDurable", ts_return_type = "Promise<any>")]
-    pub async fn insert_durable(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        tier: String,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let persistence_tier = parse_tier(&tier)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let ((object_id, row_values), receiver) = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            let ((object_id, row_values), receiver) = core
-                .insert_persisted_with_id(&table, values.0, object_id, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
-            ((object_id, row_values), receiver)
-        };
-
-        let _ = receiver.await;
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-        }))
-    }
-
-    #[napi(js_name = "insertDurableWithSession", ts_return_type = "Promise<any>")]
-    pub async fn insert_durable_with_session(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        write_context_json: Option<String>,
-        tier: String,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let persistence_tier = parse_tier(&tier)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let ((object_id, row_values), receiver) = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            let ((object_id, row_values), receiver) = core
-                .insert_persisted_with_id(
-                    &table,
-                    values.0,
-                    object_id,
-                    write_context.as_ref(),
-                    persistence_tier,
-                )
-                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
-            ((object_id, row_values), receiver)
-        };
-
-        let _ = receiver.await;
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-        }))
-    }
-
-    #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
-    pub async fn update_durable(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let updates = convert_updates(values.0);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "updateDurableWithSession", ts_return_type = "Promise<void>")]
-    pub async fn update_durable_with_session(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-        write_context_json: Option<String>,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let updates = convert_updates(values.0);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
-    pub async fn delete_durable(&self, object_id: String, tier: String) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.delete_persisted(oid, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "deleteDurableWithSession", ts_return_type = "Promise<void>")]
-    pub async fn delete_durable_with_session(
-        &self,
-        object_id: String,
-        write_context_json: Option<String>,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
-        };
-
-        let _ = receiver.await;
         Ok(())
     }
 

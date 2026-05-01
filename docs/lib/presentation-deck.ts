@@ -2,6 +2,7 @@ export type PresentationSlideDefinition = {
   estimatedDurationSeconds: number;
   href: string;
   notesText: string;
+  notesHref: string;
   slug: string;
   title: string;
 };
@@ -13,6 +14,58 @@ export type PresentationSlideIdentity = {
 
 const notesTagPattern = /<Notes\b[^>]*>([\s\S]*?)<\/Notes>/g;
 const slideTagPattern = /<Slide\b([\s\S]*?)>([\s\S]*?)<\/Slide>/g;
+const imageTagPattern = /<img\b[\s\S]*?\bsrc=(["'])([\s\S]*?)\1[\s\S]*?\/?>/g;
+const slideHashPrefix = "slide=";
+const letterCanvasArrowMessageType = "jazz-letter-canvas:arrow-key";
+
+export function createPresentationSlideHref(basePath: string, slideSlug: string) {
+  return `${basePath}#${slideHashPrefix}${encodeURIComponent(slideSlug)}`;
+}
+
+export function readPresentationSlideSlugFromHash(hash: string) {
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+
+  if (!fragment) return null;
+
+  const value = fragment.startsWith(slideHashPrefix)
+    ? fragment.slice(slideHashPrefix.length)
+    : fragment;
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function readLetterCanvasArrowNavigationDirection(message: unknown) {
+  if (!message || typeof message !== "object") return null;
+
+  const data = message as { key?: unknown; type?: unknown };
+
+  if (data.type !== letterCanvasArrowMessageType) return null;
+
+  if (data.key === "ArrowRight") return "next";
+  if (data.key === "ArrowLeft") return "previous";
+
+  return null;
+}
+
+export function extractPresentationImageSrcsFromMdx(rawMdx: string) {
+  const seenSrcs = new Set<string>();
+  const imageSrcs: string[] = [];
+
+  for (const match of rawMdx.matchAll(imageTagPattern)) {
+    const src = match[2]?.trim();
+
+    if (!src || seenSrcs.has(src)) continue;
+
+    seenSrcs.add(src);
+    imageSrcs.push(src);
+  }
+
+  return imageSrcs;
+}
 
 export function parsePresentationSlidesFromMdx(
   deckSlug: string,
@@ -39,8 +92,9 @@ export function parsePresentationSlidesFromMdx(
 
     slides.push({
       estimatedDurationSeconds: estimatePresentationSpeakingDurationSeconds(notesText),
-      href: `/presentations/${deckSlug}/${normalizedSlug}`,
+      href: createPresentationSlideHref(`/presentations/${deckSlug}`, normalizedSlug),
       notesText,
+      notesHref: createPresentationSlideHref(`/presenter/${deckSlug}`, normalizedSlug),
       slug: normalizedSlug,
       title: normalizedTitle,
     });
@@ -60,7 +114,7 @@ export function estimatePresentationSpeakingDurationSeconds(notesText: string) {
 
   const words = normalized.split(/\s+/).filter(Boolean).length;
   const paragraphBreaks = Math.max(0, normalized.split(/\n{2,}/).length - 1);
-  const rawSeconds = (words / 130) * 60;
+  const rawSeconds = (words / 160) * 60;
 
   return Math.max(4, Math.round(rawSeconds)) + paragraphBreaks * 2;
 }

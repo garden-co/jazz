@@ -1099,8 +1099,15 @@ impl SyncManager {
             }
             SyncPayload::QueryScopeSnapshot { query_id, scope } => {
                 let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
+                let scope_changed = self
+                    .remote_query_scopes
+                    .get(&(server_id, query_id))
+                    .is_none_or(|previous_scope| previous_scope != &scope_set);
                 self.remote_query_scopes
                     .insert((server_id, query_id), scope_set);
+                if scope_changed {
+                    self.remote_query_scope_dirty.insert(query_id);
+                }
 
                 if let Some(clients) = self.query_origin.get(&query_id) {
                     for &cid in clients {
@@ -1538,7 +1545,18 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
+                    if let Some(table) = applied.metadata.get(MetadataKey::Table.as_str()).cloned()
+                    {
+                        self.forward_row_batch_to_servers_with_storage(
+                            storage,
+                            table.as_str(),
+                            object_id,
+                            applied.metadata.clone(),
+                            row,
+                        );
+                    } else {
+                        self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
+                    }
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded

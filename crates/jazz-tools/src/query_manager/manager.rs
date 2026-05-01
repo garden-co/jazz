@@ -184,13 +184,13 @@ pub(crate) struct QuerySubscription {
     /// Flag indicating this subscription has settled at least once.
     /// Used to ensure one-shot queries receive an initial callback (even if empty).
     pub(crate) settled_once: bool,
+    /// True when visibility can change without graph dirtiness, e.g. initial
+    /// frontier completion or a remote query-scope snapshot.
+    pub(crate) needs_visibility_recompute: bool,
     /// Required durability tier before non-local delivery (None = immediate).
     pub(crate) durability_tier: Option<DurabilityTier>,
     /// How local writes behave while waiting for durability.
     pub(crate) local_updates: LocalUpdates,
-    /// Whether accepted transactional batches must be complete for the
-    /// query's current local scope before becoming visible.
-    pub(crate) strict_transactions: bool,
     /// True when this subscription observed a local write since last delivery.
     pub(crate) has_pending_local_updates: bool,
     /// Row ids that should use the local current version as an overlay while
@@ -1023,7 +1023,23 @@ impl QueryManager {
     pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
+            if !sub.query_frontier_complete {
+                sub.needs_visibility_recompute = true;
+            }
             sub.query_frontier_complete = true;
+        }
+    }
+
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_batch(&mut self, batch_id: BatchId) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription
+                .graph
+                .current_output_tuples()
+                .iter()
+                .any(|tuple| tuple.batch_provenance().contains(&batch_id))
+            {
+                subscription.needs_visibility_recompute = true;
+            }
         }
     }
 
@@ -1067,6 +1083,12 @@ impl QueryManager {
 
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
+        let remote_scope_dirty_query_ids = self.sync_manager.take_remote_query_scope_dirty();
+        for query_id in remote_scope_dirty_query_ids {
+            if let Some(sub) = self.subscriptions.get_mut(&QuerySubscriptionId(query_id.0)) {
+                sub.needs_visibility_recompute = true;
+            }
+        }
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1153,6 +1175,18 @@ impl QueryManager {
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
         for sub_id in subscription_ids {
+            let should_process_subscription =
+                self.subscriptions.get(&sub_id).is_some_and(|subscription| {
+                    subscription.needs_recompile
+                        || !subscription.settled_once
+                        || subscription.needs_visibility_recompute
+                        || subscription.has_pending_local_updates
+                        || subscription.graph.has_dirty_nodes()
+                });
+            if !should_process_subscription {
+                continue;
+            }
+
             let Some(mut subscription) = self.subscriptions.remove(&sub_id) else {
                 continue;
             };
@@ -1196,6 +1230,10 @@ impl QueryManager {
                             durability_tier,
                             local_pending_version,
                             !subscription.local_overlay_rows.is_empty(),
+                            !subscription.local_overlay_rows.is_empty()
+                                || (subscription.sync_backed
+                                    && subscription.durability_tier.is_some()
+                                    && subscription.local_updates == LocalUpdates::Immediate),
                             include_deleted,
                             schema_context,
                             branch_schema_map,
@@ -1207,6 +1245,7 @@ impl QueryManager {
 
                 subscription.graph.settle(storage_ref, row_loader)
             };
+            subscription.needs_visibility_recompute = false;
             let new_schema_warnings = Self::finalize_schema_warnings(
                 &mut subscription.reported_schema_warnings,
                 schema_warnings.warnings_for_query(QueryId(sub_id.0)),
@@ -1265,13 +1304,11 @@ impl QueryManager {
                 );
             }
 
-            if subscription.strict_transactions {
-                visible_tuples = self.filter_strict_transaction_tuples(
-                    storage_ref,
-                    QueryId(sub_id.0),
-                    visible_tuples,
-                );
-            }
+            visible_tuples = self.filter_transaction_visible_tuples(
+                storage_ref,
+                QueryId(sub_id.0),
+                visible_tuples,
+            );
 
             let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
             let visible_rows_by_id: HashMap<_, _> = visible_rows
@@ -2048,6 +2085,7 @@ impl QueryManager {
         durability_tier: Option<DurabilityTier>,
         local_pending_version: Option<RowBatchKey>,
         prefer_local_overlay: bool,
+        allow_staged_overlay: bool,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -2100,10 +2138,12 @@ impl QueryManager {
             exact_pending_visible_row()
                 .or_else(pending_staged_row)
                 .or_else(best_visible_row)
-        } else {
+        } else if allow_staged_overlay {
             best_visible_row()
                 .or_else(exact_pending_visible_row)
                 .or_else(pending_staged_row)
+        } else {
+            best_visible_row().or_else(exact_pending_visible_row)
         }?;
         let (table, row) = resolved;
 
@@ -2308,7 +2348,7 @@ impl QueryManager {
         }
     }
 
-    fn filter_strict_transaction_tuples(
+    fn filter_transaction_visible_tuples(
         &self,
         storage: &dyn Storage,
         query_id: QueryId,

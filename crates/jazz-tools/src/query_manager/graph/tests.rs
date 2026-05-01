@@ -6,7 +6,9 @@ use crate::query_manager::relation_ir::{
     ColumnRef, JoinCondition, KeyRef, OrderByExpr, OrderDirection, PredicateCmpOp, PredicateExpr,
     ProjectColumn, ProjectExpr, RelExpr, RowIdRef, ValueRef,
 };
-use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::query_manager::types::{
+    ColumnDescriptor, ColumnType, RowDescriptor, RowPolicyMode, Schema, Value,
+};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();

@@ -350,7 +350,7 @@ watchers.
 A direct batch can start in two ways:
 
 - implicitly, through ordinary `insert` / `update` / `delete`
-- explicitly, through `beginDirectBatch()` / `begin_direct_batch()`
+- explicitly, through `beginBatch()` / `begin_direct_batch()`
 
 Implicit writes create a fresh one-member direct batch and seal it immediately.
 
@@ -500,7 +500,6 @@ The batch-aware TS surface lives in:
 
 Important APIs:
 
-- `client.beginDirectBatch()`
 - `client.beginBatch()`
 - `client.beginTransaction()`
 - `client.localBatchRecord(batchId)`
@@ -508,13 +507,11 @@ Important APIs:
 - `client.acknowledgeRejectedBatch(batchId)`
 - `tx.commit()`
 - `batch.commit()`
-- `db.beginDirectBatch(table)`
-- `db.beginBatch(table)`
-- `db.beginTransaction(table)`
+- `db.beginBatch()`
+- `db.beginTransaction()`
 
-The `Db` batch handles are intentionally seeded by a table: that first table chooses the runtime
-client/schema, and later writes through the same handle must stay on that client-bound schema
-surface.
+The `Db` batch handles bind lazily: the first table operation chooses the runtime client/schema,
+and later writes through the same handle must stay on that client-bound schema surface.
 
 Transactional handles also support transaction-scoped reads before commit:
 

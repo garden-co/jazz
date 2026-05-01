@@ -4,6 +4,7 @@ import { resolveClientSessionSync } from "./runtime/client-session.js";
 type WindowJazzStorageDb = {
   getConfig(): DbConfig;
   deleteClientStorage(): Promise<void>;
+  shutdown(): Promise<void>;
 };
 
 type LiveStorageContext = {
@@ -14,6 +15,16 @@ type LiveStorageContext = {
 export interface WindowJazzClientApi {
   clearStorage(namespace?: string): Promise<void>;
   listLiveStorageNamespaces(): string[];
+  /**
+   * Shut down live Jazz client storage contexts and await full cleanup
+   * (worker termination, OPFS lock release).  Pass a namespace to target
+   * one context; with no argument, shuts down every live context.
+   *
+   * Resolves once all targets have completed shutdown.  Db.shutdown is
+   * idempotent, so this is safe to call alongside framework-driven cleanup
+   * (e.g. JazzProvider unmount).
+   */
+  shutdown(namespace?: string): Promise<void>;
 }
 
 declare global {
@@ -116,6 +127,13 @@ function ensureWindowJazzApi(currentWindow: Window): WindowJazzClientApi {
     },
     listLiveStorageNamespaces(): string[] {
       return listLiveStorageNamespaces(currentWindow);
+    },
+    async shutdown(namespace?: string): Promise<void> {
+      const contexts = [...getLiveStorageContexts(currentWindow)];
+      if (contexts.length === 0) return;
+      const trimmed = namespace?.trim();
+      const targets = trimmed ? contexts.filter((entry) => entry.namespace === trimmed) : contexts;
+      await Promise.all(targets.map((entry) => entry.db.shutdown()));
     },
   }) as WindowJazzClientApi;
 

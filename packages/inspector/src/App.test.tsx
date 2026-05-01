@@ -45,8 +45,8 @@ vi.mock("./routes.js", () => ({
     return (
       <>
         <div>Inspector ready</div>
-        <button type="button" onClick={standaloneContext?.onEdit}>
-          Open edit
+        <button type="button" onClick={standaloneContext?.onManageConnections}>
+          Open connections
         </button>
       </>
     );
@@ -123,37 +123,145 @@ describe("App", () => {
     });
   });
 
-  it("lets you edit a stored connection and reset from the edit page", async () => {
+  it("lets you manage and switch between named stored connections", async () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        serverUrl: "http://localhost:19879",
-        appId: "test-app-id",
-        adminSecret: "admin-secret",
-        env: "dev",
-        branch: "main",
-        schemaHash: "hash-b",
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+          {
+            id: "staging",
+            name: "Staging",
+            serverUrl: "https://staging.example.com",
+            appId: "staging-app-id",
+            adminSecret: "staging-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-b",
+          },
+        ],
       }),
     );
 
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open edit" })).not.toBeNull();
+      expect(createJazzClientMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          appId: "local-app-id",
+          serverUrl: "http://localhost:19879",
+          adminSecret: "local-admin-secret",
+        }),
+      );
+      expect(screen.getByRole("button", { name: "Open connections" })).not.toBeNull();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Open edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
 
-    expect(await screen.findByRole("heading", { name: "Edit connection" })).not.toBeNull();
-    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
-    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "test-app-id");
-    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "admin-secret");
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+    expect(screen.getByText("Local dev")).not.toBeNull();
+    expect(screen.getByText("Staging")).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to inspector" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Using Local dev" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Reset connection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Staging" }));
 
-    expect(await screen.findByRole("heading", { name: "Connect to Jazz server" })).not.toBeNull();
-    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "");
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    await waitFor(() => {
+      expect(createJazzClientMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          appId: "staging-app-id",
+          serverUrl: "https://staging.example.com",
+          adminSecret: "staging-admin-secret",
+        }),
+      );
+    });
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
+      activeConnectionId?: string;
+    };
+    expect(stored.activeConnectionId).toBe("staging");
+    expect(await screen.findByText("Inspector ready")).not.toBeNull();
+  });
+
+  it("adds a named connection from the connection manager", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            adminSecret: "local-admin-secret",
+            env: "dev",
+            branch: "main",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Open connections" })).not.toBeNull();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add connection" }));
+
+    expect(await screen.findByRole("heading", { name: "Add connection" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://v2.sync.jazz.tools/",
+    );
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Preview" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://preview.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("App ID"), { target: { value: "preview-app-id" } });
+    fireEvent.change(screen.getByLabelText("Admin secret"), {
+      target: { value: "preview-admin-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+
+    expect(await screen.findByRole("heading", { name: "Select schema" })).not.toBeNull();
+    fireEvent.change(screen.getByLabelText("Schema hash"), { target: { value: "hash-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use schema" }));
+
+    await waitFor(() => {
+      expect(createJazzClientMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          appId: "preview-app-id",
+          serverUrl: "https://preview.example.com",
+          adminSecret: "preview-admin-secret",
+        }),
+      );
+    });
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
+      activeConnectionId?: string;
+      connections?: Array<{ id: string; name: string }>;
+    };
+    expect(stored.connections).toHaveLength(2);
+    const preview = stored.connections?.find((connection) => connection.name === "Preview");
+    expect(preview).toBeDefined();
+    expect(stored.activeConnectionId).toBe(preview?.id);
   });
 
   it("prefills the connection form from partial hash params", async () => {
@@ -173,7 +281,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Connect to Jazz server" })).not.toBeNull();
+    expect(await screen.findByRole("heading", { name: "Add connection" })).not.toBeNull();
     expect(screen.getByLabelText("Server URL")).toHaveProperty(
       "value",
       "https://staging.v2.aws.cloud.jazz.tools",
