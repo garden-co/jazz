@@ -7,7 +7,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
@@ -95,7 +94,7 @@ async function sendMessage(
     "Editor should be ready for typing before sending",
   );
 
-  await act(async () => typeIntoEditor(editorEl, text));
+  typeIntoEditor(editorEl, text);
 
   await waitFor(
     () => proseMirror.textContent?.includes(text) ?? false,
@@ -108,7 +107,7 @@ async function sendMessage(
     timeoutMs,
     `Send button should stay enabled while sending "${text}"`,
   );
-  await act(async () => simulateClick(sendButton));
+  simulateClick(sendButton);
 }
 
 function hasRenderedMessage(container: ParentNode, text: string): boolean {
@@ -150,9 +149,7 @@ describe("Chat App E2E", () => {
     const appId =
       config.appId ?? `test-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    await act(async () => {
-      r.render(<App config={{ appId, ...config }} />);
-    });
+    r.render(<App config={{ appId, ...config }} />);
 
     // Wait for the app to initialise and redirect to a chat
     await waitFor(
@@ -168,7 +165,7 @@ describe("Chat App E2E", () => {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
     const { root } = mounts[idx];
-    await act(async () => root.unmount());
+    root.unmount();
     el.remove();
     mounts.splice(idx, 1);
     await new Promise((r) => setTimeout(r, 200));
@@ -178,7 +175,7 @@ describe("Chat App E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -190,7 +187,7 @@ describe("Chat App E2E", () => {
     window.location.hash = "";
     // Wait for the JazzProvider's async shutdown (worker termination,
     // OPFS lock release) to complete before starting the next test.
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------
@@ -254,7 +251,7 @@ describe("Chat App E2E", () => {
     // DropdownMenuTrigger asChild overrides Item's data-slot to "dropdown-menu-trigger"
     const clickTarget = messageBubble!.querySelector('[data-slot="dropdown-menu-trigger"]');
     expect(clickTarget).toBeTruthy();
-    await act(async () => simulateClick(clickTarget as HTMLElement));
+    simulateClick(clickTarget as HTMLElement);
 
     // Wait for dropdown to appear and find the React submenu
     await waitFor(
@@ -272,7 +269,7 @@ describe("Chat App E2E", () => {
       '[data-slot="dropdown-menu-sub-trigger"]',
     ) as HTMLElement;
     expect(reactTrigger).toBeTruthy();
-    await act(async () => simulateClick(reactTrigger));
+    simulateClick(reactTrigger);
 
     // Wait for submenu content and click heart
     await waitFor(
@@ -288,7 +285,7 @@ describe("Chat App E2E", () => {
       ...document.querySelectorAll('[data-slot="dropdown-menu-sub-content"] button'),
     ].find((b) => b.textContent?.includes("❤️"));
     if (heartButton) {
-      await act(async () => simulateClick(heartButton as HTMLElement));
+      simulateClick(heartButton as HTMLElement);
     }
 
     // Verify the reaction pill appears
@@ -333,7 +330,7 @@ describe("Chat App E2E", () => {
     );
     const clickTarget = messageBubble?.querySelector('[data-slot="dropdown-menu-trigger"]');
     expect(clickTarget).toBeTruthy();
-    await act(async () => simulateClick(clickTarget as HTMLElement));
+    simulateClick(clickTarget as HTMLElement);
 
     // Find and click the Delete menu item
     await waitFor(
@@ -349,7 +346,7 @@ describe("Chat App E2E", () => {
       (i) => i.textContent?.includes("Delete"),
     ) as HTMLElement;
     if (deleteItem) {
-      await act(async () => simulateClick(deleteItem));
+      simulateClick(deleteItem);
     }
 
     // Confirm deletion in the alert dialog
@@ -363,7 +360,7 @@ describe("Chat App E2E", () => {
       '[data-slot="alert-dialog-action"]',
     ) as HTMLElement;
     if (confirmButton) {
-      await act(async () => simulateClick(confirmButton));
+      simulateClick(confirmButton);
     }
 
     await waitFor(
@@ -393,7 +390,7 @@ describe("Chat App E2E", () => {
       "NavBar menu button should appear",
     );
     const menuButton = el.querySelector<HTMLElement>('header [data-slot="dropdown-menu-trigger"]')!;
-    await act(async () => simulateClick(menuButton));
+    simulateClick(menuButton);
 
     await waitFor(
       () => {
@@ -408,7 +405,7 @@ describe("Chat App E2E", () => {
       (i) => i.textContent?.includes("Chat List"),
     ) as HTMLElement;
     if (chatListItem) {
-      await act(async () => simulateClick(chatListItem));
+      simulateClick(chatListItem);
     }
 
     // Click "New Chat" button
@@ -425,7 +422,7 @@ describe("Chat App E2E", () => {
       (b) => b.textContent?.includes("New Chat") && !b.textContent?.includes("Private"),
     ) as HTMLElement;
     if (newChatButton) {
-      await act(async () => simulateClick(newChatButton));
+      simulateClick(newChatButton);
     }
 
     // Should redirect to the new chat and show "Hello world"
@@ -477,7 +474,7 @@ describe("Chat App E2E", () => {
     const aliceMenuButton = aliceContainer.querySelector<HTMLElement>(
       'header [data-slot="dropdown-menu-trigger"]',
     )!;
-    await act(async () => simulateClick(aliceMenuButton));
+    simulateClick(aliceMenuButton);
 
     await waitFor(
       () =>
@@ -491,7 +488,7 @@ describe("Chat App E2E", () => {
     const aliceChatListItem = [
       ...document.querySelectorAll('[data-slot="dropdown-menu-item"]'),
     ].find((i) => i.textContent?.includes("Chat List")) as HTMLElement;
-    await act(async () => simulateClick(aliceChatListItem));
+    simulateClick(aliceChatListItem);
 
     await waitFor(
       () =>
@@ -505,7 +502,7 @@ describe("Chat App E2E", () => {
     const privateChatButton = [...aliceContainer.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("New Private Chat"),
     ) as HTMLElement;
-    await act(async () => simulateClick(privateChatButton));
+    simulateClick(privateChatButton);
 
     await waitFor(
       () => hasRenderedMessage(aliceContainer, "This is a private chat."),
@@ -620,7 +617,7 @@ describe("Chat App E2E", () => {
       el.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
       [...el.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    simulateClick(plusButton as HTMLElement);
 
     await waitFor(
       () =>
@@ -634,7 +631,7 @@ describe("Chat App E2E", () => {
     const canvasItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
       (i) => i.textContent?.toLowerCase().includes("canvas"),
     ) as HTMLElement;
-    await act(async () => simulateClick(canvasItem));
+    simulateClick(canvasItem);
 
     await waitFor(
       () =>

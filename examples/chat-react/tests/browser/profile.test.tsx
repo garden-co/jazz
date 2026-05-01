@@ -7,7 +7,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
@@ -64,9 +63,7 @@ describe("Profile E2E", () => {
     const appId = config.appId ?? APP_ID;
     const serverUrl = config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`;
 
-    await act(async () => {
-      r.render(<App config={{ appId, serverUrl, ...config }} />);
-    });
+    r.render(<App config={{ appId, serverUrl, ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -81,7 +78,7 @@ describe("Profile E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -89,7 +86,7 @@ describe("Profile E2E", () => {
     }
     mounts.length = 0;
     window.location.hash = "";
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------
@@ -114,7 +111,7 @@ describe("Profile E2E", () => {
 
     // Open the menu
     const menuButton = el.querySelector<HTMLElement>('header [data-slot="dropdown-menu-trigger"]')!;
-    await act(async () => simulateClick(menuButton));
+    simulateClick(menuButton);
 
     // The Profile item has data-slot="sheet-trigger" (SheetTrigger asChild
     // overrides the DropdownMenuItem's data-slot), so use role="menuitem".
@@ -130,7 +127,7 @@ describe("Profile E2E", () => {
     const profileItem = [...document.querySelectorAll('[role="menuitem"]')].find((i) =>
       i.textContent?.includes("Profile"),
     ) as HTMLElement;
-    await act(async () => simulateClick(profileItem));
+    simulateClick(profileItem);
 
     // Wait for the profile sheet to open
     await waitFor(
@@ -142,7 +139,7 @@ describe("Profile E2E", () => {
     // Find the name input in the sheet and change it
     const nameInput = document.querySelector<HTMLInputElement>("#name");
     if (nameInput) {
-      await act(async () => typeInto(nameInput, "Test User Name"));
+      typeInto(nameInput, "Test User Name");
     }
 
     // Close the sheet
@@ -150,7 +147,7 @@ describe("Profile E2E", () => {
       .querySelector('[data-slot="sheet-content"] .lucide-x')
       ?.closest("button");
     if (closeButton) {
-      await act(async () => simulateClick(closeButton as HTMLElement));
+      simulateClick(closeButton as HTMLElement);
     }
 
     // Verify the name is updated in the navbar
@@ -183,7 +180,7 @@ describe("Profile E2E", () => {
 
     // Open the menu
     const menuButton = el.querySelector<HTMLElement>('header [data-slot="dropdown-menu-trigger"]')!;
-    await act(async () => simulateClick(menuButton));
+    simulateClick(menuButton);
 
     // Use role="menuitem" because SheetTrigger overrides the data-slot
     await waitFor(
@@ -198,7 +195,7 @@ describe("Profile E2E", () => {
     const profileItem = [...document.querySelectorAll('[role="menuitem"]')].find((i) =>
       i.textContent?.includes("Profile"),
     ) as HTMLElement;
-    await act(async () => simulateClick(profileItem));
+    simulateClick(profileItem);
 
     await waitFor(
       () => document.querySelector('[data-slot="sheet-content"]') !== null,
@@ -234,9 +231,7 @@ describe("Profile E2E", () => {
     expect(handleChange).toBeTruthy();
     // handleAvatarChange uses FileReader (callback-based), so we can't
     // simply await it. Call it and let the waitFor below detect the result.
-    await act(async () => {
-      handleChange({ target: fileInput! } as any);
-    });
+    handleChange({ target: fileInput! } as any);
 
     // Wait for the uploaded avatar to appear (has object-cover class, vs the
     // default multiavatar which does not).
@@ -259,7 +254,7 @@ describe("Profile E2E", () => {
     const removeButton = [...document.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("Remove"),
     ) as HTMLElement;
-    await act(async () => simulateClick(removeButton));
+    simulateClick(removeButton);
 
     // Verify the avatar image is gone
     await waitFor(
