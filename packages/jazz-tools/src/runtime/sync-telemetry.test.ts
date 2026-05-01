@@ -229,6 +229,26 @@ describe("telemetry OTLP helpers", () => {
     expect(otelMocks.logExporterConstructors).not.toHaveBeenCalled();
   });
 
+  it("does not throw when the WASM module has no trace entry hooks", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const dispose = installWasmTelemetry({
+      wasmModule: {} as MockWasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "telemetry-app",
+      runtimeThread: "worker",
+    });
+
+    dispose();
+    await flushQueuedMicrotasks();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[jazz] WASM telemetry unavailable: trace entry hooks are missing.",
+    );
+    expect(otelMocks.traceExporterConstructors).not.toHaveBeenCalled();
+    expect(otelMocks.logExporterConstructors).not.toHaveBeenCalled();
+  });
+
   it("enables Rust collection and drains WASM telemetry when Rust notifies JS", async () => {
     const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
     const wasmModule = createWasmModule([[], []]);

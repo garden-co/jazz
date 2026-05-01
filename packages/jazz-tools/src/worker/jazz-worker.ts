@@ -285,6 +285,8 @@ export function handleUpdateAuth(
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
+    (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    await ensureWorkerWasmInitialized(wasmModule, msg);
     disposeWasmTelemetry?.();
     disposeWasmTelemetry = installWasmTelemetry({
       wasmModule,
@@ -292,8 +294,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
       appId: msg.appId,
       runtimeThread: "worker",
     });
-    (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
-    await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     currentAuth = {};

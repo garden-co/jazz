@@ -94,6 +94,11 @@ export function installWasmTelemetry(options: {
   const logUrl = normalizeOtlpEndpoint(options.collectorUrl, "logs");
   const { appId, runtimeThread, wasmModule } = options;
 
+  if (!hasWasmTelemetryHooks(wasmModule)) {
+    console.warn("[jazz] WASM telemetry unavailable: trace entry hooks are missing.");
+    return () => undefined;
+  }
+
   let cachedExporter: Promise<WasmTelemetryExporterState> | null = null;
   let warnedOnExportFailure = false;
   const warnOnce = (error: unknown) => {
@@ -150,6 +155,14 @@ export function installWasmTelemetry(options: {
     drain();
     wasmModule.setTraceEntryCollectionEnabled(false);
   };
+}
+
+function hasWasmTelemetryHooks(wasmModule: WasmTelemetryModule): boolean {
+  return (
+    typeof wasmModule.subscribeTraceEntries === "function" &&
+    typeof wasmModule.drainTraceEntries === "function" &&
+    typeof wasmModule.setTraceEntryCollectionEnabled === "function"
+  );
 }
 
 function recordWasmTelemetryEntry(
