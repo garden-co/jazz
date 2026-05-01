@@ -32,6 +32,10 @@ enum AuthorizedTuplesResult {
     PermissionsUnavailable,
 }
 
+type PolicyAuthKey = (ObjectId, BranchName);
+type PolicyAuthScope = HashSet<PolicyAuthKey>;
+type PolicyAuthScopeCache = HashMap<PolicyAuthKey, Option<PolicyAuthScope>>;
+
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
     pub batch_id: BatchId,
@@ -384,6 +388,68 @@ impl QueryManager {
         )
     }
 
+    pub(super) fn evaluate_authorization_policy_with_witness_scope(
+        &mut self,
+        storage: &dyn Storage,
+        request: AuthorizationPolicyRequest<'_>,
+    ) -> Option<HashSet<(ObjectId, BranchName)>> {
+        let AuthorizationPolicyRequest {
+            object_id,
+            branch_name,
+            table_name,
+            policy,
+            content,
+            provenance,
+            session,
+            auth_schema,
+            auth_context,
+            source_branch_schema_map,
+            operation,
+        } = request;
+
+        let table_schema = auth_schema.get(&table_name)?;
+        let transformed = self.transform_content_to_authorization_schema(
+            table_name.as_str(),
+            content,
+            BatchId([0; 16]),
+            branch_name,
+            source_branch_schema_map,
+            auth_context,
+        )?;
+
+        let evaluator = PolicyContextEvaluator::new(
+            auth_schema,
+            session,
+            branch_name.as_str(),
+            self.row_policy_mode,
+        );
+        let row = Row::new(object_id, transformed, BatchId([0; 16]), provenance.clone());
+        let mut visited = HashSet::new();
+        let mut row_loader = |related_id: ObjectId, _table_hint: Option<TableName>| {
+            self.load_row_for_authorization_context(
+                storage,
+                related_id,
+                branch_name,
+                source_branch_schema_map,
+                auth_context,
+            )
+        };
+
+        let result = evaluator.evaluate_row_access_with_witness_scope(
+            operation,
+            &row,
+            &table_schema.columns,
+            table_name.as_str(),
+            Some(policy),
+            storage,
+            &mut row_loader,
+            0,
+            &mut visited,
+        );
+
+        result.allowed.then_some(result.scope)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn provenance_row_matches_current_select_policy(
         &mut self,
@@ -395,19 +461,40 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
+        self.provenance_row_select_policy_witness_scope(
+            storage,
+            object_id,
+            branch_name,
+            session,
+            auth_schema,
+            auth_context,
+            source_branch_schema_map,
+        )
+        .is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn provenance_row_select_policy_witness_scope(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        session: Option<&Session>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+    ) -> Option<PolicyAuthScope> {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, row)) = self.load_best_visible_row_batch(
+        let (table, row) = self.load_best_visible_row_batch(
             storage,
             object_id,
             &branches,
             None,
             auth_context,
             source_branch_schema_map,
-        ) else {
-            return false;
-        };
+        )?;
         if row.is_hard_deleted() {
-            return false;
+            return None;
         }
 
         let tip_content = row.data.clone();
@@ -418,14 +505,13 @@ impl QueryManager {
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select_policy())
         else {
-            return !self.row_policy_mode.denies_missing_explicit_policy()
-                && auth_schema.contains_key(&table_name);
+            return (!self.row_policy_mode.denies_missing_explicit_policy()
+                && auth_schema.contains_key(&table_name))
+            .then(HashSet::new);
         };
-        let Some(session) = session else {
-            return false;
-        };
+        let session = session?;
 
-        self.evaluate_authorization_policy(
+        self.evaluate_authorization_policy_with_witness_scope(
             storage,
             AuthorizationPolicyRequest {
                 object_id,
@@ -524,23 +610,20 @@ impl QueryManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn authorized_scope_from_graph_if_available(
         &mut self,
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        branches: &[String],
         session: Option<&Session>,
+        explicit_policy_context_tables: &[String],
+        include_policy_witness_rows: bool,
     ) -> Option<HashSet<(ObjectId, BranchName)>> {
-        match self.authorized_tuples_from_graph_result(
-            storage,
-            graph,
-            schema_context,
-            source_branch_schema_map,
-            session,
-        ) {
-            AuthorizedTuplesResult::Ready(_) => {}
-            AuthorizedTuplesResult::PermissionsUnavailable => return None,
+        if self.authorization_schema_required && self.authorization_schema.is_none() {
+            return None;
         }
 
         let Some((auth_schema, auth_context)) =
@@ -560,7 +643,8 @@ impl QueryManager {
             return Some(graph.sync_scope_object_ids());
         }
 
-        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+        let mut authorization_cache: PolicyAuthScopeCache = HashMap::new();
+        let mut authorization_closure_cache: PolicyAuthScopeCache = HashMap::new();
 
         let authorized_scope_tuples = graph.filtered_sync_scope_tuples(|tuple| {
             tuple
@@ -568,28 +652,129 @@ impl QueryManager {
                 .iter()
                 .copied()
                 .all(|(object_id, branch_name)| {
-                    *authorization_cache
-                        .entry((object_id, branch_name))
-                        .or_insert_with(|| {
-                            self.provenance_row_matches_current_select_policy(
-                                storage,
-                                object_id,
-                                branch_name,
-                                session,
-                                &auth_schema,
-                                &auth_context,
-                                source_branch_schema_map,
-                            )
-                        })
+                    let mut visiting = HashSet::new();
+                    self.provenance_row_select_policy_readable_scope(
+                        storage,
+                        object_id,
+                        branch_name,
+                        session,
+                        &auth_schema,
+                        &auth_context,
+                        source_branch_schema_map,
+                        &mut authorization_cache,
+                        &mut authorization_closure_cache,
+                        &mut visiting,
+                    )
+                    .is_some()
                 })
         });
 
-        Some(
-            authorized_scope_tuples
-                .into_iter()
-                .flat_map(|tuple| tuple.provenance().clone().into_iter())
-                .collect(),
-        )
+        let mut authorized_scope: HashSet<(ObjectId, BranchName)> = authorized_scope_tuples
+            .iter()
+            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .collect();
+        if include_policy_witness_rows {
+            authorized_scope.extend(
+                authorized_scope_tuples
+                    .iter()
+                    .flat_map(|tuple| tuple.provenance().iter().copied())
+                    .filter_map(|key| {
+                        authorization_closure_cache
+                            .get(&key)
+                            .and_then(Option::as_ref)
+                    })
+                    .flat_map(|scope| scope.iter().copied()),
+            );
+        }
+
+        let graph_policy_context_tables: HashSet<TableName> = graph
+            .policy_filter_tables
+            .iter()
+            .map(|(_, table)| *table)
+            .collect();
+        let explicit_only_policy_context_tables: HashSet<TableName> =
+            explicit_policy_context_tables
+                .iter()
+                .map(TableName::new)
+                .filter(|table| !graph_policy_context_tables.contains(table))
+                .collect();
+
+        Some(self.scope_with_authorized_policy_context_rows_for_tables(
+            authorized_scope,
+            &explicit_only_policy_context_tables,
+            branches,
+            storage,
+            session,
+            &auth_schema,
+            &auth_context,
+            source_branch_schema_map,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn provenance_row_select_policy_readable_scope(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        session: Option<&Session>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        authorization_cache: &mut PolicyAuthScopeCache,
+        authorization_closure_cache: &mut PolicyAuthScopeCache,
+        visiting: &mut HashSet<PolicyAuthKey>,
+    ) -> Option<PolicyAuthScope> {
+        let key = (object_id, branch_name);
+        if let Some(cached) = authorization_closure_cache.get(&key) {
+            return cached.clone();
+        }
+        if !visiting.insert(key) {
+            return Some(HashSet::new());
+        }
+
+        let witness_scope = authorization_cache
+            .entry(key)
+            .or_insert_with(|| {
+                self.provenance_row_select_policy_witness_scope(
+                    storage,
+                    object_id,
+                    branch_name,
+                    session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map,
+                )
+            })
+            .clone();
+
+        let Some(witness_scope) = witness_scope else {
+            visiting.remove(&key);
+            authorization_closure_cache.insert(key, None);
+            return None;
+        };
+
+        let mut readable_scope = HashSet::from([key]);
+        for (witness_id, witness_branch) in witness_scope {
+            let witness_readable_scope = self.provenance_row_select_policy_readable_scope(
+                storage,
+                witness_id,
+                witness_branch,
+                session,
+                auth_schema,
+                auth_context,
+                source_branch_schema_map,
+                authorization_cache,
+                authorization_closure_cache,
+                visiting,
+            )?;
+            readable_scope.insert((witness_id, witness_branch));
+            readable_scope.extend(witness_readable_scope);
+        }
+
+        visiting.remove(&key);
+        authorization_closure_cache.insert(key, Some(readable_scope.clone()));
+        Some(readable_scope)
     }
 
     pub(super) fn resolved_server_query_branches(
@@ -733,6 +918,64 @@ impl QueryManager {
                     continue;
                 };
                 if !row.is_hard_deleted() {
+                    scope.insert((object_id, *branch_name));
+                }
+            }
+        }
+
+        scope
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scope_with_authorized_policy_context_rows_for_tables(
+        &mut self,
+        mut scope: HashSet<(ObjectId, BranchName)>,
+        policy_tables: &HashSet<TableName>,
+        branches: &[String],
+        storage: &dyn Storage,
+        session: Option<&Session>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        if policy_tables.is_empty() {
+            return scope;
+        }
+
+        let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
+        let Ok(objects) = storage.scan_row_locators() else {
+            return scope;
+        };
+
+        for (object_id, row_locator) in objects {
+            let table_name = row_locator.table.as_str();
+            if !policy_tables
+                .iter()
+                .any(|table| table.as_str() == table_name)
+            {
+                continue;
+            }
+
+            for branch_name in &branch_names {
+                let Some(row) = storage
+                    .load_visible_region_row(table_name, branch_name.as_str(), object_id)
+                    .ok()
+                    .flatten()
+                else {
+                    continue;
+                };
+                if row.is_hard_deleted() {
+                    continue;
+                }
+                if self.provenance_row_matches_current_select_policy(
+                    storage,
+                    object_id,
+                    *branch_name,
+                    session,
+                    auth_schema,
+                    auth_context,
+                    source_branch_schema_map,
+                ) {
                     scope.insert((object_id, *branch_name));
                 }
             }
@@ -900,7 +1143,10 @@ impl QueryManager {
                     &graph,
                     &subscription_context,
                     &branch_schema_map,
+                    &branches,
                     session_for_policy.as_ref(),
+                    &sub.policy_context_tables,
+                    !self.sync_manager.has_servers(),
                 )
             };
             if let Some(scope) = scope.as_ref() {
@@ -1089,7 +1335,10 @@ impl QueryManager {
                         &sub.graph,
                         &sub.schema_context,
                         &branch_schema_map,
+                        branches,
                         sub.session.as_ref(),
+                        &sub.policy_context_tables,
+                        !self.sync_manager.has_servers(),
                     )
                 }
             };

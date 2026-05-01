@@ -870,6 +870,215 @@ fn sync_backed_exists_session_subscription_keeps_local_rows_when_server_scope_is
 }
 
 #[test]
+fn sync_backed_exists_policy_syncs_readable_predicate_table_rows() {
+    use crate::query_manager::policy::{CmpOp, PolicyValue};
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("access_grants"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("user_id", ColumnType::Text),
+                ColumnDescriptor::new("active", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::And(vec![
+                PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                PolicyExpr::Cmp {
+                    column: "active".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::Literal(Value::Text("yes".into())),
+                },
+            ])),
+        ),
+    );
+    schema.insert(
+        TableName::new("protected_records"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "access_grants".into(),
+                condition: Box::new(PolicyExpr::And(vec![
+                    PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                    PolicyExpr::Cmp {
+                        column: "active".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::Literal(Value::Text("yes".into())),
+                    },
+                ])),
+            }),
+        ),
+    );
+
+    let (mut server, mut server_io) = create_query_manager(SyncManager::new(), schema.clone());
+    server
+        .insert(
+            &mut server_io,
+            "access_grants",
+            &[Value::Text("alice".into()), Value::Text("yes".into())],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "access_grants",
+            &[Value::Text("bob".into()), Value::Text("yes".into())],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "access_grants",
+            &[Value::Text("alice".into()), Value::Text("no".into())],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "protected_records",
+            &[Value::Text("Visible record".into())],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema);
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("protected_records").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    client.process(&mut client_io);
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "client should not need to subscribe to the EXISTS predicate table explicitly"
+    );
+    assert_eq!(results[0].1, vec![Value::Text("Visible record".into())]);
+
+    let synced_access_grants = client_io
+        .scan_row_locators()
+        .unwrap()
+        .into_iter()
+        .filter(|(_, locator)| locator.table.as_str() == "access_grants")
+        .count();
+    assert_eq!(
+        synced_access_grants, 1,
+        "server should sync only the predicate row that proves this read"
+    );
+}
+
+#[test]
+fn sync_backed_exists_policy_withholds_rows_when_predicate_rows_are_unreadable() {
+    use crate::query_manager::policy::{CmpOp, PolicyValue};
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("access_grants"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("user_id", ColumnType::Text),
+                ColumnDescriptor::new("active", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::False),
+        ),
+    );
+    schema.insert(
+        TableName::new("protected_records"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "access_grants".into(),
+                condition: Box::new(PolicyExpr::And(vec![
+                    PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                    PolicyExpr::Cmp {
+                        column: "active".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::Literal(Value::Text("yes".into())),
+                    },
+                ])),
+            }),
+        ),
+    );
+
+    let (mut server, mut server_io) = create_query_manager(SyncManager::new(), schema.clone());
+    server
+        .insert(
+            &mut server_io,
+            "access_grants",
+            &[Value::Text("alice".into()), Value::Text("yes".into())],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
+            "protected_records",
+            &[Value::Text("Hidden record".into())],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema);
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("protected_records").build(),
+            Some(PolicySession::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    client.process(&mut client_io);
+    assert!(
+        client.get_subscription_results(sub_id).is_empty(),
+        "unreadable predicate rows should not authorize protected rows"
+    );
+
+    let synced_rows = client_io.scan_row_locators().unwrap();
+    assert!(
+        synced_rows
+            .iter()
+            .all(|(_, locator)| locator.table.as_str() != "protected_records"),
+        "server should not sync protected row bytes without a readable proof chain"
+    );
+}
+
+#[test]
 fn fail_closed_server_withholds_session_scope_before_permissions_head() {
     use crate::query_manager::relation_ir::{
         ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef,
