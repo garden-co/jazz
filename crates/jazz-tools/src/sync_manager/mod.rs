@@ -441,8 +441,16 @@ impl SyncManager {
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
         self.pending_servers.remove(&server_id);
+        let mut removed_query_ids = HashSet::new();
         self.remote_query_scopes
-            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
+            .retain(|(remote_server_id, query_id), _| {
+                let keep = *remote_server_id != server_id;
+                if !keep {
+                    removed_query_ids.insert(*query_id);
+                }
+                keep
+            });
+        self.remote_query_scope_dirty.extend(removed_query_ids);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
