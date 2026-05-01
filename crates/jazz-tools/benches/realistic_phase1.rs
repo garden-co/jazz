@@ -2144,7 +2144,7 @@ fn realistic_r2_reads_sqlite(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load.json");
+    let scenario = load_r3_scenario("dev/benchmarks/realistic/scenarios/r3_cold_load.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new_rocksdb(&profile, &scenario);
     let benchmark_name = format!(
@@ -2199,7 +2199,7 @@ fn realistic_r3_cold_load_rocksdb(_c: &mut Criterion) {}
 
 #[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
-    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load.json");
+    let scenario = load_r3_scenario("dev/benchmarks/realistic/scenarios/r3_cold_load.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
     let seeded = ColdLoadSeededDb::new_sqlite(&profile, &scenario);
     let benchmark_name = format!(
@@ -2251,8 +2251,8 @@ fn realistic_r3_cold_load_sqlite(_c: &mut Criterion) {}
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
     ));
 
     let mut group = c.benchmark_group("realistic_phase1/fanout_updates");
@@ -2296,8 +2296,8 @@ fn realistic_r4_fanout_updates(c: &mut Criterion) {
 fn realistic_r4_fanout_updates_rocksdb(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
     ));
 
     let mut group = c.benchmark_group("realistic_phase1/fanout_updates_rocksdb");
@@ -2360,8 +2360,8 @@ fn realistic_r4_fanout_updates_rocksdb(_c: &mut Criterion) {}
 fn realistic_r4_fanout_updates_sqlite(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r4_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r4_fanout_updates.json",
-        "benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/scenarios/r4_fanout_updates.json",
+        "dev/benchmarks/realistic/ci/scenarios/r4_fanout_updates.json",
     ));
 
     let mut group = c.benchmark_group("realistic_phase1/fanout_updates_sqlite");
@@ -2491,8 +2491,8 @@ fn realistic_r6_permission_write_heavy(c: &mut Criterion) {
         c,
         "realistic_phase1/permission_write_heavy",
         select_ci_path(
-            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
         ),
     );
 }
@@ -2547,8 +2547,8 @@ fn realistic_r6_permission_write_heavy_rocksdb(c: &mut Criterion) {
         c,
         "realistic_phase1/permission_write_heavy_rocksdb",
         select_ci_path(
-            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
         ),
         |recursive_depth| {
             let tempdir =
@@ -2575,8 +2575,8 @@ fn realistic_r6_permission_write_heavy_sqlite(c: &mut Criterion) {
         c,
         "realistic_phase1/permission_write_heavy_sqlite",
         select_ci_path(
-            "benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
-            "benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json",
+            "dev/benchmarks/realistic/ci/scenarios/r6_permission_write_heavy.json",
         ),
         |recursive_depth| {
             let tempdir = TempDir::new().expect("create tempdir for sqlite permission write-heavy");
@@ -2711,8 +2711,8 @@ fn realistic_r7_hotspot_history_sqlite(_c: &mut Criterion) {}
 fn realistic_r8_many_branches_write(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "write");
 
@@ -2741,8 +2741,8 @@ fn realistic_r8_many_branches_write(c: &mut Criterion) {
 fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_all_heads");
 
@@ -2775,8 +2775,8 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
 fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "scan_leaf_heads");
 
@@ -2810,8 +2810,8 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
 fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "rocksdb_cold_load");
     let seeded = ManyBranchesSeededDb::new_rocksdb(&scenario);
@@ -2858,8 +2858,8 @@ fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
 fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "sqlite_cold_load");
     let seeded = ManyBranchesSeededDb::new_sqlite(&scenario);
@@ -2903,8 +2903,8 @@ fn realistic_r8_many_branches_cold_load_sqlite(_c: &mut Criterion) {}
 fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
     ));
     let benchmark_name = format!(
         "{}_{}_docs{}_subs{}",
@@ -2980,8 +2980,8 @@ fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
 fn realistic_r8_many_branches_rocksdb(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
 
     let mut write_group = c.benchmark_group("realistic_phase1/many_branches_rocksdb_write");
@@ -3113,8 +3113,8 @@ fn realistic_r8_many_branches_rocksdb(_c: &mut Criterion) {}
 fn realistic_r8_many_branches_sqlite(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r8_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r8_many_branches.json",
-        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/scenarios/r8_many_branches.json",
+        "dev/benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
 
     let mut write_group = c.benchmark_group("realistic_phase1/many_branches_sqlite_write");
@@ -3242,8 +3242,8 @@ fn realistic_r8_many_branches_sqlite(_c: &mut Criterion) {}
 fn realistic_r9_subscribed_write_path_rocksdb(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
     ));
     let benchmark_name = format!(
         "{}_{}_docs{}_subs{}_rocksdb",
@@ -3327,8 +3327,8 @@ fn realistic_r9_subscribed_write_path_rocksdb(_c: &mut Criterion) {}
 fn realistic_r9_subscribed_write_path_sqlite(c: &mut Criterion) {
     let profile: ProfileConfig = load_json(profile_config_path());
     let scenario = load_r9_scenario(select_ci_path(
-        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
-        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "dev/benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
     ));
     let benchmark_name = format!(
         "{}_{}_docs{}_subs{}_sqlite",
@@ -3875,43 +3875,43 @@ fn select_ci_path<'a>(default_path: &'a str, ci_path: &'a str) -> &'a str {
 
 fn r1_scenario_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/scenarios/r1_crud_sustained.json",
-        "benchmarks/realistic/ci/scenarios/r1_crud_sustained.json",
+        "dev/benchmarks/realistic/scenarios/r1_crud_sustained.json",
+        "dev/benchmarks/realistic/ci/scenarios/r1_crud_sustained.json",
     )
 }
 
 fn r2_sustained_scenario_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/scenarios/r2_reads_sustained.json",
-        "benchmarks/realistic/ci/scenarios/r2_reads_sustained.json",
+        "dev/benchmarks/realistic/scenarios/r2_reads_sustained.json",
+        "dev/benchmarks/realistic/ci/scenarios/r2_reads_sustained.json",
     )
 }
 
 fn r2_reads_with_churn_scenario_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/scenarios/r2_reads_with_churn.json",
-        "benchmarks/realistic/ci/scenarios/r2_reads_with_churn.json",
+        "dev/benchmarks/realistic/scenarios/r2_reads_with_churn.json",
+        "dev/benchmarks/realistic/ci/scenarios/r2_reads_with_churn.json",
     )
 }
 
 fn r5_permission_recursive_scenario_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/scenarios/r5_permission_recursive.json",
-        "benchmarks/realistic/ci/scenarios/r5_permission_recursive.json",
+        "dev/benchmarks/realistic/scenarios/r5_permission_recursive.json",
+        "dev/benchmarks/realistic/ci/scenarios/r5_permission_recursive.json",
     )
 }
 
 fn r7_hotspot_history_scenario_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/scenarios/r7_hotspot_history.json",
-        "benchmarks/realistic/ci/scenarios/r7_hotspot_history.json",
+        "dev/benchmarks/realistic/scenarios/r7_hotspot_history.json",
+        "dev/benchmarks/realistic/ci/scenarios/r7_hotspot_history.json",
     )
 }
 
 fn profile_config_path() -> &'static str {
     select_ci_path(
-        "benchmarks/realistic/profiles/s.json",
-        "benchmarks/realistic/ci/profiles/s.json",
+        "dev/benchmarks/realistic/profiles/s.json",
+        "dev/benchmarks/realistic/ci/profiles/s.json",
     )
 }
 

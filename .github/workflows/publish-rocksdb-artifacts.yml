@@ -58,7 +58,7 @@ jobs:
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-rocksdb-artifacts.sh "${{ matrix.target }}"
+        run: bash dev/scripts/publish-rocksdb-artifacts.sh "${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
         with:

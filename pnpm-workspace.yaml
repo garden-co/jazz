@@ -5,7 +5,7 @@ packages:
   - examples/*
   - "!examples/world-tour"
   - examples/docs/*
-  - stress-tests/*
+  - dev/stress-tests/*
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
