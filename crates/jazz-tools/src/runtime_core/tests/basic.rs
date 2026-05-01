@@ -62,6 +62,67 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
 }
 
 #[test]
+fn batched_tick_applies_parked_sync_messages_in_bounded_slices() {
+    use crate::runtime_core::ticks::MAX_SYNC_MESSAGES_PER_BATCHED_TICK;
+    use crate::sync_manager::QueryId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingScheduler {
+        scheduled: Arc<AtomicUsize>,
+    }
+
+    impl Scheduler for CountingScheduler {
+        fn schedule_batched_tick(&self) {
+            self.scheduled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let app_id = AppId::from_name("bounded-sync-tick-test");
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), test_schema(), app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(
+        schema_manager,
+        MemoryStorage::new(),
+        CountingScheduler {
+            scheduled: scheduled.clone(),
+        },
+    );
+
+    let server_id = ServerId::new();
+    for sequence in 1..=(MAX_SYNC_MESSAGES_PER_BATCHED_TICK as u64 + 1) {
+        core.park_sync_message_with_sequence(
+            InboxEntry {
+                source: Source::Server(server_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id: QueryId(1),
+                    tier: DurabilityTier::EdgeServer,
+                    through_seq: sequence,
+                },
+            },
+            sequence,
+        );
+    }
+    scheduled.store(0, Ordering::SeqCst);
+
+    core.batched_tick();
+    assert_eq!(
+        core.last_applied_server_seq.get(&server_id).copied(),
+        Some(MAX_SYNC_MESSAGES_PER_BATCHED_TICK as u64)
+    );
+    assert!(
+        scheduled.load(Ordering::SeqCst) > 0,
+        "remaining ready messages should schedule another batched tick"
+    );
+
+    core.batched_tick();
+    assert_eq!(
+        core.last_applied_server_seq.get(&server_id).copied(),
+        Some(MAX_SYNC_MESSAGES_PER_BATCHED_TICK as u64 + 1)
+    );
+}
+
+#[test]
 fn test_runtime_core_insert_materializes_schema_defaults() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "todos-with-defaults");
 
