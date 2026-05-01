@@ -150,8 +150,16 @@ fn remove_server_clears_remote_query_scope() {
         sm.remote_query_scope(query_id),
         HashSet::from([(row_id, BranchName::new("main"))])
     );
+    assert_eq!(
+        sm.take_remote_query_scope_dirty(),
+        HashSet::from([query_id])
+    );
 
     sm.remove_server(server_id);
 
     assert!(sm.remote_query_scope(query_id).is_empty());
+    assert_eq!(
+        sm.take_remote_query_scope_dirty(),
+        HashSet::from([query_id])
+    );
 }

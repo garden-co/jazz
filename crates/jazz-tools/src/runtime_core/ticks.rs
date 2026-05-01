@@ -86,6 +86,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             crate::batch_fate::BatchSettlement::Missing { .. }
         ) {
             self.retransmit_local_batch_to_servers(batch_id);
+        } else if matches!(
+            settlement,
+            crate::batch_fate::BatchSettlement::AcceptedTransaction { .. }
+        ) {
+            self.schema_manager
+                .query_manager_mut()
+                .mark_subscriptions_visibility_recompute_for_batch(batch_id);
         }
 
         if let Some(acked_tier) = settlement.confirmed_tier() {
