@@ -1094,11 +1094,17 @@ pub(crate) fn prepared_row_write_context_for_descriptor<H: Storage + ?Sized>(
     row_id: ObjectId,
     user_descriptor: Arc<RowDescriptor>,
     row_codecs: Arc<FlatRowCodecs>,
+    known_needs_exact_locator: Option<bool>,
 ) -> Result<PreparedRowWriteContext, StorageError> {
-    let needs_exact_locator = storage
-        .load_row_locator(row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
+    let needs_exact_locator = match known_needs_exact_locator {
+        Some(needs_exact_locator) => needs_exact_locator,
+        None => {
+            storage
+                .load_row_locator(row_id)?
+                .and_then(|locator| locator.origin_schema_hash)
+                != Some(schema_hash)
+        }
+    };
     Ok(PreparedRowWriteContext {
         history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
         visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
@@ -1127,6 +1133,7 @@ fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
         row_id,
         user_descriptor,
         row_codecs,
+        None,
     )
 }
 

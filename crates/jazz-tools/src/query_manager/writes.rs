@@ -453,6 +453,25 @@ impl QueryManager {
             row_id,
             table_write.descriptor.clone(),
             table_write.row_codecs.clone(),
+            None,
+        )
+        .map_err(|err| QueryError::EncodingError(format!("prepare row write context: {err}")))
+    }
+
+    fn prepared_new_row_write_context_for_table_write<H: Storage>(
+        storage: &H,
+        table: &str,
+        row_id: ObjectId,
+        table_write: &WriteTableCacheEntry,
+    ) -> Result<PreparedRowWriteContext, QueryError> {
+        prepared_row_write_context_for_descriptor(
+            storage,
+            table,
+            table_write.schema_hash,
+            row_id,
+            table_write.descriptor.clone(),
+            table_write.row_codecs.clone(),
+            Some(false),
         )
         .map_err(|err| QueryError::EncodingError(format!("prepare row write context: {err}")))
     }
@@ -1045,7 +1064,7 @@ impl QueryManager {
                 row_layout: table_write.row_layout.as_ref(),
             },
         );
-        let row_write_context = Self::prepared_row_write_context_for_table_write(
+        let row_write_context = Self::prepared_new_row_write_context_for_table_write(
             storage,
             table,
             object_id,
@@ -1245,7 +1264,7 @@ impl QueryManager {
                 row_layout: table_write.row_layout.as_ref(),
             },
         );
-        let row_write_context = Self::prepared_row_write_context_for_table_write(
+        let row_write_context = Self::prepared_new_row_write_context_for_table_write(
             storage,
             table,
             object_id,
@@ -1401,7 +1420,7 @@ impl QueryManager {
                 row_layout: table_write.row_layout.as_ref(),
             },
         );
-        let row_write_context = Self::prepared_row_write_context_for_table_write(
+        let row_write_context = Self::prepared_new_row_write_context_for_table_write(
             storage,
             table,
             object_id,
