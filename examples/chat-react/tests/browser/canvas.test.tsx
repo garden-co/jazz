@@ -7,7 +7,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
@@ -68,9 +67,7 @@ describe("Canvas E2E", () => {
     const appId =
       config.appId ?? `test-canvas-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    await act(async () => {
-      r.render(<App config={{ appId, ...config }} />);
-    });
+    r.render(<App config={{ appId, ...config }} />);
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -85,7 +82,7 @@ describe("Canvas E2E", () => {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
     const { root } = mounts[idx];
-    await act(async () => root.unmount());
+    root.unmount();
     el.remove();
     mounts.splice(idx, 1);
     await new Promise((r) => setTimeout(r, 200));
@@ -95,7 +92,7 @@ describe("Canvas E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -130,7 +127,7 @@ describe("Canvas E2E", () => {
 
     const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLElement));
+    simulateClick(plusButton as HTMLElement);
 
     await waitFor(
       () =>
@@ -144,7 +141,7 @@ describe("Canvas E2E", () => {
     const canvasItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
       (i) => i.textContent?.toLowerCase().includes("canvas"),
     ) as HTMLElement;
-    await act(async () => simulateClick(canvasItem));
+    simulateClick(canvasItem);
 
     // Wait for the canvas to appear
     await waitFor(
@@ -163,36 +160,34 @@ describe("Canvas E2E", () => {
     const startX = rect.left + 50;
     const startY = rect.top + 50;
 
-    await act(async () => {
-      canvas.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          clientX: startX,
-          clientY: startY,
-          bubbles: true,
-        }),
-      );
-      canvas.dispatchEvent(
-        new PointerEvent("pointermove", {
-          clientX: startX + 100,
-          clientY: startY,
-          bubbles: true,
-        }),
-      );
-      canvas.dispatchEvent(
-        new PointerEvent("pointermove", {
-          clientX: startX + 100,
-          clientY: startY + 100,
-          bubbles: true,
-        }),
-      );
-      canvas.dispatchEvent(
-        new PointerEvent("pointerup", {
-          clientX: startX + 100,
-          clientY: startY + 100,
-          bubbles: true,
-        }),
-      );
-    });
+    canvas.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        clientX: startX,
+        clientY: startY,
+        bubbles: true,
+      }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", {
+        clientX: startX + 100,
+        clientY: startY,
+        bubbles: true,
+      }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointermove", {
+        clientX: startX + 100,
+        clientY: startY + 100,
+        bubbles: true,
+      }),
+    );
+    canvas.dispatchEvent(
+      new PointerEvent("pointerup", {
+        clientX: startX + 100,
+        clientY: startY + 100,
+        bubbles: true,
+      }),
+    );
 
     // Canvas should still be visible after drawing (no errors)
     expect(canvas).toBeTruthy();
@@ -236,7 +231,7 @@ describe("Canvas E2E", () => {
 
     // Create a canvas
     const alicePlusButton = findPlusButton(aliceContainer);
-    await act(async () => simulateClick(alicePlusButton as HTMLElement));
+    simulateClick(alicePlusButton as HTMLElement);
 
     await waitFor(
       () =>
@@ -250,7 +245,7 @@ describe("Canvas E2E", () => {
     const aliceCanvasItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
       (i) => i.textContent?.toLowerCase().includes("canvas"),
     ) as HTMLElement;
-    await act(async () => simulateClick(aliceCanvasItem));
+    simulateClick(aliceCanvasItem);
 
     await waitFor(
       () =>
@@ -288,29 +283,27 @@ describe("Canvas E2E", () => {
 
     // User B draws on the canvas
     const bobCanvasRect = bobCanvas.getBoundingClientRect();
-    await act(async () => {
-      bobCanvas.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          clientX: bobCanvasRect.left + 100,
-          clientY: bobCanvasRect.top + 100,
-          bubbles: true,
-        }),
-      );
-      bobCanvas.dispatchEvent(
-        new PointerEvent("pointermove", {
-          clientX: bobCanvasRect.left + 200,
-          clientY: bobCanvasRect.top + 100,
-          bubbles: true,
-        }),
-      );
-      bobCanvas.dispatchEvent(
-        new PointerEvent("pointerup", {
-          clientX: bobCanvasRect.left + 200,
-          clientY: bobCanvasRect.top + 100,
-          bubbles: true,
-        }),
-      );
-    });
+    bobCanvas.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        clientX: bobCanvasRect.left + 100,
+        clientY: bobCanvasRect.top + 100,
+        bubbles: true,
+      }),
+    );
+    bobCanvas.dispatchEvent(
+      new PointerEvent("pointermove", {
+        clientX: bobCanvasRect.left + 200,
+        clientY: bobCanvasRect.top + 100,
+        bubbles: true,
+      }),
+    );
+    bobCanvas.dispatchEvent(
+      new PointerEvent("pointerup", {
+        clientX: bobCanvasRect.left + 200,
+        clientY: bobCanvasRect.top + 100,
+        bubbles: true,
+      }),
+    );
 
     // Verify both canvases are still visible (no errors from sync)
     await new Promise((r) => setTimeout(r, 500));

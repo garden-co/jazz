@@ -1099,8 +1099,15 @@ impl SyncManager {
             }
             SyncPayload::QueryScopeSnapshot { query_id, scope } => {
                 let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
+                let scope_changed = self
+                    .remote_query_scopes
+                    .get(&(server_id, query_id))
+                    .is_none_or(|previous_scope| previous_scope != &scope_set);
                 self.remote_query_scopes
                     .insert((server_id, query_id), scope_set);
+                if scope_changed {
+                    self.remote_query_scope_dirty.insert(query_id);
+                }
 
                 if let Some(clients) = self.query_origin.get(&query_id) {
                     for &cid in clients {

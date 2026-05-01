@@ -31,7 +31,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { TEST_PORT, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
@@ -84,9 +83,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    await act(async () => {
-      r.render(<App config={{ appId: APP_ID, ...config }} />);
-    });
+    r.render(<App config={{ appId: APP_ID, ...config }} />);
 
     return el;
   }
@@ -95,7 +92,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
     const { root } = mounts[idx];
-    await act(async () => root.unmount());
+    root.unmount();
     el.remove();
     mounts.splice(idx, 1);
     await new Promise((r) => setTimeout(r, 200));
@@ -106,7 +103,7 @@ describe("Send permission — private chat INSERT policy", () => {
     window.location.hash = "";
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -129,7 +126,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const menuButton = aliceContainer.querySelector<HTMLElement>(
       'header [data-slot="dropdown-menu-trigger"]',
     )!;
-    await act(async () => simulateClick(menuButton));
+    simulateClick(menuButton);
 
     // Click "Chat List"
     await waitFor(
@@ -143,7 +140,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const chatListItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
       (i) => i.textContent?.includes("Chat List"),
     ) as HTMLElement;
-    await act(async () => simulateClick(chatListItem));
+    simulateClick(chatListItem);
 
     // Click "New Private Chat"
     await waitFor(
@@ -157,7 +154,7 @@ describe("Send permission — private chat INSERT policy", () => {
     const privateChatButton = [...aliceContainer.querySelectorAll("button")].find((b) =>
       b.textContent?.includes("New Private Chat"),
     ) as HTMLElement;
-    await act(async () => simulateClick(privateChatButton));
+    simulateClick(privateChatButton);
 
     // Wait for the private chat to load
     await waitFor(
@@ -209,8 +206,8 @@ describe("Send permission — private chat INSERT policy", () => {
       b.querySelector(".lucide-send"),
     ) as HTMLElement | undefined;
 
-    await act(async () => typeIntoEditor(editor, "Alice's private message"));
-    if (sendButton) await act(async () => simulateClick(sendButton));
+    typeIntoEditor(editor, "Alice's private message");
+    if (sendButton) simulateClick(sendButton);
 
     // The message should appear — Alice is a chatMember so INSERT should succeed
     await waitFor(
@@ -257,7 +254,7 @@ describe("Send permission — private chat INSERT policy", () => {
       '[data-testid="chat-header"] button:has(.lucide-settings)',
     );
     if (!gearButton) throw new Error("Could not find settings gear button");
-    await act(async () => simulateClick(gearButton));
+    simulateClick(gearButton);
 
     await waitFor(
       () => document.querySelector('[data-slot="sheet-content"]') !== null,
@@ -270,7 +267,7 @@ describe("Send permission — private chat INSERT policy", () => {
       (b) => b.textContent?.toLowerCase().includes("invite"),
     ) as HTMLElement;
     if (!inviteButton) throw new Error("Could not find invite button in settings");
-    await act(async () => simulateClick(inviteButton));
+    simulateClick(inviteButton);
 
     await waitFor(
       () => document.querySelector<HTMLInputElement>("input#link") !== null,
@@ -321,8 +318,8 @@ describe("Send permission — private chat INSERT policy", () => {
       b.querySelector(".lucide-send"),
     ) as HTMLElement | undefined;
 
-    await act(async () => typeIntoEditor(editor, "Bob's reply to the private chat"));
-    if (sendButton) await act(async () => simulateClick(sendButton));
+    typeIntoEditor(editor, "Bob's reply to the private chat");
+    if (sendButton) simulateClick(sendButton);
 
     // Bob's message should appear — he is a chatMember so INSERT should succeed
     await waitFor(
