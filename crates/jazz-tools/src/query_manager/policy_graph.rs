@@ -11,6 +11,7 @@ use crate::schema_manager::SchemaContext;
 
 use super::graph::{GraphNode, QueryGraph, RelationCompileFeatures};
 use super::graph_nodes::NodeId;
+use super::graph_nodes::RowNode;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::materialize::MaterializeNode;
@@ -343,6 +344,24 @@ impl PolicyGraph {
         {
             Some(GraphNode::ExistsOutput(node)) => node.exists(),
             _ => false,
+        }
+    }
+
+    pub(crate) fn matching_scope_object_ids(
+        &self,
+    ) -> std::collections::HashSet<(ObjectId, crate::object::BranchName)> {
+        match self
+            .graph
+            .nodes
+            .get(self.exists_node.0 as usize)
+            .map(|c| &c.node)
+        {
+            Some(GraphNode::ExistsOutput(node)) => node
+                .current_tuples()
+                .iter()
+                .flat_map(|tuple| tuple.provenance().iter().copied())
+                .collect(),
+            _ => std::collections::HashSet::new(),
         }
     }
 

@@ -275,11 +275,8 @@ impl PolicyFilterNode {
         // Process added tuples
         for tuple in input.added {
             self.input_tuples.insert(tuple.clone());
-            let Some(row) = tuple_to_row(&tuple) else {
-                continue;
-            };
 
-            if self.evaluate_with_context(&row, io, &mut row_loader) {
+            if self.evaluate_tuple_with_context(&tuple, io, &mut row_loader) {
                 self.current_tuples.insert(tuple.clone());
                 result.added.push(tuple);
             }
@@ -298,15 +295,8 @@ impl PolicyFilterNode {
             self.input_tuples.remove(&old_tuple);
             self.input_tuples.insert(new_tuple.clone());
 
-            let old_row = tuple_to_row(&old_tuple);
-            let new_row = tuple_to_row(&new_tuple);
-
-            let old_passes = old_row
-                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
-                .unwrap_or(false);
-            let new_passes = new_row
-                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
-                .unwrap_or(false);
+            let old_passes = self.evaluate_tuple_with_context(&old_tuple, io, &mut row_loader);
+            let new_passes = self.evaluate_tuple_with_context(&new_tuple, io, &mut row_loader);
 
             match (old_passes, new_passes) {
                 (true, true) => {
@@ -339,9 +329,7 @@ impl PolicyFilterNode {
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
 
         for tuple in all_tuples {
-            let passes = tuple_to_row(&tuple)
-                .map(|row| self.evaluate_with_context(&row, io, row_loader))
-                .unwrap_or(false);
+            let passes = self.evaluate_tuple_with_context(&tuple, io, row_loader);
             let currently_visible = self.current_tuples.contains(&tuple);
 
             match (currently_visible, passes) {
@@ -362,18 +350,34 @@ impl PolicyFilterNode {
     }
 
     /// Evaluate with context - supports recursive INHERITS and EXISTS evaluation.
-    fn evaluate_with_context(
+    fn evaluate_tuple_with_context(
         &self,
-        row: &Row,
+        tuple: &Tuple,
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
     ) -> bool {
-        let evaluator = PolicyContextEvaluator::new(
-            &self.schema,
-            &self.session,
-            &self.branch,
-            self.row_policy_mode,
-        );
+        let Some(row) = tuple_to_row(tuple) else {
+            return false;
+        };
+        let branch = tuple
+            .provenance()
+            .iter()
+            .find(|(id, _)| *id == row.id)
+            .map(|(_, branch)| branch.as_str())
+            .unwrap_or(&self.branch);
+        self.evaluate_with_context(&row, branch, io, row_loader)
+    }
+
+    /// Evaluate with context - supports recursive INHERITS and EXISTS evaluation.
+    fn evaluate_with_context(
+        &self,
+        row: &Row,
+        branch: &str,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+    ) -> bool {
+        let evaluator =
+            PolicyContextEvaluator::new(&self.schema, &self.session, branch, self.row_policy_mode);
         let mut visited_referencing = HashSet::new();
         evaluator.evaluate_row_access(
             self.policy_operation,
@@ -832,7 +836,7 @@ mod tests {
         let storage = crate::storage::MemoryStorage::new();
         let mut seen = Vec::new();
 
-        let allowed = node.evaluate_with_context(&row, &storage, &mut |id, hint| {
+        let allowed = node.evaluate_with_context(&row, "main", &storage, &mut |id, hint| {
             seen.push((id, hint));
             None
         });

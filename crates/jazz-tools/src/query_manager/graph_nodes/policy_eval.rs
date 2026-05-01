@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::{
     Operation, PolicyExpr, bind_outer_row_refs, bind_relation_refs,
     evaluate_expr_recursive_with_row_id, normalize_recursive_max_depth,
@@ -14,6 +14,14 @@ use crate::query_manager::types::{
 use crate::storage::Storage;
 
 use super::super::encoding::{column_is_null, decode_column};
+
+type WitnessScope = HashSet<(ObjectId, BranchName)>;
+
+#[derive(Default)]
+pub(crate) struct ScopedPolicyResult {
+    pub(crate) allowed: bool,
+    pub(crate) scope: WitnessScope,
+}
 
 pub(crate) struct PolicyContextEvaluator<'a> {
     schema: &'a Schema,
@@ -50,21 +58,48 @@ impl<'a> PolicyContextEvaluator<'a> {
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
+        self.evaluate_row_access_with_witness_scope(
+            operation,
+            row,
+            descriptor,
+            table_name,
+            local_policy_override,
+            io,
+            row_loader,
+            depth,
+            visited_referencing,
+        )
+        .allowed
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate_row_access_with_witness_scope(
+        &self,
+        operation: Operation,
+        row: &Row,
+        descriptor: &RowDescriptor,
+        table_name: &str,
+        local_policy_override: Option<&PolicyExpr>,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
+        depth: usize,
+        visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
+    ) -> ScopedPolicyResult {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let table = TableName::new(table_name);
         let key = (table, row.id, operation);
         if !visited_referencing.insert(key) {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
-        let local_allow = local_policy_override
+        let result = local_policy_override
             .or_else(|| self.policy_for_operation(table, operation))
             .map(|policy| {
                 let mut visited_inherits = HashSet::new();
-                self.evaluate_expr_with_context(
+                self.evaluate_expr_with_witness_scope(
                     policy,
                     operation,
                     row,
@@ -77,10 +112,13 @@ impl<'a> PolicyContextEvaluator<'a> {
                     visited_referencing,
                 )
             })
-            .unwrap_or(!self.row_policy_mode.denies_missing_explicit_policy());
+            .unwrap_or(ScopedPolicyResult {
+                allowed: !self.row_policy_mode.denies_missing_explicit_policy(),
+                scope: WitnessScope::new(),
+            });
 
         visited_referencing.remove(&(table, row.id, operation));
-        local_allow
+        result
     }
 
     fn policy_for_operation(
@@ -98,7 +136,7 @@ impl<'a> PolicyContextEvaluator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_inherits_referencing_with_context(
+    fn evaluate_inherits_referencing_with_witness_scope(
         &self,
         operation: Operation,
         source_table: &str,
@@ -110,26 +148,26 @@ impl<'a> PolicyContextEvaluator<'a> {
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
-    ) -> bool {
+    ) -> ScopedPolicyResult {
         let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
-            return false;
+            return ScopedPolicyResult::default();
         };
         if depth >= effective_max_depth {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let source_table_name = TableName::new(source_table);
         let Some(source_schema) = self.schema.get(&source_table_name) else {
-            return false;
+            return ScopedPolicyResult::default();
         };
         let source_descriptor = &source_schema.columns;
 
         let Some(col_idx) = source_descriptor.column_index(via_column) else {
-            return false;
+            return ScopedPolicyResult::default();
         };
         let col = &source_descriptor.columns[col_idx];
         if col.references != Some(TableName::new(target_table_name)) {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let candidate_ids = match &col.column_type {
@@ -142,13 +180,14 @@ impl<'a> PolicyContextEvaluator<'a> {
             ColumnType::Array { element } if **element == ColumnType::Uuid => {
                 io.index_scan_all(source_table_name.as_str(), col.name.as_str(), self.branch)
             }
-            _ => return false,
+            _ => return ScopedPolicyResult::default(),
         };
 
         for source_row_id in candidate_ids {
             let Some(source_row) = row_loader(source_row_id, Some(source_table_name)) else {
                 continue;
             };
+            let source_scope = source_row.provenance.clone();
 
             if !referencing_edge_matches_target(
                 source_descriptor,
@@ -165,7 +204,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 source_row.batch_id,
                 source_row.row_provenance,
             );
-            if self.evaluate_row_access(
+            let mut result = self.evaluate_row_access_with_witness_scope(
                 operation,
                 &source_row,
                 source_descriptor,
@@ -175,16 +214,18 @@ impl<'a> PolicyContextEvaluator<'a> {
                 row_loader,
                 depth + 1,
                 visited_referencing,
-            ) {
-                return true;
+            );
+            if result.allowed {
+                result.scope.extend(source_scope);
+                return result;
             }
         }
 
-        false
+        ScopedPolicyResult::default()
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_expr_with_context(
+    fn evaluate_expr_with_witness_scope(
         &self,
         expr: &PolicyExpr,
         operation: Operation,
@@ -196,9 +237,9 @@ impl<'a> PolicyContextEvaluator<'a> {
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
-    ) -> bool {
+    ) -> ScopedPolicyResult {
         if depth > crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         match expr {
@@ -206,7 +247,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 operation,
                 via_column,
                 max_depth,
-            } => self.evaluate_inherits_with_context(
+            } => self.evaluate_inherits_with_witness_scope(
                 *operation,
                 via_column,
                 *max_depth,
@@ -224,7 +265,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                 source_table,
                 via_column,
                 max_depth,
-            } => self.evaluate_inherits_referencing_with_context(
+            } => self.evaluate_inherits_referencing_with_witness_scope(
                 *operation,
                 source_table,
                 via_column,
@@ -236,10 +277,10 @@ impl<'a> PolicyContextEvaluator<'a> {
                 depth,
                 visited_referencing,
             ),
-            PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_context(
+            PolicyExpr::Exists { table, condition } => self.evaluate_exists_with_witness_scope(
                 table, condition, operation, row, descriptor, io, row_loader, depth,
             ),
-            PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_context(
+            PolicyExpr::ExistsRel { rel } => self.evaluate_exists_rel_with_witness_scope(
                 rel,
                 operation == Operation::Select,
                 row,
@@ -249,9 +290,54 @@ impl<'a> PolicyContextEvaluator<'a> {
                 row_loader,
                 depth,
             ),
-            PolicyExpr::And(exprs) => exprs.iter().all(|e| {
-                self.evaluate_expr_with_context(
-                    e,
+            PolicyExpr::And(exprs) => {
+                let mut scope = WitnessScope::new();
+                for expr in exprs {
+                    let result = self.evaluate_expr_with_witness_scope(
+                        expr,
+                        operation,
+                        row,
+                        descriptor,
+                        table_name,
+                        io,
+                        row_loader,
+                        depth,
+                        visited,
+                        visited_referencing,
+                    );
+                    if !result.allowed {
+                        return ScopedPolicyResult::default();
+                    }
+                    scope.extend(result.scope);
+                }
+                ScopedPolicyResult {
+                    allowed: true,
+                    scope,
+                }
+            }
+            PolicyExpr::Or(exprs) => {
+                for expr in exprs {
+                    let result = self.evaluate_expr_with_witness_scope(
+                        expr,
+                        operation,
+                        row,
+                        descriptor,
+                        table_name,
+                        io,
+                        row_loader,
+                        depth,
+                        visited,
+                        visited_referencing,
+                    );
+                    if result.allowed {
+                        return result;
+                    }
+                }
+                ScopedPolicyResult::default()
+            }
+            PolicyExpr::Not(inner) => {
+                let result = self.evaluate_expr_with_witness_scope(
+                    inner,
                     operation,
                     row,
                     descriptor,
@@ -261,48 +347,29 @@ impl<'a> PolicyContextEvaluator<'a> {
                     depth,
                     visited,
                     visited_referencing,
-                )
-            }),
-            PolicyExpr::Or(exprs) => exprs.iter().any(|e| {
-                self.evaluate_expr_with_context(
-                    e,
-                    operation,
-                    row,
+                );
+                ScopedPolicyResult {
+                    allowed: !result.allowed,
+                    scope: WitnessScope::new(),
+                }
+            }
+            _ => ScopedPolicyResult {
+                allowed: evaluate_expr_recursive_with_row_id(
+                    expr,
+                    &row.data,
+                    &row.provenance,
                     descriptor,
-                    table_name,
-                    io,
-                    row_loader,
+                    self.session,
+                    Some(row.id),
                     depth,
-                    visited,
-                    visited_referencing,
-                )
-            }),
-            PolicyExpr::Not(inner) => !self.evaluate_expr_with_context(
-                inner,
-                operation,
-                row,
-                descriptor,
-                table_name,
-                io,
-                row_loader,
-                depth,
-                visited,
-                visited_referencing,
-            ),
-            _ => evaluate_expr_recursive_with_row_id(
-                expr,
-                &row.data,
-                &row.provenance,
-                descriptor,
-                self.session,
-                Some(row.id),
-                depth,
-            ),
+                ),
+                scope: WitnessScope::new(),
+            },
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_inherits_with_context(
+    fn evaluate_inherits_with_witness_scope(
         &self,
         operation: Operation,
         via_column: &str,
@@ -315,48 +382,52 @@ impl<'a> PolicyContextEvaluator<'a> {
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
-    ) -> bool {
+    ) -> ScopedPolicyResult {
         let Some(effective_max_depth) = normalize_recursive_max_depth(max_depth) else {
-            return false;
+            return ScopedPolicyResult::default();
         };
         if depth >= effective_max_depth {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let col_index = match descriptor.column_index(via_column) {
             Some(idx) => idx,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         if column_is_null(descriptor, &row.data, col_index).unwrap_or(false) {
-            return true;
+            return ScopedPolicyResult {
+                allowed: true,
+                scope: WitnessScope::new(),
+            };
         }
 
         let col_desc = &descriptor.columns[col_index];
         let parent_table = match &col_desc.references {
             Some(table) => table,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         let parent_id = match decode_column(descriptor, &row.data, col_index) {
             Ok(Value::Uuid(id)) => id,
-            _ => return false,
+            _ => return ScopedPolicyResult::default(),
         };
 
         if visited.contains(&parent_id) {
-            return false;
+            return ScopedPolicyResult::default();
         }
         visited.insert(parent_id);
 
         let parent_table_name = *parent_table;
         let parent_row = match row_loader(parent_id, Some(parent_table_name)) {
             Some(content) => content,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
+        let parent_scope = parent_row.provenance.clone();
 
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         let parent_policy = match operation {
@@ -368,7 +439,7 @@ impl<'a> PolicyContextEvaluator<'a> {
 
         let parent_policy = match parent_policy {
             Some(p) => p,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         let parent_row = Row::new(
@@ -377,7 +448,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             parent_row.batch_id,
             parent_row.row_provenance,
         );
-        self.evaluate_expr_with_context(
+        let mut result = self.evaluate_expr_with_witness_scope(
             parent_policy,
             operation,
             &parent_row,
@@ -388,11 +459,15 @@ impl<'a> PolicyContextEvaluator<'a> {
             depth + 1,
             visited,
             visited_referencing,
-        )
+        );
+        if result.allowed {
+            result.scope.extend(parent_scope);
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_exists_with_context(
+    fn evaluate_exists_with_witness_scope(
         &self,
         table: &str,
         condition: &PolicyExpr,
@@ -402,15 +477,15 @@ impl<'a> PolicyContextEvaluator<'a> {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
-    ) -> bool {
+    ) -> ScopedPolicyResult {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let bound_condition =
             match bind_outer_row_refs(condition, &row.data, descriptor, Some(row.id)) {
                 Some(expr) => expr,
-                None => return false,
+                None => return ScopedPolicyResult::default(),
             };
 
         let table_name = TableName::new(table);
@@ -424,7 +499,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.row_policy_mode,
         ) {
             Some(g) => g,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         for _ in 0..100 {
@@ -433,11 +508,14 @@ impl<'a> PolicyContextEvaluator<'a> {
             }
         }
 
-        graph.result()
+        ScopedPolicyResult {
+            allowed: graph.result(),
+            scope: graph.matching_scope_object_ids(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_exists_rel_with_context(
+    fn evaluate_exists_rel_with_witness_scope(
         &self,
         rel: &RelExpr,
         structural_scans: bool,
@@ -447,15 +525,15 @@ impl<'a> PolicyContextEvaluator<'a> {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId, Option<TableName>) -> Option<LoadedRow>,
         depth: usize,
-    ) -> bool {
+    ) -> ScopedPolicyResult {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
-            return false;
+            return ScopedPolicyResult::default();
         }
 
         let bound_rel =
             match bind_relation_refs(rel, &row.data, descriptor, self.session, Some(row.id)) {
                 Some(expr) => expr,
-                None => return false,
+                None => return ScopedPolicyResult::default(),
             };
 
         let current_table = TableName::new(table_name);
@@ -469,7 +547,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             structural_scans,
         ) {
             Some(g) => g,
-            None => return false,
+            None => return ScopedPolicyResult::default(),
         };
 
         for _ in 0..100 {
@@ -478,7 +556,10 @@ impl<'a> PolicyContextEvaluator<'a> {
             }
         }
 
-        graph.result()
+        ScopedPolicyResult {
+            allowed: graph.result(),
+            scope: graph.matching_scope_object_ids(),
+        }
     }
 }
 

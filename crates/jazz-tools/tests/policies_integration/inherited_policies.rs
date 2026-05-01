@@ -394,7 +394,6 @@ async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String,
 /// dave query ───► hidden
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
@@ -534,7 +533,6 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners() {
 /// bob(fresh) ─────query docs─────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: inherited select still resolves through deleted parent rows"
 async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_targets() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
@@ -681,7 +679,6 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
 /// dave query ────► nothing
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let schema = SchemaBuilder::new()
@@ -855,7 +852,6 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 /// alice ──insert owner=alice, folder=shared─────────► server ──► accepted
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: inherited write policies resolves on wrong branch"
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let schema = SchemaBuilder::new()
@@ -1084,7 +1080,6 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
 /// alice ──delete folder────────────────────────────► server ──► persisted
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let schema = SchemaBuilder::new()
@@ -1229,7 +1224,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 /// bob ──delete charlie doc──────────────────────────► server ──✗ rejected
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let schema = SchemaBuilder::new()
@@ -1388,7 +1382,6 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
 /// Verifies that multiple forward inherited paths compose with OR: visibility
 /// through either FK should be enough to expose the child row.
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_multiple_folder_paths_compose_with_or() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
@@ -1968,9 +1961,6 @@ async fn inherited_referencing_array_membership_preserves_set_semantics() {
 /// Verifies that non-recursive forward inheritance can compose across multiple
 /// tables, such as `folders -> files -> file_parts`.
 #[tokio::test]
-#[should_panic(
-    expected = "forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
-)]
 async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
     let schema = multi_hop_inherited_parts_schema();
     let server = TestingServer::builder()
@@ -2046,7 +2036,6 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
 /// Verifies that changing the parent row's policy-relevant contents revokes
 /// child visibility for active subscriptions.
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_parent_policy_change_propagates_to_child_on_active_subscriptions() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
@@ -2139,7 +2128,6 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
 /// Verifies that retargeting a child from a visible parent to a hidden parent
 /// removes it from active subscriptions.
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from_subscriptions() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
@@ -2234,7 +2222,6 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
 /// Verifies that retargeting a child from a hidden parent to a visible parent
 /// adds it to active subscriptions.
 #[tokio::test]
-#[should_panic] // "known failing: forward INHERITS SELECT fails to expose child rows to parent-authorized sessions"
 async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subscriptions() {
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(

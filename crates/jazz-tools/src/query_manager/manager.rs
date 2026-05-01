@@ -1019,8 +1019,25 @@ impl QueryManager {
 
     pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
         let sub_id = QuerySubscriptionId(query_id.0);
+        let remote_scope = self.sync_manager.remote_query_scope(query_id);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
             sub.query_frontier_complete = true;
+            if remote_scope
+                .iter()
+                .any(|(_, branch)| !sub.branches.iter().any(|known| known == branch.as_str()))
+            {
+                sub.needs_recompile = true;
+            }
+            let root_table = sub.graph.table.as_str().to_string();
+            sub.graph.mark_dirty_for_table(&root_table);
+
+            let mut policy_context_tables = sub.policy_context_tables.clone();
+            policy_context_tables.extend(Self::policy_context_tables_for_graph(&sub.graph));
+            policy_context_tables.sort();
+            policy_context_tables.dedup();
+            for table in policy_context_tables {
+                sub.graph.mark_dirty_for_table(&table);
+            }
         }
     }
 
