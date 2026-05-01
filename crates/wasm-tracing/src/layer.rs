@@ -318,7 +318,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             mark(&mark_name(id));
         }
 
-        if self.config.report_logs_in_timings || trace_entry_collection_enabled() {
+        if trace_entry_collection_enabled() {
             if let Some(span_ref) = ctx.span(id) {
                 span_ref.extensions_mut().insert(SpanTiming {
                     start_unix_nano: unix_nano_now_string(),

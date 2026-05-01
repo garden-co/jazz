@@ -107,7 +107,7 @@ describe("jazzSvelteKit", () => {
     expect(process.env.PUBLIC_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
   }, 30_000);
 
-  it("exposes top-level telemetry options without starting server-side telemetry", async () => {
+  it("exposes top-level telemetry options and starts server-side telemetry", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const startSpy = vi.spyOn(devServer, "startLocalJazzServer").mockResolvedValue({
       appId: "00000000-0000-0000-0000-000000000062",
@@ -128,7 +128,7 @@ describe("jazzSvelteKit", () => {
     await (plugin.configureServer as (s: ViteDevServer) => Promise<void>)(viteServer);
 
     const startOptions = startSpy.mock.calls[0]![0] as Record<string, unknown>;
-    expect("telemetry" in startOptions).toBe(false);
+    expect(startOptions.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
     expect(viteServer.config.env!.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL).toBe(
       "http://127.0.0.1:54418",
     );

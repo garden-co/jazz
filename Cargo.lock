@@ -1731,10 +1731,13 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "opentelemetry_sdk",
  "serde",
  "serde_bytes",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

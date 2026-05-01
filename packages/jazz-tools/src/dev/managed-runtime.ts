@@ -221,7 +221,9 @@ export class ManagedDevRuntime {
       let serverUrl: string;
       let adminSecret: string;
       let appId: string;
-      let telemetryCollectorUrl: string | undefined;
+      const telemetryCollectorUrl =
+        process.env[this.envKeys.telemetryCollectorUrl] ??
+        resolveTelemetryCollectorUrl(options.telemetry);
 
       try {
         if (serverOpt === false) {
@@ -293,6 +295,7 @@ export class ManagedDevRuntime {
             catalogueAuthority: serverConfig.catalogueAuthority,
             catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
             catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
+            telemetryCollectorUrl,
           });
 
           serverUrl = this.serverHandle.url;
@@ -305,9 +308,6 @@ export class ManagedDevRuntime {
         }
 
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
-        telemetryCollectorUrl =
-          process.env[this.envKeys.telemetryCollectorUrl] ??
-          resolveTelemetryCollectorUrl(options.telemetry);
         if (telemetryCollectorUrl) {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }
