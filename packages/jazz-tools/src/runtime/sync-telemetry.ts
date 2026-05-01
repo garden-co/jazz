@@ -12,10 +12,11 @@ type ImportMetaWithEnv = ImportMeta & {
   env?: Record<string, string | undefined>;
 };
 
-type WasmTelemetryModule = Pick<
-  typeof import("jazz-wasm"),
-  "setTraceEntryCollectionEnabled" | "drainTraceEntries"
->;
+type WasmTelemetryModule = {
+  setTraceEntryCollectionEnabled(enabled: boolean): void;
+  drainTraceEntries(): WasmTraceEntry[];
+  subscribeTraceEntries(callback: () => void): () => void;
+};
 
 interface WasmTelemetryExporterState {
   tracer: Tracer;
@@ -32,7 +33,6 @@ interface WasmTelemetryExporterState {
 
 const MAX_WASM_TELEMETRY_EXPORT_BATCH_SIZE = 256;
 const MAX_PENDING_WASM_TELEMETRY_RECORDS = 5_000;
-const WASM_TELEMETRY_DRAIN_INTERVAL_MS = 500;
 // SpanKind.INTERNAL — inlined to avoid a dynamic import of @opentelemetry/api.
 const SPAN_KIND_INTERNAL = 1;
 const SEVERITY_NUMBER = {
@@ -121,20 +121,32 @@ export function installWasmTelemetry(options: {
     }
   };
 
+  let disposed = false;
+  let drainMicrotaskPending = false;
+
   const drain = () => {
     const entries = wasmModule.drainTraceEntries();
     if (!Array.isArray(entries) || entries.length === 0) return;
     void exportEntries(entries);
   };
 
+  const scheduleDrain = () => {
+    if (disposed || drainMicrotaskPending) return;
+    drainMicrotaskPending = true;
+    queueMicrotask(() => {
+      drainMicrotaskPending = false;
+      if (disposed) return;
+      drain();
+    });
+  };
+
+  const unsubscribeTraceEntries = wasmModule.subscribeTraceEntries(scheduleDrain);
   wasmModule.setTraceEntryCollectionEnabled(true);
-  const interval = setInterval(drain, WASM_TELEMETRY_DRAIN_INTERVAL_MS);
-  let disposed = false;
 
   return () => {
     if (disposed) return;
     disposed = true;
-    clearInterval(interval);
+    unsubscribeTraceEntries();
     drain();
     wasmModule.setTraceEntryCollectionEnabled(false);
   };

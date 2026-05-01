@@ -44,6 +44,7 @@ declare module "jazz-wasm" {
   export function initSync(input?: unknown): void;
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): WasmTraceEntry[];
+  export function subscribeTraceEntries(callback: () => void): () => void;
 
   export class WasmRuntime {
     constructor(

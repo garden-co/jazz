@@ -106,17 +106,37 @@ import {
 } from "./sync-telemetry.js";
 
 type WasmTraceEntry = import("jazz-wasm").WasmTraceEntry;
+type TraceEntrySubscriber = () => void;
 
 type MockWasmModule = {
   setTraceEntryCollectionEnabled: ReturnType<typeof vi.fn<(enabled: boolean) => void>>;
   drainTraceEntries: ReturnType<typeof vi.fn<() => WasmTraceEntry[]>>;
+  subscribeTraceEntries: ReturnType<typeof vi.fn<(callback: TraceEntrySubscriber) => () => void>>;
+  subscribers: TraceEntrySubscriber[];
+  unsubscribeTraceEntries: ReturnType<typeof vi.fn<() => void>>;
 };
 
 function createWasmModule(drains: WasmTraceEntry[][] = []): MockWasmModule {
+  const subscribers: TraceEntrySubscriber[] = [];
+  const unsubscribeTraceEntries = vi.fn(() => {
+    subscribers.length = 0;
+  });
+
   return {
     setTraceEntryCollectionEnabled: vi.fn<(enabled: boolean) => void>(),
     drainTraceEntries: vi.fn<() => WasmTraceEntry[]>(() => drains.shift() ?? []),
+    subscribeTraceEntries: vi.fn((callback: TraceEntrySubscriber) => {
+      subscribers.push(callback);
+      return unsubscribeTraceEntries;
+    }),
+    subscribers,
+    unsubscribeTraceEntries,
   };
+}
+
+async function flushQueuedMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 const originalFetch = globalThis.fetch;
@@ -190,8 +210,7 @@ describe("telemetry OTLP helpers", () => {
     expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
   });
 
-  it("does not enable Rust collection or polling without a collector URL", async () => {
-    vi.useFakeTimers();
+  it("does not enable Rust collection or subscribe without a collector URL", async () => {
     const wasmModule = createWasmModule();
 
     installWasmTelemetry({
@@ -201,16 +220,17 @@ describe("telemetry OTLP helpers", () => {
       runtimeThread: "worker",
     });
 
-    await vi.advanceTimersByTimeAsync(1_000);
+    await flushQueuedMicrotasks();
 
     expect(wasmModule.setTraceEntryCollectionEnabled).not.toHaveBeenCalled();
+    expect(wasmModule.subscribeTraceEntries).not.toHaveBeenCalled();
     expect(wasmModule.drainTraceEntries).not.toHaveBeenCalled();
     expect(otelMocks.traceExporterConstructors).not.toHaveBeenCalled();
     expect(otelMocks.logExporterConstructors).not.toHaveBeenCalled();
   });
 
-  it("enables Rust collection and drains WASM telemetry every 500ms", async () => {
-    vi.useFakeTimers();
+  it("enables Rust collection and drains WASM telemetry when Rust notifies JS", async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
     const wasmModule = createWasmModule([[], []]);
 
     const dispose = installWasmTelemetry({
@@ -221,16 +241,48 @@ describe("telemetry OTLP helpers", () => {
     });
 
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledWith(true);
+    expect(wasmModule.subscribeTraceEntries).toHaveBeenCalledTimes(1);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
     expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
 
-    await vi.advanceTimersByTimeAsync(1_000);
+    wasmModule.subscribers[0]!();
+    await flushQueuedMicrotasks();
+
+    wasmModule.subscribers[0]!();
+    await flushQueuedMicrotasks();
+
+    expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(2);
+    dispose();
+  });
+
+  it("coalesces notifications while the drain microtask is pending", async () => {
+    const wasmModule = createWasmModule([[], []]);
+
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "telemetry-app",
+      runtimeThread: "worker",
+    });
+
+    wasmModule.subscribers[0]!();
+    wasmModule.subscribers[0]!();
+    wasmModule.subscribers[0]!();
+
+    expect(wasmModule.drainTraceEntries).not.toHaveBeenCalled();
+
+    await flushQueuedMicrotasks();
+
+    expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(1);
+
+    wasmModule.subscribers[0]!();
+    await flushQueuedMicrotasks();
 
     expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(2);
     dispose();
   });
 
   it("exports drained span, log, and dropped entries through OpenTelemetry", async () => {
-    vi.useFakeTimers();
     const wasmModule = createWasmModule([
       [
         {
@@ -263,7 +315,7 @@ describe("telemetry OTLP helpers", () => {
       runtimeThread: "worker",
     });
 
-    await vi.advanceTimersByTimeAsync(500);
+    wasmModule.subscribers[0]!();
     await vi.waitFor(() => expect(otelMocks.startSpan).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(otelMocks.emitLog).toHaveBeenCalledTimes(2));
 
@@ -304,7 +356,6 @@ describe("telemetry OTLP helpers", () => {
   });
 
   it("drains once and disables Rust collection on dispose", () => {
-    vi.useFakeTimers();
     const wasmModule = createWasmModule([[]]);
 
     const dispose = installWasmTelemetry({
@@ -317,6 +368,7 @@ describe("telemetry OTLP helpers", () => {
     dispose();
 
     expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.unsubscribeTraceEntries).toHaveBeenCalledTimes(1);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
   });
 });

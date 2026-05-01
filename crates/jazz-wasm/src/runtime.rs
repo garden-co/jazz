@@ -71,6 +71,13 @@ pub fn drain_trace_entries() -> JsValue {
     wasm_tracing::drain_trace_entries()
 }
 
+/// Subscribe to notifications that buffered tracing entries are ready to drain.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = subscribeTraceEntries)]
+pub fn subscribe_trace_entries(callback: Function) -> Function {
+    wasm_tracing::subscribe_trace_entries(callback)
+}
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{

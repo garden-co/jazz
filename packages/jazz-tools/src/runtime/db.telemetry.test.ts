@@ -22,13 +22,10 @@ async function loadDbWithTelemetryMocks(wasmModule: unknown = {}) {
     };
   });
 
-  vi.doMock("./sync-telemetry.js", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("./sync-telemetry.js")>();
-    return {
-      ...actual,
-      installWasmTelemetry: installWasmTelemetryMock,
-    };
-  });
+  vi.doMock("./sync-telemetry.js", () => ({
+    installWasmTelemetry: installWasmTelemetryMock,
+    resolveTelemetryCollectorUrlFromEnv: vi.fn(() => undefined),
+  }));
 
   const { Db } = await import("./db.js");
   return {
@@ -63,6 +60,7 @@ describe("Db WASM telemetry", () => {
     const wasmModule = {
       setTraceEntryCollectionEnabled: vi.fn(),
       drainTraceEntries: vi.fn(),
+      subscribeTraceEntries: vi.fn(() => vi.fn()),
     };
     const { Db, disposeWasmTelemetryMock, installWasmTelemetryMock } =
       await loadDbWithTelemetryMocks(wasmModule);

@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
 use std::{
     collections::HashMap,
     mem,
@@ -23,6 +25,8 @@ use crate::{
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 struct SpanTiming {
     start_unix_nano: String,
@@ -31,9 +35,15 @@ struct SpanTiming {
 const MAX_TRACE_ENTRIES: usize = 5_000;
 
 static TRACE_ENTRY_COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
+static TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING: AtomicBool = AtomicBool::new(false);
 static TRACE_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static DROPPED_TRACE_ENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
 static TRACE_ENTRIES: Mutex<Vec<TraceEntry>> = Mutex::new(Vec::new());
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TRACE_ENTRY_DRAIN_CALLBACK: RefCell<Option<js_sys::Function>> = RefCell::new(None);
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -73,6 +83,24 @@ pub fn set_trace_entry_collection_enabled(enabled: bool) {
     }
 }
 
+/// Subscribe to notifications that buffered tracing entries are ready to drain.
+#[cfg(target_arch = "wasm32")]
+pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
+    TRACE_ENTRY_DRAIN_CALLBACK.with(|slot| {
+        *slot.borrow_mut() = Some(callback);
+    });
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(false, Ordering::Relaxed);
+
+    if has_trace_entries_to_drain() {
+        notify_trace_entries_ready();
+    }
+
+    let unsubscribe = Closure::<dyn FnMut()>::wrap(Box::new(|| {
+        clear_trace_entry_drain_callback();
+    }));
+    unsubscribe.into_js_value().unchecked_into()
+}
+
 /// Drain buffered tracing entries into a JavaScript value.
 #[cfg(target_arch = "wasm32")]
 pub fn drain_trace_entries() -> JsValue {
@@ -92,12 +120,16 @@ fn push_trace_entry(entry: TraceEntry) {
         return;
     }
 
-    let mut entries = TRACE_ENTRIES.lock().expect("trace entries mutex poisoned");
-    if entries.len() >= MAX_TRACE_ENTRIES {
-        DROPPED_TRACE_ENTRY_COUNT.fetch_add(1, Ordering::Relaxed);
-        return;
+    {
+        let mut entries = TRACE_ENTRIES.lock().expect("trace entries mutex poisoned");
+        if entries.len() >= MAX_TRACE_ENTRIES {
+            DROPPED_TRACE_ENTRY_COUNT.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entries.push(entry);
+        }
     }
-    entries.push(entry);
+
+    notify_trace_entries_ready();
 }
 
 #[allow(dead_code)]
@@ -105,10 +137,51 @@ fn drain_trace_entries_internal() -> Vec<TraceEntry> {
     let mut entries = TRACE_ENTRIES.lock().expect("trace entries mutex poisoned");
     let mut drained = mem::take(&mut *entries);
     let dropped = DROPPED_TRACE_ENTRY_COUNT.swap(0, Ordering::Relaxed);
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(false, Ordering::Release);
     if dropped > 0 {
         drained.push(TraceEntry::Dropped { count: dropped });
     }
     drained
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_trace_entries_to_drain() -> bool {
+    !TRACE_ENTRIES
+        .lock()
+        .expect("trace entries mutex poisoned")
+        .is_empty()
+        || DROPPED_TRACE_ENTRY_COUNT.load(Ordering::Relaxed) > 0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn notify_trace_entries_ready() {
+    if TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+
+    let callback = TRACE_ENTRY_DRAIN_CALLBACK.with(|slot| slot.borrow().clone());
+    let Some(callback) = callback else {
+        return;
+    };
+
+    if TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    if callback.call0(&JsValue::UNDEFINED).is_err() {
+        TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn notify_trace_entries_ready() {}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_trace_entry_drain_callback() {
+    TRACE_ENTRY_DRAIN_CALLBACK.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(false, Ordering::Release);
 }
 
 fn clear_trace_entries() {
@@ -118,6 +191,7 @@ fn clear_trace_entries() {
         .clear();
     DROPPED_TRACE_ENTRY_COUNT.store(0, Ordering::Relaxed);
     TRACE_ENTRY_SEQUENCE.store(0, Ordering::Relaxed);
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -133,6 +207,16 @@ fn drain_trace_entries_for_test() -> Vec<TraceEntry> {
 #[cfg(test)]
 fn clear_trace_entries_for_test() {
     clear_trace_entries();
+}
+
+#[cfg(test)]
+fn set_trace_entry_drain_notification_pending_for_test(pending: bool) {
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.store(pending, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn trace_entry_drain_notification_pending_for_test() -> bool {
+    TRACE_ENTRY_DRAIN_NOTIFICATION_PENDING.load(Ordering::Relaxed)
 }
 
 #[doc = r#"
@@ -610,6 +694,7 @@ mod trace_entry_tests {
         let _guard = TEST_LOCK.lock().unwrap();
         clear_trace_entries_for_test();
         set_trace_entry_collection_enabled(true);
+        set_trace_entry_drain_notification_pending_for_test(true);
 
         push_trace_entry_for_test(span_entry(0));
         push_trace_entry_for_test(log_entry(1));
@@ -618,6 +703,7 @@ mod trace_entry_tests {
             drain_trace_entries_for_test(),
             vec![span_entry(0), log_entry(1)]
         );
+        assert!(!trace_entry_drain_notification_pending_for_test());
         assert!(drain_trace_entries_for_test().is_empty());
     }
 
