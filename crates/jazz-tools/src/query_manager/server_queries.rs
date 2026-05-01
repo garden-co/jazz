@@ -918,7 +918,12 @@ impl QueryManager {
                 .sync_manager
                 .max_local_durability_tier()
                 .unwrap_or(DurabilityTier::Local);
-            settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
+            settled_notifications.push((
+                sub.client_id,
+                sub.query_id,
+                settled_tier,
+                scope.clone().unwrap_or_default(),
+            ));
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
@@ -955,9 +960,9 @@ impl QueryManager {
             self.sync_manager.emit_schema_warning(client_id, warning);
         }
 
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -1003,7 +1008,12 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
-        let mut settled_notifications: Vec<(ClientId, QueryId, DurabilityTier)> = Vec::new();
+        let mut settled_notifications: Vec<(
+            ClientId,
+            QueryId,
+            DurabilityTier,
+            HashSet<(ObjectId, BranchName)>,
+        )> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -1054,16 +1064,6 @@ impl QueryManager {
                         .map(|warning| (client_id, warning)),
                 );
 
-                // Emit QuerySettled on first settlement
-                if !sub.settled_once {
-                    sub.settled_once = true;
-                    let settled_tier = self
-                        .sync_manager
-                        .max_local_durability_tier()
-                        .unwrap_or(DurabilityTier::Local);
-                    settled_notifications.push((client_id, query_id, settled_tier));
-                }
-
                 // Check if scope changed
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
@@ -1098,6 +1098,37 @@ impl QueryManager {
             {
                 scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
                 sub.last_scope = new_scope;
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                settled_notifications.push((
+                    client_id,
+                    query_id,
+                    settled_tier,
+                    sub.last_scope.clone(),
+                ));
+            }
+
+            // Emit QuerySettled on first settlement after the authoritative
+            // scope for that settled frame has been computed.
+            if !sub.settled_once {
+                sub.settled_once = true;
+                if !settled_notifications
+                    .iter()
+                    .any(|(cid, qid, _, _)| *cid == client_id && *qid == query_id)
+                {
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((
+                        client_id,
+                        query_id,
+                        settled_tier,
+                        sub.last_scope.clone(),
+                    ));
+                }
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
@@ -1115,9 +1146,9 @@ impl QueryManager {
         }
 
         // Emit QuerySettled notifications
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
     }
 
