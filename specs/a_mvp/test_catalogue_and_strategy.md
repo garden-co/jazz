@@ -266,10 +266,10 @@ Do this file-by-file and require a short reason in the pruning PR.
 
 Known gaps from current repo notes:
 
-- Multi-server sync coverage is tracked in `todo/issues/test_multi-server-sync.md`.
-- WebSocket transport integration coverage is tracked in `todo/issues/test_websocket-transport-integration.md`.
-- Expo Android websocket e2e is tracked in `todo/issues/expo-android-maestro-e2e-ws-unverified.md`.
-- Sync protocol reliability appears as an MVP idea in `todo/ideas/1_mvp/sync-protocol-reliability.md`.
+- Multi-server sync coverage is tracked in `specs/todo/issues/test_multi-server-sync.md`.
+- WebSocket transport integration coverage is tracked in `specs/todo/issues/test_websocket-transport-integration.md`.
+- Expo Android websocket e2e is tracked in `specs/todo/issues/expo-android-maestro-e2e-ws-unverified.md`.
+- Sync protocol reliability appears as an MVP idea in `specs/todo/ideas/1_mvp/sync-protocol-reliability.md`.
 
 Turn those into contract rows before adding more ad hoc tests.
 

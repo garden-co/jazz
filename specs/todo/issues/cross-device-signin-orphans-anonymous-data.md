@@ -12,7 +12,7 @@ medium
 
 - Architecturally, the current local-first auth model is 1 external account ↔ 1 Jazz id, pinned at sign-up via `databaseHooks.user.create.before` in the BetterAuth hooks. Sign-in always authenticates as that one pinned id.
 - There is no link table, no `jazz_principal_id` carrying a secondary id, and no server-side concept of "multiple linked identities per principal". See `packages/jazz-tools/src/backend/request-auth.ts` `resolveRequestSession` — the session's `user_id` comes directly from whatever JWT is presented.
-- The legacy `useLinkExternalIdentity` in `packages/jazz-tools/src/{react,svelte,vue}/use-link-external-identity.ts` targets the old synthetic-users/demoAuth path and is being removed (`todo/issues/deprecate-demo-local-auth.md`). It is not a solution.
+- The legacy `useLinkExternalIdentity` in `packages/jazz-tools/src/{react,svelte,vue}/use-link-external-identity.ts` targets the old synthetic-users/demoAuth path and is being removed (`specs/todo/issues/deprecate-demo-local-auth.md`). It is not a solution.
 - Possible directions worth considering:
   - A server-side identity-link table mapping `principal_jazz_id → [linked_jazz_ids]`, plus a mechanism for the server to treat policies as matching _any_ linked id for reads/writes by that principal.
   - A client-side "re-parent" flow on sign-in that re-inserts rows owned by the anonymous id under the signed-in id, before the anonymous identity is discarded. Only works for data the client still has a reference to.
