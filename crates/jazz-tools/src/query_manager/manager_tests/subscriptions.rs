@@ -34,6 +34,37 @@ fn subscription_updates_after_insert_and_process() {
 }
 
 #[test]
+fn settled_clean_subscription_does_not_request_visibility_recompute_on_idle_process() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm.query("users").build();
+    let sub_id = qm.subscribe(query).unwrap();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+
+    let subscription = qm.subscriptions.get(&sub_id).unwrap();
+    assert!(subscription.settled_once);
+    assert!(!subscription.graph.has_dirty_nodes());
+    assert!(!subscription.needs_visibility_recompute);
+
+    qm.process(&mut storage);
+
+    assert!(qm.take_updates().is_empty());
+    assert!(!qm.subscriptions[&sub_id].needs_visibility_recompute);
+}
+
+#[test]
 fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

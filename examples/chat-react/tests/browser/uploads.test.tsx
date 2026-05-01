@@ -7,7 +7,6 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
 import { App } from "../../src/App.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { Toaster } from "../../src/components/ui/sonner.js";
@@ -68,14 +67,12 @@ describe("Upload E2E", () => {
     const appId = config.appId ?? APP_ID;
     const serverUrl = config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`;
 
-    await act(async () => {
-      r.render(
-        <>
-          <App config={{ appId, serverUrl, ...config }} />
-          <Toaster />
-        </>,
-      );
-    });
+    r.render(
+      <>
+        <App config={{ appId, serverUrl, ...config }} />
+        <Toaster />
+      </>,
+    );
 
     await waitFor(
       () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
@@ -90,7 +87,7 @@ describe("Upload E2E", () => {
     resetProfileGuard();
     for (const { root, container } of mounts) {
       try {
-        await act(async () => root.unmount());
+        root.unmount();
       } catch {
         /* best effort */
       }
@@ -98,7 +95,7 @@ describe("Upload E2E", () => {
     }
     mounts.length = 0;
     window.location.hash = "";
-    await new Promise((r) => setTimeout(r, 1000));
+    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------
@@ -126,7 +123,7 @@ describe("Upload E2E", () => {
     // Open the action menu and click "Image"
     const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLButtonElement));
+    simulateClick(plusButton as HTMLButtonElement);
 
     await waitFor(
       () =>
@@ -140,7 +137,7 @@ describe("Upload E2E", () => {
     const imageItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find((i) =>
       i.textContent?.toLowerCase().includes("image"),
     ) as HTMLElement;
-    await act(async () => simulateClick(imageItem));
+    simulateClick(imageItem);
 
     // Wait for the upload dialog
     await waitFor(
@@ -165,9 +162,7 @@ describe("Upload E2E", () => {
     const handleFile = (fileInput as any).__handleFile as (f: File) => Promise<void>;
     expect(handleFile).toBeTruthy();
 
-    await act(async () => {
-      await handleFile(file);
-    });
+    await handleFile(file);
 
     // Verify "upload successful" toast appears
     await waitFor(
@@ -209,7 +204,7 @@ describe("Upload E2E", () => {
     // Open the action menu and click "File"
     const plusButton = findPlusButton(el);
     expect(plusButton).toBeTruthy();
-    await act(async () => simulateClick(plusButton as HTMLButtonElement));
+    simulateClick(plusButton as HTMLButtonElement);
 
     await waitFor(
       () =>
@@ -223,7 +218,7 @@ describe("Upload E2E", () => {
     const fileItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find((i) =>
       i.textContent?.toLowerCase().includes("file"),
     ) as HTMLElement;
-    await act(async () => simulateClick(fileItem));
+    simulateClick(fileItem);
 
     // Wait for the upload dialog
     await waitFor(
@@ -239,9 +234,7 @@ describe("Upload E2E", () => {
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
     const handleFile = (fileInput as any).__handleFile as (f: File) => Promise<void>;
     expect(handleFile).toBeTruthy();
-    await act(async () => {
-      await handleFile(file);
-    });
+    await handleFile(file);
 
     // Verify "upload successful" toast appears
     await waitFor(

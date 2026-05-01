@@ -11,7 +11,7 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
-import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   DirectBatch as RuntimeDirectBatch,
@@ -135,6 +135,19 @@ function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
       },
     ]),
   ) as WasmSchema;
+}
+
+const policyStrippedSchemaCache = new WeakMap<WasmSchema, WasmSchema>();
+
+function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
+  const cached = policyStrippedSchemaCache.get(schema);
+  if (cached) {
+    return cached;
+  }
+
+  const strippedSchema = stripSchemaPolicies(schema);
+  policyStrippedSchemaCache.set(schema, strippedSchema);
+  return strippedSchema;
 }
 
 function trimOptionalString(value?: string | null): string | null {
@@ -1022,6 +1035,7 @@ export class Db {
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
@@ -1247,11 +1261,12 @@ export class Db {
     }
 
     const runtimeSchema = shouldBypassLocalPolicies(this.config)
-      ? stripSchemaPolicies(schema)
+      ? getPolicyStrippedSchema(schema)
       : schema;
 
-    // Use stringified schema as cache key
-    const key = serializeRuntimeSchema(runtimeSchema);
+    // Use the canonical schema JSON as the client cache key, but memoize it by
+    // schema identity so write-heavy paths don't stringify the same schema per row.
+    const key = getRuntimeSchemaCacheKey(runtimeSchema);
 
     if (!this.clients.has(key)) {
       setGlobalWasmLogLevel(this.config.logLevel);
@@ -2717,8 +2732,16 @@ export class Db {
   /**
    * Shutdown the Db and release all resources.
    * Closes all memoized JazzClient connections and the worker.
+   *
+   * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownPromise = this.runShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);

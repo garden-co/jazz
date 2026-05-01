@@ -46,6 +46,7 @@
 
 - [**async-persistence-layer**](todo/ideas/1_mvp/async-persistence-layer.md) — Non-blocking persistence for mobile. The Storage trait is synchronous, so RN currently blocks the UI on I/O. We need an async boundary between Jazz and the persisted storage.
 - [**auth-mode-gating-via-permissions**](todo/ideas/1_mvp/auth-mode-gating-via-permissions.md) — Replace `AuthConfig.allow_local_first_auth: bool` with declarative calls on the
+- [**column-metadata**](todo/ideas/1_mvp/column-metadata.md) — Allow attaching arbitrary key/value metadata to schema columns, like Zod's `.meta()`, so UI code can drive itself off the schema as a single source of truth (impossible to forget to render a field).
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
 - [**configurable-client-ttl**](todo/ideas/1_mvp/configurable-client-ttl.md) — Expose the client state TTL as a configurable option per app instead of leaving it hardcoded to 5 minutes and only adjustable through test-only plumbing.
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
