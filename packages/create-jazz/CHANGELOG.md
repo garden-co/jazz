@@ -1,5 +1,7 @@
 # create-jazz
 
+## 2.0.0-alpha.44
+
 ## 2.0.0-alpha.43
 
 ### Patch Changes
