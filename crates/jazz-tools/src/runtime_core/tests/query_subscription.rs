@@ -321,7 +321,7 @@ fn rc_query_local_transaction_overlay_keeps_same_row_updates_isolated_by_batch()
 }
 
 #[test]
-fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+fn rc_query_remote_tier_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -406,8 +406,8 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     assert!(
         !server_outbox
             .iter()
-            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { ref scope, .. } if !scope.is_empty())),
-        "server without a published permissions head should not advertise a non-empty authoritative scope"
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative session query"
     );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
@@ -422,22 +422,16 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
- {
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -522,6 +516,12 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     server.immediate_tick();
 
     let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query"
+    );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
@@ -535,21 +535,16 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize backend scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_for_synced_policy_rows_without_permissions_head()
  {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
@@ -599,7 +594,14 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
         .unwrap();
 
     pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
-    for entry in server.sync_sender().take() {
+    let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query even when policy rows synced"
+    );
+    for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
                 source: Source::Server(server_id),
@@ -656,16 +658,11 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Synced policy context rows should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize synced policy scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 

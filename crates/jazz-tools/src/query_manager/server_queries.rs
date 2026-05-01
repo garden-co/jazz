@@ -914,16 +914,19 @@ impl QueryManager {
                 );
             }
 
-            let settled_tier = self
-                .sync_manager
-                .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Local);
-            settled_notifications.push((
-                sub.client_id,
-                sub.query_id,
-                settled_tier,
-                scope.clone().unwrap_or_default(),
-            ));
+            let settled_once = scope.is_some();
+            if let Some(scope) = scope.as_ref() {
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                settled_notifications.push((
+                    sub.client_id,
+                    sub.query_id,
+                    settled_tier,
+                    scope.clone(),
+                ));
+            }
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
@@ -949,7 +952,7 @@ impl QueryManager {
                     policy_context_tables: sub.policy_context_tables,
                     last_scope: scope.unwrap_or_default(),
                     needs_recompile: false,
-                    settled_once: true,
+                    settled_once,
                     propagation: sub.propagation,
                     reported_schema_warnings,
                 },
@@ -1093,31 +1096,31 @@ impl QueryManager {
                     )
                 }
             };
-            if let Some(new_scope) = new_scope
-                && new_scope != sub.last_scope
-            {
-                scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
-                sub.last_scope = new_scope;
-                let settled_tier = self
-                    .sync_manager
-                    .max_local_durability_tier()
-                    .unwrap_or(DurabilityTier::Local);
-                settled_notifications.push((
-                    client_id,
-                    query_id,
-                    settled_tier,
-                    sub.last_scope.clone(),
-                ));
-            }
+            let scope_unavailable = new_scope.is_none();
+            if let Some(new_scope) = new_scope {
+                let scope_changed = new_scope != sub.last_scope;
+                if scope_changed {
+                    scope_updates.push((
+                        client_id,
+                        query_id,
+                        new_scope.clone(),
+                        sub.session.clone(),
+                    ));
+                    sub.last_scope = new_scope.clone();
+                }
 
-            // Emit QuerySettled on first settlement after the authoritative
-            // scope for that settled frame has been computed.
-            if !sub.settled_once {
-                sub.settled_once = true;
-                if !settled_notifications
-                    .iter()
-                    .any(|(cid, qid, _, _)| *cid == client_id && *qid == query_id)
-                {
+                // Emit an authoritative QuerySettled once the scope for this
+                // settled frame has been computed. A computed empty scope is
+                // authoritative; missing permissions/schema context returns None
+                // and must keep the subscription unsettled.
+                if !sub.settled_once {
+                    sub.settled_once = true;
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((client_id, query_id, settled_tier, new_scope));
+                } else if scope_changed {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
@@ -1129,6 +1132,14 @@ impl QueryManager {
                         sub.last_scope.clone(),
                     ));
                 }
+            }
+
+            if scope_unavailable {
+                tracing::trace!(
+                    ?query_id,
+                    %client_id,
+                    "server subscription scope unavailable; holding QuerySettled"
+                );
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
