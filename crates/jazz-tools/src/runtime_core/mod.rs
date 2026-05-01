@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -291,7 +291,7 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
 
     /// Parked sync messages (from network).
-    parked_sync_messages: Vec<InboxEntry>,
+    parked_sync_messages: VecDeque<InboxEntry>,
     /// Sequenced server messages buffered for in-order application.
     parked_sync_messages_by_server_seq: HashMap<ServerId, BTreeMap<u64, InboxEntry>>,
     /// Next expected per-server stream sequence.
@@ -352,7 +352,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             storage_write_pending_flush: false,
             transport: None,
             sync_sender: None,
-            parked_sync_messages: Vec::new(),
+            parked_sync_messages: VecDeque::new(),
             parked_sync_messages_by_server_seq: HashMap::new(),
             next_expected_server_seq: HashMap::new(),
             last_applied_server_seq: HashMap::new(),

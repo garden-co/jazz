@@ -148,6 +148,10 @@ harness = false
 name = "limit_offset_benchmark"
 harness = false
 
+[[bench]]
+name = "batched_tick_budget_benchmark"
+harness = false
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

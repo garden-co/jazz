@@ -3,6 +3,9 @@ use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
 use crate::storage::metadata_from_row_locator;
 
+pub(crate) const MAX_TRANSPORT_MESSAGES_PER_BATCHED_TICK: usize = 16;
+pub(crate) const MAX_SYNC_MESSAGES_PER_BATCHED_TICK: usize = 16;
+
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn local_batch_rows(
         &self,
@@ -519,10 +522,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         let mut inbound = Vec::new();
         if let Some(handle) = self.transport.as_mut() {
-            while let Some(message) = handle.try_recv_inbound() {
+            while inbound.len() < MAX_TRANSPORT_MESSAGES_PER_BATCHED_TICK
+                && let Some(message) = handle.try_recv_inbound()
+            {
                 inbound.push(message);
             }
         }
+        let hit_batch_limit = inbound.len() == MAX_TRANSPORT_MESSAGES_PER_BATCHED_TICK;
 
         for message in inbound {
             match message {
@@ -564,20 +570,31 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
             }
         }
+
+        if hit_batch_limit {
+            self.scheduler.schedule_batched_tick();
+        }
     }
 
     /// Apply parked sync messages and tick.
     fn handle_sync_messages(&mut self) {
-        let messages = std::mem::take(&mut self.parked_sync_messages);
         let mut applied_messages = 0usize;
+        let unsequenced_count = self
+            .parked_sync_messages
+            .len()
+            .min(MAX_SYNC_MESSAGES_PER_BATCHED_TICK);
 
-        if !messages.is_empty() {
+        if unsequenced_count > 0 {
             debug!(
-                count = messages.len(),
+                count = unsequenced_count,
                 "processing parked unsequenced sync messages"
             );
         }
-        for msg in messages {
+        for _ in 0..unsequenced_count {
+            let msg = self
+                .parked_sync_messages
+                .pop_front()
+                .expect("unsequenced_count is bounded by parked_sync_messages length");
             if msg.payload.writes_storage() {
                 self.mark_storage_write_pending_flush();
             }
@@ -585,17 +602,38 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             applied_messages += 1;
         }
 
+        if applied_messages < MAX_SYNC_MESSAGES_PER_BATCHED_TICK {
+            self.apply_ready_sequenced_sync_messages(&mut applied_messages);
+        }
+
+        if applied_messages > 0 {
+            debug!(count = applied_messages, "applied parked sync messages");
+            self.immediate_tick();
+        }
+
+        if self.has_ready_parked_sync_messages() {
+            self.scheduler.schedule_batched_tick();
+        }
+    }
+
+    fn apply_ready_sequenced_sync_messages(&mut self, applied_messages: &mut usize) {
         let server_ids: Vec<ServerId> = self
             .parked_sync_messages_by_server_seq
             .keys()
             .copied()
             .collect();
         for server_id in server_ids {
+            if *applied_messages >= MAX_SYNC_MESSAGES_PER_BATCHED_TICK {
+                break;
+            }
+
             let mut next_expected = *self.next_expected_server_seq.get(&server_id).unwrap_or(&1);
             let mut ready_messages = Vec::new();
             let mut remove_buffer = false;
             if let Some(buffered) = self.parked_sync_messages_by_server_seq.get_mut(&server_id) {
-                while let Some(msg) = buffered.remove(&next_expected) {
+                while *applied_messages + ready_messages.len() < MAX_SYNC_MESSAGES_PER_BATCHED_TICK
+                    && let Some(msg) = buffered.remove(&next_expected)
+                {
                     ready_messages.push((next_expected, msg));
                     next_expected += 1;
                 }
@@ -614,7 +652,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     self.mark_storage_write_pending_flush();
                 }
                 self.push_sync_inbox(msg);
-                applied_messages += 1;
+                *applied_messages += 1;
                 last_applied = sequence;
             }
             self.next_expected_server_seq
@@ -624,11 +662,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 self.parked_sync_messages_by_server_seq.remove(&server_id);
             }
         }
+    }
 
-        if applied_messages > 0 {
-            debug!(count = applied_messages, "applied parked sync messages");
-            self.immediate_tick();
-        }
+    fn has_ready_parked_sync_messages(&self) -> bool {
+        !self.parked_sync_messages.is_empty()
+            || self
+                .parked_sync_messages_by_server_seq
+                .iter()
+                .any(|(server_id, buffered)| {
+                    let next_expected = *self.next_expected_server_seq.get(server_id).unwrap_or(&1);
+                    buffered.contains_key(&next_expected)
+                })
     }
 
     /// Check if there are outbound messages requiring a batched_tick.
@@ -647,7 +691,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if let Some((ref tracer, ref name)) = self.sync_tracer {
             tracer.record_incoming(&message.source, name, &message.payload);
         }
-        self.parked_sync_messages.push(message);
+        self.parked_sync_messages.push_back(message);
         self.scheduler.schedule_batched_tick();
     }
 
