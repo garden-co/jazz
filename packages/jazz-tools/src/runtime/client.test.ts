@@ -61,7 +61,7 @@ function makeFakeRuntime() {
     addServer: vi.fn(),
     removeServer: vi.fn(),
     addClient: vi.fn().mockReturnValue("client-id"),
-    returnsDeclaredSchemaRows: false as boolean,
+    returnsDeclaredSchemaRows: true,
     getSchema: vi.fn().mockReturnValue({}),
     getSchemaHash: vi.fn().mockReturnValue("hash"),
     close: vi.fn(),
@@ -258,7 +258,6 @@ describe("JazzClient runtime schema caching", () => {
       },
     };
     const runtime = makeFakeRuntime();
-    runtime.returnsDeclaredSchemaRows = true;
     runtime.query.mockResolvedValue([
       {
         id: "todo-1",

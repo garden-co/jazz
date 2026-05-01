@@ -558,7 +558,7 @@ export class DbTransaction {
     const { client } = this.bindTable(table, "DbTransaction");
     return resolveSchemaWithTable(
       table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
+      () => normalizeRuntimeSchema(client.getSchema()),
       table._table,
     );
   }
@@ -732,7 +732,7 @@ export class DbDirectBatch {
     const { client } = this.bindTable(table, "DbDirectBatch");
     return resolveSchemaWithTable(
       table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
+      () => normalizeRuntimeSchema(client.getSchema()),
       table._table,
     );
   }

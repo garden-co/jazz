@@ -201,6 +201,128 @@ describe("Db runtime schema order", () => {
     expect(runtime.getSchemaHash).not.toHaveBeenCalled();
   });
 
+  it("does not fetch runtime schema for transaction inserts that stay within the declared schema", () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-transaction-schema-order"),
+      create: vi.fn(() => ({
+        id: "todo-transaction",
+        values: [
+          { type: "Text", value: "No transaction schema fetch" },
+          { type: "Boolean", value: false },
+        ],
+        batchId: "batch-transaction-schema-order",
+      })),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-transaction-schema-order")),
+      localBatchRecord: vi.fn(() => null),
+      localBatchRecords: vi.fn(() => []),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const getSchema = vi.fn(() => new Map());
+    const getSchemaHash = vi.fn(() => "runtime-schema-hash");
+    const client = {
+      getSchema,
+      getSchemaHash,
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+    } as unknown as JazzClient;
+    const db = createDbFromClient({ appId: "transaction-schema-order" }, client);
+    const table = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _initType: {} as { title: string; done: boolean },
+    } satisfies TableProxy<
+      { id: string; title: string; done: boolean },
+      { title: string; done: boolean }
+    >;
+
+    const tx = db.beginTransaction();
+    const row = tx.insert(table, { title: "No transaction schema fetch", done: false });
+
+    expect(row).toEqual({
+      id: "todo-transaction",
+      title: "No transaction schema fetch",
+      done: false,
+    });
+    expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "No transaction schema fetch" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch runtime schema for direct batch inserts that stay within the declared schema", () => {
+    const generatedSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-schema-order"),
+      create: vi.fn(() => ({
+        id: "todo-direct-batch",
+        values: [
+          { type: "Text", value: "No direct batch schema fetch" },
+          { type: "Boolean", value: true },
+        ],
+        batchId: "batch-direct-schema-order",
+      })),
+      update: vi.fn(),
+      upsert: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-schema-order")),
+      localBatchRecord: vi.fn(() => null),
+      localBatchRecords: vi.fn(() => []),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const getSchema = vi.fn(() => new Map());
+    const getSchemaHash = vi.fn(() => "runtime-schema-hash");
+    const client = {
+      getSchema,
+      getSchemaHash,
+      beginBatchInternal: vi.fn(() => runtimeBatch),
+    } as unknown as JazzClient;
+    const db = createDbFromClient({ appId: "direct-batch-schema-order" }, client);
+    const table = {
+      _table: "todos",
+      _schema: generatedSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _initType: {} as { title: string; done: boolean },
+    } satisfies TableProxy<
+      { id: string; title: string; done: boolean },
+      { title: string; done: boolean }
+    >;
+
+    const batch = db.beginBatch();
+    const row = batch.insert(table, { title: "No direct batch schema fetch", done: true });
+
+    expect(row).toEqual({
+      id: "todo-direct-batch",
+      title: "No direct batch schema fetch",
+      done: true,
+    });
+    expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "No direct batch schema fetch" },
+      done: { type: "Boolean", value: true },
+    });
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
+  });
+
   it("falls back to the generated schema when the runtime schema is missing a table", async () => {
     const generatedSchema: WasmSchema = {
       todos: {

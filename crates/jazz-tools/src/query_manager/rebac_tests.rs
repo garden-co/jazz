@@ -553,13 +553,17 @@ fn seed_folder_on_branch(
         1000,
         ObjectId::new().to_string(),
     );
+    let folders_layout = crate::row_format::compiled_row_layout(folders_descriptor);
     QueryManager::update_indices_for_insert_on_branch(
         storage,
         "folders",
         branch,
         folder_id,
         &folder_content,
-        folders_descriptor,
+        super::indices::RowIndexContext {
+            descriptor: folders_descriptor,
+            row_layout: folders_layout.as_ref(),
+        },
     )
     .unwrap();
     qm.persist_row_region_tip(storage, "folders", folder_id, branch);

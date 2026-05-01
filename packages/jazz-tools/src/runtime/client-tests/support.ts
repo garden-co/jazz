@@ -44,6 +44,7 @@ export function mockMutation(batchId = "batch-id"): DirectMutationResult {
 }
 
 export const runtimeBatchRecordStubs = {
+  returnsDeclaredSchemaRows: true as const,
   loadLocalBatchRecord: () => null,
   loadLocalBatchRecords: () => [],
   sealBatch: () => {},

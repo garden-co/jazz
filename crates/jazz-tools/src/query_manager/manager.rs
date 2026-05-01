@@ -8,6 +8,8 @@ use crate::batch_fate::BatchSettlement;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
+use crate::row_format::CompiledRowLayout;
+use crate::row_histories::FlatRowCodecs;
 use crate::row_histories::{BatchId, QueryRowBatch, RowState, RowVisibilityChange, StoredRowBatch};
 use crate::schema_manager::{
     LensTransformer, SchemaContext, encoding::encode_schema, resolve_current_table_name,
@@ -21,6 +23,7 @@ use crate::sync_manager::{
 
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
+use super::indices::RowIndexContext;
 use super::policy::{Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
@@ -270,7 +273,10 @@ pub(super) struct PolicyCheckState {
 
 #[derive(Debug)]
 pub(super) struct WriteTableCacheEntry {
+    pub(super) schema_hash: SchemaHash,
     pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) row_layout: Arc<CompiledRowLayout>,
+    pub(super) row_codecs: Arc<FlatRowCodecs>,
     pub(super) row_locator: RowLocator,
     pub(super) insert_policy: Option<Arc<PolicyExpr>>,
     pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
@@ -1442,21 +1448,12 @@ impl QueryManager {
         };
         let table_name = TableName::new(&branch_table);
 
-        let table_schema = if schema_hash == self.schema_context.current_hash {
-            match self.schema.get(&table_name) {
-                Some(schema) => schema.clone(),
-                None => return,
-            }
+        let write_schema = if schema_hash == self.schema_context.current_hash {
+            self.schema.clone()
         } else if let Some(schema) = self.schema_context.get_schema(&schema_hash) {
-            match schema.get(&table_name) {
-                Some(table_schema) => table_schema.clone(),
-                None => return,
-            }
+            Arc::new(schema.clone())
         } else if let Some(schema) = self.known_schemas.get(&schema_hash) {
-            match schema.get(&table_name) {
-                Some(table_schema) => table_schema.clone(),
-                None => return,
-            }
+            Arc::new(schema.clone())
         } else {
             tracing::error!(
                 object_id = %update.object_id,
@@ -1467,8 +1464,18 @@ impl QueryManager {
             self.pending_row_visibility_changes.push(update);
             return;
         };
+        let Ok(table_write) =
+            self.write_table_cache_entry_for_schema(branch, table_name, write_schema.as_ref())
+        else {
+            return;
+        };
 
-        let descriptor = table_schema.columns.clone();
+        let descriptor = table_write.descriptor.as_ref();
+        let row_layout = table_write.row_layout.as_ref();
+        let row_index_context = RowIndexContext {
+            descriptor,
+            row_layout,
+        };
         let old_row = update.previous_row.as_ref();
         let current_batch_id = update.row.batch_id;
         let current_row_key = RowBatchKey::from_row(&update.row);
@@ -1502,7 +1509,7 @@ impl QueryManager {
                     branch,
                     update.object_id,
                     old_data,
-                    &descriptor,
+                    row_index_context,
                 );
             }
             if local_update {
@@ -1527,7 +1534,7 @@ impl QueryManager {
                         branch,
                         update.object_id,
                         &old_row.data,
-                        &descriptor,
+                        row_index_context,
                     );
                 } else {
                     let _ = storage.index_remove(
@@ -1574,7 +1581,7 @@ impl QueryManager {
                     branch,
                     update.object_id,
                     new_data,
-                    &descriptor,
+                    row_index_context,
                 )
             {
                 tracing::error!(
@@ -1606,7 +1613,7 @@ impl QueryManager {
                     branch,
                     update.object_id,
                     new_data,
-                    &descriptor,
+                    row_index_context,
                 )
             {
                 tracing::error!(
@@ -1627,7 +1634,7 @@ impl QueryManager {
                 update.object_id,
                 &old_row.data,
                 new_data,
-                &descriptor,
+                row_index_context,
             )
         {
             tracing::error!(

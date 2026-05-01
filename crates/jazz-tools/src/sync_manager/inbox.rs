@@ -4,7 +4,8 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
-    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, patch_row_batch_state,
+    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch_infer_context,
+    patch_row_batch_state,
 };
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
@@ -302,19 +303,24 @@ impl SyncManager {
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
-        let visibility_change =
-            match apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[]) {
-                Ok(applied) => applied.visibility_change,
-                Err(err) => {
-                    tracing::warn!(
-                        row_id = %row.row_id,
-                        %branch_name,
-                        ?err,
-                        "failed to apply synced row batch"
-                    );
-                    return None;
-                }
-            };
+        let visibility_change = match apply_row_batch_infer_context(
+            storage,
+            row.row_id,
+            &branch_name,
+            row.clone(),
+            &[],
+        ) {
+            Ok(applied) => applied.visibility_change,
+            Err(err) => {
+                tracing::warn!(
+                    row_id = %row.row_id,
+                    %branch_name,
+                    ?err,
+                    "failed to apply synced row batch"
+                );
+                return None;
+            }
+        };
 
         Some(AppliedRowBatch {
             metadata,
@@ -518,9 +524,14 @@ impl SyncManager {
                     let branch_name = BranchName::new(&row.branch);
                     let accepted_row = row.accepted_transaction_output(*confirmed_tier);
                     let accepted_batch_id = accepted_row.batch_id;
-                    let applied =
-                        apply_row_batch(storage, row_id, &branch_name, accepted_row.clone(), &[])
-                            .ok();
+                    let applied = apply_row_batch_infer_context(
+                        storage,
+                        row_id,
+                        &branch_name,
+                        accepted_row.clone(),
+                        &[],
+                    )
+                    .ok();
 
                     let metadata = storage
                         .load_row_locator(row_id)

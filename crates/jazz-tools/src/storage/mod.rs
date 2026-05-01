@@ -50,6 +50,7 @@ use crate::row_format::{decode_row, encode_row};
 use crate::row_histories::{
     BatchId, FlatRowCodecs, HistoryScan, QueryRowBatch, RowState, StoredRowBatch, VisibleRowEntry,
     decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
+    encode_flat_history_row_with_codecs, encode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
 };
 use crate::sync_manager::DurabilityTier;
@@ -454,11 +455,12 @@ struct ResolvedRowTable {
     row_codecs: Arc<FlatRowCodecs>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedRowWriteContext {
     pub history_row_raw_table_id: RowRawTableId,
     pub visible_row_raw_table_id: RowRawTableId,
     pub user_descriptor: Arc<RowDescriptor>,
+    pub row_codecs: Arc<FlatRowCodecs>,
     pub needs_exact_locator: bool,
 }
 
@@ -1085,26 +1087,54 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     )
 }
 
+pub(crate) fn prepared_row_write_context_for_descriptor<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+    user_descriptor: Arc<RowDescriptor>,
+    row_codecs: Arc<FlatRowCodecs>,
+    known_needs_exact_locator: Option<bool>,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    let needs_exact_locator = match known_needs_exact_locator {
+        Some(needs_exact_locator) => needs_exact_locator,
+        None => {
+            storage
+                .load_row_locator(row_id)?
+                .and_then(|locator| locator.origin_schema_hash)
+                != Some(schema_hash)
+        }
+    };
+    Ok(PreparedRowWriteContext {
+        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
+        row_codecs,
+        user_descriptor,
+        needs_exact_locator,
+    })
+}
+
 fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
     storage: &H,
     table_name: &str,
     schema_hash: SchemaHash,
     row_id: ObjectId,
 ) -> Result<PreparedRowWriteContext, StorageError> {
-    let needs_exact_locator = storage
-        .load_row_locator(row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(PreparedRowWriteContext {
-        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
-        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
-        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
-            storage,
-            table_name,
-            schema_hash,
-        )?),
-        needs_exact_locator,
-    })
+    let user_descriptor = Arc::new(load_user_descriptor_for_schema_hash(
+        storage,
+        table_name,
+        schema_hash,
+    )?);
+    let row_codecs = flat_row_codecs(user_descriptor.as_ref());
+    prepared_row_write_context_for_descriptor(
+        storage,
+        table_name,
+        schema_hash,
+        row_id,
+        user_descriptor,
+        row_codecs,
+        None,
+    )
 }
 
 fn load_user_descriptor_from_raw_table_header(
@@ -1686,9 +1716,8 @@ pub(crate) fn encode_history_row_bytes_with_context(
     context: &PreparedRowWriteContext,
     row: &StoredRowBatch,
 ) -> Result<OwnedHistoryRowBytes, StorageError> {
-    let bytes =
-        crate::row_histories::encode_flat_history_row(context.user_descriptor.as_ref(), row)
-            .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
+    let bytes = encode_flat_history_row_with_codecs(context.row_codecs.as_ref(), row)
+        .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
 
     Ok(OwnedHistoryRowBytes {
         row_raw_table: context
@@ -1709,11 +1738,8 @@ pub(crate) fn encode_visible_row_bytes_with_context(
     context: &PreparedRowWriteContext,
     entry: &VisibleRowEntry,
 ) -> Result<OwnedVisibleRowBytes, StorageError> {
-    let bytes = crate::row_histories::encode_flat_visible_row_entry(
-        context.user_descriptor.as_ref(),
-        entry,
-    )
-    .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
+    let bytes = encode_flat_visible_row_entry_with_codecs(context.row_codecs.as_ref(), entry)
+        .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
 
     Ok(OwnedVisibleRowBytes {
         row_raw_table: context

@@ -9,7 +9,7 @@
 //!   ancestor, per-column merge, delete-winner, computed visible preview. No
 //!   storage access; called by both `mutations` and `types` (via
 //!   `VisibleRowEntry::rebuild_*`).
-//! - [`mutations`]: the storage-mutating verbs (`apply_row_batch`,
+//! - [`mutations`]: the storage-mutating verbs (`apply_row_batch_with_context`,
 //!   `patch_row_batch_state`) and their direct support — load history,
 //!   recompute visibility via `resolution`, write through `Storage`, emit a
 //!   `RowVisibilityChange`.
@@ -21,6 +21,7 @@ mod types;
 
 pub(crate) use codecs::{
     FlatRowCodecs, decode_flat_history_row_with_codecs, decode_flat_visible_row_entry_with_codecs,
+    encode_flat_history_row_with_codecs, encode_flat_visible_row_entry_with_codecs,
     flat_row_codecs,
 };
 pub use codecs::{
@@ -28,7 +29,8 @@ pub use codecs::{
     encode_flat_history_row, encode_flat_visible_row_entry, history_row_physical_descriptor,
     visible_row_physical_descriptor,
 };
-pub use mutations::{apply_row_batch, patch_row_batch_state};
+pub(crate) use mutations::apply_row_batch_with_context;
+pub use mutations::{apply_row_batch_infer_context, patch_row_batch_state};
 pub(crate) use resolution::visible_row_preview_from_history_rows;
 pub use types::{
     ApplyRowBatchResult, BatchId, HistoryScan, QueryRowBatch, RowHistoryError, RowMetadata,

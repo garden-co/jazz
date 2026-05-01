@@ -19,6 +19,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteCalls: string[] = [];
 
   const runtimeBase: Runtime = {
+    returnsDeclaredSchemaRows: true,
     loadLocalBatchRecord: () => null,
     loadLocalBatchRecords: () => [],
     insert: (table: string, values: Record<string, unknown>) => {
