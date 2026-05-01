@@ -280,12 +280,15 @@ Expected outcome:
    subqueries, and subscriptions.
    - Rust shared binding coverage exists for full-row, include, and
      projection-plus-include alignment.
+   - TypeScript hot-path coverage exists for ordinary, transaction, and direct
+     batch inserts avoiding runtime schema/hash calls when generated schema is
+     sufficient.
    - Dedicated WASM/NAPI/RN subscription integration coverage is still worth
      adding.
 5. [x] Remove TypeScript hot-path output alignment.
 6. [x] Make all TypeScript runtime input-schema lookups lazy.
 7. [x] Update fake runtimes and tests to the mandatory aligned-output contract.
-8. [ ] Run focused write benchmark before/after.
+8. [x] Run focused write benchmark before/after.
 
 ## Non-Goals
 
