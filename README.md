@@ -1,4 +1,8 @@
-# <img src="docs/public/jazz-logo.svg" alt="Jazz" width="100" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/public/jazz-logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/public/jazz-logo-light.svg">
+  <img src="docs/public/jazz-logo-light.svg" alt="Jazz" width="100">
+</picture>
 
 Jazz is a local-first relational database. It runs across your frontend, backend and our global storage cloud. Sync partial tables, durable streams and files, fast. Feels like simple reactive state.
 
