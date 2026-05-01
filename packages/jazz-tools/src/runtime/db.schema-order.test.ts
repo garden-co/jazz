@@ -228,9 +228,11 @@ describe("Db runtime schema order", () => {
       localBatchRecords: vi.fn(() => []),
       acknowledgeRejectedBatch: vi.fn(() => false),
     };
+    const getSchema = vi.fn(() => new Map());
+    const getSchemaHash = vi.fn(() => "runtime-schema-hash");
     const client = {
-      getSchema: vi.fn(() => new Map()),
-      getSchemaHash: vi.fn(() => "runtime-schema-hash"),
+      getSchema,
+      getSchemaHash,
       beginTransactionInternal: vi.fn(() => runtimeTransaction),
     } as unknown as JazzClient;
     const db = createDbFromClient({ appId: "transaction-schema-order" }, client);
@@ -256,8 +258,8 @@ describe("Db runtime schema order", () => {
       title: { type: "Text", value: "No transaction schema fetch" },
       done: { type: "Boolean", value: false },
     });
-    expect(client.getSchema).not.toHaveBeenCalled();
-    expect(client.getSchemaHash).not.toHaveBeenCalled();
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
   });
 
   it("does not fetch runtime schema for direct batch inserts that stay within the declared schema", () => {
@@ -287,9 +289,11 @@ describe("Db runtime schema order", () => {
       localBatchRecords: vi.fn(() => []),
       acknowledgeRejectedBatch: vi.fn(() => false),
     };
+    const getSchema = vi.fn(() => new Map());
+    const getSchemaHash = vi.fn(() => "runtime-schema-hash");
     const client = {
-      getSchema: vi.fn(() => new Map()),
-      getSchemaHash: vi.fn(() => "runtime-schema-hash"),
+      getSchema,
+      getSchemaHash,
       beginBatchInternal: vi.fn(() => runtimeBatch),
     } as unknown as JazzClient;
     const db = createDbFromClient({ appId: "direct-batch-schema-order" }, client);
@@ -315,8 +319,8 @@ describe("Db runtime schema order", () => {
       title: { type: "Text", value: "No direct batch schema fetch" },
       done: { type: "Boolean", value: true },
     });
-    expect(client.getSchema).not.toHaveBeenCalled();
-    expect(client.getSchemaHash).not.toHaveBeenCalled();
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
   });
 
   it("falls back to the generated schema when the runtime schema is missing a table", async () => {

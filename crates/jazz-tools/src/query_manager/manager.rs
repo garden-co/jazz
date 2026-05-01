@@ -267,6 +267,7 @@ pub(super) struct PolicyCheckState {
 
 #[derive(Debug)]
 pub(super) struct WriteTableCacheEntry {
+    pub(super) schema_hash: SchemaHash,
     pub(super) descriptor: Arc<RowDescriptor>,
     pub(super) row_locator: RowLocator,
     pub(super) insert_policy: Option<Arc<PolicyExpr>>,

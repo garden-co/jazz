@@ -6,10 +6,13 @@ use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_proven
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{
     BatchId, QueryRowBatch, RowHistoryError, RowState, RowVisibilityChange, StoredRowBatch,
-    apply_row_batch,
+    apply_row_batch_with_context,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
-use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
+use crate::storage::{
+    PreparedRowWriteContext, RowLocator, Storage, metadata_from_row_locator,
+    prepared_row_write_context_for_descriptor,
+};
 use crate::sync_manager::RowBatchKey;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -36,6 +39,7 @@ pub struct RowBranchWrite<'a> {
 struct PreparedUpdateWrite {
     new_data: Vec<u8>,
     descriptor: Arc<RowDescriptor>,
+    row_write_context: PreparedRowWriteContext,
 }
 
 struct PreparedUpdateCommit<'a> {
@@ -87,6 +91,7 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let entry = Arc::new(WriteTableCacheEntry {
+            schema_hash,
             descriptor: Arc::new(table_schema.columns.clone()),
             row_locator: RowLocator {
                 table: table_name.as_str().to_string().into(),
@@ -340,6 +345,7 @@ impl QueryManager {
         let _ = storage.put_row_locator(row_id, Some(row_locator));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_local_row_history_write<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -348,6 +354,7 @@ impl QueryManager {
         row_id: ObjectId,
         row: StoredRowBatch,
         index_mutations: &[crate::storage::IndexMutation<'_>],
+        context: &PreparedRowWriteContext,
     ) -> Result<(BatchId, Option<RowVisibilityChange>), QueryError> {
         self.ensure_known_schemas_catalogued(storage)
             .map_err(|err| QueryError::EncodingError(format!("persist known schemas: {err}")))?;
@@ -362,16 +369,23 @@ impl QueryManager {
         }
 
         let forwarded_row = row.clone();
-        let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
-            .map_err(|error| match error {
-                RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
-                RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
-                    "missing row-history parent {parent:?} while applying local write for {row_id:?}"
-                )),
-                RowHistoryError::StorageError(error) => {
-                    QueryError::EncodingError(format!("apply row batch: {error}"))
-                }
-            })?;
+        let applied = apply_row_batch_with_context(
+            storage,
+            row_id,
+            branch_name,
+            row,
+            index_mutations,
+            context,
+        )
+        .map_err(|error| match error {
+            RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
+            RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
+                "missing row-history parent {parent:?} while applying local write for {row_id:?}"
+            )),
+            RowHistoryError::StorageError(error) => {
+                QueryError::EncodingError(format!("apply row batch: {error}"))
+            }
+        })?;
 
         self.sync_manager.forward_row_batch_to_servers_with_storage(
             storage,
@@ -409,6 +423,22 @@ impl QueryManager {
         }
 
         self.find_schema_by_short_hash(&composed.schema_hash)
+    }
+
+    fn prepared_row_write_context_for_table_write<H: Storage>(
+        storage: &H,
+        table: &str,
+        row_id: ObjectId,
+        table_write: &WriteTableCacheEntry,
+    ) -> Result<PreparedRowWriteContext, QueryError> {
+        prepared_row_write_context_for_descriptor(
+            storage,
+            table,
+            table_write.schema_hash,
+            row_id,
+            table_write.descriptor.clone(),
+        )
+        .map_err(|err| QueryError::EncodingError(format!("prepare row write context: {err}")))
     }
 
     fn row_locator_for_branch(&self, table: &str, branch: &str) -> RowLocator {
@@ -721,6 +751,12 @@ impl QueryManager {
         Ok(PreparedUpdateWrite {
             new_data,
             descriptor: table_write.descriptor.clone(),
+            row_write_context: Self::prepared_row_write_context_for_table_write(
+                storage,
+                table,
+                id,
+                &table_write,
+            )?,
         })
     }
 
@@ -755,6 +791,7 @@ impl QueryManager {
             id,
             row,
             index_mutations,
+            &prepared.row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
@@ -988,6 +1025,12 @@ impl QueryManager {
             &data,
             descriptor,
         );
+        let row_write_context = Self::prepared_row_write_context_for_table_write(
+            storage,
+            table,
+            object_id,
+            &table_write,
+        )?;
         let row = self.authored_row_batch(
             object_id,
             &current_branch,
@@ -1003,6 +1046,7 @@ impl QueryManager {
             object_id,
             row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
@@ -1173,6 +1217,12 @@ impl QueryManager {
         // Add commit with row data to specified branch
         let index_mutations =
             Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let row_write_context = Self::prepared_row_write_context_for_table_write(
+            storage,
+            table,
+            object_id,
+            &table_write,
+        )?;
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1188,6 +1238,7 @@ impl QueryManager {
             object_id,
             row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
@@ -1314,6 +1365,12 @@ impl QueryManager {
 
         let index_mutations =
             Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let row_write_context = Self::prepared_row_write_context_for_table_write(
+            storage,
+            table,
+            object_id,
+            &table_write,
+        )?;
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1329,6 +1386,7 @@ impl QueryManager {
             object_id,
             row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
@@ -2278,6 +2336,8 @@ impl QueryManager {
             &old_data,
             descriptor,
         );
+        let row_write_context =
+            Self::prepared_row_write_context_for_table_write(storage, &table, id, &table_write)?;
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2286,6 +2346,7 @@ impl QueryManager {
             id,
             delete_row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
@@ -2469,6 +2530,8 @@ impl QueryManager {
             old_data_for_policy,
             descriptor,
         );
+        let row_write_context =
+            Self::prepared_row_write_context_for_table_write(storage, table, id, &table_write)?;
         let branch_name = BranchName::new(branch);
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2477,6 +2540,7 @@ impl QueryManager {
             id,
             delete_row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             table,
@@ -2583,6 +2647,8 @@ impl QueryManager {
             &new_data,
             descriptor,
         );
+        let row_write_context =
+            Self::prepared_row_write_context_for_table_write(storage, &table, id, &table_write)?;
         let branch_name = BranchName::new(branch.as_str());
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2591,6 +2657,7 @@ impl QueryManager {
             id,
             row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,
@@ -2675,6 +2742,8 @@ impl QueryManager {
             old_data.as_deref(),
             descriptor,
         );
+        let row_write_context =
+            Self::prepared_row_write_context_for_table_write(storage, &table, id, &table_write)?;
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
             storage,
@@ -2683,6 +2752,7 @@ impl QueryManager {
             id,
             delete_row,
             &index_mutations,
+            &row_write_context,
         )?;
         self.maybe_track_local_pending_transaction_overlay(
             &table,

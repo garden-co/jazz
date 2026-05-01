@@ -454,7 +454,7 @@ struct ResolvedRowTable {
     row_codecs: Arc<FlatRowCodecs>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedRowWriteContext {
     pub history_row_raw_table_id: RowRawTableId,
     pub visible_row_raw_table_id: RowRawTableId,
@@ -1085,11 +1085,12 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     )
 }
 
-fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
+pub(crate) fn prepared_row_write_context_for_descriptor<H: Storage + ?Sized>(
     storage: &H,
     table_name: &str,
     schema_hash: SchemaHash,
     row_id: ObjectId,
+    user_descriptor: Arc<RowDescriptor>,
 ) -> Result<PreparedRowWriteContext, StorageError> {
     let needs_exact_locator = storage
         .load_row_locator(row_id)?
@@ -1098,13 +1099,28 @@ fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
     Ok(PreparedRowWriteContext {
         history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
         visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
-        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
+        user_descriptor,
+        needs_exact_locator,
+    })
+}
+
+fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    prepared_row_write_context_for_descriptor(
+        storage,
+        table_name,
+        schema_hash,
+        row_id,
+        Arc::new(load_user_descriptor_for_schema_hash(
             storage,
             table_name,
             schema_hash,
         )?),
-        needs_exact_locator,
-    })
+    )
 }
 
 fn load_user_descriptor_from_raw_table_header(
