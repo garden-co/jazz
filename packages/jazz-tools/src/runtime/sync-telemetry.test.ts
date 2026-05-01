@@ -17,6 +17,12 @@ const otelMocks = vi.hoisted(() => {
   }> = [];
   const traceForceFlush = vi.fn(() => Promise.resolve());
 
+  const logExporterConstructors = vi.fn();
+  const logProviderConstructors = vi.fn();
+  const logProcessorConstructors = vi.fn();
+  const loggerNames: string[] = [];
+  const emitLog = vi.fn();
+
   return {
     traceExporterConstructors,
     traceProviderConstructors,
@@ -25,6 +31,11 @@ const otelMocks = vi.hoisted(() => {
     startSpan,
     traceSpans,
     traceForceFlush,
+    logExporterConstructors,
+    logProviderConstructors,
+    logProcessorConstructors,
+    loggerNames,
+    emitLog,
   };
 });
 
@@ -58,8 +69,30 @@ vi.mock("@opentelemetry/sdk-trace-base", () => ({
   },
 }));
 
-vi.mock("@opentelemetry/api", () => ({
-  SpanKind: { INTERNAL: 1 },
+vi.mock("@opentelemetry/exporter-logs-otlp-http", () => ({
+  OTLPLogExporter: class {
+    constructor(config: unknown) {
+      otelMocks.logExporterConstructors(config);
+    }
+  },
+}));
+
+vi.mock("@opentelemetry/sdk-logs", () => ({
+  LoggerProvider: class {
+    constructor(config: unknown) {
+      otelMocks.logProviderConstructors(config);
+    }
+
+    getLogger(name: string) {
+      otelMocks.loggerNames.push(name);
+      return { emit: otelMocks.emitLog };
+    }
+  },
+  BatchLogRecordProcessor: class {
+    constructor(exporter: unknown) {
+      otelMocks.logProcessorConstructors(exporter);
+    }
+  },
 }));
 
 vi.mock("@opentelemetry/resources", () => ({
@@ -67,10 +100,24 @@ vi.mock("@opentelemetry/resources", () => ({
 }));
 
 import {
-  installWasmTraceTelemetry,
+  installWasmTelemetry,
   normalizeOtlpEndpoint,
   resolveTelemetryCollectorUrlFromEnv,
 } from "./sync-telemetry.js";
+
+type WasmTraceEntry = import("jazz-wasm").WasmTraceEntry;
+
+type MockWasmModule = {
+  setTraceEntryCollectionEnabled: ReturnType<typeof vi.fn<(enabled: boolean) => void>>;
+  drainTraceEntries: ReturnType<typeof vi.fn<() => WasmTraceEntry[]>>;
+};
+
+function createWasmModule(drains: WasmTraceEntry[][] = []): MockWasmModule {
+  return {
+    setTraceEntryCollectionEnabled: vi.fn<(enabled: boolean) => void>(),
+    drainTraceEntries: vi.fn<() => WasmTraceEntry[]>(() => drains.shift() ?? []),
+  };
+}
 
 const originalFetch = globalThis.fetch;
 const originalTelemetryEnv = {
@@ -81,6 +128,7 @@ const originalTelemetryEnv = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   for (const mock of [
     otelMocks.traceExporterConstructors,
@@ -88,11 +136,16 @@ afterEach(() => {
     otelMocks.traceProcessorConstructors,
     otelMocks.startSpan,
     otelMocks.traceForceFlush,
+    otelMocks.logExporterConstructors,
+    otelMocks.logProviderConstructors,
+    otelMocks.logProcessorConstructors,
+    otelMocks.emitLog,
   ]) {
     mock.mockClear();
   }
   otelMocks.tracerNames.length = 0;
   otelMocks.traceSpans.length = 0;
+  otelMocks.loggerNames.length = 0;
   if (originalFetch === undefined) {
     delete (globalThis as { fetch?: typeof fetch }).fetch;
   } else {
@@ -120,6 +173,12 @@ describe("telemetry OTLP helpers", () => {
     expect(normalizeOtlpEndpoint("http://localhost:4318/v1/logs", "traces")).toBe(
       "http://localhost:4318/v1/traces",
     );
+    expect(normalizeOtlpEndpoint("http://localhost:4318", "logs")).toBe(
+      "http://localhost:4318/v1/logs",
+    );
+    expect(normalizeOtlpEndpoint("http://localhost:4318/v1/traces", "logs")).toBe(
+      "http://localhost:4318/v1/logs",
+    );
   });
 
   it("resolves collector url from literal public env keys", () => {
@@ -131,191 +190,133 @@ describe("telemetry OTLP helpers", () => {
     expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
   });
 
-  it("uses the first configured public env key", () => {
-    process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = " http://127.0.0.1:54418 ";
-    process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54419";
-    process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54420";
-    process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL = "http://127.0.0.1:54421";
+  it("does not enable Rust collection or polling without a collector URL", async () => {
+    vi.useFakeTimers();
+    const wasmModule = createWasmModule();
 
-    expect(resolveTelemetryCollectorUrlFromEnv()).toBe("http://127.0.0.1:54418");
+    installWasmTelemetry({
+      wasmModule,
+      collectorUrl: undefined,
+      appId: "telemetry-app",
+      runtimeThread: "worker",
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(wasmModule.setTraceEntryCollectionEnabled).not.toHaveBeenCalled();
+    expect(wasmModule.drainTraceEntries).not.toHaveBeenCalled();
+    expect(otelMocks.traceExporterConstructors).not.toHaveBeenCalled();
+    expect(otelMocks.logExporterConstructors).not.toHaveBeenCalled();
   });
 
-  it("installs a WASM span callback that records OPFS spans through the official trace exporter", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  it("enables Rust collection and drains WASM telemetry every 500ms", async () => {
+    vi.useFakeTimers();
+    const wasmModule = createWasmModule([[], []]);
 
-    installWasmTraceTelemetry({
+    const dispose = installWasmTelemetry({
+      wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
       appId: "telemetry-app",
       runtimeThread: "worker",
     });
 
-    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
-    expect(callback).toBeTypeOf("function");
-    (callback as (span: unknown) => void)({
-      name: "OpfsBTree::put",
-      target: "opfs_btree::db",
-      level: "TRACE",
-      fields: { key_len: "8", value_len: "32" },
-      startUnixNano: "1775000000000000000",
-      endUnixNano: "1775000000000123000",
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledWith(true);
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(2);
+    dispose();
+  });
+
+  it("exports drained span, log, and dropped entries through OpenTelemetry", async () => {
+    vi.useFakeTimers();
+    const wasmModule = createWasmModule([
+      [
+        {
+          kind: "span",
+          sequence: 0,
+          name: "OpfsBTree::put",
+          target: "opfs_btree::db",
+          level: "TRACE",
+          fields: { key_len: "8" },
+          startUnixNano: "1775000000000000000",
+          endUnixNano: "1775000000000001000",
+        },
+        {
+          kind: "log",
+          sequence: 1,
+          target: "opfs_btree::db",
+          level: "WARN",
+          fields: { attempt: "2" },
+          message: "retrying write",
+          timestampUnixNano: "1775000000000002000",
+        },
+        { kind: "dropped", count: 3 },
+      ],
+    ]);
+
+    const dispose = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "telemetry-app",
+      runtimeThread: "worker",
     });
 
+    await vi.advanceTimersByTimeAsync(500);
     await vi.waitFor(() => expect(otelMocks.startSpan).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(otelMocks.emitLog).toHaveBeenCalledTimes(2));
+
     expect(otelMocks.traceExporterConstructors).toHaveBeenCalledWith({
       url: "http://127.0.0.1:54418/v1/traces",
     });
-    expect(otelMocks.tracerNames).toContain("jazz-wasm.tracing");
+    expect(otelMocks.logExporterConstructors).toHaveBeenCalledWith({
+      url: "http://127.0.0.1:54418/v1/logs",
+    });
     expect(otelMocks.startSpan).toHaveBeenCalledWith(
       "OpfsBTree::put",
       expect.objectContaining({
         attributes: expect.objectContaining({
           "jazz.runtime_thread": "worker",
+          "jazz.span.target": "opfs_btree::db",
         }),
       }),
     );
-    expect(otelMocks.traceSpans[0]!.end).toHaveBeenCalled();
-    expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
+    expect(otelMocks.traceSpans[0]!.end).toHaveBeenCalledWith([1775000000, 1000]);
+    expect(otelMocks.emitLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "retrying write",
+        severityText: "WARN",
+        attributes: expect.objectContaining({
+          "jazz.runtime_thread": "worker",
+          "jazz.log.target": "opfs_btree::db",
+        }),
+      }),
+    );
+    expect(otelMocks.emitLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "Dropped 3 WASM telemetry records",
+        severityText: "WARN",
+      }),
+    );
 
-  it("records multiple WASM trace spans without direct fetches or explicit flushes", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    installWasmTraceTelemetry({
-      collectorUrl: "http://127.0.0.1:54419",
-      appId: "telemetry-app",
-      runtimeThread: "worker",
-    });
-
-    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__ as
-      | ((span: unknown) => void)
-      | undefined;
-    expect(callback).toBeTypeOf("function");
-
-    callback!({
-      name: "OpfsBTree::put",
-      target: "opfs_btree::db",
-      level: "TRACE",
-      fields: { key_len: "8" },
-      startUnixNano: "1775000000000000000",
-      endUnixNano: "1775000000000001000",
-    });
-    callback!({
-      name: "OpfsBTree::get",
-      target: "opfs_btree::db",
-      level: "TRACE",
-      fields: { key_len: "8" },
-      startUnixNano: "1775000000000002000",
-      endUnixNano: "1775000000000003000",
-    });
-    callback!({
-      name: "OpfsBTree::range",
-      target: "opfs_btree::db",
-      level: "TRACE",
-      fields: { prefix_len: "4" },
-      startUnixNano: "1775000000000004000",
-      endUnixNano: "1775000000000005000",
-    });
-
-    await vi.waitFor(() => expect(otelMocks.startSpan).toHaveBeenCalledTimes(3));
-    expect(otelMocks.traceExporterConstructors).toHaveBeenCalledWith({
-      url: "http://127.0.0.1:54419/v1/traces",
-    });
-    expect(otelMocks.traceSpans.map((span) => span.name)).toEqual([
-      "OpfsBTree::put",
-      "OpfsBTree::get",
-      "OpfsBTree::range",
-    ]);
-    expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("does not wait for a slow provider flush before recording later spans", async () => {
-    let releaseFlush = () => {};
-    const slowFlush = new Promise<void>((resolve) => {
-      releaseFlush = resolve;
-    });
-    otelMocks.traceForceFlush.mockImplementationOnce(() => slowFlush);
-
-    installWasmTraceTelemetry({
-      collectorUrl: "http://127.0.0.1:54420",
-      appId: "telemetry-app",
-      runtimeThread: "worker",
-    });
-
-    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__ as
-      | ((span: unknown) => void)
-      | undefined;
-    expect(callback).toBeTypeOf("function");
-
-    let assertionError: unknown;
-    try {
-      callback!({
-        name: "OpfsBTree::put",
-        target: "opfs_btree::db",
-        level: "TRACE",
-        fields: { key_len: "8" },
-        startUnixNano: "1775000000000000000",
-        endUnixNano: "1775000000000001000",
-      });
-
-      await vi.waitFor(() => {
-        expect(otelMocks.traceSpans.map((span) => span.name)).toEqual(["OpfsBTree::put"]);
-      });
-
-      callback!({
-        name: "OpfsBTree::get",
-        target: "opfs_btree::db",
-        level: "TRACE",
-        fields: { key_len: "8" },
-        startUnixNano: "1775000000000002000",
-        endUnixNano: "1775000000000003000",
-      });
-
-      await Promise.resolve();
-      expect(otelMocks.traceSpans.map((span) => span.name)).toEqual([
-        "OpfsBTree::put",
-        "OpfsBTree::get",
-      ]);
-      expect(otelMocks.traceForceFlush).not.toHaveBeenCalled();
-    } catch (error) {
-      assertionError = error;
-    } finally {
-      releaseFlush();
-      await Promise.resolve();
-    }
-
-    if (assertionError) throw assertionError;
-  });
-
-  it("returns a disposer that only clears its owned WASM span callback", () => {
-    const dispose = installWasmTraceTelemetry({
-      collectorUrl: "http://127.0.0.1:54418",
-      appId: "telemetry-app",
-      runtimeThread: "main",
-    });
-    const installedCallback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
-    expect(installedCallback).toBeTypeOf("function");
-
-    const replacementCallback = () => {};
-    (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__ = replacementCallback;
     dispose();
-    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBe(
-      replacementCallback,
-    );
+  });
 
-    const disposeReplacement = installWasmTraceTelemetry({
+  it("drains once and disables Rust collection on dispose", () => {
+    vi.useFakeTimers();
+    const wasmModule = createWasmModule([[]]);
+
+    const dispose = installWasmTelemetry({
+      wasmModule,
       collectorUrl: "http://127.0.0.1:54418",
       appId: "telemetry-app",
       runtimeThread: "main",
     });
-    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).not.toBe(
-      replacementCallback,
-    );
 
-    disposeReplacement();
-    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
+    dispose();
+
+    expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
   });
 });

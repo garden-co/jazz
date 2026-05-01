@@ -265,7 +265,7 @@ describe("WorkerBridge", () => {
     await initPromise;
   });
 
-  it("clears its owned WASM trace callback on shutdown", async () => {
+  it("does not install a global WASM trace callback during init", async () => {
     const worker = new MockWorker();
     const runtimeMock = createRuntimeMock();
     const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
@@ -281,14 +281,11 @@ describe("WorkerBridge", () => {
     worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
     await initPromise;
 
-    const callback = (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
-    expect(callback).toBeTypeOf("function");
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
 
     const shutdownPromise = bridge.shutdown(worker as unknown as Worker);
     worker.emitFromWorker({ type: "shutdown-ok" });
     await shutdownPromise;
-
-    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {

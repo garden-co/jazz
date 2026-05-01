@@ -56,7 +56,7 @@ import {
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
-import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
+import { installWasmTelemetry, resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
@@ -901,6 +901,7 @@ export class Db {
   private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
+  private disposeWasmTelemetry: (() => void) | null = null;
   private bridgeReady: Promise<void> | null = null;
   private primaryDbName: string | null = null;
   private workerDbName: string | null = null;
@@ -1152,6 +1153,7 @@ export class Db {
 
     if (!this.clients.has(key)) {
       setGlobalWasmLogLevel(this.config.logLevel);
+      this.installMainThreadWasmTelemetry();
 
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(
@@ -1272,6 +1274,24 @@ export class Db {
     this.bridgeReady = bridgeReady;
   }
 
+  private installMainThreadWasmTelemetry(): void {
+    const collectorUrl = this.resolveTelemetryCollectorUrl();
+    if (!collectorUrl || !this.wasmModule || this.disposeWasmTelemetry) {
+      return;
+    }
+
+    this.disposeWasmTelemetry = installWasmTelemetry({
+      wasmModule: this.wasmModule,
+      collectorUrl,
+      appId: this.config.appId,
+      runtimeThread: "main",
+    });
+  }
+
+  private resolveTelemetryCollectorUrl(): string | undefined {
+    return resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl;
+  }
+
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
     const driver = resolveStorageDriver(this.config.driver);
     if (driver.type !== "persistent") {
@@ -1338,8 +1358,7 @@ export class Db {
       runtimeSources,
       fallbackWasmUrl,
       logLevel: this.config.logLevel,
-      telemetryCollectorUrl:
-        resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl,
+      telemetryCollectorUrl: this.resolveTelemetryCollectorUrl(),
     };
   }
 
@@ -2625,6 +2644,8 @@ export class Db {
     }
     this.clientMutationErrorUnsubscribers.clear();
     this.mutationErrorListeners.clear();
+    this.disposeWasmTelemetry?.();
+    this.disposeWasmTelemetry = null;
     for (const client of this.clients.values()) {
       await client.shutdown();
     }

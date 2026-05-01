@@ -1,5 +1,16 @@
-use std::sync::atomic::AtomicUsize;
+use std::{
+    collections::HashMap,
+    mem,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Mutex,
+    },
+};
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
 use tracing::{Level, Subscriber};
 #[cfg(feature = "tracing-log")]
 use tracing_log::NormalizeEvent as _;
@@ -13,16 +24,115 @@ use crate::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = globalThis, js_name = __JAZZ_WASM_TRACE_SPAN__, catch)]
-    fn emit_wasm_trace_span(span: &JsValue) -> Result<(), JsValue>;
-}
-
-#[cfg(target_arch = "wasm32")]
 struct SpanTiming {
     start_unix_nano: String,
+}
+
+const MAX_TRACE_ENTRIES: usize = 5_000;
+
+static TRACE_ENTRY_COLLECTION_ENABLED: AtomicBool = AtomicBool::new(false);
+static TRACE_ENTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static DROPPED_TRACE_ENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRACE_ENTRIES: Mutex<Vec<TraceEntry>> = Mutex::new(Vec::new());
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum TraceEntry {
+    Span {
+        sequence: u64,
+        name: String,
+        target: String,
+        level: String,
+        start_unix_nano: String,
+        end_unix_nano: String,
+        fields: HashMap<String, String>,
+    },
+    Log {
+        sequence: u64,
+        target: String,
+        level: String,
+        timestamp_unix_nano: String,
+        message: String,
+        fields: HashMap<String, String>,
+    },
+    Dropped {
+        count: u64,
+    },
+}
+
+/// Enable or disable collection of buffered tracing entries for JavaScript drains.
+pub fn set_trace_entry_collection_enabled(enabled: bool) {
+    TRACE_ENTRY_COLLECTION_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        clear_trace_entries();
+    }
+}
+
+/// Drain buffered tracing entries into a JavaScript value.
+#[cfg(target_arch = "wasm32")]
+pub fn drain_trace_entries() -> JsValue {
+    serde_wasm_bindgen::to_value(&drain_trace_entries_internal()).unwrap_or(JsValue::NULL)
+}
+
+fn trace_entry_collection_enabled() -> bool {
+    TRACE_ENTRY_COLLECTION_ENABLED.load(Ordering::Relaxed)
+}
+
+fn next_trace_entry_sequence() -> u64 {
+    TRACE_ENTRY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn push_trace_entry(entry: TraceEntry) {
+    if !trace_entry_collection_enabled() {
+        return;
+    }
+
+    let mut entries = TRACE_ENTRIES.lock().expect("trace entries mutex poisoned");
+    if entries.len() >= MAX_TRACE_ENTRIES {
+        DROPPED_TRACE_ENTRY_COUNT.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    entries.push(entry);
+}
+
+#[allow(dead_code)]
+fn drain_trace_entries_internal() -> Vec<TraceEntry> {
+    let mut entries = TRACE_ENTRIES.lock().expect("trace entries mutex poisoned");
+    let mut drained = mem::take(&mut *entries);
+    let dropped = DROPPED_TRACE_ENTRY_COUNT.swap(0, Ordering::Relaxed);
+    if dropped > 0 {
+        drained.push(TraceEntry::Dropped { count: dropped });
+    }
+    drained
+}
+
+fn clear_trace_entries() {
+    TRACE_ENTRIES
+        .lock()
+        .expect("trace entries mutex poisoned")
+        .clear();
+    DROPPED_TRACE_ENTRY_COUNT.store(0, Ordering::Relaxed);
+    TRACE_ENTRY_SEQUENCE.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn push_trace_entry_for_test(entry: TraceEntry) {
+    push_trace_entry(entry);
+}
+
+#[cfg(test)]
+fn drain_trace_entries_for_test() -> Vec<TraceEntry> {
+    drain_trace_entries_internal()
+}
+
+#[cfg(test)]
+fn clear_trace_entries_for_test() {
+    clear_trace_entries();
 }
 
 #[doc = r#"
@@ -100,7 +210,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        if !self.config.enabled {
+        let should_collect_entry = trace_entry_collection_enabled();
+        if !self.config.enabled && !should_collect_entry {
             return;
         }
 
@@ -113,6 +224,13 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         #[cfg(not(feature = "tracing-log"))]
         let meta = event.metadata();
         let level = meta.level();
+        if should_collect_entry {
+            record_log_trace_entry(meta, level, &recorder);
+        }
+
+        if !self.config.enabled {
+            return;
+        }
 
         if self.config.report_logs_in_timings {
             let mark_name = format!(
@@ -198,7 +316,9 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         if self.config.report_logs_in_timings {
             mark(&mark_name(id));
-            #[cfg(target_arch = "wasm32")]
+        }
+
+        if self.config.report_logs_in_timings || trace_entry_collection_enabled() {
             if let Some(span_ref) = ctx.span(id) {
                 span_ref.extensions_mut().insert(SpanTiming {
                     start_unix_nano: unix_nano_now_string(),
@@ -235,7 +355,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
     }
 
     fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        if !self.config.report_logs_in_timings {
+        let should_collect_entry = trace_entry_collection_enabled();
+        if !self.config.report_logs_in_timings && !should_collect_entry {
             return;
         }
 
@@ -243,86 +364,95 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
             let meta = span_ref.metadata();
             let extensions = span_ref.extensions();
             let debug_record = extensions.get::<StringRecorder>();
-            #[cfg(target_arch = "wasm32")]
             let timing = extensions.get::<SpanTiming>();
             if let Some(debug_record) = debug_record {
-                let _ = measure(
-                    format!(
-                        "\"{}\"{} {} {}",
-                        meta.name(),
-                        thread_display_suffix(),
-                        meta.module_path().unwrap_or("..."),
-                        debug_record,
-                    ),
-                    mark_name(id),
-                );
-                #[cfg(target_arch = "wasm32")]
-                emit_span_to_js(meta, Some(debug_record), timing);
-                #[cfg(not(target_arch = "wasm32"))]
-                emit_span_to_js(meta, Some(debug_record));
+                if self.config.report_logs_in_timings {
+                    let _ = measure(
+                        format!(
+                            "\"{}\"{} {} {}",
+                            meta.name(),
+                            thread_display_suffix(),
+                            meta.module_path().unwrap_or("..."),
+                            debug_record,
+                        ),
+                        mark_name(id),
+                    );
+                }
+                record_span_trace_entry(meta, Some(debug_record), timing);
             } else {
-                let _ = measure(
-                    format!(
-                        "\"{}\"{} {}",
-                        meta.name(),
-                        thread_display_suffix(),
-                        meta.module_path().unwrap_or("..."),
-                    ),
-                    mark_name(id),
-                );
-                #[cfg(target_arch = "wasm32")]
-                emit_span_to_js(meta, None, timing);
-                #[cfg(not(target_arch = "wasm32"))]
-                emit_span_to_js(meta, None);
+                if self.config.report_logs_in_timings {
+                    let _ = measure(
+                        format!(
+                            "\"{}\"{} {}",
+                            meta.name(),
+                            thread_display_suffix(),
+                            meta.module_path().unwrap_or("..."),
+                        ),
+                        mark_name(id),
+                    );
+                }
+                record_span_trace_entry(meta, None, timing);
             }
         }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn emit_span_to_js(
+fn record_span_trace_entry(
     meta: &tracing::Metadata<'_>,
     recorder: Option<&StringRecorder>,
     timing: Option<&SpanTiming>,
 ) {
-    let object = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&object, &"name".into(), &meta.name().into());
-    let _ = js_sys::Reflect::set(&object, &"level".into(), &meta.level().to_string().into());
-    let _ = js_sys::Reflect::set(
-        &object,
-        &"target".into(),
-        &meta.module_path().unwrap_or(meta.target()).into(),
-    );
-    let _ = js_sys::Reflect::set(
-        &object,
-        &"fields".into(),
-        &recorder
-            .map(|value| value.to_string())
-            .unwrap_or_default()
-            .into(),
-    );
-    let _ = js_sys::Reflect::set(
-        &object,
-        &"startUnixNano".into(),
-        &timing
-            .map(|value| value.start_unix_nano.as_str())
-            .unwrap_or_default()
-            .into(),
-    );
-    let _ = js_sys::Reflect::set(
-        &object,
-        &"endUnixNano".into(),
-        &unix_nano_now_string().into(),
-    );
-    let _ = emit_wasm_trace_span(&object.into());
+    if !trace_entry_collection_enabled() {
+        return;
+    }
+
+    let end_unix_nano = unix_nano_now_string();
+    push_trace_entry(TraceEntry::Span {
+        sequence: next_trace_entry_sequence(),
+        name: meta.name().to_string(),
+        target: meta.target().to_string(),
+        level: meta.level().to_string(),
+        start_unix_nano: timing
+            .map(|value| value.start_unix_nano.clone())
+            .unwrap_or_else(|| end_unix_nano.clone()),
+        end_unix_nano,
+        fields: recorder
+            .map(|value| value.fields.clone())
+            .unwrap_or_default(),
+    });
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn emit_span_to_js(_meta: &tracing::Metadata<'_>, _recorder: Option<&StringRecorder>) {}
+fn record_log_trace_entry(meta: &tracing::Metadata<'_>, level: &Level, recorder: &StringRecorder) {
+    if !trace_entry_collection_enabled() {
+        return;
+    }
 
-#[cfg(target_arch = "wasm32")]
+    push_trace_entry(TraceEntry::Log {
+        sequence: next_trace_entry_sequence(),
+        target: meta.target().to_string(),
+        level: level.to_string(),
+        timestamp_unix_nano: unix_nano_now_string(),
+        message: recorder
+            .message
+            .clone()
+            .unwrap_or_else(|| recorder.display.trim().to_string()),
+        fields: recorder.fields.clone(),
+    });
+}
+
 fn unix_nano_now_string() -> String {
-    format!("{:.0}", js_sys::Date::now() * 1_000_000.0)
+    #[cfg(target_arch = "wasm32")]
+    {
+        format!("{:.0}", js_sys::Date::now() * 1_000_000.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        nanos.to_string()
+    }
 }
 
 fn log(message: String, level: &Level, use_console_methods: bool) {
@@ -370,5 +500,160 @@ impl LevelExt for Level {
             Level::WARN => "color: orange; background: #444",
             Level::ERROR => "color: red; background: #444",
         }
+    }
+}
+
+#[cfg(test)]
+mod trace_entry_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use super::*;
+    use tracing_subscriber::prelude::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn span_entry(sequence: u64) -> TraceEntry {
+        TraceEntry::Span {
+            sequence,
+            name: "opfs put".to_string(),
+            target: "opfs_btree::db".to_string(),
+            level: "TRACE".to_string(),
+            start_unix_nano: "1775000000000000000".to_string(),
+            end_unix_nano: "1775000000000001000".to_string(),
+            fields: HashMap::from([("key_len".to_string(), "8".to_string())]),
+        }
+    }
+
+    fn log_entry(sequence: u64) -> TraceEntry {
+        TraceEntry::Log {
+            sequence,
+            target: "opfs_btree::db".to_string(),
+            level: "WARN".to_string(),
+            timestamp_unix_nano: "1775000000000002000".to_string(),
+            message: "retrying write".to_string(),
+            fields: HashMap::from([("attempt".to_string(), "2".to_string())]),
+        }
+    }
+
+    fn emit_test_trace_records() {
+        tracing::warn!(target: "opfs_btree::db", attempt = 2, "retrying write");
+
+        let span = tracing::span!(
+            target: "opfs_btree::db",
+            Level::TRACE,
+            "opfs put",
+            key_len = 8
+        );
+        let _entered = span.enter();
+    }
+
+    fn silent_test_layer() -> WasmLayer {
+        WasmLayer::new(WasmLayerConfig::new().disable().remove_timings())
+    }
+
+    #[test]
+    fn ignores_entries_while_collection_is_disabled() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(false);
+
+        let subscriber = tracing_subscriber::registry().with(silent_test_layer());
+        tracing::subscriber::with_default(subscriber, emit_test_trace_records);
+
+        assert!(drain_trace_entries_for_test().is_empty());
+    }
+
+    #[test]
+    fn enabling_collection_buffers_layer_spans_and_logs() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(true);
+
+        let subscriber = tracing_subscriber::registry().with(silent_test_layer());
+        tracing::subscriber::with_default(subscriber, emit_test_trace_records);
+
+        let drained = drain_trace_entries_for_test();
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(
+            &drained[0],
+            TraceEntry::Log {
+                sequence: 0,
+                target,
+                level,
+                message,
+                fields,
+                ..
+            } if target == "opfs_btree::db"
+                && level == "WARN"
+                && message == "retrying write"
+                && fields.get("attempt") == Some(&"2".to_string())
+        ));
+        assert!(matches!(
+            &drained[1],
+            TraceEntry::Span {
+                sequence: 1,
+                name,
+                target,
+                level,
+                fields,
+                ..
+            } if name == "opfs put"
+                && target == "opfs_btree::db"
+                && level == "TRACE"
+                && fields.get("key_len") == Some(&"8".to_string())
+        ));
+    }
+
+    #[test]
+    fn drain_returns_entries_and_clears_buffer() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(true);
+
+        push_trace_entry_for_test(span_entry(0));
+        push_trace_entry_for_test(log_entry(1));
+
+        assert_eq!(
+            drain_trace_entries_for_test(),
+            vec![span_entry(0), log_entry(1)]
+        );
+        assert!(drain_trace_entries_for_test().is_empty());
+    }
+
+    #[test]
+    fn overflowing_the_buffer_reports_dropped_entries() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(true);
+
+        for index in 0..=MAX_TRACE_ENTRIES {
+            push_trace_entry_for_test(span_entry(index as u64));
+        }
+
+        let drained = drain_trace_entries_for_test();
+        assert_eq!(drained.len(), MAX_TRACE_ENTRIES + 1);
+        assert!(matches!(
+            drained.last(),
+            Some(TraceEntry::Dropped { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn serializes_entries_with_js_field_names() {
+        let span = serde_json::to_value(span_entry(3)).unwrap();
+        assert_eq!(span["kind"], "span");
+        assert_eq!(span["startUnixNano"], "1775000000000000000");
+        assert_eq!(span["endUnixNano"], "1775000000000001000");
+        assert!(span.get("start_unix_nano").is_none());
+
+        let log = serde_json::to_value(log_entry(4)).unwrap();
+        assert_eq!(log["kind"], "log");
+        assert_eq!(log["timestampUnixNano"], "1775000000000002000");
+        assert!(log.get("timestamp_unix_nano").is_none());
+
+        let dropped = serde_json::to_value(TraceEntry::Dropped { count: 5 }).unwrap();
+        assert_eq!(dropped["kind"], "dropped");
+        assert_eq!(dropped["count"], 5);
     }
 }

@@ -57,6 +57,20 @@ fn wasm_log_level_from_global() -> tracing::Level {
     }
 }
 
+/// Enable or disable collection of buffered tracing entries for JavaScript drains.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = setTraceEntryCollectionEnabled)]
+pub fn set_trace_entry_collection_enabled(enabled: bool) {
+    wasm_tracing::set_trace_entry_collection_enabled(enabled);
+}
+
+/// Drain buffered tracing entries collected by the wasm tracing layer.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = drainTraceEntries)]
+pub fn drain_trace_entries() -> JsValue {
+    wasm_tracing::drain_trace_entries()
+}
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{

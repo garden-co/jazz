@@ -15,7 +15,6 @@ import type {
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
 import { createSyncOutboxRouter } from "./sync-transport.js";
-import { installWasmTraceTelemetry } from "./sync-telemetry.js";
 
 /**
  * Options for initializing the worker bridge.
@@ -62,7 +61,6 @@ interface WorkerBridgeState {
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
-  disposeWasmTraceTelemetry: (() => void) | null;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -106,7 +104,6 @@ export class WorkerBridge {
       peerSyncListener: null,
       authFailureListener: null,
       serverPayloadForwarder: null,
-      disposeWasmTraceTelemetry: null,
     };
 
     // Wire worker → main: incoming sync messages from worker
@@ -184,13 +181,6 @@ export class WorkerBridge {
       telemetryCollectorUrl: options.telemetryCollectorUrl,
       clientId: "", // Worker generates its own client ID for main thread
     };
-    this.state.disposeWasmTraceTelemetry?.();
-    this.state.disposeWasmTraceTelemetry = installWasmTraceTelemetry({
-      collectorUrl: options.telemetryCollectorUrl,
-      appId: options.appId,
-      runtimeThread: "main",
-    });
-
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
       this.markUpstreamServerConnected();
@@ -450,8 +440,6 @@ export class WorkerBridge {
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
     this.state.syncBatchFlushQueued = false;
-    this.state.disposeWasmTraceTelemetry?.();
-    this.state.disposeWasmTraceTelemetry = null;
     this.runtime.onSyncMessageToSend?.(() => undefined);
   }
 }
