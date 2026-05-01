@@ -2,8 +2,11 @@
 //!
 //! Owns the public verbs that change row-history state and keep the derived
 //! visible region consistent afterward:
-//! - [`apply_row_batch`] — insert or update a history batch, then recompute and
-//!   persist visibility (and supersede stale staging siblings if needed)
+//! - [`apply_row_batch_with_context`] — insert or update a history batch with a
+//!   caller-provided descriptor context, then recompute and persist visibility
+//!   (and supersede stale staging siblings if needed)
+//! - [`apply_row_batch_infer_context`] — compatibility wrapper for inbound or
+//!   storage-level paths that must infer the descriptor context from row metadata
 //! - [`patch_row_batch_state`] — flip an existing batch's state/tier and
 //!   recompute visibility
 //!
@@ -143,19 +146,18 @@ pub(super) fn supersede_older_staging_rows_for_batch<H: Storage>(
     Ok(())
 }
 
-pub fn apply_row_batch<H: Storage>(
+pub fn apply_row_batch_with_context<H: Storage>(
     io: &mut H,
     object_id: ObjectId,
     branch_name: &BranchName,
     row: StoredRowBatch,
     index_mutations: &[IndexMutation<'_>],
+    context: &crate::storage::PreparedRowWriteContext,
 ) -> Result<ApplyRowBatchResult, RowHistoryError> {
     let row_locator = row_locator_from_storage(io, object_id)?;
     let table = row_locator.table.to_string();
     let batch_id = row.batch_id();
     let branch = SharedString::from(branch_name.as_str().to_string());
-    let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
-        .map_err(RowHistoryError::StorageError)?;
     let previous_entry = load_previous_visible_entry(
         io,
         &table,
@@ -221,11 +223,11 @@ pub fn apply_row_batch<H: Storage>(
         && visible_entries[0].current_row.batch_id() == row.batch_id();
 
     if visible_entries.is_empty() || can_encode_visible_with_row_context {
-        let encoded_history = crate::storage::encode_history_row_bytes_with_context(&context, &row)
+        let encoded_history = crate::storage::encode_history_row_bytes_with_context(context, &row)
             .map_err(RowHistoryError::StorageError)?;
         let encoded_visible = if let Some(entry) = visible_entries.first() {
             vec![
-                crate::storage::encode_visible_row_bytes_with_context(&context, entry)
+                crate::storage::encode_visible_row_bytes_with_context(context, entry)
                     .map_err(RowHistoryError::StorageError)?,
             ]
         } else {
@@ -269,6 +271,20 @@ pub fn apply_row_batch<H: Storage>(
         row_locator,
         visibility_change: visibility_change_from_applied(object_id, applied),
     })
+}
+
+pub fn apply_row_batch_infer_context<H: Storage>(
+    io: &mut H,
+    object_id: ObjectId,
+    branch_name: &BranchName,
+    row: StoredRowBatch,
+    index_mutations: &[IndexMutation<'_>],
+) -> Result<ApplyRowBatchResult, RowHistoryError> {
+    let row_locator = row_locator_from_storage(io, object_id)?;
+    let table = row_locator.table.to_string();
+    let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
+        .map_err(RowHistoryError::StorageError)?;
+    apply_row_batch_with_context(io, object_id, branch_name, row, index_mutations, &context)
 }
 
 pub fn patch_row_batch_state<H: Storage>(

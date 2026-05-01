@@ -439,15 +439,18 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
 /// Decode a binary row to Value slice.
 pub fn decode_row(descriptor: &RowDescriptor, data: &[u8]) -> Result<Vec<Value>, EncodingError> {
     let layout = compiled_row_layout(descriptor);
+    decode_row_with_layout(descriptor, layout.as_ref(), data)
+}
+
+pub(crate) fn decode_row_with_layout(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    data: &[u8],
+) -> Result<Vec<Value>, EncodingError> {
     let mut values = Vec::with_capacity(descriptor.columns.len());
 
     for i in 0..descriptor.columns.len() {
-        values.push(decode_column_with_layout(
-            descriptor,
-            layout.as_ref(),
-            data,
-            i,
-        )?);
+        values.push(decode_column_with_layout(descriptor, layout, data, i)?);
     }
 
     Ok(values)
@@ -619,7 +622,7 @@ pub fn decode_column(
     decode_column_with_layout(descriptor, layout.as_ref(), data, col_index)
 }
 
-fn decode_column_with_layout(
+pub(crate) fn decode_column_with_layout(
     descriptor: &RowDescriptor,
     layout: &CompiledRowLayout,
     data: &[u8],

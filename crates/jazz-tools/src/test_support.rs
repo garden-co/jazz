@@ -5,7 +5,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{Schema, SchemaHash};
 use crate::row_histories::{
-    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch,
+    ApplyRowBatchResult, BatchId, RowHistoryError, StoredRowBatch, apply_row_batch_infer_context,
 };
 use crate::schema_manager::encoding::encode_schema;
 use crate::storage::{
@@ -76,7 +76,7 @@ pub fn apply_test_row_batch<H: Storage>(
     branch: impl AsRef<str>,
     row: StoredRowBatch,
 ) -> Result<ApplyRowBatchResult, RowHistoryError> {
-    apply_row_batch(
+    apply_row_batch_infer_context(
         storage,
         object_id,
         &BranchName::new(branch.as_ref()),

@@ -12,7 +12,7 @@ use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, Value};
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
-    compiled_row_layout, decode_row, encode_row, project_row_with_layout,
+    compiled_row_layout, decode_row, decode_row_with_layout, encode_row, project_row_with_layout,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -250,6 +250,7 @@ fn visible_row_system_column_count() -> usize {
 #[derive(Debug, Clone)]
 pub(crate) struct FlatRowCodecs {
     user_descriptor: Arc<RowDescriptor>,
+    user_layout: Arc<CompiledRowLayout>,
     history_descriptor: Arc<RowDescriptor>,
     history_layout: Arc<CompiledRowLayout>,
     history_user_projection: Vec<(usize, usize)>,
@@ -282,6 +283,7 @@ pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCod
     let user_projection_len = user_descriptor.columns.len();
     let codecs = Arc::new(FlatRowCodecs {
         user_descriptor: user_descriptor.clone(),
+        user_layout: compiled_row_layout(user_descriptor.as_ref()),
         history_layout: compiled_row_layout(history_descriptor.as_ref()),
         history_descriptor,
         history_user_projection: (0..user_projection_len)
@@ -337,14 +339,41 @@ pub(super) fn flat_user_values(
     }
 }
 
+fn flat_user_values_with_codecs(
+    codecs: &FlatRowCodecs,
+    data: &RowBytes,
+) -> Result<Vec<Value>, EncodingError> {
+    if data.is_empty() {
+        Ok(codecs
+            .user_descriptor
+            .columns
+            .iter()
+            .map(|_| Value::Null)
+            .collect::<Vec<_>>())
+    } else {
+        decode_row_with_layout(
+            codecs.user_descriptor.as_ref(),
+            codecs.user_layout.as_ref(),
+            data,
+        )
+    }
+}
+
 /// Encode a row-history version into a single flat physical row.
 pub fn encode_flat_history_row(
     user_descriptor: &RowDescriptor,
     row: &StoredRowBatch,
 ) -> Result<Vec<u8>, EncodingError> {
     let codecs = flat_row_codecs(user_descriptor);
+    encode_flat_history_row_with_codecs(codecs.as_ref(), row)
+}
+
+pub(crate) fn encode_flat_history_row_with_codecs(
+    codecs: &FlatRowCodecs,
+    row: &StoredRowBatch,
+) -> Result<Vec<u8>, EncodingError> {
     let mut values = history_row_system_values(row);
-    values.extend(flat_user_values(user_descriptor, &row.data)?);
+    values.extend(flat_user_values_with_codecs(codecs, &row.data)?);
 
     encode_row(codecs.history_descriptor.as_ref(), &values)
 }
@@ -366,8 +395,18 @@ pub fn encode_flat_visible_row_entry(
     entry: &VisibleRowEntry,
 ) -> Result<Vec<u8>, EncodingError> {
     let codecs = flat_row_codecs(user_descriptor);
+    encode_flat_visible_row_entry_with_codecs(codecs.as_ref(), entry)
+}
+
+pub(crate) fn encode_flat_visible_row_entry_with_codecs(
+    codecs: &FlatRowCodecs,
+    entry: &VisibleRowEntry,
+) -> Result<Vec<u8>, EncodingError> {
     let mut values = visible_row_system_values(entry);
-    values.extend(flat_user_values(user_descriptor, &entry.current_row.data)?);
+    values.extend(flat_user_values_with_codecs(
+        codecs,
+        &entry.current_row.data,
+    )?);
     encode_row(codecs.visible_descriptor.as_ref(), &values)
 }
 
