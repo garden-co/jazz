@@ -1035,6 +1035,7 @@ export class Db {
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
   private lifecycleHooksAttached = false;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
@@ -2731,8 +2732,16 @@ export class Db {
   /**
    * Shutdown the Db and release all resources.
    * Closes all memoized JazzClient connections and the worker.
+   *
+   * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownPromise = this.runShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
     if (this.localFirstRefreshTimer) {
       clearTimeout(this.localFirstRefreshTimer);
