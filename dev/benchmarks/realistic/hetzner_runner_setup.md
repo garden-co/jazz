@@ -46,7 +46,7 @@ sudo RUNNER_TOKEN="<repo registration token>" \
   RUNNER_NAME="benchmark-runner-hetzner" \
   RUNNER_LABELS="jazz-bench,hetzner" \
   INSTALL_SSM_AGENT=0 \
-  benchmarks/realistic/bootstrap_runner.sh
+  dev/benchmarks/realistic/bootstrap_runner.sh
 ```
 
 The bootstrap script will:
@@ -55,14 +55,14 @@ The bootstrap script will:
 - install Rust, Node, `pnpm`, `wasm-pack`, and `libclang`
 - install and register the GitHub Actions runner as a systemd service
 - skip AWS SSM installation automatically on non-AWS hardware
-- apply `benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
+- apply `dev/benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
 
 ## Hardening choices
 
 Run the hardening script directly if you need to re-apply tuning:
 
 ```bash
-sudo benchmarks/realistic/harden_runner.sh
+sudo dev/benchmarks/realistic/harden_runner.sh
 ```
 
 The script currently enforces:

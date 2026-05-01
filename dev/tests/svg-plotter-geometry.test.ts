@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectSharpTurnPausePoints } from "../docs/components/playgrounds/svg-plotter-geometry";
+import { collectSharpTurnPausePoints } from "../../docs/components/playgrounds/svg-plotter-geometry";
 
 describe("collectSharpTurnPausePoints", () => {
   it("adds a linger point at a clear right-angle turn", () => {

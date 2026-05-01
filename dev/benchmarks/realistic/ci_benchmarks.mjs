@@ -18,8 +18,8 @@ const NATIVE_EXAMPLE_SCENARIOS = [
     label: "W1 (interactive)",
     output_path: "w1_interactive.json",
     log_path: "logs/w1_interactive.log",
-    scenario_path: "benchmarks/realistic/ci/scenarios/w1_interactive.json",
-    profile_path: "benchmarks/realistic/ci/profiles/s.json",
+    scenario_path: "dev/benchmarks/realistic/ci/scenarios/w1_interactive.json",
+    profile_path: "dev/benchmarks/realistic/ci/profiles/s.json",
     prepare_seed: true,
   },
   {
@@ -27,8 +27,8 @@ const NATIVE_EXAMPLE_SCENARIOS = [
     label: "W4 (cold start)",
     output_path: "w4_cold_start.json",
     log_path: "logs/w4_cold_start.log",
-    scenario_path: "benchmarks/realistic/ci/scenarios/w4_cold_start.json",
-    profile_path: "benchmarks/realistic/ci/profiles/s.json",
+    scenario_path: "dev/benchmarks/realistic/ci/scenarios/w4_cold_start.json",
+    profile_path: "dev/benchmarks/realistic/ci/profiles/s.json",
     prepare_seed: true,
   },
 ];

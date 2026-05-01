@@ -5,7 +5,7 @@ import {
   buildPauseTrailCircles,
   type PlotterSettings,
   type PreparedSvg,
-} from "../docs/components/playgrounds/svg-plotter-render";
+} from "../../docs/components/playgrounds/svg-plotter-render";
 
 const preparedSvg: PreparedSvg = {
   contentMarkup: '<path d="M0 0L100 0" stroke="#2e4ae3" stroke-width="3.28"/>',

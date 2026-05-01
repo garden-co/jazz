@@ -24,16 +24,16 @@ Run from workspace root:
 
 ```bash
 RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
-  --profile benchmarks/realistic/profiles/s.json \
-  --scenario benchmarks/realistic/scenarios/w1_interactive.json
+  --profile dev/benchmarks/realistic/profiles/s.json \
+  --scenario dev/benchmarks/realistic/scenarios/w1_interactive.json
 ```
 
 `W3` requires a running server and `--server-url`:
 
 ```bash
 RUST_LOG=warn cargo run -p jazz-tools --features client,rocksdb --example realistic_bench -- \
-  --profile benchmarks/realistic/profiles/s.json \
-  --scenario benchmarks/realistic/scenarios/w3_offline_reconnect.json \
+  --profile dev/benchmarks/realistic/profiles/s.json \
+  --scenario dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
 ```
 
@@ -47,16 +47,16 @@ cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1
 
 It currently loads:
 
-- profile: `benchmarks/realistic/profiles/s.json`
-- scenario `R1`: `benchmarks/realistic/scenarios/r1_crud_sustained.json`
-- scenario `R2`: `benchmarks/realistic/scenarios/r2_reads_sustained.json`
-- scenario `R2B`: `benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
-- scenario `R3`: `benchmarks/realistic/scenarios/r3_cold_load.json` (cold open + first query, RocksDB)
-- scenario `R4`: `benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
-- scenario `R5`: `benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
-- scenario `R6`: `benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
-- scenario `R7A`: `benchmarks/realistic/scenarios/r7_hotspot_history.json` (deep updates on a small hot set)
-- scenario `R8`: `benchmarks/realistic/scenarios/r8_many_branches.json` (many linked branches on one object)
+- profile: `dev/benchmarks/realistic/profiles/s.json`
+- scenario `R1`: `dev/benchmarks/realistic/scenarios/r1_crud_sustained.json`
+- scenario `R2`: `dev/benchmarks/realistic/scenarios/r2_reads_sustained.json`
+- scenario `R2B`: `dev/benchmarks/realistic/scenarios/r2_reads_with_churn.json` (5% background write churn)
+- scenario `R3`: `dev/benchmarks/realistic/scenarios/r3_cold_load.json` (cold open + first query, RocksDB)
+- scenario `R4`: `dev/benchmarks/realistic/scenarios/r4_fanout_updates.json` (N={10,50,200} subscribers)
+- scenario `R5`: `dev/benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
+- scenario `R6`: `dev/benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
+- scenario `R7A`: `dev/benchmarks/realistic/scenarios/r7_hotspot_history.json` (deep updates on a small hot set)
+- scenario `R8`: `dev/benchmarks/realistic/scenarios/r8_many_branches.json` (many linked branches on one object)
 
 Current topology coverage:
 
@@ -137,7 +137,7 @@ Current browser scenarios:
 ## CI / Runner
 
 - Workflow: `.github/workflows/benchmarks.yml`
-- AWS setup: `benchmarks/realistic/aws_runner_setup.md`
+- AWS setup: `dev/benchmarks/realistic/aws_runner_setup.md`
 
 Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
@@ -149,7 +149,7 @@ The workflow currently:
 - runs on `main` pushes and nightly schedule
 - runs on PRs only when the PR has the `benchmark` label
 - runs every benchmark with a 60-second CI budget and records `passed`, `timed_out`, `failed`, or `skipped_configured`
-- keeps a checked-in skip set at `benchmarks/realistic/ci_skip_set.json`
+- keeps a checked-in skip set at `dev/benchmarks/realistic/ci_skip_set.json`
 - only activates configured skips after 3 timed-out observations for the same benchmark id
 - records native example outputs (`W1`/`W4`) plus exported Criterion results (`native-criterion`) when they complete within budget
 - records browser outputs per scenario when they complete within budget
@@ -177,10 +177,10 @@ pnpm bench:realistic:render -- \
 
 Notes:
 
-- Script: `benchmarks/realistic/render_deltas.mjs`
+- Script: `dev/benchmarks/realistic/render_deltas.mjs`
 - It auto-discovers `manifest.json` recursively under `--base` and `--head`.
 - It compares the newest native/browser manifests found in each tree.
-- For history-backed markdown reports in CI, use `benchmarks/realistic/render_history_report.mjs`.
+- For history-backed markdown reports in CI, use `dev/benchmarks/realistic/render_history_report.mjs`.
 
 ## Static Site (Local + Vercel)
 
@@ -188,19 +188,19 @@ Build locally from raw artifacts:
 
 ```bash
 pnpm bench:realistic:update-history -- \
-  --history benchmarks/realistic/history/bench_history.json \
+  --history dev/benchmarks/realistic/history/bench_history.json \
   --native ./site-input/native \
   --browser ./site-input/browser
 
 pnpm bench:realistic:build-site -- \
-  --history benchmarks/realistic/history/bench_history.json \
-  --out benchmarks/realistic/site
+  --history dev/benchmarks/realistic/history/bench_history.json \
+  --out dev/benchmarks/realistic/site
 ```
 
 For Vercel hosting:
 
-- set project root directory to `benchmarks/realistic/site`
-- keep [vercel.json](/Users/anselm/.codex/worktrees/30d1/jazz2/benchmarks/realistic/site/vercel.json) in that directory so routing stays explicit
+- set project root directory to `dev/benchmarks/realistic/site`
+- keep [vercel.json](site/vercel.json) in that directory so routing stays explicit
 - use no install command and no build command (prebuilt static files)
 - framework preset: `Other`
 - deploy from `main` so each benchmark CI run refreshes the dashboard automatically

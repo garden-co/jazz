@@ -229,9 +229,9 @@ fn parse_args() -> Result<Args, DynError> {
     }
 
     let scenario_path = scenario_path
-        .unwrap_or_else(|| PathBuf::from("benchmarks/realistic/scenarios/w1_interactive.json"));
+        .unwrap_or_else(|| PathBuf::from("dev/benchmarks/realistic/scenarios/w1_interactive.json"));
     let profile_path =
-        profile_path.unwrap_or_else(|| PathBuf::from("benchmarks/realistic/profiles/s.json"));
+        profile_path.unwrap_or_else(|| PathBuf::from("dev/benchmarks/realistic/profiles/s.json"));
 
     let app_id = if let Some(raw) = app_id_raw {
         AppId::from_string(&raw).unwrap_or_else(|_| AppId::from_name(&raw))
@@ -260,8 +260,8 @@ Usage:
   cargo run -p jazz-tools --features client --example realistic_bench -- [options]
 
 Options:
-  --scenario <path>    Scenario JSON (default: benchmarks/realistic/scenarios/w1_interactive.json)
-  --profile <path>     Profile JSON  (default: benchmarks/realistic/profiles/s.json)
+  --scenario <path>    Scenario JSON (default: dev/benchmarks/realistic/scenarios/w1_interactive.json)
+  --profile <path>     Profile JSON  (default: dev/benchmarks/realistic/profiles/s.json)
   --server-url <url>   Optional server URL for sync scenarios (required for W3)
   --app-id <id|name>   App ID UUID or deterministic name (default: realistic-bench)
   --data-dir <path>    Persist benchmark files here instead of temp dir

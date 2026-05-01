@@ -3,7 +3,7 @@
 //
 // Verifies that files meant to be identical actually are, and that every
 // README follows the same section order. Runs in CI / lefthook and also
-// as `node scripts/check-starters-parity.mjs`.
+// as `node dev/scripts/check-starters-parity.mjs`.
 //
 // When a check fails, the output names the file(s) that disagree and the
 // hashes involved, so you can `diff` them directly.

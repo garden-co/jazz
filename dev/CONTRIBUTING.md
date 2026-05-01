@@ -57,7 +57,7 @@ compiling RocksDB from source.
 To rebuild and publish the full supported set on macOS, use:
 
 ```sh
-bash scripts/publish-rocksdb-artifacts.sh
+bash dev/scripts/publish-rocksdb-artifacts.sh
 ```
 
 If an archive is missing or GHCR fetch is unavailable, builds fall back to

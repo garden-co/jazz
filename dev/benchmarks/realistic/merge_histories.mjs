@@ -10,9 +10,9 @@ function fail(message) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/merge_histories.mjs \\
+  node dev/benchmarks/realistic/merge_histories.mjs \\
     --out bench-out/site-history/working_history.json \\
-    --history benchmarks/realistic/history/bench_history.json \\
+    --history dev/benchmarks/realistic/history/bench_history.json \\
     [--history bench-out/prev-site/history.json] \\
     [--max-runs 5000]
 `);

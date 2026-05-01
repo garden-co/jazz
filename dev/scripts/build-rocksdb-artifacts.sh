@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/rocksdb}"
 LLVM_AR="${LLVM_AR:-/opt/homebrew/opt/llvm/bin/llvm-ar}"
@@ -78,7 +78,7 @@ build_and_store() {
   (
     cd "${REPO_ROOT}"
     env JAZZ_ROCKSDB_OFFLINE=1 CARGO_TARGET_DIR="${target_dir}" "$@" \
-      cargo build --manifest-path vendor/librocksdb-sys/Cargo.toml \
+      cargo build --manifest-path dev/vendor/librocksdb-sys/Cargo.toml \
       --release \
       --target "${target}" \
       --features "${ROCKSDB_FEATURES}"

@@ -10,8 +10,8 @@ function fail(message) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/update_skip_set.mjs \\
-    --skip-set benchmarks/realistic/ci_skip_set.json \\
+  node dev/benchmarks/realistic/update_skip_set.mjs \\
+    --skip-set dev/benchmarks/realistic/ci_skip_set.json \\
     --status site-input/native/suite_status.json \\
     [--status site-input/browser/suite_status.json]
 `);
@@ -19,7 +19,7 @@ function printHelp() {
 
 function parseArgs(argv) {
   const out = {
-    skipSet: "benchmarks/realistic/ci_skip_set.json",
+    skipSet: "dev/benchmarks/realistic/ci_skip_set.json",
     statusFiles: [],
   };
 

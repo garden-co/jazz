@@ -2,7 +2,7 @@
 # Regenerates specs/TODO.md from the specs/todo/ directory structure.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TODO="$ROOT/specs/TODO.md"
 TODO_DIR="$ROOT/specs/todo"
 TODO_LINK_ROOT="$ROOT/specs/"

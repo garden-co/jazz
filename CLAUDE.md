@@ -30,7 +30,7 @@ Repo-local skills live in `.agents/skills/`. Check them proactively.
 
 ## Quick Capture: Ideas & Issues
 
-Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `specs/todo/`, run `bash scripts/update-todo.sh`.
+Capture only. No shaping, no implementation, no re-asking what's already in the prompt. After every write to `specs/todo/`, run `bash dev/scripts/update-todo.sh`.
 
 ### Ideas → `specs/todo/ideas/{priority}/{idea-name}.md`
 
