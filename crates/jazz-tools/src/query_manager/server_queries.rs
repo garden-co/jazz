@@ -532,17 +532,6 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
     ) -> Option<HashSet<(ObjectId, BranchName)>> {
-        match self.authorized_tuples_from_graph_result(
-            storage,
-            graph,
-            schema_context,
-            source_branch_schema_map,
-            session,
-        ) {
-            AuthorizedTuplesResult::Ready(_) => {}
-            AuthorizedTuplesResult::PermissionsUnavailable => return None,
-        }
-
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
