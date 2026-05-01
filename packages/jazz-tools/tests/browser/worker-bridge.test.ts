@@ -1041,6 +1041,85 @@ describe("Worker Bridge with OPFS", () => {
     unsub();
   });
 
+  it("tiered subscriptions gate the first callback until the worker's settled snapshot content is local", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-global-gated");
+    const sharedLocalAuthToken = generateAuthSecret();
+    const seeder = track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("subscribe-global-gated-seeder"),
+        },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      }),
+    );
+
+    const {
+      value: { id: projectId },
+    } = seeder.insert(projects, { name: `server-project-${Date.now()}` });
+    await seeder.all(app.projects.where({ id: projectId }), { tier: "global" });
+
+    const expectedTitles: string[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const title = `server-seeded-${i}`;
+      expectedTitles.push(title);
+      await seeder.insert(todos, { title, done: i % 2 === 0, projectId }).wait({ tier: "global" });
+    }
+    await seeder.shutdown();
+    ctx.untrack(seeder);
+
+    const fresh = track(
+      await createDb({
+        appId: syncServer.appId,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("subscribe-global-gated-fresh"),
+        },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      }),
+    );
+    (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
+    await waitForCondition(
+      async () => Boolean((fresh as unknown as { worker?: Worker | null }).worker?.onmessage),
+      5000,
+      `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
+        tabRole: (fresh as unknown as { tabRole?: unknown }).tabRole,
+        workerExists: Boolean((fresh as unknown as { worker?: Worker | null }).worker),
+        workerOnMessage: Boolean(
+          (fresh as unknown as { worker?: Worker | null }).worker?.onmessage,
+        ),
+        bridge: Boolean((fresh as unknown as { workerBridge?: unknown }).workerBridge),
+        clientsType: typeof (fresh as unknown as { clients?: unknown }).clients,
+        clientKeys: Object.keys((fresh as unknown as { clients?: object }).clients ?? {}),
+      })}`,
+    );
+    const snapshots: Todo[][] = [];
+    const unsubscribe = trackSubscription(
+      fresh.subscribeAll(
+        todosByProject(projectId),
+        (delta) => {
+          snapshots.push([...delta.all]);
+        },
+        { tier: "global" },
+      ),
+    );
+
+    await waitForCondition(
+      async () => snapshots.some((snapshot) => snapshot.length === expectedTitles.length),
+      15000,
+      "global tier subscription should deliver the settled snapshot",
+    );
+
+    const firstSnapshot = snapshots[0];
+    expect(firstSnapshot).toHaveLength(expectedTitles.length);
+    expect(firstSnapshot.map((row) => row.title).sort()).toEqual([...expectedTitles].sort());
+
+    unsubscribe();
+  }, 90000);
+
   it("delivers an initial scoped subscription snapshot after seeding many synced rows", async () => {
     const sharedLocalAuthToken = generateAuthSecret();
     const syncServer = await publishSyncServerSchemaAndPermissions("subscribe-initial-snapshot");

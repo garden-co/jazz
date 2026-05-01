@@ -149,9 +149,9 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
         if entry.destination == Destination::Client(s.a_client_of_b) {
@@ -406,8 +406,8 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     assert!(
         !server_outbox
             .iter()
-            .any(|entry| matches!(entry.payload, SyncPayload::QueryScopeSnapshot { .. })),
-        "server without a published permissions head should not advertise an authoritative scope snapshot"
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { ref scope, .. } if !scope.is_empty())),
+        "server without a published permissions head should not advertise a non-empty authoritative scope"
     );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
@@ -1290,9 +1290,9 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
         if entry.destination == Destination::Client(s.a_client_of_b) {
@@ -1603,8 +1603,7 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
                     remaining_row_payloads.push(payload);
                 }
             }
-            payload @ SyncPayload::QueryScopeSnapshot { .. }
-            | payload @ SyncPayload::BatchSettlement { .. }
+            payload @ SyncPayload::BatchSettlement { .. }
             | payload @ SyncPayload::QuerySettled { .. }
             | payload @ SyncPayload::RowBatchStateChanged { .. } => {
                 control_payloads.push(payload);
@@ -1617,11 +1616,11 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
     assert!(
         control_payloads
             .iter()
-            .any(|payload| matches!(payload, SyncPayload::QueryScopeSnapshot { query_id, scope }
+            .any(|payload| matches!(payload, SyncPayload::QuerySettled { query_id, scope, .. }
                 if *query_id == crate::sync_manager::QueryId(0)
                     && scope.iter().map(|(object_id, _)| *object_id).collect::<std::collections::HashSet<_>>()
                         == std::collections::HashSet::from([first_id, second_id]))),
-        "expected scope snapshot covering both accepted transaction members, got {control_payloads:#?}"
+        "expected settled scope covering both accepted transaction members, got {control_payloads:#?}"
     );
     assert!(
         control_payloads.iter().any(|payload| matches!(

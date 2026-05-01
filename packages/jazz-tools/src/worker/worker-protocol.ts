@@ -36,6 +36,11 @@ export interface SyncToWorkerMessage {
   payload: Uint8Array[];
 }
 
+export interface SequencedSyncPayload {
+  payload: Uint8Array | string;
+  sequence: number;
+}
+
 export type WorkerLifecycleEvent =
   | "visibility-hidden"
   | "visibility-visible"
@@ -159,7 +164,7 @@ export interface UpstreamDisconnectedMessage {
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
-  payload: (Uint8Array | string)[];
+  payload: (Uint8Array | string | SequencedSyncPayload)[];
 }
 
 /** Forward sync payload(s) to a specific follower peer through leader main thread. */

@@ -7,6 +7,7 @@ declare module "jazz-wasm" {
         destinationId: string,
         payload: string | Uint8Array,
         isCatalogue: boolean,
+        sequence?: number | null,
       ]
     | [
         err: unknown,
@@ -14,6 +15,7 @@ declare module "jazz-wasm" {
         destinationId: string,
         payload: string | Uint8Array,
         isCatalogue: boolean,
+        sequence?: number | null,
       ];
   type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
