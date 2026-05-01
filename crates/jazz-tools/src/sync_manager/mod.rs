@@ -75,6 +75,8 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Latest remote scope snapshots keyed by upstream server and query id.
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
+    /// Query ids whose remote scope changed since the last QueryManager process.
+    pub(super) remote_query_scope_dirty: HashSet<QueryId>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
     /// Pending query rejections waiting for QueryManager to fail local subscriptions.
@@ -217,6 +219,7 @@ impl SyncManager {
             row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
+            remote_query_scope_dirty: HashSet::new(),
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
             pending_batch_settlements: Vec::new(),
@@ -802,6 +805,11 @@ impl SyncManager {
         self.remote_query_scopes
             .keys()
             .any(|(_, remote_query_id)| *remote_query_id == query_id)
+    }
+
+    /// Take query ids whose upstream scope changed since the last process pass.
+    pub fn take_remote_query_scope_dirty(&mut self) -> HashSet<QueryId> {
+        std::mem::take(&mut self.remote_query_scope_dirty)
     }
 
     /// Take pending replayable batch settlements for RuntimeCore to process.

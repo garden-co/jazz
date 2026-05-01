@@ -184,6 +184,9 @@ pub(crate) struct QuerySubscription {
     /// Flag indicating this subscription has settled at least once.
     /// Used to ensure one-shot queries receive an initial callback (even if empty).
     pub(crate) settled_once: bool,
+    /// True when visibility can change without graph dirtiness, e.g. initial
+    /// frontier completion or a remote query-scope snapshot.
+    pub(crate) needs_visibility_recompute: bool,
     /// Required durability tier before non-local delivery (None = immediate).
     pub(crate) durability_tier: Option<DurabilityTier>,
     /// How local writes behave while waiting for durability.
@@ -1020,6 +1023,9 @@ impl QueryManager {
     pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
+            if !sub.query_frontier_complete {
+                sub.needs_visibility_recompute = true;
+            }
             sub.query_frontier_complete = true;
         }
     }
@@ -1064,6 +1070,12 @@ impl QueryManager {
 
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
+        let remote_scope_dirty_query_ids = self.sync_manager.take_remote_query_scope_dirty();
+        for query_id in remote_scope_dirty_query_ids {
+            if let Some(sub) = self.subscriptions.get_mut(&QuerySubscriptionId(query_id.0)) {
+                sub.needs_visibility_recompute = true;
+            }
+        }
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1150,6 +1162,18 @@ impl QueryManager {
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
         for sub_id in subscription_ids {
+            let should_process_subscription =
+                self.subscriptions.get(&sub_id).is_some_and(|subscription| {
+                    subscription.needs_recompile
+                        || !subscription.settled_once
+                        || subscription.needs_visibility_recompute
+                        || subscription.has_pending_local_updates
+                        || subscription.graph.has_dirty_nodes()
+                });
+            if !should_process_subscription {
+                continue;
+            }
+
             let Some(mut subscription) = self.subscriptions.remove(&sub_id) else {
                 continue;
             };
@@ -1208,6 +1232,7 @@ impl QueryManager {
 
                 subscription.graph.settle(storage_ref, row_loader)
             };
+            subscription.needs_visibility_recompute = false;
             let new_schema_warnings = Self::finalize_schema_warnings(
                 &mut subscription.reported_schema_warnings,
                 schema_warnings.warnings_for_query(QueryId(sub_id.0)),
