@@ -1030,6 +1030,19 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_batch(&mut self, batch_id: BatchId) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription
+                .graph
+                .current_output_tuples()
+                .iter()
+                .any(|tuple| tuple.batch_provenance().contains(&batch_id))
+            {
+                subscription.needs_visibility_recompute = true;
+            }
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
