@@ -20,12 +20,12 @@ function fail(message) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/run_ci_benchmarks.mjs \\
+  node dev/benchmarks/realistic/run_ci_benchmarks.mjs \\
     --suite native|browser \\
     --out-dir bench-out/native \\
     [--storage-engine rocksdb|sqlite] \\
     [--profile s] \\
-    [--skip-set benchmarks/realistic/ci_skip_set.json] \\
+    [--skip-set dev/benchmarks/realistic/ci_skip_set.json] \\
     [--repeat-count 3] \\
     [--timeout-seconds 60]
 `);
@@ -37,7 +37,7 @@ function parseArgs(argv) {
     outDir: "",
     storageEngine: "",
     profile: "s",
-    skipSet: "benchmarks/realistic/ci_skip_set.json",
+    skipSet: "dev/benchmarks/realistic/ci_skip_set.json",
     repeatCount: DEFAULT_NOISE_REPEAT_COUNT,
     timeoutSeconds: DEFAULT_BENCHMARK_TIMEOUT_SECONDS,
   };
@@ -471,7 +471,7 @@ function nativeStorageEngine(benchmark, args = {}) {
 
 export function buildNativeExampleBaseCommand(benchmark, args) {
   const profilePath =
-    benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+    benchmark.profile_path ?? `dev/benchmarks/realistic/profiles/${args.profile}.json`;
   const features = NATIVE_EXAMPLE_FEATURES_BY_ENGINE[nativeStorageEngine(benchmark, args)];
   if (!features) {
     throw new Error(
@@ -523,7 +523,7 @@ async function runNativeBenchmark(benchmark, args) {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
     const env = { ...process.env, ...(benchmark.env ?? {}) };
     const profilePath =
-      benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
+      benchmark.profile_path ?? `dev/benchmarks/realistic/profiles/${args.profile}.json`;
     const baseCommand = buildNativeExampleBaseCommand(benchmark, args);
     const repeatCount = repeatCountForBenchmark(benchmark, args.repeatCount);
     const attempts = [];
@@ -898,7 +898,7 @@ async function main() {
       results.push(
         summarizeBenchmark(benchmark, "skipped_configured", 0, {
           timeout_seconds: args.timeoutSeconds,
-          note: "Skipped by benchmarks/realistic/ci_skip_set.json",
+          note: "Skipped by dev/benchmarks/realistic/ci_skip_set.json",
         }),
       );
       continue;

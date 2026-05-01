@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getEmbeddedSvgStyleValue,
   parseEmbeddedSvgStyles,
-} from "../docs/components/playgrounds/svg-plotter-style";
+} from "../../docs/components/playgrounds/svg-plotter-style";
 
 describe("parseEmbeddedSvgStyles", () => {
   it("resolves class-based stroke properties from embedded style blocks", () => {

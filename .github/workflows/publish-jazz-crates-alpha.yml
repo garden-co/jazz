@@ -36,4 +36,4 @@ jobs:
           fi
 
       - name: Publish crates in dependency order
-        run: ./scripts/publish-crates-alpha.sh "${{ inputs.mode }}"
+        run: ./dev/scripts/publish-crates-alpha.sh "${{ inputs.mode }}"

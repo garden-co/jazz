@@ -149,7 +149,7 @@ test("native Criterion command opts into the SQLite storage backend", () => {
 
 test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native binaries", () => {
   const workflow = readFileSync(
-    new URL("../../.github/workflows/benchmarks.yml", import.meta.url),
+    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
     "utf8",
   );
 
@@ -173,7 +173,7 @@ test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native b
 
 test("benchmark workflow builds jazz-napi before browser benchmarks", () => {
   const workflow = readFileSync(
-    new URL("../../.github/workflows/benchmarks.yml", import.meta.url),
+    new URL("../../../.github/workflows/benchmarks.yml", import.meta.url),
     "utf8",
   );
 
@@ -218,7 +218,7 @@ test("trimmed CI scenarios keep their non-trivial topology", () => {
     readFileSync(new URL("./ci/scenarios/r9_subscribed_write_path.json", import.meta.url), "utf8"),
   );
   const browserHarness = readFileSync(
-    new URL("../../packages/jazz-tools/tests/browser/realistic-bench.test.ts", import.meta.url),
+    new URL("../../../packages/jazz-tools/tests/browser/realistic-bench.test.ts", import.meta.url),
     "utf8",
   );
 

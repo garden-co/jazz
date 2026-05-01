@@ -90,7 +90,7 @@ Primary clusters:
 - Starter Playwright e2e suites under `starters/*/e2e`
 - Example app browser and e2e tests under `examples/*`
 - Docs example tests under `examples/docs/*`
-- Benchmarks under `benchmarks/realistic`
+- Benchmarks under `dev/benchmarks/realistic`
 - Root/document helper tests under `tests/` and `docs/lib`
 
 These tests are currently doing three jobs: validating examples, validating starter templates, and providing end-to-end product confidence. That is too much for an undifferentiated bucket. They should become explicit smoke/canary suites with a small shared matrix, while deeper behavior moves into core/runtime tests.
@@ -385,7 +385,7 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `crates/jazz-tools/src/test_row_history.rs`
 - `crates/jazz-tools/tests/auth_test.rs`
 - `crates/jazz-tools/tests/test_server.rs`
-- `vendor/librocksdb-sys/src/test.rs`
+- `dev/vendor/librocksdb-sys/src/test.rs`
 
 ### TypeScript runtime
 
@@ -546,9 +546,9 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 
 ### Examples, starters, docs, benchmarks, and root utilities
 
-- `benchmarks/realistic/ci_benchmarks.test.mjs`
-- `benchmarks/realistic/ci_scenarios.test.mjs`
-- `benchmarks/realistic/update_history.test.mjs`
+- `dev/benchmarks/realistic/ci_benchmarks.test.mjs`
+- `dev/benchmarks/realistic/ci_scenarios.test.mjs`
+- `dev/benchmarks/realistic/update_history.test.mjs`
 - `docs/lib/presentation-deck.test.ts`
 - `examples/auth-betterauth-chat/e2e/chat-auth.spec.ts`
 - `examples/auth-betterauth-chat/vitest.config.ts`
@@ -622,7 +622,7 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `starters/sveltekit-hybrid/e2e/todo-flow.spec.ts`
 - `starters/sveltekit-localfirst/e2e/auth-backup.spec.ts`
 - `starters/sveltekit-localfirst/e2e/todo-flow.spec.ts`
-- `stress-tests/todo-react/vitest.config.browser.ts`
-- `tests/svg-plotter-geometry.test.ts`
-- `tests/svg-plotter-render.test.ts`
-- `tests/svg-plotter-style.test.ts`
+- `dev/stress-tests/todo-react/vitest.config.browser.ts`
+- `dev/tests/svg-plotter-geometry.test.ts`
+- `dev/tests/svg-plotter-render.test.ts`
+- `dev/tests/svg-plotter-style.test.ts`

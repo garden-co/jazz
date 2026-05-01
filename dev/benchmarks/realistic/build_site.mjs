@@ -10,8 +10,8 @@ function fail(message) {
 
 function parseArgs(argv) {
   const out = {
-    history: "benchmarks/realistic/history/bench_history.json",
-    out: "benchmarks/realistic/site",
+    history: "dev/benchmarks/realistic/history/bench_history.json",
+    out: "dev/benchmarks/realistic/site",
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -37,9 +37,9 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/build_site.mjs \\
-    --history benchmarks/realistic/history/bench_history.json \\
-    --out benchmarks/realistic/site
+  node dev/benchmarks/realistic/build_site.mjs \\
+    --history dev/benchmarks/realistic/history/bench_history.json \\
+    --out dev/benchmarks/realistic/site
 `);
 }
 

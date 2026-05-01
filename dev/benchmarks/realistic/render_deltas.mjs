@@ -56,7 +56,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/render_deltas.mjs --base <dir> --head <dir> [--kind all|native|browser]
+  node dev/benchmarks/realistic/render_deltas.mjs --base <dir> --head <dir> [--kind all|native|browser]
 
 Description:
   Reads benchmark artifact bundles by discovering manifest.json files under --base and --head,

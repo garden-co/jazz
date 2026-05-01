@@ -36,7 +36,7 @@ sudo RUNNER_TOKEN="<repo registration token>" \
   RUNNER_URL="https://github.com/garden-co/jazz2" \
   RUNNER_USER=ubuntu \
   INSTALL_SSM_AGENT=1 \
-  benchmarks/realistic/bootstrap_runner.sh
+  dev/benchmarks/realistic/bootstrap_runner.sh
 ```
 
 This script handles the details that bit us on the first live setup:
@@ -45,7 +45,7 @@ This script handles the details that bit us on the first live setup:
 - installs `libclang-dev` so RocksDB bindgen builds work without ad-hoc workflow `sudo`
 - uses `/var/lib/cloud/data/instance-id` for naming, which works with IMDSv2 required
 - installs the GitHub runner service after `config.sh`, which is when current releases generate `svc.sh`
-- applies `benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
+- applies `dev/benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
 
 ## 3. Register the GitHub runner
 
@@ -66,7 +66,7 @@ Use these labels:
 Use the checked-in hardening script for the deterministic baseline:
 
 ```bash
-sudo benchmarks/realistic/harden_runner.sh
+sudo dev/benchmarks/realistic/harden_runner.sh
 ```
 
 It currently does three concrete things:

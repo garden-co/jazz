@@ -59,7 +59,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/prepare_local_preview.mjs \\
+  node dev/benchmarks/realistic/prepare_local_preview.mjs \\
     [--branch codex/benchmark-runner] \\
     [--run-id 22833327994] \\
     [--out bench-out/local-preview]
@@ -198,7 +198,7 @@ function main() {
     downloads.push({ label: branch, ...branchDownload });
 
     const mergedHistory = path.join(outDir, "history.json");
-    const mergeArgs = ["benchmarks/realistic/merge_histories.mjs", "--out", mergedHistory];
+    const mergeArgs = ["dev/benchmarks/realistic/merge_histories.mjs", "--out", mergedHistory];
     for (const historyPath of histories) {
       mergeArgs.push("--history", historyPath);
     }
@@ -206,7 +206,7 @@ function main() {
 
     const siteDir = path.join(outDir, "site");
     run("node", [
-      "benchmarks/realistic/build_site.mjs",
+      "dev/benchmarks/realistic/build_site.mjs",
       "--history",
       mergedHistory,
       "--out",

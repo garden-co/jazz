@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
+const REPO_ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
+
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -164,7 +166,7 @@ test("update_history ingests engine-specific native and browser manifests from a
   execFileSync(
     "node",
     [
-      "benchmarks/realistic/update_history.mjs",
+      "dev/benchmarks/realistic/update_history.mjs",
       "--history",
       historyPath,
       "--native",
@@ -173,7 +175,7 @@ test("update_history ingests engine-specific native and browser manifests from a
       browserRoot,
     ],
     {
-      cwd: "/Users/anselm/.codex/worktrees/25dc/jazz2",
+      cwd: REPO_ROOT,
       stdio: "pipe",
     },
   );

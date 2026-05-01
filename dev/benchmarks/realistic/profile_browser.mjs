@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import jazzNapi from "../../crates/jazz-napi/index.js";
+import jazzNapi from "../../../crates/jazz-napi/index.js";
 
 const { TestingServer } = jazzNapi;
 
@@ -15,11 +15,12 @@ const DEFAULT_CDP_PORT = 9333;
 const DEFAULT_SCALE = 0.03;
 const DEFAULT_LARGE_MULTIPLIER = 4;
 
-const ROOT_DIR = path.resolve(new URL("../..", import.meta.url).pathname);
+const ROOT_DIR = path.resolve(new URL("../../..", import.meta.url).pathname);
 const JAZZ_TOOLS_DIR = path.join(ROOT_DIR, "packages", "jazz-tools");
-const PROFILE_PATH = path.join(ROOT_DIR, "benchmarks", "realistic", "profiles", "s.json");
+const PROFILE_PATH = path.join(ROOT_DIR, "dev", "benchmarks", "realistic", "profiles", "s.json");
 const SCHEMA_PATH = path.join(
   ROOT_DIR,
+  "dev",
   "benchmarks",
   "realistic",
   "schema",
@@ -27,6 +28,7 @@ const SCHEMA_PATH = path.join(
 );
 const B5_SCENARIO_PATH = path.join(
   ROOT_DIR,
+  "dev",
   "benchmarks",
   "realistic",
   "scenarios",
@@ -91,7 +93,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage: node benchmarks/realistic/profile_browser.mjs [options]
+  console.log(`Usage: node dev/benchmarks/realistic/profile_browser.mjs [options]
 
 Options:
   --scenario w4,b2,b3,b5   Comma-separated scenario list (default: ${DEFAULT_SCENARIOS.join(",")})

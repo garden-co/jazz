@@ -10,7 +10,7 @@ function fail(message) {
 
 function parseArgs(argv) {
   const out = {
-    history: "benchmarks/realistic/history/bench_history.json",
+    history: "dev/benchmarks/realistic/history/bench_history.json",
     baseBranch: "main",
     headBranch: "",
     suite: "all",
@@ -64,8 +64,8 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/render_history_report.mjs \\
-    --history benchmarks/realistic/history/bench_history.json \\
+  node dev/benchmarks/realistic/render_history_report.mjs \\
+    --history dev/benchmarks/realistic/history/bench_history.json \\
     --base-branch main \\
     --head-branch my-branch \\
     [--suite all|native|browser|native-criterion] \\

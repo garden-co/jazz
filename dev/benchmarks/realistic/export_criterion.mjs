@@ -12,9 +12,9 @@ function fail(message) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/export_criterion.mjs \
+  node dev/benchmarks/realistic/export_criterion.mjs \
     [--criterion-root target/criterion] \
-    [--scenarios-dir benchmarks/realistic/scenarios] \
+    [--scenarios-dir dev/benchmarks/realistic/scenarios] \
     [--prefix realistic_phase1/] \
     [--out bench-out/native/criterion_realistic_phase1.json] \
     [--summary-md bench-out/native/criterion_realistic_phase1.md]
@@ -24,7 +24,7 @@ function printHelp() {
 function parseArgs(argv) {
   const out = {
     criterionRoot: "target/criterion",
-    scenariosDir: "benchmarks/realistic/scenarios",
+    scenariosDir: "dev/benchmarks/realistic/scenarios",
     prefix: "realistic_phase1/",
     out: "bench-out/native/criterion_realistic_phase1.json",
     summaryMd: "bench-out/native/criterion_realistic_phase1.md",

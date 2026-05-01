@@ -10,7 +10,7 @@ function fail(message) {
 
 function parseArgs(argv) {
   const out = {
-    history: "benchmarks/realistic/history/bench_history.json",
+    history: "dev/benchmarks/realistic/history/bench_history.json",
     native: "",
     browser: "",
     maxRuns: 1000,
@@ -54,8 +54,8 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node benchmarks/realistic/update_history.mjs \
-    --history benchmarks/realistic/history/bench_history.json \
+  node dev/benchmarks/realistic/update_history.mjs \
+    --history dev/benchmarks/realistic/history/bench_history.json \
     [--native site-input/native] \
     [--browser site-input/browser] \
     [--max-runs 1000]

@@ -111,15 +111,15 @@ jobs:
           for engine in rocksdb sqlite; do
             rm -rf target/criterion
             out_dir="bench-out/native/${engine}"
-            taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
+            taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
               --suite native \
               --storage-engine "${engine}" \
               --out-dir "${out_dir}" \
               --profile "${BENCH_PROFILE}" \
-              --skip-set benchmarks/realistic/ci_skip_set.json \
+              --skip-set dev/benchmarks/realistic/ci_skip_set.json \
               --repeat-count "${BENCH_REPEAT_COUNT}" \
               --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
-            node benchmarks/realistic/export_criterion.mjs \
+            node dev/benchmarks/realistic/export_criterion.mjs \
               --allow-empty \
               --out "${out_dir}/criterion_realistic_phase1.json" \
               --summary-md "${out_dir}/criterion_realistic_phase1.md"
@@ -276,11 +276,11 @@ jobs:
         run: |
           set -euo pipefail
           sleep 10
-          taskset -c "${BENCH_CPUSET}" node benchmarks/realistic/run_ci_benchmarks.mjs \
+          taskset -c "${BENCH_CPUSET}" node dev/benchmarks/realistic/run_ci_benchmarks.mjs \
             --suite browser \
             --out-dir bench-out/browser \
             --profile "${BENCH_PROFILE}" \
-            --skip-set benchmarks/realistic/ci_skip_set.json \
+            --skip-set dev/benchmarks/realistic/ci_skip_set.json \
             --repeat-count "${BENCH_REPEAT_COUNT}" \
             --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
 
@@ -393,10 +393,10 @@ jobs:
           mkdir -p bench-out/site-history
           history_path=bench-out/site-history/working_history.json
 
-          if git cat-file -e origin/main:benchmarks/realistic/history/bench_history.json 2>/dev/null; then
-            git show origin/main:benchmarks/realistic/history/bench_history.json > "$history_path"
-          elif [ -f benchmarks/realistic/history/bench_history.json ]; then
-            cp benchmarks/realistic/history/bench_history.json "$history_path"
+          if git cat-file -e origin/main:dev/benchmarks/realistic/history/bench_history.json 2>/dev/null; then
+            git show origin/main:dev/benchmarks/realistic/history/bench_history.json > "$history_path"
+          elif [ -f dev/benchmarks/realistic/history/bench_history.json ]; then
+            cp dev/benchmarks/realistic/history/bench_history.json "$history_path"
           else
             printf '{\n  "version": 1,\n  "updated_at": null,\n  "runs": []\n}\n' > "$history_path"
           fi
@@ -428,7 +428,7 @@ jobs:
 
                 previous_history="$(find bench-out/previous-site -name history.json -print -quit || true)"
                 if [ -n "${previous_history}" ]; then
-                  node benchmarks/realistic/merge_histories.mjs \
+                  node dev/benchmarks/realistic/merge_histories.mjs \
                     --out "$history_path" \
                     --history "$history_path" \
                     --history "$previous_history" \
@@ -451,32 +451,32 @@ jobs:
           if [ -d site-input/browser ]; then
             args+=(--browser site-input/browser)
           fi
-          node benchmarks/realistic/update_history.mjs "${args[@]}"
+          node dev/benchmarks/realistic/update_history.mjs "${args[@]}"
 
       - name: Update benchmark skip set
         run: |
           set -euo pipefail
-          args=(--skip-set benchmarks/realistic/ci_skip_set.json)
+          args=(--skip-set dev/benchmarks/realistic/ci_skip_set.json)
           while IFS= read -r status_file; do
             args+=(--status "$status_file")
           done < <(find site-input/native -name suite_status.json -type f | sort)
           if [ -f site-input/browser/suite_status.json ]; then
             args+=(--status site-input/browser/suite_status.json)
           fi
-          node benchmarks/realistic/update_skip_set.mjs "${args[@]}"
+          node dev/benchmarks/realistic/update_skip_set.mjs "${args[@]}"
 
       - name: Build static benchmark site
         run: |
           set -euo pipefail
-          node benchmarks/realistic/build_site.mjs \
+          node dev/benchmarks/realistic/build_site.mjs \
             --history "${BENCH_WORKING_HISTORY}" \
-            --out benchmarks/realistic/site
+            --out dev/benchmarks/realistic/site
 
       - name: Sync checked-in history from working snapshot
         if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           set -euo pipefail
-          cp "${BENCH_WORKING_HISTORY}" benchmarks/realistic/history/bench_history.json
+          cp "${BENCH_WORKING_HISTORY}" dev/benchmarks/realistic/history/bench_history.json
 
       - name: Deploy benchmark site preview
         if: ${{ github.event_name == 'pull_request' }}
@@ -490,14 +490,14 @@ jobs:
           fi
           deploy_root="$(mktemp -d)"
           trap 'rm -rf "${deploy_root}"' EXIT
-          mkdir -p "${deploy_root}/benchmarks/realistic"
-          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
+          mkdir -p "${deploy_root}/dev/benchmarks/realistic"
+          cp -R dev/benchmarks/realistic/site "${deploy_root}/dev/benchmarks/realistic/site"
           if ! deployment_url="$(
             npx vercel@latest deploy "${deploy_root}" \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
-              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
+              --local-config "${deploy_root}/dev/benchmarks/realistic/site/vercel.json" \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
@@ -534,15 +534,15 @@ jobs:
           fi
           deploy_root="$(mktemp -d)"
           trap 'rm -rf "${deploy_root}"' EXIT
-          mkdir -p "${deploy_root}/benchmarks/realistic"
-          cp -R benchmarks/realistic/site "${deploy_root}/benchmarks/realistic/site"
+          mkdir -p "${deploy_root}/dev/benchmarks/realistic"
+          cp -R dev/benchmarks/realistic/site "${deploy_root}/dev/benchmarks/realistic/site"
           if ! deployment_url="$(
             npx vercel@latest deploy "${deploy_root}" \
               --prod \
               --yes \
               --scope garden-co \
               --token "${VERCEL_TOKEN}" \
-              --local-config "${deploy_root}/benchmarks/realistic/site/vercel.json" \
+              --local-config "${deploy_root}/dev/benchmarks/realistic/site/vercel.json" \
               -m benchmark_branch="${BENCH_BRANCH}" \
               -m benchmark_sha="${BENCH_SHA}" \
               -m benchmark_run_id="${GITHUB_RUN_ID}" \
@@ -582,7 +582,7 @@ jobs:
               printf '\n' >> bench-out/pr-report.md
             fi
           done
-          node benchmarks/realistic/render_history_report.mjs \
+          node dev/benchmarks/realistic/render_history_report.mjs \
             --history "${BENCH_WORKING_HISTORY}" \
             --base-branch main \
             --head-branch "${BENCH_BRANCH}" \
@@ -594,7 +594,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: realistic-site-${{ github.run_id }}-${{ github.run_attempt }}
-          path: benchmarks/realistic/site
+          path: dev/benchmarks/realistic/site
           if-no-files-found: error
 
       - name: Update PR benchmark comment
@@ -649,7 +649,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/ci_skip_set.json benchmarks/realistic/site
+          git add dev/benchmarks/realistic/history/bench_history.json dev/benchmarks/realistic/ci_skip_set.json dev/benchmarks/realistic/site
           if git diff --cached --quiet; then
             echo "No benchmark history/site changes to commit."
             exit 0
