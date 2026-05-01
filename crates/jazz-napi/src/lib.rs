@@ -35,7 +35,7 @@ use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, TableName, Value};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
     SubscriptionHandle,
@@ -1150,14 +1150,18 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Schema serialization failed: {}", e)))
     }
 
+    #[napi(getter, js_name = "returnsDeclaredSchemaRows")]
+    pub fn returns_declared_schema_rows(&self) -> bool {
+        true
+    }
+
     #[napi(js_name = "getSchemaHash")]
     pub fn get_schema_hash(&self) -> napi::Result<String> {
         let core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let schema = core.current_schema();
-        Ok(SchemaHash::compute(schema).to_string())
+        Ok(core.schema_manager().current_hash().to_string())
     }
 
     #[napi]

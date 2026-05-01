@@ -31,6 +31,7 @@ declare module "jazz-wasm" {
       useBinaryEncoding?: boolean,
     );
     schedule?: (task: () => void) => void;
+    readonly returnsDeclaredSchemaRows: boolean;
 
     insert(
       table: string,

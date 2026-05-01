@@ -13,7 +13,7 @@ use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBat
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
-use crate::query_manager::query::Query;
+use crate::query_manager::query::{ArraySubquerySpec, Query};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
@@ -50,12 +50,10 @@ enum RuntimeSchemaWire {
     Schema(Schema),
 }
 
+const HIDDEN_INCLUDE_COLUMN_PREFIX: &str = "__jazz_include_";
+
 pub fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
+    query.joins.is_empty() && query.recursive.is_none() && query.result_element_index.is_none()
 }
 
 fn reorder_values_by_column_name(
@@ -109,6 +107,177 @@ pub fn align_row_values_to_declared_schema(
     align_values_to_declared_schema(declared_schema, table, &runtime_table.columns, values)
 }
 
+fn resolve_selected_columns(
+    schema: &Schema,
+    table: &TableName,
+    projection: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let table_schema = schema.get(table)?;
+    let schema_column_names = table_schema
+        .columns
+        .columns
+        .iter()
+        .map(|column| column.name.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(projection) = projection.filter(|projection| !projection.is_empty()) else {
+        return Some(schema_column_names);
+    };
+
+    let mut explicit_columns_in_schema = Vec::new();
+    let mut explicit_columns_not_in_schema = Vec::new();
+    let mut has_wildcard = false;
+
+    for column in projection {
+        if column == "*" {
+            has_wildcard = true;
+            continue;
+        }
+        if column == "id" {
+            continue;
+        }
+        if schema_column_names.iter().any(|name| name == column) {
+            if !explicit_columns_in_schema.iter().any(|name| name == column) {
+                explicit_columns_in_schema.push(column.clone());
+            }
+        } else if !explicit_columns_not_in_schema
+            .iter()
+            .any(|name| name == column)
+        {
+            explicit_columns_not_in_schema.push(column.clone());
+        }
+    }
+
+    if !has_wildcard {
+        explicit_columns_in_schema.extend(explicit_columns_not_in_schema);
+        return Some(explicit_columns_in_schema);
+    }
+
+    if explicit_columns_not_in_schema.is_empty() {
+        Some(schema_column_names)
+    } else {
+        let mut selected = schema_column_names;
+        selected.extend(explicit_columns_not_in_schema);
+        Some(selected)
+    }
+}
+
+fn projected_visible_column_count(
+    declared_schema: &Schema,
+    table: &TableName,
+    select_columns: Option<&[String]>,
+) -> Option<usize> {
+    let projection = select_columns?;
+    let selected = resolve_selected_columns(declared_schema, table, Some(projection))?;
+    Some(
+        selected
+            .iter()
+            .filter(|column| !column.starts_with(HIDDEN_INCLUDE_COLUMN_PREFIX))
+            .count(),
+    )
+}
+
+fn align_included_value_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    value: Value,
+    spec: &ArraySubquerySpec,
+) -> Value {
+    match value {
+        Value::Array(entries) => Value::Array(
+            entries
+                .into_iter()
+                .map(|entry| match entry {
+                    Value::Row { id, values } => Value::Row {
+                        id,
+                        values: align_query_values_to_declared_schema(
+                            declared_schema,
+                            runtime_schema,
+                            &spec.table,
+                            values,
+                            &spec.nested_arrays,
+                            spec.select_columns.as_deref(),
+                        ),
+                    },
+                    other => other,
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn align_query_values_to_declared_schema(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    values: Vec<Value>,
+    array_subqueries: &[ArraySubquerySpec],
+    select_columns: Option<&[String]>,
+) -> Vec<Value> {
+    if let Some(projected_count) =
+        projected_visible_column_count(declared_schema, table, select_columns)
+    {
+        if values.len() < projected_count {
+            return values;
+        }
+        let mut values_iter = values.into_iter();
+        let mut aligned = values_iter
+            .by_ref()
+            .take(projected_count)
+            .collect::<Vec<_>>();
+        aligned.extend(values_iter.enumerate().map(|(index, value)| {
+            match array_subqueries.get(index) {
+                Some(spec) => align_included_value_to_declared_schema(
+                    declared_schema,
+                    runtime_schema,
+                    value,
+                    spec,
+                ),
+                None => value,
+            }
+        }));
+        return aligned;
+    }
+
+    let Some(runtime_table) = runtime_schema.get(table) else {
+        return values;
+    };
+    let Some(declared_table) = declared_schema.get(table) else {
+        return values;
+    };
+
+    if values.len() < runtime_table.columns.columns.len() {
+        return values;
+    }
+
+    let base_width = runtime_table.columns.columns.len();
+    let base_values = values[..base_width].to_vec();
+    let trailing_values = values[base_width..].to_vec();
+    let mut aligned = reorder_values_by_column_name(
+        &runtime_table.columns,
+        &declared_table.columns,
+        &base_values,
+    )
+    .unwrap_or(base_values);
+
+    aligned.extend(
+        trailing_values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| match array_subqueries.get(index) {
+                Some(spec) => align_included_value_to_declared_schema(
+                    declared_schema,
+                    runtime_schema,
+                    value,
+                    spec,
+                ),
+                None => value,
+            }),
+    );
+    aligned
+}
+
 pub fn align_query_rows_to_declared_schema(
     declared_schema: &Schema,
     runtime_schema: &Schema,
@@ -119,21 +288,16 @@ pub fn align_query_rows_to_declared_schema(
         return rows;
     }
 
-    let Some(declared_table) = declared_schema.get(&query.table) else {
-        return rows;
-    };
-    let Some(runtime_table) = runtime_schema.get(&query.table) else {
-        return rows;
-    };
-
     rows.into_iter()
         .map(|(id, values)| {
-            let values = reorder_values_by_column_name(
-                &runtime_table.columns,
-                &declared_table.columns,
-                &values,
-            )
-            .unwrap_or(values);
+            let values = align_query_values_to_declared_schema(
+                declared_schema,
+                runtime_schema,
+                &query.table,
+                values,
+                &query.array_subqueries,
+                query.select_columns.as_deref(),
+            );
             (id, values)
         })
         .collect()
@@ -475,7 +639,7 @@ mod tests {
     };
     use crate::batch_fate::BatchMode;
     use crate::object::ObjectId;
-    use crate::query_manager::query::Query;
+    use crate::query_manager::query::{ArraySubquerySpec, Query};
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
@@ -499,6 +663,36 @@ mod tests {
                     .column("description", ColumnType::Text)
                     .column("done", ColumnType::Boolean)
                     .column("title", ColumnType::Text),
+            )
+            .build()
+    }
+
+    fn declared_todo_project_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .table(
+                TableSchema::builder("projects")
+                    .column("name", ColumnType::Text)
+                    .column("slug", ColumnType::Text),
+            )
+            .build()
+    }
+
+    fn runtime_todo_project_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("done", ColumnType::Boolean)
+                    .column("title", ColumnType::Text),
+            )
+            .table(
+                TableSchema::builder("projects")
+                    .column("slug", ColumnType::Text)
+                    .column("name", ColumnType::Text),
             )
             .build()
     }
@@ -575,6 +769,101 @@ mod tests {
     #[test]
     fn simple_queries_are_schema_alignable() {
         assert!(query_rows_can_be_schema_aligned(&Query::new("todos")));
+    }
+
+    #[test]
+    fn query_rows_align_included_rows_in_rust() {
+        let project_id = ObjectId::new();
+        let rows = vec![(
+            ObjectId::new(),
+            vec![
+                Value::Boolean(false),
+                Value::Text("buy milk".to_string()),
+                Value::Array(vec![Value::Row {
+                    id: Some(project_id),
+                    values: vec![
+                        Value::Text("inbox".to_string()),
+                        Value::Text("Inbox".to_string()),
+                    ],
+                }]),
+            ],
+        )];
+        let mut query = Query::new("todos");
+        query
+            .array_subqueries
+            .push(ArraySubquerySpec::new("__jazz_include_project", "projects"));
+
+        let aligned = align_query_rows_to_declared_schema(
+            &declared_todo_project_schema(),
+            &runtime_todo_project_schema(),
+            &query,
+            rows,
+        );
+
+        assert_eq!(
+            aligned[0].1,
+            vec![
+                Value::Text("buy milk".to_string()),
+                Value::Boolean(false),
+                Value::Array(vec![Value::Row {
+                    id: Some(project_id),
+                    values: vec![
+                        Value::Text("Inbox".to_string()),
+                        Value::Text("inbox".to_string()),
+                    ],
+                }]),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_rows_preserve_projection_values_before_aligned_includes() {
+        let project_id = ObjectId::new();
+        let rows = vec![(
+            ObjectId::new(),
+            vec![
+                Value::Text("buy milk".to_string()),
+                Value::Boolean(true),
+                Value::Array(vec![Value::Row {
+                    id: Some(project_id),
+                    values: vec![
+                        Value::Text("inbox".to_string()),
+                        Value::Text("Inbox".to_string()),
+                    ],
+                }]),
+            ],
+        )];
+        let mut query = Query::new("todos");
+        query.select_columns = Some(vec![
+            "title".to_string(),
+            "$canDelete".to_string(),
+            "__jazz_include_project".to_string(),
+        ]);
+        query
+            .array_subqueries
+            .push(ArraySubquerySpec::new("__jazz_include_project", "projects"));
+
+        let aligned = align_query_rows_to_declared_schema(
+            &declared_todo_project_schema(),
+            &runtime_todo_project_schema(),
+            &query,
+            rows,
+        );
+
+        assert_eq!(
+            aligned[0].1,
+            vec![
+                Value::Text("buy milk".to_string()),
+                Value::Boolean(true),
+                Value::Array(vec![Value::Row {
+                    id: Some(project_id),
+                    values: vec![
+                        Value::Text("Inbox".to_string()),
+                        Value::Text("inbox".to_string()),
+                    ],
+                }]),
+            ]
+        );
     }
 
     #[test]

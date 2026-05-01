@@ -58,6 +58,7 @@ function createRuntimeMock(): {
   const removeServerCalls = { count: 0 };
 
   const runtime: Runtime = {
+    returnsDeclaredSchemaRows: true,
     loadLocalBatchRecord: () => null,
     loadLocalBatchRecords: () => [],
     insert: () => ({ id: "id", values: [], batchId: "batch-id" }),

@@ -137,6 +137,8 @@ function createErrorWithCause(message: string, cause: unknown): Error {
 }
 
 export class JazzRnRuntimeAdapter implements Runtime {
+  readonly returnsDeclaredSchemaRows = true;
+
   private readonly handleMap = new Map<number, bigint>();
   private closed = false;
 

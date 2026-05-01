@@ -23,7 +23,7 @@ use jazz_tools::binding_support::{
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{Schema, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
 };
@@ -902,8 +902,7 @@ impl RnRuntime {
             let core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let schema = core.current_schema();
-            Ok(SchemaHash::compute(schema).to_string())
+            Ok(core.schema_manager().current_hash().to_string())
         })
     }
 

@@ -82,7 +82,7 @@ describe("JazzClient schema order", () => {
     });
   });
 
-  it("reorders query rows back to the declared schema order", async () => {
+  it("passes through query rows returned in declared schema order", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
@@ -96,8 +96,8 @@ describe("JazzClient schema order", () => {
         {
           id: "todo-1",
           values: [
-            { type: "Boolean", value: false },
             { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: false },
           ],
         },
       ],
@@ -167,7 +167,7 @@ describe("JazzClient schema order", () => {
     ]);
   });
 
-  it("reorders query row columns while preserving included relation values", async () => {
+  it("passes through query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
@@ -181,8 +181,8 @@ describe("JazzClient schema order", () => {
         {
           id: "todo-1",
           values: [
-            { type: "Boolean", value: false },
             { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: false },
             {
               type: "Array",
               value: [
@@ -276,7 +276,7 @@ describe("JazzClient schema order", () => {
     ]);
   });
 
-  it("reorders included relation row values to the declared schema order", async () => {
+  it("passes through included relation row values in declared schema order", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
@@ -290,8 +290,8 @@ describe("JazzClient schema order", () => {
         {
           id: "todo-1",
           values: [
-            { type: "Boolean", value: false },
             { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: false },
             {
               type: "Array",
               value: [
@@ -300,8 +300,8 @@ describe("JazzClient schema order", () => {
                   value: {
                     id: "project-1",
                     values: [
-                      { type: "Text", value: "inbox" },
                       { type: "Text", value: "Inbox" },
+                      { type: "Text", value: "inbox" },
                     ],
                   },
                 },
@@ -425,7 +425,7 @@ describe("JazzClient schema order", () => {
     ]);
   });
 
-  it("keeps magic projection values ahead of included rows during schema alignment", async () => {
+  it("keeps runtime-aligned magic projection values ahead of included rows", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       insert: () => mockRow(),
@@ -449,8 +449,8 @@ describe("JazzClient schema order", () => {
                   value: {
                     id: "project-1",
                     values: [
-                      { type: "Text", value: "inbox" },
                       { type: "Text", value: "Inbox" },
+                      { type: "Text", value: "inbox" },
                     ],
                   },
                 },
@@ -576,7 +576,7 @@ describe("JazzClient schema order", () => {
     ]);
   });
 
-  it("reorders subscription deltas back to the declared schema order", async () => {
+  it("passes through subscription deltas returned in declared schema order", async () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
@@ -652,8 +652,8 @@ describe("JazzClient schema order", () => {
         row: {
           id: "todo-1",
           values: [
-            { type: "Boolean", value: false },
             { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: false },
           ],
         },
       },

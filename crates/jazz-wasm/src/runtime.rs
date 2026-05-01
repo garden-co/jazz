@@ -60,19 +60,18 @@ fn wasm_log_level_from_global() -> tracing::Level {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, parse_batch_id_input,
+    serialize_local_batch_record, serialize_local_batch_records,
 };
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::binding_support::{query_rows_can_be_schema_aligned, subscription_delta_to_json};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{SchemaHash, Value};
+use jazz_tools::query_manager::types::{Schema, TableName, Value};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
 };
@@ -92,11 +91,6 @@ use jazz_tools::sync_manager::{
 
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
-#[cfg(target_arch = "wasm32")]
-use crate::types::{
-    SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
-    SubscriptionRowUpdated,
-};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -277,49 +271,14 @@ fn parse_subscription_inputs(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn make_subscription_callback(on_update: Function) -> impl Fn(SubscriptionDelta) + 'static {
+fn make_subscription_callback(
+    on_update: Function,
+    declared_schema: Option<Schema>,
+    table: Option<TableName>,
+) -> impl Fn(SubscriptionDelta) + 'static {
     move |delta: SubscriptionDelta| {
-        let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
-            let values = decode_row(descriptor, &row.data)
-                .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
-                .unwrap_or_default();
-            SubscriptionRow {
-                id: row.id.uuid().to_string(),
-                values,
-            }
-        };
-
-        let descriptor = &delta.descriptor;
-        let wasm_delta = SubscriptionRowDelta(
-            delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    SubscriptionRowChange::Removed(SubscriptionRowRemoved {
-                        kind: 1,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                    })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    SubscriptionRowChange::Updated(SubscriptionRowUpdated {
-                        kind: 2,
-                        id: change.id.uuid().to_string(),
-                        index: change.new_index,
-                        row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    SubscriptionRowChange::Added(SubscriptionRowAdded {
-                        kind: 0,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                        row: row_to_wasm(&change.row, descriptor),
-                    })
-                }))
-                .collect::<Vec<_>>(),
-        );
+        let wasm_delta =
+            subscription_delta_to_json(&delta, declared_schema.as_ref(), table.as_ref());
 
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
@@ -355,7 +314,7 @@ fn build_schema_manager(
     env: &str,
     user_branch: &str,
     tier: Option<&str>,
-) -> Result<SchemaManager, JsError> {
+) -> Result<(SchemaManager, Schema), JsError> {
     let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
         .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
     let node_tiers = parse_node_durability_tiers(tier)?;
@@ -363,7 +322,8 @@ fn build_schema_manager(
     if !node_tiers.is_empty() {
         sync_manager = sync_manager.with_durability_tiers(node_tiers);
     }
-    SchemaManager::new_with_policy_mode(
+    let declared_schema = runtime_schema.schema.clone();
+    let schema_manager = SchemaManager::new_with_policy_mode(
         sync_manager,
         runtime_schema.schema,
         app_id,
@@ -375,7 +335,8 @@ fn build_schema_manager(
             jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
         },
     )
-    .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))
+    .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+    Ok((schema_manager, declared_schema))
 }
 
 /// Wire up scheduler, sync sender, and `RuntimeCore` into a `WasmRuntime`.
@@ -383,6 +344,7 @@ fn build_schema_manager(
 #[cfg(target_arch = "wasm32")]
 fn assemble_wasm_runtime(
     schema_manager: SchemaManager,
+    declared_schema: Schema,
     storage: Box<dyn Storage>,
     tier_label: &'static str,
     use_binary_encoding: bool,
@@ -402,8 +364,10 @@ fn assemble_wasm_runtime(
     core_rc.borrow_mut().persist_schema();
     WasmRuntime {
         core: core_rc,
+        declared_schema,
         sync_sender,
         upstream_server_id: RefCell::new(None),
+        subscription_queries: RefCell::new(HashMap::new()),
         tier_label,
     }
 }
@@ -575,6 +539,7 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    declared_schema: Schema,
     /// JS callback holder for outbound sync messages (worker-bridge path only).
     ///
     /// `on_sync_message_to_send` installs the JS-side callback here. The worker
@@ -582,6 +547,8 @@ pub struct WasmRuntime {
     /// the main thread via postMessage. Server sync goes through `connect()`.
     sync_sender: JsSyncSender,
     upstream_server_id: RefCell<Option<ServerId>>,
+    #[cfg(target_arch = "wasm32")]
+    subscription_queries: RefCell<HashMap<u64, Query>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
     tier_label: &'static str,
 }
@@ -629,6 +596,7 @@ impl WasmRuntime {
         let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
         let schema = runtime_schema.schema;
+        let declared_schema = schema.clone();
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -683,8 +651,11 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            declared_schema,
             sync_sender,
             upstream_server_id: RefCell::new(None),
+            #[cfg(target_arch = "wasm32")]
+            subscription_queries: RefCell::new(HashMap::new()),
             tier_label,
         })
     }
@@ -820,9 +791,16 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
+        let runtime_schema = core.current_schema().clone();
         let ((object_id, row_values), batch_id) = core
             .insert_with_id(table, named_values, object_id, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &runtime_schema,
+            &TableName::new(table.to_string()),
+            row_values,
+        );
 
         let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
@@ -851,9 +829,16 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut core = self.core.borrow_mut();
+        let runtime_schema = core.current_schema().clone();
         let ((object_id, row_values), batch_id) = core
             .insert_with_id(table, named_values, object_id, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &runtime_schema,
+            &TableName::new(table.to_string()),
+            row_values,
+        );
 
         let row = WasmInsertResult {
             id: object_id.uuid().to_string(),
@@ -879,25 +864,41 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+        let query_for_alignment = query.clone();
         let session = parse_session_json(session_json)?;
+        let declared_schema = self.declared_schema.clone();
 
         let (durability, propagation, overlay) =
             parse_read_durability_options(settled_tier, options_json)?;
 
-        let future = {
+        let (future, runtime_schema) = {
             let mut core = self.core.borrow_mut();
-            match overlay {
-                Some(overlay) => {
-                    core.query_with_local_overlay(query, session, durability, propagation, overlay)
-                }
-                None => core.query_with_propagation(query, session, durability, propagation),
-            }
+            (
+                match overlay {
+                    Some(overlay) => core.query_with_local_overlay(
+                        query,
+                        session,
+                        durability,
+                        propagation,
+                        overlay,
+                    ),
+                    None => core.query_with_propagation(query, session, durability, propagation),
+                },
+                core.current_schema().clone(),
+            )
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let results = future
                 .await
                 .map_err(|e| JsValue::from_str(&format!("Query failed: {:?}", e)))?;
+
+            let results = align_query_rows_to_declared_schema(
+                &declared_schema,
+                &runtime_schema,
+                &query_for_alignment,
+                results,
+            );
 
             let wasm_results: Vec<_> = results
                 .into_iter()
@@ -1047,11 +1048,20 @@ impl WasmRuntime {
         let persistence_tier = parse_tier(tier)?;
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
 
-        let ((object_id, row_values), batch_id, _receiver) = {
+        let (object_id, row_values, batch_id, _receiver, runtime_schema) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted_with_batch_id(table, named_values, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
+            let runtime_schema = core.current_schema().clone();
+            let ((object_id, row_values), batch_id, receiver) = core
+                .insert_persisted_with_batch_id(table, named_values, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
+            (object_id, row_values, batch_id, receiver, runtime_schema)
         };
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &runtime_schema,
+            &TableName::new(table.to_string()),
+            row_values,
+        );
 
         let payload = serde_json::json!({
             "batchId": batch_id.to_string(),
@@ -1079,16 +1089,25 @@ impl WasmRuntime {
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
 
-        let ((object_id, row_values), batch_id, _receiver) = {
+        let (object_id, row_values, batch_id, _receiver, runtime_schema) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted_with_batch_id(
-                table,
-                named_values,
-                write_context.as_ref(),
-                persistence_tier,
-            )
-            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+            let runtime_schema = core.current_schema().clone();
+            let ((object_id, row_values), batch_id, receiver) = core
+                .insert_persisted_with_batch_id(
+                    table,
+                    named_values,
+                    write_context.as_ref(),
+                    persistence_tier,
+                )
+                .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+            (object_id, row_values, batch_id, receiver, runtime_schema)
         };
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &runtime_schema,
+            &TableName::new(table.to_string()),
+            row_values,
+        );
 
         let payload = serde_json::json!({
             "batchId": batch_id.to_string(),
@@ -1306,7 +1325,15 @@ impl WasmRuntime {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let (query, session, durability, propagation) =
             parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
-        let callback = make_subscription_callback(on_update);
+        let alignment_table =
+            query_rows_can_be_schema_aligned(&query).then_some(query.table.clone());
+        let callback = make_subscription_callback(
+            on_update,
+            alignment_table
+                .as_ref()
+                .map(|_| self.declared_schema.clone()),
+            alignment_table,
+        );
 
         let handle = self
             .core
@@ -1331,6 +1358,7 @@ impl WasmRuntime {
     pub fn unsubscribe(&self, handle: f64) {
         let sub_id = handle as u64;
         let _span = tracing::debug_span!("wasm::unsubscribe", sub_id).entered();
+        self.subscription_queries.borrow_mut().remove(&sub_id);
         self.core
             .borrow_mut()
             .unsubscribe(SubscriptionHandle(sub_id));
@@ -1350,11 +1378,17 @@ impl WasmRuntime {
         let _span = debug_span!("wasm::createSubscription", tier = self.tier_label).entered();
         let (query, session, durability, propagation) =
             parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
+        let query_for_alignment = query.clone();
 
         let handle =
             self.core
                 .borrow_mut()
                 .create_subscription(query, session, durability, propagation);
+        if query_rows_can_be_schema_aligned(&query_for_alignment) {
+            self.subscription_queries
+                .borrow_mut()
+                .insert(handle.0, query_for_alignment);
+        }
 
         tracing::debug!(handle = handle.0, "subscription created (pending)");
         Ok(handle.0 as f64)
@@ -1374,7 +1408,18 @@ impl WasmRuntime {
             tier = self.tier_label
         )
         .entered();
-        let callback = make_subscription_callback(on_update);
+        let alignment_table = self
+            .subscription_queries
+            .borrow()
+            .get(&sub_handle.0)
+            .map(|query| query.table.clone());
+        let callback = make_subscription_callback(
+            on_update,
+            alignment_table
+                .as_ref()
+                .map(|_| self.declared_schema.clone()),
+            alignment_table,
+        );
 
         self.core
             .borrow_mut()
@@ -1480,21 +1525,22 @@ impl WasmRuntime {
     // Schema Access
     // =========================================================================
 
-    /// Get the current schema as JSON.
+    #[wasm_bindgen(getter, js_name = returnsDeclaredSchemaRows)]
+    pub fn returns_declared_schema_rows(&self) -> bool {
+        true
+    }
+
+    /// Get the declared schema as JSON.
     #[wasm_bindgen(js_name = getSchema)]
     pub fn get_schema(&self) -> Result<JsValue, JsError> {
-        let core = self.core.borrow();
-        let schema = core.current_schema();
-        let wasm_schema = schema.clone();
-        Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
+        Ok(serde_wasm_bindgen::to_value(&self.declared_schema)?)
     }
 
     /// Get the canonical schema hash (64-char hex).
     #[wasm_bindgen(js_name = getSchemaHash)]
     pub fn get_schema_hash(&self) -> String {
         let core = self.core.borrow();
-        let schema = core.current_schema();
-        SchemaHash::compute(schema).to_string()
+        core.schema_manager().current_hash().to_string()
     }
 
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
@@ -1618,7 +1664,7 @@ impl WasmRuntime {
         info!("opening persistent OPFS runtime");
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let mut schema_manager =
+        let (mut schema_manager, declared_schema) =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
                 .map_err(JsValue::from)?;
 
@@ -1648,6 +1694,7 @@ impl WasmRuntime {
 
         Ok(assemble_wasm_runtime(
             schema_manager,
+            declared_schema,
             storage,
             tier_label,
             use_binary_encoding,
@@ -1686,13 +1733,14 @@ impl WasmRuntime {
         info!("opening ephemeral in-memory runtime (OPFS unavailable)");
 
         let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
-        let schema_manager =
+        let (schema_manager, declared_schema) =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
 
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
 
         Ok(assemble_wasm_runtime(
             schema_manager,
+            declared_schema,
             storage,
             tier_label,
             use_binary_encoding,
