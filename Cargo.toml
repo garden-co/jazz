@@ -14,4 +14,4 @@ members = [
 rocksdb = { git = "https://github.com/garden-co/rust-rocksdb.git", branch = "feat/tdb-flush" }
 
 [patch."https://github.com/garden-co/rust-rocksdb.git"]
-librocksdb-sys = { path = "vendor/librocksdb-sys" }
+librocksdb-sys = { path = "dev/vendor/librocksdb-sys" }
