@@ -1097,7 +1097,12 @@ impl SyncManager {
                     batch_ids,
                 );
             }
-            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
+            SyncPayload::QuerySettled {
+                query_id,
+                tier,
+                scope,
+                through_seq,
+            } => {
                 let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
                 let scope_changed = self
                     .remote_query_scopes
@@ -1109,23 +1114,6 @@ impl SyncManager {
                     self.remote_query_scope_dirty.insert(query_id);
                 }
 
-                if let Some(clients) = self.query_origin.get(&query_id) {
-                    for &cid in clients {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(cid),
-                            payload: SyncPayload::QueryScopeSnapshot {
-                                query_id,
-                                scope: scope.clone(),
-                            },
-                        });
-                    }
-                }
-            }
-            SyncPayload::QuerySettled {
-                query_id,
-                tier,
-                through_seq,
-            } => {
                 tracing::debug!(?query_id, "server→QuerySettled");
                 // Queue for local QueryManager to process
                 self.pending_query_settled.push(PendingQuerySettled {
@@ -1143,6 +1131,7 @@ impl SyncManager {
                             payload: SyncPayload::QuerySettled {
                                 query_id,
                                 tier,
+                                scope: scope.clone(),
                                 through_seq,
                             },
                         });
@@ -1483,6 +1472,7 @@ impl SyncManager {
             SyncPayload::QuerySettled {
                 query_id,
                 tier,
+                scope: _,
                 through_seq,
             } => {
                 // Client relaying a QuerySettled from downstream
@@ -1498,13 +1488,6 @@ impl SyncManager {
                     %client_id,
                     query_id = warning.query_id.0,
                     "client attempted to send SchemaWarning payload; ignoring"
-                );
-            }
-            SyncPayload::QueryScopeSnapshot { query_id, .. } => {
-                tracing::warn!(
-                    %client_id,
-                    query_id = query_id.0,
-                    "client attempted to send QueryScopeSnapshot payload; ignoring"
                 );
             }
             SyncPayload::ConnectionSchemaDiagnostics(_) => {

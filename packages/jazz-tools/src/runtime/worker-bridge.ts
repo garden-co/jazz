@@ -11,6 +11,7 @@ import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import type {
   InitMessage,
+  SequencedSyncPayload,
   WorkerLifecycleEvent,
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
@@ -109,8 +110,10 @@ export class WorkerBridge {
     this.worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
       const msg = event.data;
       if (msg.type === "sync") {
-        for (const payload of msg.payload) {
-          this.runtime.onSyncMessageReceived(payload);
+        for (const entry of msg.payload) {
+          const payload = isSequencedSyncPayload(entry) ? entry.payload : entry;
+          const sequence = isSequencedSyncPayload(entry) ? entry.sequence : undefined;
+          this.runtime.onSyncMessageReceived(payload, sequence);
         }
       } else if (msg.type === "upstream-connected") {
         this.markUpstreamServerConnected();
@@ -143,7 +146,7 @@ export class WorkerBridge {
     );
 
     // Register a server so the runtime sends sync messages to it
-    this.runtime.addServer();
+    this.runtime.addServer(null, 1);
   }
 
   /**
@@ -445,6 +448,16 @@ export class WorkerBridge {
 
 function collectPayloadTransferables(payloads: Uint8Array[]): Transferable[] {
   return payloads.map((payload) => payload.buffer);
+}
+
+function isSequencedSyncPayload(value: unknown): value is SequencedSyncPayload {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "payload" in value &&
+    "sequence" in value &&
+    typeof (value as { sequence?: unknown }).sequence === "number"
+  );
 }
 
 /**
