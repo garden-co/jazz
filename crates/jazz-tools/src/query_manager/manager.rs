@@ -271,6 +271,7 @@ pub(super) struct PolicyCheckState {
 #[derive(Debug)]
 pub(super) struct WriteTableCacheEntry {
     pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) row_layout: Arc<crate::row_format::CompiledRowLayout>,
     pub(super) row_locator: RowLocator,
     pub(super) insert_policy: Option<Arc<PolicyExpr>>,
     pub(super) update_using_policy: Option<Arc<PolicyExpr>>,
@@ -389,6 +390,7 @@ pub struct QueryManager {
     pub(super) row_policy_mode: RowPolicyMode,
     pub(super) authorization_schema: Option<Arc<Schema>>,
     pub(super) authorization_schema_required: bool,
+    pub(super) authorization_context_cache: HashMap<(String, String), Arc<SchemaContext>>,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -521,6 +523,7 @@ impl QueryManager {
             row_policy_mode: RowPolicyMode::PermissiveLocal,
             authorization_schema: None,
             authorization_schema_required: false,
+            authorization_context_cache: HashMap::new(),
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -574,6 +577,7 @@ impl QueryManager {
         } else {
             None
         };
+        self.authorization_context_cache.clear();
         self.authorization_schema_required = false;
         self.write_table_cache.clear();
 
@@ -589,6 +593,7 @@ impl QueryManager {
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
+        self.authorization_context_cache.clear();
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
@@ -597,6 +602,7 @@ impl QueryManager {
     pub fn require_authorization_schema(&mut self) {
         self.row_policy_mode = RowPolicyMode::Enforcing;
         self.authorization_schema_required = true;
+        self.authorization_context_cache.clear();
     }
 
     #[cfg(test)]
@@ -647,6 +653,7 @@ impl QueryManager {
     /// Also attempts to activate any pending schemas that may now be reachable.
     pub fn register_lens(&mut self, lens: super::super::schema_manager::lens::Lens) {
         self.schema_context.register_lens(lens);
+        self.authorization_context_cache.clear();
 
         // Try to activate pending schemas
         let activated = self.schema_context.try_activate_pending();
