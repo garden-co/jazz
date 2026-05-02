@@ -16,7 +16,7 @@
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{RowDescriptor, SharedString};
-use crate::storage::{IndexMutation, RowLocator, Storage, StorageError};
+use crate::storage::{IndexMutation, PreparedRowWriteContext, RowLocator, Storage, StorageError};
 use crate::sync_manager::DurabilityTier;
 
 use super::resolution::visible_entry_from_history_rows;
@@ -32,6 +32,18 @@ pub(super) struct AppliedRowBatch {
     current_visible: Option<StoredRowBatch>,
     is_new_object: bool,
     visible_changed: bool,
+}
+
+pub(crate) struct ApplyRowBatchWithContext<'a> {
+    pub(crate) object_id: ObjectId,
+    pub(crate) branch_name: &'a BranchName,
+    pub(crate) row: StoredRowBatch,
+    pub(crate) index_mutations: &'a [IndexMutation<'a>],
+    pub(crate) row_locator: RowLocator,
+    pub(crate) table: String,
+    pub(crate) branch: SharedString,
+    pub(crate) context: PreparedRowWriteContext,
+    pub(crate) is_known_new_object: bool,
 }
 
 pub(super) fn row_locator_from_storage<H: Storage>(
@@ -152,36 +164,82 @@ pub fn apply_row_batch<H: Storage>(
 ) -> Result<ApplyRowBatchResult, RowHistoryError> {
     let row_locator = row_locator_from_storage(io, object_id)?;
     let table = row_locator.table.to_string();
-    let batch_id = row.batch_id();
     let branch = SharedString::from(branch_name.as_str().to_string());
     let context = crate::storage::resolve_history_row_write_context(io, &table, &row)
         .map_err(RowHistoryError::StorageError)?;
-    let previous_entry = load_previous_visible_entry(
+    apply_row_batch_with_context(
         io,
-        &table,
+        ApplyRowBatchWithContext {
+            object_id,
+            branch_name,
+            row,
+            index_mutations,
+            row_locator,
+            table,
+            branch,
+            context,
+            is_known_new_object: false,
+        },
+    )
+}
+
+pub(crate) fn apply_row_batch_with_context<H: Storage>(
+    io: &mut H,
+    request: ApplyRowBatchWithContext<'_>,
+) -> Result<ApplyRowBatchResult, RowHistoryError> {
+    let ApplyRowBatchWithContext {
         object_id,
-        &branch,
-        context.user_descriptor.as_ref(),
-    )?;
+        branch_name,
+        row,
+        index_mutations,
+        row_locator,
+        table,
+        branch,
+        context,
+        is_known_new_object,
+    } = request;
+    let batch_id = row.batch_id();
+    debug_assert!(
+        !is_known_new_object || row.parents.is_empty(),
+        "known-new row apply skips parent lookups"
+    );
+    let previous_entry = if is_known_new_object {
+        None
+    } else {
+        load_previous_visible_entry(
+            io,
+            &table,
+            object_id,
+            &branch,
+            context.user_descriptor.as_ref(),
+        )?
+    };
     let previous_visible = previous_entry
         .as_ref()
         .map(|entry| entry.current_row.clone());
 
-    for parent in &row.parents {
-        if io
-            .load_history_row_batch(&table, branch_name.as_str(), object_id, *parent)
-            .map_err(RowHistoryError::StorageError)?
-            .is_none()
-        {
-            return Err(RowHistoryError::ParentNotFound(*parent));
+    if !is_known_new_object {
+        for parent in &row.parents {
+            if io
+                .load_history_row_batch(&table, branch_name.as_str(), object_id, *parent)
+                .map_err(RowHistoryError::StorageError)?
+                .is_none()
+            {
+                return Err(RowHistoryError::ParentNotFound(*parent));
+            }
         }
     }
 
-    let mut patched_history = load_branch_history(io, &table, object_id, &branch)?;
+    let mut patched_history = if is_known_new_object {
+        Vec::new()
+    } else {
+        load_branch_history(io, &table, object_id, &branch)?
+    };
 
-    if let Some(existing_row) = io
-        .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
-        .map_err(RowHistoryError::StorageError)?
+    if !is_known_new_object
+        && let Some(existing_row) = io
+            .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
+            .map_err(RowHistoryError::StorageError)?
         && existing_row == row
     {
         return Ok(ApplyRowBatchResult {
