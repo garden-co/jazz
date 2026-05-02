@@ -1586,6 +1586,21 @@ impl SyncManager {
                     tracing::warn!(batch_id = ?submission.batch_id, "ignoring SealBatch with no declared members");
                     return;
                 }
+                match storage.load_authoritative_batch_settlement(submission.batch_id) {
+                    Ok(Some(settlement)) => {
+                        self.queue_batch_settlement_to_client(client_id, settlement);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            batch_id = ?submission.batch_id,
+                            %error,
+                            "failed to load authoritative batch settlement"
+                        );
+                        return;
+                    }
+                }
                 if let Err(rejection) = self.validate_sealed_batch_submission(&submission) {
                     let batch_rows = self.transactional_batch_rows(
                         storage,
