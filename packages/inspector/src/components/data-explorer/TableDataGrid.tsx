@@ -792,13 +792,13 @@ export function TableDataGrid() {
       if (event.key !== "Escape") return;
       if (mutationState) {
         setMutationState(null);
-      } else if (selectedRowId) {
+      } else {
         setSelectedRowId(null);
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [mutationState, selectedRowId]);
+  }, [mutationState]);
 
   return (
     <section className={styles.container}>
