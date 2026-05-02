@@ -903,11 +903,19 @@ impl QueryManager {
                 );
             }
 
-            let settled_tier = self
-                .sync_manager
-                .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Local);
-            settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
+            let settled_once = scope.is_some();
+            if let Some(scope) = scope.as_ref() {
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                settled_notifications.push((
+                    sub.client_id,
+                    sub.query_id,
+                    settled_tier,
+                    scope.clone(),
+                ));
+            }
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
@@ -933,7 +941,7 @@ impl QueryManager {
                     policy_context_tables: sub.policy_context_tables,
                     last_scope: scope.unwrap_or_default(),
                     needs_recompile: false,
-                    settled_once: true,
+                    settled_once,
                     propagation: sub.propagation,
                     reported_schema_warnings,
                 },
@@ -944,9 +952,9 @@ impl QueryManager {
             self.sync_manager.emit_schema_warning(client_id, warning);
         }
 
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -992,7 +1000,12 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
-        let mut settled_notifications: Vec<(ClientId, QueryId, DurabilityTier)> = Vec::new();
+        let mut settled_notifications: Vec<(
+            ClientId,
+            QueryId,
+            DurabilityTier,
+            HashSet<(ObjectId, BranchName)>,
+        )> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -1043,16 +1056,6 @@ impl QueryManager {
                         .map(|warning| (client_id, warning)),
                 );
 
-                // Emit QuerySettled on first settlement
-                if !sub.settled_once {
-                    sub.settled_once = true;
-                    let settled_tier = self
-                        .sync_manager
-                        .max_local_durability_tier()
-                        .unwrap_or(DurabilityTier::Local);
-                    settled_notifications.push((client_id, query_id, settled_tier));
-                }
-
                 // Check if scope changed
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
@@ -1082,11 +1085,50 @@ impl QueryManager {
                     )
                 }
             };
-            if let Some(new_scope) = new_scope
-                && new_scope != sub.last_scope
-            {
-                scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
-                sub.last_scope = new_scope;
+            let scope_unavailable = new_scope.is_none();
+            if let Some(new_scope) = new_scope {
+                let scope_changed = new_scope != sub.last_scope;
+                if scope_changed {
+                    scope_updates.push((
+                        client_id,
+                        query_id,
+                        new_scope.clone(),
+                        sub.session.clone(),
+                    ));
+                    sub.last_scope = new_scope.clone();
+                }
+
+                // Emit an authoritative QuerySettled once the scope for this
+                // settled frame has been computed. A computed empty scope is
+                // authoritative; missing permissions/schema context returns None
+                // and must keep the subscription unsettled.
+                if !sub.settled_once {
+                    sub.settled_once = true;
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((client_id, query_id, settled_tier, new_scope));
+                } else if scope_changed {
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((
+                        client_id,
+                        query_id,
+                        settled_tier,
+                        sub.last_scope.clone(),
+                    ));
+                }
+            }
+
+            if scope_unavailable {
+                tracing::trace!(
+                    ?query_id,
+                    %client_id,
+                    "server subscription scope unavailable; holding QuerySettled"
+                );
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
@@ -1104,9 +1146,9 @@ impl QueryManager {
         }
 
         // Emit QuerySettled notifications
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
     }
 

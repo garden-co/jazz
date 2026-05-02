@@ -159,7 +159,6 @@ impl QueryManager {
         let query_frontier_complete = durability_tier.is_none()
             || !self.should_send_local_subscription_upstream(propagation)
             || !self.sync_manager.has_servers_or_pending_servers();
-
         tracing::debug!(
             sub_id = id.0,
             ?branches,

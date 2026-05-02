@@ -149,9 +149,9 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
         if entry.destination == Destination::Client(s.a_client_of_b) {
@@ -321,7 +321,7 @@ fn rc_query_local_transaction_overlay_keeps_same_row_updates_isolated_by_batch()
 }
 
 #[test]
-fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+fn rc_query_remote_tier_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -406,8 +406,8 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     assert!(
         !server_outbox
             .iter()
-            .any(|entry| matches!(entry.payload, SyncPayload::QueryScopeSnapshot { .. })),
-        "server without a published permissions head should not advertise an authoritative scope snapshot"
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative session query"
     );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
@@ -422,22 +422,16 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
- {
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -522,6 +516,12 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     server.immediate_tick();
 
     let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query"
+    );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
@@ -535,21 +535,16 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize backend scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_for_synced_policy_rows_without_permissions_head()
  {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
@@ -599,7 +594,14 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
         .unwrap();
 
     pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
-    for entry in server.sync_sender().take() {
+    let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query even when policy rows synced"
+    );
+    for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
                 source: Source::Server(server_id),
@@ -656,16 +658,11 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Synced policy context rows should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize synced policy scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
@@ -1290,9 +1287,9 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
         if entry.destination == Destination::Client(s.a_client_of_b) {
@@ -1496,7 +1493,7 @@ fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_reject
 #[test]
 fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_complete() {
     // alice authors one transactional batch with two rows
-    //   worker accepts it and reports both rows in the query scope snapshot
+    //   worker accepts it and reports both rows in the QuerySettled scope
     //   downstream strict visibility must hide the first delivered row until the second arrives
     let mut s = create_3tier_rc();
 
@@ -1605,8 +1602,7 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
                     remaining_row_payloads.push(payload);
                 }
             }
-            payload @ SyncPayload::QueryScopeSnapshot { .. }
-            | payload @ SyncPayload::BatchSettlement { .. }
+            payload @ SyncPayload::BatchSettlement { .. }
             | payload @ SyncPayload::QuerySettled { .. }
             | payload @ SyncPayload::RowBatchStateChanged { .. } => {
                 control_payloads.push(payload);
@@ -1619,11 +1615,11 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
     assert!(
         control_payloads
             .iter()
-            .any(|payload| matches!(payload, SyncPayload::QueryScopeSnapshot { query_id, scope }
+            .any(|payload| matches!(payload, SyncPayload::QuerySettled { query_id, scope, .. }
                 if *query_id == crate::sync_manager::QueryId(0)
                     && scope.iter().map(|(object_id, _)| *object_id).collect::<std::collections::HashSet<_>>()
                         == std::collections::HashSet::from([first_id, second_id]))),
-        "expected scope snapshot covering both accepted transaction members, got {control_payloads:#?}"
+        "expected settled scope covering both accepted transaction members, got {control_payloads:#?}"
     );
     assert!(
         control_payloads.iter().any(|payload| matches!(

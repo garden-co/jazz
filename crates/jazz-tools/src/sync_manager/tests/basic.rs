@@ -58,6 +58,7 @@ fn memory_size_separates_sync_state_buckets() {
         payload: SyncPayload::QuerySettled {
             query_id: QueryId(7),
             tier: DurabilityTier::Local,
+            scope: vec![],
             through_seq: 1,
         },
     });
