@@ -144,6 +144,45 @@ fn rc_same_row_direct_batch_overwrites_in_place() {
 }
 
 #[test]
+fn rc_direct_batch_reuses_loaded_local_batch_record_while_building() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "direct-batch-local-record-cache-test",
+        Box::new(RowMutationObservingStorage::new(calls.clone())),
+    );
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Bob"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Cleo"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().local_batch_record_get_calls,
+        1,
+        "building a direct batch should not repeatedly load and decode the growing local batch record"
+    );
+}
+
+#[test]
 fn rc_worker_direct_batch_retains_all_visible_members() {
     let mut s = create_3tier_rc();
     let batch_id = BatchId::new();

@@ -31,7 +31,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     fn ensure_batch_is_writable(
-        &self,
+        &mut self,
         write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
         let Some(write_context) = write_context else {
@@ -42,11 +42,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(());
         };
 
+        if let Some(record) = self.local_batch_record_cache.get(&batch_id) {
+            if record.mode != mode {
+                return Err(RuntimeError::WriteError(format!(
+                    "batch {batch_id:?} reused with conflicting modes"
+                )));
+            }
+            if record.sealed {
+                return Err(RuntimeError::WriteError(format!(
+                    "batch {batch_id:?} is already sealed"
+                )));
+            }
+            return Ok(());
+        }
+
         let Some(record) = self
             .storage
             .load_local_batch_record(batch_id)
             .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
         else {
+            self.local_batch_record_cache
+                .insert(batch_id, LocalBatchRecord::new(batch_id, mode, false, None));
             return Ok(());
         };
 
@@ -61,6 +77,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             )));
         }
 
+        self.local_batch_record_cache.insert(batch_id, record);
         Ok(())
     }
 
@@ -87,10 +104,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         };
 
         let mut record = self
-            .storage
-            .load_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-            .unwrap_or_else(|| LocalBatchRecord::new(batch_id, mode, false, None));
+            .local_batch_record_cache
+            .remove(&batch_id)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.storage
+                    .load_local_batch_record(batch_id)
+                    .map_err(|err| {
+                        RuntimeError::WriteError(format!("load local batch record: {err}"))
+                    })
+                    .map(|record| {
+                        record.unwrap_or_else(|| LocalBatchRecord::new(batch_id, mode, false, None))
+                    })
+            })?;
         if record.mode != mode {
             return Err(RuntimeError::WriteError(format!(
                 "batch {batch_id:?} reused with conflicting modes"
@@ -105,7 +131,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         self.storage
             .upsert_local_batch_record(&record)
-            .map_err(|err| RuntimeError::WriteError(format!("persist local batch record: {err}")))
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("persist local batch record: {err}"))
+            })?;
+        self.local_batch_record_cache.insert(batch_id, record);
+        Ok(())
     }
 
     fn local_batch_members_for_row(
@@ -698,6 +728,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Acknowledge a replayable rejected batch outcome and prune the local
     /// batch record that kept it alive across reconnect and restart.
     pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+        self.local_batch_record_cache.remove(&batch_id);
         let Some(record) = self
             .storage
             .load_local_batch_record(batch_id)
@@ -722,17 +753,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     }
 
     pub fn seal_batch(&mut self, batch_id: BatchId) -> Result<(), RuntimeError> {
-        let Some(mut record) = self
-            .storage
-            .load_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-        else {
-            return Err(RuntimeError::WriteError(format!(
-                "missing local batch record for {batch_id:?}"
-            )));
+        let mut record = if let Some(record) = self.local_batch_record_cache.remove(&batch_id) {
+            record
+        } else {
+            let Some(record) = self
+                .storage
+                .load_local_batch_record(batch_id)
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!("load local batch record: {err}"))
+                })?
+            else {
+                return Err(RuntimeError::WriteError(format!(
+                    "missing local batch record for {batch_id:?}"
+                )));
+            };
+            record
         };
 
         if record.sealed {
+            self.local_batch_record_cache.insert(batch_id, record);
             return Ok(());
         }
 
@@ -744,6 +783,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| {
                 RuntimeError::WriteError(format!("persist local batch record: {err}"))
             })?;
+        self.local_batch_record_cache.insert(batch_id, record);
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
