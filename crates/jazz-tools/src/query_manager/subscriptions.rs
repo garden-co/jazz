@@ -557,6 +557,7 @@ impl QueryManager {
     /// This enables lazy branch activation when rows arrive with unknown branches.
     pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
+        self.authorization_context_cache.clear();
     }
 
     /// Add a branch → schema hash mapping (for server-mode schema activation).

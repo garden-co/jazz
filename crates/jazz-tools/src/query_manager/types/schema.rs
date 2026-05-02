@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -293,15 +294,34 @@ impl ColumnDescriptor {
 }
 
 /// Descriptor for a row's schema, defining column order and types.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RowDescriptor {
     pub columns: Vec<ColumnDescriptor>,
+    #[serde(skip)]
+    content_hash_cache: OnceLock<[u8; 32]>,
+}
+
+impl PartialEq for RowDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+    }
+}
+
+impl Eq for RowDescriptor {}
+
+impl From<Vec<ColumnDescriptor>> for RowDescriptor {
+    fn from(columns: Vec<ColumnDescriptor>) -> Self {
+        Self::new(columns)
+    }
 }
 
 impl RowDescriptor {
     pub fn new(columns: Vec<ColumnDescriptor>) -> Self {
-        Self { columns }
+        Self {
+            columns,
+            content_hash_cache: OnceLock::new(),
+        }
     }
 
     /// Find column index by name.
@@ -336,14 +356,16 @@ impl RowDescriptor {
     pub fn combine(descriptors: &[RowDescriptor]) -> Self {
         let columns: Vec<ColumnDescriptor> =
             descriptors.iter().flat_map(|d| d.columns.clone()).collect();
-        Self { columns }
+        Self::new(columns)
     }
 
     /// Compute a content hash of this descriptor, preserving declared column order.
     pub fn content_hash(&self) -> [u8; 32] {
-        let mut hasher = blake3::Hasher::new();
-        super::branch::hash_row_descriptor(&mut hasher, self);
-        *hasher.finalize().as_bytes()
+        *self.content_hash_cache.get_or_init(|| {
+            let mut hasher = blake3::Hasher::new();
+            super::branch::hash_row_descriptor(&mut hasher, self);
+            *hasher.finalize().as_bytes()
+        })
     }
 }
 
