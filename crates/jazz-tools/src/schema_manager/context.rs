@@ -373,6 +373,11 @@ impl SchemaContext {
     /// The schema will become live once a lens path to current_schema is available.
     pub fn add_pending_schema(&mut self, schema: Schema) {
         let hash = SchemaHash::compute(&schema);
+        self.add_pending_schema_with_hash(hash, schema);
+    }
+
+    /// Add a schema to the pending set when the caller already knows its hash.
+    pub fn add_pending_schema_with_hash(&mut self, hash: SchemaHash, schema: Schema) {
         // Don't add if already live or current
         if !self.is_live(&hash) {
             self.pending_schemas.insert(hash, schema);

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::batch_fate::BatchMode;
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
+use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
     ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError, RowState,
     RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
@@ -39,6 +40,7 @@ pub struct RowBranchWrite<'a> {
 struct PreparedUpdateWrite {
     new_data: Vec<u8>,
     descriptor: Arc<RowDescriptor>,
+    row_layout: Arc<crate::row_format::CompiledRowLayout>,
 }
 
 struct PreparedUpdateCommit<'a> {
@@ -101,6 +103,7 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(table_name))?;
         let entry = Arc::new(WriteTableCacheEntry {
             descriptor: Arc::new(table_schema.columns.clone()),
+            row_layout: compiled_row_layout(&table_schema.columns),
             row_locator: RowLocator {
                 table: table_name.as_str().to_string().into(),
                 origin_schema_hash: Some(schema_hash),
@@ -798,6 +801,7 @@ impl QueryManager {
         Ok(PreparedUpdateWrite {
             new_data,
             descriptor: table_write.descriptor.clone(),
+            row_layout: table_write.row_layout.clone(),
         })
     }
 
@@ -1058,12 +1062,13 @@ impl QueryManager {
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data
-        let index_mutations = Self::index_mutations_for_insert_on_branch(
+        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
             table,
             &current_branch,
             object_id,
             &data,
             descriptor,
+            &table_write.row_layout,
         );
         let row = self.authored_row_batch(
             object_id,
@@ -1253,8 +1258,14 @@ impl QueryManager {
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
         // Add commit with row data to specified branch
-        let index_mutations =
-            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
+            table,
+            branch,
+            object_id,
+            &data,
+            descriptor,
+            &table_write.row_layout,
+        );
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1394,8 +1405,14 @@ impl QueryManager {
 
         self.persist_row_locator(storage, object_id, &table_write.row_locator);
 
-        let index_mutations =
-            Self::index_mutations_for_insert_on_branch(table, branch, object_id, &data, descriptor);
+        let index_mutations = Self::index_mutations_for_insert_on_branch_with_layout(
+            table,
+            branch,
+            object_id,
+            &data,
+            descriptor,
+            &table_write.row_layout,
+        );
         let row = self.authored_row_batch(
             object_id,
             branch,
@@ -1536,10 +1553,13 @@ impl QueryManager {
     }
 
     fn local_write_authorization_context(
-        &self,
+        &mut self,
         branch: &str,
         session: Option<&Session>,
-    ) -> Option<(std::sync::Arc<Schema>, crate::schema_manager::SchemaContext)> {
+    ) -> Option<(
+        std::sync::Arc<Schema>,
+        std::sync::Arc<crate::schema_manager::SchemaContext>,
+    )> {
         self.local_subscription_uses_explicit_authorization(session)
             .then(|| self.authorization_schema_for_branch(&BranchName::new(branch)))
             .flatten()
@@ -2147,12 +2167,13 @@ impl QueryManager {
                 prepared.descriptor.as_ref(),
             )
         } else {
-            Self::index_mutations_for_insert_on_branch(
+            Self::index_mutations_for_insert_on_branch_with_layout(
                 table,
                 branch,
                 id,
                 &prepared.new_data,
                 prepared.descriptor.as_ref(),
+                &prepared.row_layout,
             )
         };
         let batch_id = self.commit_prepared_update_write(
