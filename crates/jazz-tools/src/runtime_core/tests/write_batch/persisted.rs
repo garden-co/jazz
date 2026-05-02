@@ -595,7 +595,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         payload: SyncPayload::BatchSettlement {
             settlement: crate::batch_fate::BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Local,
+                confirmed_tier: DurabilityTier::EdgeServer,
                 visible_members: vec![crate::batch_fate::VisibleBatchMember {
                     object_id: row_id,
                     branch_name,
@@ -611,6 +611,13 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         Ok(Some(Ok(()))),
         "persisted receivers should resolve from replayable batch settlement even when a live row-batch ack was missed"
     );
+
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("settled direct row should remain visible");
+    assert_eq!(visible_row.confirmed_tier, Some(DurabilityTier::EdgeServer));
 }
 
 #[test]

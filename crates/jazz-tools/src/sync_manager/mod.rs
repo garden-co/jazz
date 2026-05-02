@@ -426,7 +426,14 @@ impl SyncManager {
     }
 
     pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
-        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        let now = Instant::now();
+        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
+        server_ids.extend(
+            self.pending_servers
+                .iter()
+                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
+                .map(|(server_id, _)| *server_id),
+        );
         for server_id in server_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),

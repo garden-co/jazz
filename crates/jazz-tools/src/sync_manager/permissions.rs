@@ -28,7 +28,16 @@ impl SyncManager {
         storage: &mut H,
         check: PendingPermissionCheck,
     ) {
+        let batch_id = match &check.payload {
+            SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
+                Some(row.batch_id)
+            }
+            _ => None,
+        };
         self.apply_payload_from_client(storage, check.client_id, check.payload, true);
+        if let Some(batch_id) = batch_id {
+            self.try_accept_completed_sealed_batch_from_client(storage, check.client_id, batch_id);
+        }
     }
 
     /// Reject a pending permission check, sending error back to client.
