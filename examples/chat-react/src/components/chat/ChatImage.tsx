@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,14 +12,26 @@ interface ChatImageProps {
 export function ChatImage({ attachment }: ChatImageProps) {
   const db = useDb();
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const fileReadOptions = db.getConfig().serverUrl ? { tier: "edge" as const } : undefined;
+  const serverUrl = db.getConfig().serverUrl;
+  const fileReadOptions = useMemo(
+    () => (serverUrl ? ({ tier: "edge" as const } as const) : undefined),
+    [serverUrl],
+  );
 
   useEffect(() => {
     let isActive = true;
     let objectUrl: string | null = null;
 
     async function loadImage() {
-      const blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
+      let blob: Blob;
+      try {
+        blob = await db.loadFileAsBlob(app, attachment.fileId, fileReadOptions);
+      } catch {
+        if (isActive) {
+          setImageUrl(null);
+        }
+        return;
+      }
       if (!isActive) return;
 
       objectUrl = URL.createObjectURL(blob);
