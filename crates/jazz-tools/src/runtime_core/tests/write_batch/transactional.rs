@@ -530,18 +530,11 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     let batch_id = history_rows[0].batch_id;
     let branch_name = s.a.schema_manager().branch_name();
 
-    let initial_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("transactional persisted write should create a local batch record");
-    assert_eq!(initial_record.batch_id, batch_id);
     assert_eq!(
-        initial_record.mode,
-        crate::batch_fate::BatchMode::Transactional
+        s.a.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "open transactional batches should not persist replayable durability records before seal"
     );
-    assert!(!initial_record.sealed);
-    assert_eq!(initial_record.latest_settlement, None);
 
     s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
@@ -691,14 +684,10 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
     assert_eq!(first_history_rows[0].batch_id, batch_id);
     assert_eq!(second_history_rows[0].batch_id, batch_id);
 
-    let initial_records = s.a.storage().scan_local_batch_records().unwrap();
-    assert_eq!(
-        initial_records.len(),
-        1,
-        "shared batch should persist one local batch record"
+    assert!(
+        s.a.storage().scan_local_batch_records().unwrap().is_empty(),
+        "open shared transactional batches should not persist replayable durability records before seal"
     );
-    assert_eq!(initial_records[0].batch_id, batch_id);
-    assert!(!initial_records[0].sealed);
 
     s.a.seal_batch(batch_id).unwrap();
     pump_a_to_b(&mut s);
