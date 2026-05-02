@@ -294,12 +294,18 @@ impl ColumnDescriptor {
 }
 
 /// Descriptor for a row's schema, defining column order and types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RowDescriptor {
     pub columns: Vec<ColumnDescriptor>,
     #[serde(skip)]
     content_hash_cache: OnceLock<[u8; 32]>,
+}
+
+impl Clone for RowDescriptor {
+    fn clone(&self) -> Self {
+        Self::new(self.columns.clone())
+    }
 }
 
 impl PartialEq for RowDescriptor {
