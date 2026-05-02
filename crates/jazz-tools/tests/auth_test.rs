@@ -19,7 +19,9 @@ use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::schema_manager::encoding::encode_schema;
 use jazz_tools::sync_manager::{ClientId, SyncError, SyncPayload};
-use jazz_tools::transport_manager::{AuthConfig, AuthHandshake, ConnectedResponse};
+use jazz_tools::transport_manager::{
+    AuthConfig, AuthHandshake, ConnectedResponse, SYNC_PROTOCOL_VERSION,
+};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -111,6 +113,7 @@ async fn ws_handshake_open(
         .map_err(|e| format!("ws connect failed: {e}"))?;
 
     let handshake = AuthHandshake {
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
         client_id: ClientId::new().to_string(),
         auth,
         catalogue_state_hash: None,
