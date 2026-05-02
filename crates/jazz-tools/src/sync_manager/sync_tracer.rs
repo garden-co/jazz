@@ -921,15 +921,18 @@ impl<'a> Normalizer<'a> {
             SyncPayload::QueryUnsubscription { query_id } => {
                 format!("query:{}", query_id.0)
             }
-            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
-                format!("query:{} scope:{}", query_id.0, scope.len())
-            }
             SyncPayload::QuerySettled {
                 query_id,
+                scope,
                 through_seq,
                 ..
             } => {
-                format!("query:{} through_seq:{}", query_id.0, through_seq)
+                format!(
+                    "query:{} scope:{} through_seq:{}",
+                    query_id.0,
+                    scope.len(),
+                    through_seq
+                )
             }
             SyncPayload::SchemaWarning(w) => {
                 format!("query:{} table:{}", w.query_id.0, w.table_name)
@@ -1104,15 +1107,18 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         SyncPayload::QueryUnsubscription { query_id } => {
             format!("query:{}", query_id.0)
         }
-        SyncPayload::QueryScopeSnapshot { query_id, scope } => {
-            format!("query:{} scope:{}", query_id.0, scope.len())
-        }
         SyncPayload::QuerySettled {
             query_id,
+            scope,
             through_seq,
             ..
         } => {
-            format!("query:{} through_seq:{}", query_id.0, through_seq)
+            format!(
+                "query:{} scope:{} through_seq:{}",
+                query_id.0,
+                scope.len(),
+                through_seq
+            )
         }
         SyncPayload::SchemaWarning(w) => {
             format!("query:{} table:{}", w.query_id.0, w.table_name)
