@@ -461,10 +461,79 @@ impl SyncManager {
             let settlement = self
                 .load_batch_settlement_by_batch_id_from_storage(storage, batch_id)
                 .unwrap_or(BatchSettlement::Missing { batch_id });
+            let settlement = match destination {
+                Destination::Client(client_id) => {
+                    let Some(settlement) = self.batch_settlement_for_client(client_id, &settlement)
+                    else {
+                        continue;
+                    };
+                    settlement
+                }
+                Destination::Server(_) => settlement,
+            };
             self.outbox.push(OutboxEntry {
                 destination: destination.clone(),
                 payload: SyncPayload::BatchSettlement { settlement },
             });
+        }
+    }
+
+    pub(super) fn batch_settlement_for_client(
+        &self,
+        client_id: ClientId,
+        settlement: &BatchSettlement,
+    ) -> Option<BatchSettlement> {
+        let client = self.clients.get(&client_id)?;
+        match settlement {
+            BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                let visible_members = visible_members
+                    .iter()
+                    .filter(|member| {
+                        let key =
+                            RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
+                        self.row_batch_interest
+                            .get(&key)
+                            .is_some_and(|clients| clients.contains(&client_id))
+                            || client.is_in_scope(member.object_id, &member.branch_name)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!visible_members.is_empty()).then_some(BatchSettlement::DurableDirect {
+                    batch_id: *batch_id,
+                    confirmed_tier: *confirmed_tier,
+                    visible_members,
+                })
+            }
+            BatchSettlement::AcceptedTransaction {
+                batch_id,
+                confirmed_tier,
+                visible_members,
+            } => {
+                let visible_members = visible_members
+                    .iter()
+                    .filter(|member| {
+                        let key =
+                            RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
+                        self.row_batch_interest
+                            .get(&key)
+                            .is_some_and(|clients| clients.contains(&client_id))
+                            || client.is_in_scope(member.object_id, &member.branch_name)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!visible_members.is_empty()).then_some(BatchSettlement::AcceptedTransaction {
+                    batch_id: *batch_id,
+                    confirmed_tier: *confirmed_tier,
+                    visible_members,
+                })
+            }
+            BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
+                Some(settlement.clone())
+            }
         }
     }
 
@@ -762,10 +831,7 @@ impl SyncManager {
         }
         if matches!(settlement, BatchSettlement::DurableDirect { .. }) {
             if let Some(client_id) = origin_client_id {
-                self.outbox.push(OutboxEntry {
-                    destination: Destination::Client(client_id),
-                    payload: SyncPayload::BatchSettlement { settlement },
-                });
+                self.queue_batch_settlement_to_client(client_id, settlement);
             }
             return;
         }
@@ -1102,12 +1168,12 @@ impl SyncManager {
                     }
                 };
                 for cid in interested {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Client(cid),
-                        payload: SyncPayload::BatchSettlement {
-                            settlement: settlement.clone(),
-                        },
-                    });
+                    if let Some(settlement) = self.batch_settlement_for_client(cid, &settlement) {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::BatchSettlement { settlement },
+                        });
+                    }
                 }
             }
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
