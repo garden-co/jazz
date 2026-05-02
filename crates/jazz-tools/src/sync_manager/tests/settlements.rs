@@ -195,12 +195,12 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
 }
 
 #[test]
-fn batch_settlement_needed_filters_visible_members_to_client_scope() {
+fn batch_settlement_needed_filters_visible_members_to_sent_row_batches() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
-    let visible_row_id = ObjectId::new();
-    let out_of_scope_row_id = ObjectId::new();
+    let sent_row_id = ObjectId::new();
+    let scoped_but_unsent_row_id = ObjectId::new();
     let batch_id = BatchId::new();
     let branch_name = BranchName::new("main");
     let settlement = BatchSettlement::DurableDirect {
@@ -208,12 +208,12 @@ fn batch_settlement_needed_filters_visible_members_to_client_scope() {
         confirmed_tier: DurabilityTier::GlobalServer,
         visible_members: vec![
             VisibleBatchMember {
-                object_id: visible_row_id,
+                object_id: sent_row_id,
                 branch_name,
                 batch_id,
             },
             VisibleBatchMember {
-                object_id: out_of_scope_row_id,
+                object_id: scoped_but_unsent_row_id,
                 branch_name,
                 batch_id,
             },
@@ -229,10 +229,17 @@ fn batch_settlement_needed_filters_visible_members_to_client_scope() {
         &io,
         client_id,
         QueryId(1),
-        HashSet::from([(visible_row_id, branch_name)]),
+        HashSet::from([
+            (sent_row_id, branch_name),
+            (scoped_but_unsent_row_id, branch_name),
+        ]),
         None,
     );
     sm.take_outbox();
+    sm.row_batch_interest
+        .entry(RowBatchKey::new(sent_row_id, branch_name, batch_id))
+        .or_default()
+        .insert(client_id);
 
     sm.process_from_client(
         &mut io,
@@ -251,7 +258,7 @@ fn batch_settlement_needed_filters_visible_members_to_client_scope() {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
             visible_members: vec![VisibleBatchMember {
-                object_id: visible_row_id,
+                object_id: sent_row_id,
                 branch_name,
                 batch_id,
             }],
@@ -399,13 +406,13 @@ fn batch_settlement_needed_returns_persisted_rejected_without_visible_rows() {
 }
 
 #[test]
-fn batch_settlement_from_server_filters_visible_members_to_client_scope() {
+fn batch_settlement_from_server_filters_visible_members_to_sent_row_batches() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
     let server_id = ServerId::new();
-    let visible_row_id = ObjectId::new();
-    let out_of_scope_row_id = ObjectId::new();
+    let sent_row_id = ObjectId::new();
+    let scoped_but_unsent_row_id = ObjectId::new();
     let batch_id = BatchId::new();
     let branch_name = BranchName::new("main");
 
@@ -418,10 +425,17 @@ fn batch_settlement_from_server_filters_visible_members_to_client_scope() {
         &io,
         client_id,
         QueryId(1),
-        HashSet::from([(visible_row_id, branch_name)]),
+        HashSet::from([
+            (sent_row_id, branch_name),
+            (scoped_but_unsent_row_id, branch_name),
+        ]),
         None,
     );
     sm.take_outbox();
+    sm.row_batch_interest
+        .entry(RowBatchKey::new(sent_row_id, branch_name, batch_id))
+        .or_default()
+        .insert(client_id);
 
     sm.process_from_server(
         &mut io,
@@ -432,12 +446,12 @@ fn batch_settlement_from_server_filters_visible_members_to_client_scope() {
                 confirmed_tier: DurabilityTier::GlobalServer,
                 visible_members: vec![
                     VisibleBatchMember {
-                        object_id: visible_row_id,
+                        object_id: sent_row_id,
                         branch_name,
                         batch_id,
                     },
                     VisibleBatchMember {
-                        object_id: out_of_scope_row_id,
+                        object_id: scoped_but_unsent_row_id,
                         branch_name,
                         batch_id,
                     },
@@ -464,7 +478,7 @@ fn batch_settlement_from_server_filters_visible_members_to_client_scope() {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
             visible_members: vec![VisibleBatchMember {
-                object_id: visible_row_id,
+                object_id: sent_row_id,
                 branch_name,
                 batch_id,
             }],

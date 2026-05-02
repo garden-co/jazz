@@ -119,14 +119,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                                 .enqueue_row_visibility_change(update),
                             Ok(None) => {}
                             Err(error) => {
-                                tracing::warn!(
+                                tracing::debug!(
                                     object_id = %member.object_id,
                                     branch_name = %member.branch_name,
                                     batch_id = ?member.batch_id,
                                     ?acked_tier,
                                     ?error,
-                                    "failed to apply batch settlement tier to local row"
+                                    "ignoring batch settlement tier for local row batch that is not present"
                                 );
+                                continue;
                             }
                         }
                         self.durability.record_ack(
