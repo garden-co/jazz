@@ -1187,3 +1187,102 @@ fn seal_batch_accepts_when_family_visible_frontier_matches() {
             }]
     ));
 }
+
+#[test]
+fn seal_batch_replay_returns_existing_settlement_after_frontier_moves() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let existing_row_id = ObjectId::new();
+    let staged_row_id = ObjectId::new();
+    let newer_row_id = ObjectId::new();
+    let target_branch = "dev-aaaaaaaaaaaa-main";
+    let sibling_branch = "dev-bbbbbbbbbbbb-main";
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let existing_row = visible_row(existing_row_id, target_branch, Vec::new(), 900, b"seen");
+    seed_visible_row(&mut sm, &mut io, "users", existing_row.clone());
+
+    let staged_row = row_with_batch_state(
+        visible_row(staged_row_id, target_branch, Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: staged_row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: staged_row.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let submission = sealed_submission(
+        batch_id,
+        target_branch,
+        vec![SealedBatchMember {
+            object_id: staged_row_id,
+            row_digest: staged_row.content_digest(),
+        }],
+        vec![CapturedFrontierMember {
+            object_id: existing_row_id,
+            branch_name: BranchName::new(target_branch),
+            batch_id: existing_row.batch_id(),
+        }],
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: submission.clone(),
+        },
+    );
+    sm.take_outbox();
+
+    let accepted_settlement = BatchSettlement::AcceptedTransaction {
+        batch_id,
+        confirmed_tier: DurabilityTier::Local,
+        visible_members: vec![VisibleBatchMember {
+            object_id: staged_row_id,
+            branch_name: BranchName::new(target_branch),
+            batch_id,
+        }],
+    };
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(accepted_settlement.clone())
+    );
+
+    seed_visible_row(
+        &mut sm,
+        &mut io,
+        "users",
+        visible_row(newer_row_id, sibling_branch, Vec::new(), 1_100, b"bob"),
+    );
+
+    sm.process_from_client(&mut io, client_id, SyncPayload::SealBatch { submission });
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(accepted_settlement.clone()),
+        "replayed seals must be idempotent once the authority has decided the batch"
+    );
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if *id == client_id && *settlement == accepted_settlement
+    )));
+}
