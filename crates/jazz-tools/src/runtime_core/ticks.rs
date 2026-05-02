@@ -1,6 +1,7 @@
 use super::*;
 use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
+use crate::row_histories::patch_row_batch_state;
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -104,6 +105,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     visible_members, ..
                 } => {
                     for member in visible_members {
+                        match patch_row_batch_state(
+                            &mut self.storage,
+                            member.object_id,
+                            &member.branch_name,
+                            member.batch_id,
+                            None,
+                            Some(acked_tier),
+                        ) {
+                            Ok(Some(update)) => self
+                                .schema_manager
+                                .query_manager_mut()
+                                .enqueue_row_visibility_change(update),
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    object_id = %member.object_id,
+                                    branch_name = %member.branch_name,
+                                    batch_id = ?member.batch_id,
+                                    ?acked_tier,
+                                    ?error,
+                                    "failed to apply batch settlement tier to local row"
+                                );
+                            }
+                        }
                         self.durability.record_ack(
                             crate::sync_manager::RowBatchKey::new(
                                 member.object_id,
