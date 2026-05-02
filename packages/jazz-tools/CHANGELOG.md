@@ -1,5 +1,27 @@
 # jazz-tools
 
+## 2.0.0-alpha.45
+
+### Patch Changes
+
+- 38cfc0e: Improve local write performance by skipping idle subscription recompilation, reducing local batch member sorting, and reusing prepared schema insert alignment.
+- 8fd0db9: Gate tiered browser subscriptions so the first callback is held until the worker bridge has replayed the settled server snapshot instead of exposing an empty transient snapshot.
+- 2ee98be: Add sync protocol version checks to the WebSocket handshake so incompatible clients and servers fail with an explicit update prompt.
+- 7b01f3f: Improve local insert performance by reusing prepared write context through row-history application and caching catalogue row descriptors for repeated same-schema writes.
+- 3a6251b: Avoid duplicate server subscription authorization checks when computing authorized sync scope.
+
+  Thanks, Tobi!
+
+- a065e63: Skip settling clean query subscriptions when no graph, visibility, or local-update state changed.
+
+  Thanks, Tobi!
+
+- 75aa36b: Add `window.__jazz.shutdown(namespace?)` for awaiting Jazz client teardown (worker termination + OPFS lock release). Useful in browser tests that mount and unmount apps between cases. `Db.shutdown()` is now idempotent — concurrent or repeated calls share the same in-flight promise — so the new API plays cleanly alongside framework-driven cleanup (e.g. JazzProvider unmount).
+- Updated dependencies [8fd0db9]
+- Updated dependencies [2ee98be]
+  - jazz-wasm@2.0.0-alpha.45
+  - jazz-rn@2.0.0-alpha.45
+
 ## 2.0.0-alpha.44
 
 ### Patch Changes
