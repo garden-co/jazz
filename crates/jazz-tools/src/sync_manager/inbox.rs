@@ -483,7 +483,7 @@ impl SyncManager {
         client_id: ClientId,
         settlement: &BatchSettlement,
     ) -> Option<BatchSettlement> {
-        let client = self.clients.get(&client_id)?;
+        self.clients.get(&client_id)?;
         match settlement {
             BatchSettlement::DurableDirect {
                 batch_id,
@@ -498,7 +498,6 @@ impl SyncManager {
                         self.row_batch_interest
                             .get(&key)
                             .is_some_and(|clients| clients.contains(&client_id))
-                            || client.is_in_scope(member.object_id, &member.branch_name)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -521,7 +520,6 @@ impl SyncManager {
                         self.row_batch_interest
                             .get(&key)
                             .is_some_and(|clients| clients.contains(&client_id))
-                            || client.is_in_scope(member.object_id, &member.branch_name)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -1121,10 +1119,7 @@ impl SyncManager {
                         },
                     });
                     if let Some(settlement) = persisted_settlement.clone() {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(cid),
-                            payload: SyncPayload::BatchSettlement { settlement },
-                        });
+                        self.queue_batch_settlement_to_client(cid, settlement);
                     }
                 }
             }
@@ -1153,13 +1148,6 @@ impl SyncManager {
                             if let Some(clients) = self.row_batch_interest.get(&key) {
                                 interested.extend(clients.iter().copied());
                             }
-                            interested.extend(self.clients.iter().filter_map(
-                                |(client_id, client)| {
-                                    client
-                                        .is_in_scope(member.object_id, &member.branch_name)
-                                        .then_some(*client_id)
-                                },
-                            ));
                         }
                         interested
                     }
@@ -1407,6 +1395,10 @@ impl SyncManager {
                         if let Some(existing_history_row) = existing_history_row.as_ref()
                             && Self::matches_replayed_row_batch(existing_history_row, row)
                         {
+                            self.row_batch_interest
+                                .entry(RowBatchKey::from_row(row))
+                                .or_default()
+                                .insert(client_id);
                             self.try_accept_completed_sealed_batch_from_client(
                                 storage,
                                 client_id,
