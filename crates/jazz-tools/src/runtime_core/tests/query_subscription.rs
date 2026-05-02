@@ -1491,7 +1491,7 @@ fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_reject
 #[test]
 fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_complete() {
     // alice authors one transactional batch with two rows
-    //   worker accepts it and reports both rows in the query scope snapshot
+    //   worker accepts it and reports both rows in the QuerySettled scope
     //   downstream strict visibility must hide the first delivered row until the second arrives
     let mut s = create_3tier_rc();
 

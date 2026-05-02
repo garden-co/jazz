@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
 use support::{TestingClient, wait_for_query};
@@ -134,16 +135,11 @@ async fn alice_write_bob_read() {
             "bob should see a batch settlement from the server"
         );
         assert!(
-            messages
-                .iter()
-                .any(|message| message.payload.variant_name() == "QueryScopeSnapshot"),
-            "bob should see at least one query scope snapshot from the server"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.payload.variant_name() == "QuerySettled"),
-            "bob should see query settlement from the server"
+            messages.iter().any(|message| matches!(
+                &message.payload,
+                SyncPayload::QuerySettled { scope, .. } if !scope.is_empty()
+            )),
+            "bob should see query settlement carrying the server scope"
         );
         assert!(
             messages.iter().any(|message| message.is_object_updated()),
