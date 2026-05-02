@@ -463,6 +463,7 @@ pub(crate) struct PreparedRowWriteContext {
 }
 
 type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
+type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
 
 fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
     static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
@@ -571,6 +572,46 @@ fn cache_row_descriptor(raw_table: &str, descriptor: Arc<RowDescriptor>) {
         .lock()
         .expect("row raw table descriptor cache poisoned")
         .insert(raw_table.to_string(), descriptor);
+}
+
+fn catalogue_user_descriptor_cache() -> &'static Mutex<CatalogueUserDescriptorCache> {
+    static CACHE: OnceLock<Mutex<CatalogueUserDescriptorCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_catalogue_user_descriptor_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+) -> Option<Arc<RowDescriptor>> {
+    catalogue_user_descriptor_cache()
+        .lock()
+        .expect("catalogue user descriptor cache poisoned")
+        .get(&(
+            storage.storage_cache_namespace(),
+            table_name.to_string(),
+            schema_hash,
+        ))
+        .cloned()
+}
+
+fn cache_catalogue_user_descriptor_with_storage<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    descriptor: Arc<RowDescriptor>,
+) {
+    catalogue_user_descriptor_cache()
+        .lock()
+        .expect("catalogue user descriptor cache poisoned")
+        .insert(
+            (
+                storage.storage_cache_namespace(),
+                table_name.to_string(),
+                schema_hash,
+            ),
+            descriptor,
+        );
 }
 
 fn metadata_raw_key(id: ObjectId) -> String {
@@ -1075,7 +1116,7 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     storage: &H,
     table_name: &str,
     schema_hash: SchemaHash,
-) -> Result<RowDescriptor, StorageError> {
+) -> Result<Arc<RowDescriptor>, StorageError> {
     load_history_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?.ok_or_else(
         || {
             StorageError::IoError(format!(
@@ -1085,26 +1126,61 @@ fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     )
 }
 
+fn prepared_row_write_context_for_descriptor(
+    table_name: &str,
+    schema_hash: SchemaHash,
+    user_descriptor: Arc<RowDescriptor>,
+    needs_exact_locator: bool,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    Ok(PreparedRowWriteContext {
+        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
+        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
+        user_descriptor,
+        needs_exact_locator,
+    })
+}
+
+pub(crate) fn prepared_row_write_context_for_known_exact_locator(
+    table_name: &str,
+    schema_hash: SchemaHash,
+    user_descriptor: Arc<RowDescriptor>,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    prepared_row_write_context_for_descriptor(table_name, schema_hash, user_descriptor, false)
+}
+
+pub(crate) fn prepared_row_write_context_for_schema_hash_and_descriptor<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+    row_id: ObjectId,
+    user_descriptor: Arc<RowDescriptor>,
+) -> Result<PreparedRowWriteContext, StorageError> {
+    let needs_exact_locator = storage
+        .load_row_locator(row_id)?
+        .and_then(|locator| locator.origin_schema_hash)
+        != Some(schema_hash);
+    prepared_row_write_context_for_descriptor(
+        table_name,
+        schema_hash,
+        user_descriptor,
+        needs_exact_locator,
+    )
+}
+
 fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
     storage: &H,
     table_name: &str,
     schema_hash: SchemaHash,
     row_id: ObjectId,
 ) -> Result<PreparedRowWriteContext, StorageError> {
-    let needs_exact_locator = storage
-        .load_row_locator(row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(PreparedRowWriteContext {
-        history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
-        visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
-        user_descriptor: Arc::new(load_user_descriptor_for_schema_hash(
-            storage,
-            table_name,
-            schema_hash,
-        )?),
-        needs_exact_locator,
-    })
+    let user_descriptor = load_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?;
+    prepared_row_write_context_for_schema_hash_and_descriptor(
+        storage,
+        table_name,
+        schema_hash,
+        row_id,
+        user_descriptor,
+    )
 }
 
 fn load_user_descriptor_from_raw_table_header(
@@ -1133,10 +1209,10 @@ fn resolved_user_descriptor_for_raw_table<H: Storage + ?Sized>(
         return Ok(descriptor);
     }
 
-    let descriptor = load_user_descriptor_from_raw_table_header(header)?.unwrap_or(
-        load_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?,
-    );
-    let descriptor = Arc::new(descriptor);
+    let descriptor = match load_user_descriptor_from_raw_table_header(header)? {
+        Some(descriptor) => Arc::new(descriptor),
+        None => load_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?,
+    };
     cache_row_descriptor(raw_table_name, descriptor.clone());
     Ok(descriptor)
 }
@@ -1322,11 +1398,11 @@ fn resolved_row_table_from_locator<H: Storage + ?Sized>(
         if let Some(descriptor) = cached_row_descriptor(locator.row_raw_table.as_str()) {
             descriptor
         } else {
-            let descriptor = Arc::new(load_user_descriptor_for_schema_hash(
+            let descriptor = load_user_descriptor_for_schema_hash(
                 storage,
                 locator.table_name.as_str(),
                 locator.schema_hash,
-            )?);
+            )?;
             cache_row_descriptor(locator.row_raw_table.as_str(), descriptor.clone());
             descriptor
         };
@@ -1517,7 +1593,13 @@ fn load_history_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     storage: &H,
     table_hint: &str,
     schema_hash: SchemaHash,
-) -> Result<Option<crate::query_manager::types::RowDescriptor>, StorageError> {
+) -> Result<Option<Arc<RowDescriptor>>, StorageError> {
+    if let Some(descriptor) =
+        cached_catalogue_user_descriptor_with_storage(storage, table_hint, schema_hash)
+    {
+        return Ok(Some(descriptor));
+    }
+
     let Some(entry) = storage.load_catalogue_entry(schema_hash.to_object_id())? else {
         return Ok(None);
     };
@@ -1525,9 +1607,17 @@ fn load_history_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
         .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?;
 
     let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
-    Ok(schema
-        .get(&hinted_table_name)
-        .map(|table_schema| table_schema.columns.clone()))
+    let Some(table_schema) = schema.get(&hinted_table_name) else {
+        return Ok(None);
+    };
+    let descriptor = Arc::new(table_schema.columns.clone());
+    cache_catalogue_user_descriptor_with_storage(
+        storage,
+        table_hint,
+        schema_hash,
+        descriptor.clone(),
+    );
+    Ok(Some(descriptor))
 }
 
 fn catalogue_schema_hash(entry: &CatalogueEntry) -> Result<SchemaHash, StorageError> {
@@ -1590,23 +1680,22 @@ fn required_history_user_descriptor_and_schema_hash_for_row<H: Storage + ?Sized>
     storage: &H,
     table_hint: &str,
     row: &StoredRowBatch,
-) -> Result<(SchemaHash, crate::query_manager::types::RowDescriptor), StorageError> {
+) -> Result<(SchemaHash, Arc<RowDescriptor>), StorageError> {
     let row_data_matches = |descriptor: &crate::query_manager::types::RowDescriptor| {
         row.data.is_empty() || crate::row_format::decode_row(descriptor, &row.data).is_ok()
     };
-    let try_schema_hash =
-        |candidates: &mut Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>,
-         table_name: &str,
-         schema_hash: SchemaHash|
-         -> Result<(), StorageError> {
-            if let Some(descriptor) =
-                load_history_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?
-                && row_data_matches(&descriptor)
-            {
-                candidates.push((schema_hash, descriptor));
-            }
-            Ok(())
-        };
+    let try_schema_hash = |candidates: &mut Vec<(SchemaHash, Arc<RowDescriptor>)>,
+                           table_name: &str,
+                           schema_hash: SchemaHash|
+     -> Result<(), StorageError> {
+        if let Some(descriptor) =
+            load_history_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?
+            && row_data_matches(descriptor.as_ref())
+        {
+            candidates.push((schema_hash, descriptor));
+        }
+        Ok(())
+    };
 
     let row_locator = storage.load_row_locator(row.row_id)?;
     let mut locator_candidates = Vec::new();
@@ -1641,6 +1730,7 @@ fn required_history_user_descriptor_and_schema_hash_for_row<H: Storage + ?Sized>
     let mut table_candidates = catalogue_row_descriptors_for_table(storage, table_hint)?
         .into_iter()
         .filter(|(_, descriptor)| row_data_matches(descriptor))
+        .map(|(schema_hash, descriptor)| (schema_hash, Arc::new(descriptor)))
         .collect::<Vec<_>>();
     table_candidates.sort_by_key(|(schema_hash, _)| schema_hash.to_string());
     table_candidates.dedup_by(|(left_hash, _), (right_hash, _)| left_hash == right_hash);
@@ -1676,10 +1766,13 @@ pub(crate) fn resolve_history_row_write_context<H: Storage + ?Sized>(
 ) -> Result<PreparedRowWriteContext, StorageError> {
     let (schema_hash, user_descriptor) =
         required_history_user_descriptor_and_schema_hash_for_row(storage, table, row)?;
-    let mut context =
-        prepared_row_write_context_for_schema_hash(storage, table, schema_hash, row.row_id)?;
-    context.user_descriptor = Arc::new(user_descriptor);
-    Ok(context)
+    prepared_row_write_context_for_schema_hash_and_descriptor(
+        storage,
+        table,
+        schema_hash,
+        row.row_id,
+        user_descriptor,
+    )
 }
 
 pub(crate) fn encode_history_row_bytes_with_context(
