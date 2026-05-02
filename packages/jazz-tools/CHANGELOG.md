@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 2.0.0-alpha.46
+
+### Patch Changes
+
+- f528f1a: Send direct-batch durability confirmations once per sealed batch instead of once per row.
+- 76a3b89: Filter replayed batch settlement members to each receiving client's scope.
+  - jazz-wasm@2.0.0-alpha.46
+  - jazz-rn@2.0.0-alpha.46
+
 ## 2.0.0-alpha.45
 
 ### Patch Changes
