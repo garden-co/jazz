@@ -1,5 +1,12 @@
 # jazz-wasm
 
+## 2.0.0-alpha.45
+
+### Patch Changes
+
+- 8fd0db9: Gate tiered browser subscriptions so the first callback is held until the worker bridge has replayed the settled server snapshot instead of exposing an empty transient snapshot.
+- 2ee98be: Add sync protocol version checks to the WebSocket handshake so incompatible clients and servers fail with an explicit update prompt.
+
 ## 2.0.0-alpha.44
 
 ## 2.0.0-alpha.43
