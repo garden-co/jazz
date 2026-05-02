@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     http::HeaderMap,
     response::Response,
 };
@@ -227,10 +227,23 @@ fn is_loopback_dev_host(host: &str) -> bool {
 
 /// Send a `ServerEvent::Error` frame on the socket, best-effort.
 async fn send_ws_error(socket: &mut WebSocket, message: &str) {
-    use crate::jazz_transport::ErrorCode;
+    send_ws_error_with_code(
+        socket,
+        crate::jazz_transport::ErrorCode::Unauthorized,
+        message,
+    )
+    .await;
+}
+
+/// Send a `ServerEvent::Error` frame on the socket, best-effort.
+async fn send_ws_error_with_code(
+    socket: &mut WebSocket,
+    code: crate::jazz_transport::ErrorCode,
+    message: &str,
+) {
     let event = crate::jazz_transport::ServerEvent::Error {
         message: message.to_string(),
-        code: ErrorCode::Unauthorized,
+        code,
     };
     if let Ok(bytes) = serde_json::to_vec(&event) {
         let _ = socket
@@ -239,6 +252,16 @@ async fn send_ws_error(socket: &mut WebSocket, message: &str) {
             )))
             .await;
     }
+}
+
+async fn close_ws_with_protocol_reason(socket: &mut WebSocket, reason: &str) {
+    let reason = reason.chars().take(123).collect::<String>();
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::PROTOCOL,
+            reason: reason.into(),
+        })))
+        .await;
 }
 
 async fn handle_ws_connection(
@@ -269,6 +292,27 @@ async fn handle_ws_connection(
                 return;
             }
         };
+
+    // Older, pre-versioned clients deserialize as protocol version 0. Reject
+    // them explicitly so developers see an actionable update prompt instead
+    // of a dropped socket.
+    if handshake.sync_protocol_version != crate::transport_manager::SYNC_PROTOCOL_VERSION {
+        let message = format!(
+            "Incompatible Jazz sync protocol: client sent {}, server requires {}. Please update Jazz.",
+            handshake.sync_protocol_version,
+            crate::transport_manager::SYNC_PROTOCOL_VERSION,
+        );
+        // Use BadRequest here so older clients that do not know newer error
+        // codes can still deserialize and log the message.
+        send_ws_error_with_code(
+            &mut socket,
+            crate::jazz_transport::ErrorCode::BadRequest,
+            &message,
+        )
+        .await;
+        close_ws_with_protocol_reason(&mut socket, &message).await;
+        return;
+    }
 
     // 2. Parse client_id.
     let client_id = match crate::sync_manager::ClientId::parse(&handshake.client_id) {
@@ -337,6 +381,7 @@ async fn handle_ws_connection(
 
     // 6. Send the Connected response.
     let resp = crate::transport_manager::ConnectedResponse {
+        sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
         connection_id: connection_id.to_string(),
         client_id: client_id.to_string(),
         next_sync_seq: Some(next_sync_seq),
