@@ -1,5 +1,20 @@
 use super::*;
 
+fn owned_items_schema() -> Schema {
+    let mut schema = Schema::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    schema.insert(
+        TableName::new("items"),
+        TableSchema::with_policies(descriptor, policies),
+    );
+    schema
+}
+
 #[test]
 fn server_builds_query_graph_on_subscription() {
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
@@ -136,6 +151,58 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
         "server subscription should settle from visible rows without legacy object-backed storage"
     );
     assert_eq!(row_updates[0], handle.row_id);
+}
+
+#[test]
+fn server_authorizes_subscription_sync_scope_without_rechecking_output_scope() {
+    use crate::query_manager::session::Session;
+    use crate::sync_manager::{
+        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
+    };
+
+    let mut server_qm = QueryManager::new(SyncManager::new());
+    server_qm.set_current_schema(owned_items_schema(), "dev", "main");
+    let inner = seeded_memory_storage(&server_qm.schema_context().current_schema);
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(inner);
+
+    for index in 0..4 {
+        server_qm
+            .insert(
+                &mut storage,
+                "items",
+                &[
+                    Value::Text("alice".to_string()),
+                    Value::Text(format!("Item {index}")),
+                ],
+            )
+            .expect("insert item");
+    }
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+    storage.reset_visible_query_loads();
+
+    let query = server_qm.query("items").limit(4).build();
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(Session::new("alice")),
+            propagation: QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    assert!(
+        storage.visible_query_loads() <= 12,
+        "server subscription should not re-run an extra output-scope authorization pass, got {} visible row loads",
+        storage.visible_query_loads()
+    );
 }
 
 #[test]
