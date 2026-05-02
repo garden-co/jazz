@@ -81,6 +81,24 @@ table("codex_sync_states", {
   synced_at: col.timestamp(),
 });
 
+table("codex_stream_events", {
+  event_id: col.string(),
+  session_id: col.string(),
+  turn_id: col.string().optional(),
+  sequence: col.int(),
+  event_kind: col.string(),
+  event_type: col.string().optional(),
+  source_id: col.string().optional(),
+  source_host: col.string().optional(),
+  source_path: col.string().optional(),
+  text_delta: col.string().optional(),
+  payload_json: col.json().optional(),
+  raw_json: col.json().optional(),
+  schema_hash: col.string().optional(),
+  created_at: col.timestamp(),
+  observed_at: col.timestamp(),
+});
+
 table("j_agent_definitions", {
   definition_id: col.string(),
   name: col.string(),

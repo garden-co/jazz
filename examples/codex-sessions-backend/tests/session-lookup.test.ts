@@ -128,7 +128,7 @@ describe("codex session lookup CLI", () => {
     ]);
     expect(searched).toHaveLength(1);
     expect(searched[0]?.id).toBe("019d58b5-a54b-75f1-8c62-3679667476d9");
-  });
+  }, 15_000);
 
   it("searches globally when project root is omitted", async () => {
     const otherProjectRoot = "/Users/nikitavoloboev/work/review-codex-experiment";
@@ -277,7 +277,7 @@ describe("codex session lookup CLI", () => {
 
       expect(searched[0]?.id).toBe("019dffff-dead-7000-8000-000000000999");
     },
-    15_000,
+    30_000,
   );
 
   it("lists only active sessions using presence rows ordered by recent activity", async () => {

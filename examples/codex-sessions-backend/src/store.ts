@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import {
   createJazzContext,
@@ -13,6 +13,8 @@ import {
   type CodexSessionInit,
   type CodexSessionPresence,
   type CodexSessionPresenceInit,
+  type CodexStreamEvent,
+  type CodexStreamEventInit,
   type CodexSyncState,
   type CodexSyncStateInit,
   type CodexTurn,
@@ -142,6 +144,32 @@ export interface RecordCodexTerminalPresenceInput {
   runtimePid?: number;
   runtimeTty?: string;
   runtimeHost?: string;
+}
+
+export interface RecordCodexStreamEventInput {
+  eventId?: string;
+  sessionId: string;
+  turnId?: string;
+  sequence: number;
+  eventKind: string;
+  eventType?: string;
+  sourceId?: string;
+  sourceHost?: string;
+  sourcePath?: string;
+  textDelta?: string;
+  payloadJson?: JsonValue;
+  rawJson?: JsonValue;
+  schemaHash?: string;
+  createdAt?: TimestampInput;
+  observedAt?: TimestampInput;
+}
+
+export interface ListCodexStreamEventsOptions {
+  sessionId?: string;
+  turnId?: string;
+  afterSequence?: number;
+  limit?: number;
+  latest?: boolean;
 }
 
 export interface CodexCompletionEvent {
@@ -425,6 +453,28 @@ function normalizeRequiredId(value: string | undefined, label: string): string {
   return normalized;
 }
 
+function deterministicStreamEventId(input: {
+  sessionId: string;
+  turnId?: string;
+  sequence: number;
+  eventKind: string;
+  eventType?: string;
+  sourceId?: string;
+}): string {
+  const digest = createHash("sha256")
+    .update([
+      input.sessionId,
+      input.turnId ?? "",
+      String(input.sequence),
+      input.eventKind,
+      input.eventType ?? "",
+      input.sourceId ?? "",
+    ].join("\0"))
+    .digest("hex")
+    .slice(0, 32);
+  return `stream:${digest}`;
+}
+
 function terminalActivityState(input: RecordCodexTerminalPresenceInput): string {
   if (input.stale) {
     return "stale";
@@ -697,6 +747,81 @@ export class CodexSessionStore {
     });
   }
 
+  async recordCodexStreamEvent(
+    input: RecordCodexStreamEventInput,
+    session?: Session,
+  ): Promise<CodexStreamEvent> {
+    return this.withWriteLock(async () => {
+      const db = this.getDb(session);
+      const sessionId = normalizeRequiredId(input.sessionId, "sessionId");
+      const eventKind = normalizeRequiredId(input.eventKind, "eventKind");
+      const sequence = Math.trunc(input.sequence);
+      if (!Number.isFinite(input.sequence) || sequence !== input.sequence || sequence < 0) {
+        throw new Error("sequence must be a non-negative integer");
+      }
+
+      const eventId = input.eventId?.trim() || deterministicStreamEventId({
+        sessionId,
+        turnId: input.turnId,
+        sequence,
+        eventKind,
+        eventType: input.eventType,
+        sourceId: input.sourceId,
+      });
+      const payload: CodexStreamEventInit = {
+        event_id: eventId,
+        session_id: sessionId,
+        turn_id: nullable(input.turnId?.trim() || undefined),
+        sequence,
+        event_kind: eventKind,
+        event_type: nullable(input.eventType?.trim() || undefined),
+        source_id: nullable(input.sourceId?.trim() || undefined),
+        source_host: nullable(input.sourceHost?.trim() || undefined),
+        source_path: nullable(input.sourcePath?.trim() || undefined),
+        text_delta: nullable(input.textDelta),
+        payload_json: nullable(input.payloadJson),
+        raw_json: nullable(input.rawJson),
+        schema_hash: nullable(input.schemaHash?.trim() || undefined),
+        created_at: asDate(input.createdAt),
+        observed_at: asDate(input.observedAt),
+      };
+
+      const existing = await db.one(app.codex_stream_events.where({ event_id: eventId }));
+      if (existing) {
+        await this.updateRow(db, app.codex_stream_events, existing.id, payload);
+      } else {
+        await this.insertRow(db, app.codex_stream_events, payload);
+      }
+
+      const event = await db.one(app.codex_stream_events.where({ event_id: eventId }));
+      if (!event) {
+        throw new Error(`codex stream event ${eventId} missing after record`);
+      }
+      return normalizeRow(event);
+    });
+  }
+
+  async listCodexStreamEvents(
+    options: ListCodexStreamEventsOptions = {},
+    session?: Session,
+  ): Promise<CodexStreamEvent[]> {
+    const limit = clampLimit(options.limit, 200);
+    const scanLimit = options.afterSequence === undefined
+      ? limit
+      : clampLimit(Math.max(limit * 4, 200));
+    const scanLatest = options.latest === true || options.afterSequence !== undefined;
+    const query = options.sessionId
+      ? app.codex_stream_events.where({ session_id: options.sessionId }).orderBy("sequence", scanLatest ? "desc" : "asc")
+      : app.codex_stream_events.orderBy("created_at", scanLatest ? "desc" : "asc");
+    const rows = await this.getDb(session).all(query.limit(scanLimit));
+    const filtered = rows
+      .filter((row) => options.turnId === undefined || row.turn_id === options.turnId)
+      .filter((row) => options.afterSequence === undefined || row.sequence > options.afterSequence)
+      .slice(0, limit);
+    return (scanLatest ? filtered.reverse() : filtered)
+      .map(normalizeRow);
+  }
+
   async listSessions(limit?: number, session?: Session): Promise<CodexSession[]> {
     const query = app.codex_sessions.orderBy("latest_activity_at", "desc");
     const rows = await this.getDb(session).all(
@@ -740,7 +865,12 @@ export class CodexSessionStore {
           .where({ project_root: options.projectRoot })
           .orderBy("last_event_at", "desc")
       : app.codex_session_presence.orderBy("last_event_at", "desc");
-    const rows = await this.getDb(session).all(query);
+    const scanLimit = options?.limit === undefined
+      ? undefined
+      : clampLimit(Math.max(options.limit * 4, 100));
+    const rows = await this.getDb(session).all(
+      scanLimit === undefined ? query : query.limit(scanLimit),
+    );
     const filtered = options?.activeOnly
       ? rows.filter((row) => ACTIVE_CODEX_PRESENCE_STATE_SET.has(row.state) && isFreshActivePresence(row))
       : rows;
@@ -948,7 +1078,7 @@ export class CodexSessionStore {
       return this.requireJAgentDefinition(db, input.definitionId);
     }
 
-    return db.insertDurable(app.j_agent_definitions, payload, { tier: this.writeTier });
+    return this.insertRow(db, app.j_agent_definitions, payload);
   }
 
   async recordJAgentRunStarted(
@@ -998,7 +1128,7 @@ export class CodexSessionStore {
       return this.requireJAgentRun(db, input.runId);
     }
 
-    return db.insertDurable(app.j_agent_runs, payload, { tier: this.writeTier });
+    return this.insertRow(db, app.j_agent_runs, payload);
   }
 
   async recordJAgentRunCompleted(
@@ -1047,7 +1177,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.j_agent_steps, existing.id, payload);
     } else {
-      await db.insertDurable(app.j_agent_steps, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.j_agent_steps, payload);
     }
 
     await this.updateRow(db, app.j_agent_runs, run.id, {
@@ -1113,7 +1243,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.j_agent_attempts, existing.id, payload);
     } else {
-      await db.insertDurable(app.j_agent_attempts, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.j_agent_attempts, payload);
     }
 
     const attempt = await db.one(app.j_agent_attempts.where({ attempt_id: attemptId }));
@@ -1182,7 +1312,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.j_agent_waits, existing.id, payload);
     } else {
-      await db.insertDurable(app.j_agent_waits, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.j_agent_waits, payload);
     }
 
     const wait = await db.one(app.j_agent_waits.where({ wait_id: waitId }));
@@ -1247,7 +1377,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.j_agent_session_bindings, existing.id, payload);
     } else {
-      await db.insertDurable(app.j_agent_session_bindings, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.j_agent_session_bindings, payload);
     }
 
     const binding = await db.one(app.j_agent_session_bindings.where({ binding_id: bindingId }));
@@ -1282,7 +1412,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.j_agent_artifacts, existing.id, payload);
     } else {
-      await db.insertDurable(app.j_agent_artifacts, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.j_agent_artifacts, payload);
     }
 
     const artifact = await db.one(app.j_agent_artifacts.where({ artifact_id: artifactId }));
@@ -1296,8 +1426,12 @@ export class CodexSessionStore {
     options?: { projectRoot?: string; limit?: number },
     session?: Session,
   ): Promise<JAgentRun[]> {
+    const scanLimit = options?.limit === undefined
+      ? undefined
+      : clampLimit(Math.max(options.limit * 4, 100));
+    const query = app.j_agent_runs.orderBy("updated_at", "desc");
     const runs = await this.getDb(session).all(
-      app.j_agent_runs.orderBy("updated_at", "desc"),
+      scanLimit === undefined ? query : query.limit(scanLimit),
     );
     const filtered = runs.filter(
       (run) =>
@@ -1493,7 +1627,7 @@ export class CodexSessionStore {
       return this.requireCodexSession(db, projection.sessionId);
     }
 
-    return db.insertDurable(app.codex_sessions, payload, { tier: this.writeTier });
+    return this.insertRow(db, app.codex_sessions, payload);
   }
 
   private async upsertTerminalSession(
@@ -1557,7 +1691,7 @@ export class CodexSessionStore {
       },
     };
 
-    return db.insertDurable(app.codex_sessions, payload, { tier: this.writeTier });
+    return this.insertRow(db, app.codex_sessions, payload);
   }
 
   private async upsertTerminalTurn(
@@ -1595,7 +1729,7 @@ export class CodexSessionStore {
       return this.getCodexTurnByExternalId(db, codexSession.session_id, turnId);
     }
 
-    await db.insertDurable(app.codex_turns, payload, { tier: this.writeTier });
+    await this.insertRow(db, app.codex_turns, payload);
     return this.getCodexTurnByExternalId(db, codexSession.session_id, turnId);
   }
 
@@ -1637,7 +1771,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.codex_session_presence, existing.id, payload);
     } else {
-      await db.insertDurable(app.codex_session_presence, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.codex_session_presence, payload);
     }
 
     const presence = await db.one(
@@ -1761,14 +1895,14 @@ export class CodexSessionStore {
         await this.updateRow(db, app.codex_turns, existing.id, payload);
         continue;
       }
-      await db.insertDurable(app.codex_turns, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.codex_turns, payload);
     }
 
     for (const turn of existingTurns) {
       if (seenTurnIds.has(turn.turn_id)) {
         continue;
       }
-      await db.deleteDurable(app.codex_turns, turn.id, { tier: this.writeTier });
+      await this.deleteRow(db, app.codex_turns, turn.id);
     }
   }
 
@@ -1800,7 +1934,7 @@ export class CodexSessionStore {
       return updated;
     }
 
-    return db.insertDurable(app.codex_sync_states, payload, { tier: this.writeTier });
+    return this.insertRow(db, app.codex_sync_states, payload);
   }
 
   private async upsertSessionPresence(
@@ -1839,7 +1973,7 @@ export class CodexSessionStore {
     if (existing) {
       await this.updateRow(db, app.codex_session_presence, existing.id, payload);
     } else {
-      await db.insertDurable(app.codex_session_presence, payload, { tier: this.writeTier });
+      await this.insertRow(db, app.codex_session_presence, payload);
     }
 
     const presence = await db.one(
@@ -1939,7 +2073,23 @@ export class CodexSessionStore {
     if (Object.keys(payload).length === 0) {
       return;
     }
-    await db.updateDurable(table as never, id, payload as never, { tier: this.writeTier });
+    await db.update(table as never, id, payload as never).wait({ tier: this.writeTier });
+  }
+
+  private async insertRow<T, Init>(
+    db: Db,
+    table: TableProxy<T, Init>,
+    payload: Init,
+  ): Promise<T> {
+    return db.insert(table, payload).wait({ tier: this.writeTier });
+  }
+
+  private async deleteRow<T, Init>(
+    db: Db,
+    table: TableProxy<T, Init>,
+    id: string,
+  ): Promise<void> {
+    await db.delete(table, id).wait({ tier: this.writeTier });
   }
 }
 
@@ -1947,7 +2097,7 @@ export function createCodexSessionStore(
   config: CodexSessionStoreConfig,
 ): CodexSessionStore {
   const tier = config.tier ?? "edge";
-  const context = createJazzContext({
+  const contextOptions = {
     appId: config.appId ?? DEFAULT_APP_ID,
     app,
     permissions: {},
@@ -1959,6 +2109,7 @@ export function createCodexSessionStore(
     backendSecret: config.backendSecret,
     adminSecret: config.adminSecret,
     tier,
-  });
+  } as Parameters<typeof createJazzContext>[0] & { serverPathPrefix?: string };
+  const context = createJazzContext(contextOptions);
   return new CodexSessionStore(context, tier);
 }

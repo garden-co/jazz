@@ -1,7 +1,9 @@
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import readline from "node:readline";
 import {
   type AgentRun,
   type AgentRunSummary,
@@ -336,6 +338,9 @@ interface SerializedCommitTurnResult {
   runId: string | null;
   threadId: string | null;
   repoRoot: string | null;
+  model: string | null;
+  effort: string | null;
+  traceRef: string | null;
   message: string | null;
   classification: string | null;
   title: string | null;
@@ -909,6 +914,9 @@ function serializeCommitTurnResult(
     runId: result.runId ?? null,
     threadId: result.threadId ?? null,
     repoRoot: result.repoRoot ?? null,
+    model: result.model ?? null,
+    effort: result.effort ?? null,
+    traceRef: result.traceRef ?? null,
     message: result.message ?? null,
     classification: result.classification ?? null,
     title: result.title ?? null,
@@ -1063,12 +1071,81 @@ function renderJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+interface ServeJsonRequest {
+  command?: string;
+  args?: string[];
+  input?: unknown;
+}
+
+async function runServeJsonCommand(
+  request: ServeJsonRequest,
+  dataPath: string,
+): Promise<unknown> {
+  const command = request.command?.trim();
+  if (!command || command === "serve-json") {
+    throw new Error("serve-json request requires a non-recursive command");
+  }
+  const args = Array.isArray(request.args) ? request.args.map(String) : [];
+  const child = spawn(
+    process.execPath,
+    [path.resolve(process.argv[1]), command, ...args, "--data-path", dataPath],
+    {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  if (Object.prototype.hasOwnProperty.call(request, "input")) {
+    child.stdin.end(JSON.stringify(request.input));
+  } else {
+    child.stdin.end();
+  }
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  const stdoutText = Buffer.concat(stdout).toString("utf8");
+  const stderrText = Buffer.concat(stderr).toString("utf8").trim();
+  if (exitCode !== 0) {
+    throw new Error(stderrText || stdoutText.trim() || `command exited ${exitCode}`);
+  }
+  return stdoutText.trim() ? JSON.parse(stdoutText) : null;
+}
+
+async function serveJson(dataPath: string): Promise<void> {
+  const lines = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  for await (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const request = JSON.parse(line) as ServeJsonRequest;
+      const result = await runServeJsonCommand(request, dataPath);
+      process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(`${JSON.stringify({ ok: false, error: message })}\n`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const command = requireCommand();
   const dataPath = await resolvePersistentDataPath(
     readFlag("--data-path") ?? "~/.jazz2/agent-infra.db",
   );
   await mkdir(path.dirname(dataPath), { recursive: true });
+
+  if (command === "serve-json") {
+    await serveJson(dataPath);
+    return;
+  }
 
   const store = createAgentDataStore({
     appId: "run-agent-infra",

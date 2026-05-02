@@ -79,6 +79,24 @@ CREATE TABLE codex_sync_states (
     synced_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE codex_stream_events (
+    event_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    turn_id TEXT,
+    sequence INTEGER NOT NULL,
+    event_kind TEXT NOT NULL,
+    event_type TEXT,
+    source_id TEXT,
+    source_host TEXT,
+    source_path TEXT,
+    text_delta TEXT,
+    payload_json JSON,
+    raw_json JSON,
+    schema_hash TEXT,
+    created_at TIMESTAMP NOT NULL,
+    observed_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE j_agent_definitions (
     definition_id TEXT NOT NULL,
     name TEXT NOT NULL,

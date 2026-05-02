@@ -1,12 +1,15 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
+
+// Regenerate via: node scripts/generate-app.mjs
+
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
 export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
-  $canRead: boolean | null;
-  $canEdit: boolean | null;
-  $canDelete: boolean | null;
+  $canRead: boolean;
+  $canEdit: boolean;
+  $canDelete: boolean;
 }
 
 export interface CodexSession {
@@ -92,6 +95,25 @@ export interface CodexSyncState {
   session_row_id?: string;
   line_count: number;
   synced_at: Date;
+}
+
+export interface CodexStreamEvent {
+  id: string;
+  event_id: string;
+  session_id: string;
+  turn_id?: string;
+  sequence: number;
+  event_kind: string;
+  event_type?: string;
+  source_id?: string;
+  source_host?: string;
+  source_path?: string;
+  text_delta?: string;
+  payload_json?: JsonValue;
+  raw_json?: JsonValue;
+  schema_hash?: string;
+  created_at: Date;
+  observed_at: Date;
 }
 
 export interface JAgentDefinition {
@@ -296,6 +318,24 @@ export interface CodexSyncStateInit {
   session_row_id?: string | null;
   line_count: number;
   synced_at: Date;
+}
+
+export interface CodexStreamEventInit {
+  event_id: string;
+  session_id: string;
+  turn_id?: string | null;
+  sequence: number;
+  event_kind: string;
+  event_type?: string | null;
+  source_id?: string | null;
+  source_host?: string | null;
+  source_path?: string | null;
+  text_delta?: string | null;
+  payload_json?: JsonValue | null;
+  raw_json?: JsonValue | null;
+  schema_hash?: string | null;
+  created_at: Date;
+  observed_at: Date;
 }
 
 export interface JAgentDefinitionInit {
@@ -511,6 +551,28 @@ export interface CodexSyncStateWhereInput {
   $canDelete?: boolean;
 }
 
+export interface CodexStreamEventWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  event_id?: string | { eq?: string; ne?: string; contains?: string };
+  session_id?: string | { eq?: string; ne?: string; contains?: string };
+  turn_id?: string | { eq?: string; ne?: string; contains?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  event_kind?: string | { eq?: string; ne?: string; contains?: string };
+  event_type?: string | { eq?: string; ne?: string; contains?: string };
+  source_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_host?: string | { eq?: string; ne?: string; contains?: string };
+  source_path?: string | { eq?: string; ne?: string; contains?: string };
+  text_delta?: string | { eq?: string; ne?: string; contains?: string };
+  payload_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  raw_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  schema_hash?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  observed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 export interface JAgentDefinitionWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   definition_id?: string | { eq?: string; ne?: string; contains?: string };
@@ -659,6 +721,7 @@ type AnyCodexSessionQueryBuilder<T = any> = { readonly _table: "codex_sessions" 
 type AnyCodexTurnQueryBuilder<T = any> = { readonly _table: "codex_turns" } & QueryBuilder<T>;
 type AnyCodexSessionPresenceQueryBuilder<T = any> = { readonly _table: "codex_session_presence" } & QueryBuilder<T>;
 type AnyCodexSyncStateQueryBuilder<T = any> = { readonly _table: "codex_sync_states" } & QueryBuilder<T>;
+type AnyCodexStreamEventQueryBuilder<T = any> = { readonly _table: "codex_stream_events" } & QueryBuilder<T>;
 type AnyJAgentDefinitionQueryBuilder<T = any> = { readonly _table: "j_agent_definitions" } & QueryBuilder<T>;
 type AnyJAgentRunQueryBuilder<T = any> = { readonly _table: "j_agent_runs" } & QueryBuilder<T>;
 type AnyJAgentStepQueryBuilder<T = any> = { readonly _table: "j_agent_steps" } & QueryBuilder<T>;
@@ -1342,6 +1405,11 @@ export type CodexSyncStateSelected<S extends CodexSyncStateSelectableColumn = ke
 
 export type CodexSyncStateSelectedWithIncludes<I extends CodexSyncStateInclude = {}, S extends CodexSyncStateSelectableColumn = keyof CodexSyncState, R extends boolean = false> = CodexSyncStateSelected<S> & CodexSyncStateIncludedRelations<I, R>;
 
+export type CodexStreamEventSelectableColumn = keyof CodexStreamEvent | PermissionIntrospectionColumn | "*";
+export type CodexStreamEventOrderableColumn = keyof CodexStreamEvent | PermissionIntrospectionColumn;
+
+export type CodexStreamEventSelected<S extends CodexStreamEventSelectableColumn = keyof CodexStreamEvent> = ("*" extends S ? CodexStreamEvent : Pick<CodexStreamEvent, Extract<S | "id", keyof CodexStreamEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
 export type JAgentDefinitionSelectableColumn = keyof JAgentDefinition | PermissionIntrospectionColumn | "*";
 export type JAgentDefinitionOrderableColumn = keyof JAgentDefinition | PermissionIntrospectionColumn;
 
@@ -1888,6 +1956,115 @@ export const wasmSchema: WasmSchema = {
       },
       {
         "name": "synced_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "codex_stream_events": {
+    "columns": [
+      {
+        "name": "event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "turn_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "event_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "event_type",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_host",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "text_delta",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "payload_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "raw_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "schema_hash",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "observed_at",
         "column_type": {
           "type": "Timestamp"
         },
@@ -3407,6 +3584,188 @@ export class CodexSyncStateQueryBuilder<I extends CodexSyncStateInclude = {}, S 
   }
 }
 
+export class CodexStreamEventQueryBuilder<I extends Record<string, never> = {}, S extends CodexStreamEventSelectableColumn = keyof CodexStreamEvent, R extends boolean = false> implements QueryBuilder<CodexStreamEventSelected<S>> {
+  readonly _table = "codex_stream_events";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: CodexStreamEventSelected<S>;
+  readonly _initType!: CodexStreamEventInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<Record<string, never>> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: CodexStreamEventWhereInput): CodexStreamEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends CodexStreamEventSelectableColumn>(...columns: [NewS, ...NewS[]]): CodexStreamEventQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  orderBy(column: CodexStreamEventOrderableColumn, direction: "asc" | "desc" = "asc"): CodexStreamEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): CodexStreamEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): CodexStreamEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  gather(options: {
+    start: CodexStreamEventWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): CodexStreamEventQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends Record<string, never> = I, CloneS extends CodexStreamEventSelectableColumn = S, CloneR extends boolean = R>(): CodexStreamEventQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new CodexStreamEventQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export class JAgentDefinitionQueryBuilder<I extends JAgentDefinitionInclude = {}, S extends JAgentDefinitionSelectableColumn = keyof JAgentDefinition, R extends boolean = false> implements QueryBuilder<JAgentDefinitionSelectedWithIncludes<I, S, R>> {
   readonly _table = "j_agent_definitions";
   readonly _schema: WasmSchema = wasmSchema;
@@ -4812,6 +5171,7 @@ export interface GeneratedApp {
   codex_turns: CodexTurnQueryBuilder;
   codex_session_presence: CodexSessionPresenceQueryBuilder;
   codex_sync_states: CodexSyncStateQueryBuilder;
+  codex_stream_events: CodexStreamEventQueryBuilder;
   j_agent_definitions: JAgentDefinitionQueryBuilder;
   j_agent_runs: JAgentRunQueryBuilder;
   j_agent_steps: JAgentStepQueryBuilder;
@@ -4827,6 +5187,7 @@ export const app: GeneratedApp = {
   codex_turns: new CodexTurnQueryBuilder(),
   codex_session_presence: new CodexSessionPresenceQueryBuilder(),
   codex_sync_states: new CodexSyncStateQueryBuilder(),
+  codex_stream_events: new CodexStreamEventQueryBuilder(),
   j_agent_definitions: new JAgentDefinitionQueryBuilder(),
   j_agent_runs: new JAgentRunQueryBuilder(),
   j_agent_steps: new JAgentStepQueryBuilder(),

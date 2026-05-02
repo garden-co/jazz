@@ -144,6 +144,85 @@ describe("CodexSessionStore", () => {
     expect(active.map((entry) => entry.presence.session_id)).toContain("session-terminal");
   });
 
+  it("records stream events as durable idempotent session deltas", async () => {
+    const event = await store.recordCodexStreamEvent({
+      sessionId: "session-stream",
+      turnId: "turn-stream",
+      sequence: 1,
+      eventKind: "assistant_delta",
+      eventType: "message_delta",
+      sourceHost: "op1",
+      sourcePath: "/root/.codex/sessions/session-stream.jsonl",
+      textDelta: "hel",
+      payloadJson: { delta: "hel" },
+      schemaHash: "schema-hash-1",
+      createdAt: "2026-05-02T12:00:00.000Z",
+      observedAt: "2026-05-02T12:00:00.010Z",
+    });
+
+    const updated = await store.recordCodexStreamEvent({
+      eventId: event.event_id,
+      sessionId: "session-stream",
+      turnId: "turn-stream",
+      sequence: 1,
+      eventKind: "assistant_delta",
+      eventType: "message_delta",
+      sourceHost: "op1",
+      sourcePath: "/root/.codex/sessions/session-stream.jsonl",
+      textDelta: "hello",
+      payloadJson: { delta: "hello" },
+      schemaHash: "schema-hash-1",
+      createdAt: "2026-05-02T12:00:00.000Z",
+      observedAt: "2026-05-02T12:00:00.020Z",
+    });
+    await store.recordCodexStreamEvent({
+      sessionId: "session-stream",
+      turnId: "turn-other",
+      sequence: 2,
+      eventKind: "reasoning_delta",
+      eventType: "reasoning_delta",
+      sourceHost: "op1",
+      textDelta: "next",
+      schemaHash: "schema-hash-1",
+      createdAt: "2026-05-02T12:00:01.000Z",
+      observedAt: "2026-05-02T12:00:01.010Z",
+    });
+
+    const events = await store.listCodexStreamEvents({
+      sessionId: "session-stream",
+      turnId: "turn-stream",
+      afterSequence: 0,
+      limit: 10,
+    });
+    const laterEvents = await store.listCodexStreamEvents({
+      sessionId: "session-stream",
+      afterSequence: 1,
+      limit: 10,
+    });
+
+    expect(updated.id).toBe(event.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event_id: event.event_id,
+      session_id: "session-stream",
+      turn_id: "turn-stream",
+      sequence: 1,
+      event_kind: "assistant_delta",
+      event_type: "message_delta",
+      source_host: "op1",
+      text_delta: "hello",
+      schema_hash: "schema-hash-1",
+    });
+    expect(events[0]?.observed_at.toISOString()).toBe("2026-05-02T12:00:00.020Z");
+    expect(laterEvents).toHaveLength(1);
+    expect(laterEvents[0]).toMatchObject({
+      session_id: "session-stream",
+      turn_id: "turn-other",
+      sequence: 2,
+      text_delta: "next",
+    });
+  });
+
   it("creates a native Jazz run binding for every projected codex session", async () => {
     await store.replaceSessionProjection(
       {
@@ -255,8 +334,8 @@ describe("CodexSessionStore", () => {
       );
       expect(run).not.toBeNull();
       expect(binding).not.toBeNull();
-      await db.deleteDurable(app.j_agent_session_bindings, binding!.id, { tier: "edge" });
-      await db.deleteDurable(app.j_agent_runs, run!.id, { tier: "edge" });
+      await db.delete(app.j_agent_session_bindings, binding!.id).wait({ tier: "edge" });
+      await db.delete(app.j_agent_runs, run!.id).wait({ tier: "edge" });
     } finally {
       await adminContext.shutdown();
     }
@@ -424,7 +503,7 @@ describe("CodexSessionStore", () => {
         app.codex_session_presence.where({ session_id: "session-upgrade" }),
       );
       expect(presence).not.toBeNull();
-      await db.deleteDurable(app.codex_session_presence, presence!.id, { tier: "edge" });
+      await db.delete(app.codex_session_presence, presence!.id).wait({ tier: "edge" });
     } finally {
       await adminContext.shutdown();
     }
@@ -711,7 +790,7 @@ describe("CodexSessionStore", () => {
         }),
       );
       expect(binding).not.toBeNull();
-      await db.deleteDurable(app.j_agent_session_bindings, binding!.id, { tier: "edge" });
+      await db.delete(app.j_agent_session_bindings, binding!.id).wait({ tier: "edge" });
     } finally {
       await adminContext.shutdown();
     }

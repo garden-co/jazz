@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { createReadStream, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, readdir, stat, watch as watchPath } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { homedir, hostname } from "node:os";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import type {
   CodexSession,
   JAgentArtifact,
@@ -13,12 +14,15 @@ import type {
   JAgentSessionBinding,
   JAgentStep,
   JAgentWait,
+  JsonValue,
 } from "../schema/app.js";
 import {
   type BindJAgentSessionInput,
   createCodexSessionStore,
   type CodexCompletionEvent,
+  type CodexSessionStoreConfig,
   type JAgentRunSummary,
+  type RecordCodexStreamEventInput,
   type RecordCodexTerminalPresenceInput,
   type RecordJAgentArtifactInput,
   type RecordJAgentAttemptCompletedInput,
@@ -65,6 +69,50 @@ interface SessionReferenceRow extends SessionLookupRow {
   completedAt: string | null;
 }
 
+interface RolloutEventRow {
+  id: string;
+  sourceId: string;
+  absolutePath: string;
+  sessionId: string | null;
+  lineNumber: number;
+  byteOffset: number;
+  byteLength: number;
+  timestamp: string | null;
+  recordType: string;
+  eventType: string | null;
+  turnId: string | null;
+  payloadJson: unknown | null;
+  rawJson: string;
+  createdAt: string;
+}
+
+interface RolloutEventListInput {
+  sessionId?: string;
+  absolutePath?: string;
+  afterLineNumber?: number;
+  afterByteOffset?: number;
+  limit?: number;
+}
+
+interface ReplicateRolloutEventsInput extends RolloutEventListInput {
+  follow?: boolean;
+  idleTimeoutMs?: number;
+  maxBatches?: number;
+  pollIntervalMs: number;
+  sourceHost?: string;
+  yieldBetweenEvents?: boolean;
+}
+
+interface ReplicateRolloutEventsResult {
+  absolutePath: string | null;
+  sessionId: string | null;
+  recorded: number;
+  lastLineNumber: number | null;
+  lastByteOffset: number | null;
+  followed: boolean;
+  hasMore?: boolean;
+}
+
 interface SessionServiceRequest {
   id?: string;
   method: string;
@@ -72,9 +120,21 @@ interface SessionServiceRequest {
   query?: string;
   prefix?: string;
   sessionId?: string;
+  turnId?: string;
+  absolutePath?: string;
+  afterLineNumber?: number;
+  afterByteOffset?: number;
+  afterSequence?: number;
+  follow?: boolean;
+  idleTimeoutMs?: number;
+  pollIntervalMs?: number;
+  sourceHost?: string;
   runId?: string;
   completedAfter?: string;
   limit?: number;
+  latest?: boolean;
+  includePayload?: boolean;
+  payload?: unknown;
 }
 
 interface SessionServiceResponse {
@@ -99,6 +159,18 @@ interface SessionServiceLockMetadata {
 interface SessionServiceRuntimeInfo {
   socketPath: string;
   watchRollouts: boolean;
+  watchStreamRollouts: boolean;
+  streamDataPath: string;
+}
+
+type CodexSessionStoreHandle = ReturnType<typeof createCodexSessionStore>;
+type CodexStreamEventRow = Awaited<ReturnType<CodexSessionStoreHandle["listCodexStreamEvents"]>>[number];
+
+interface SessionServiceRuntimeDeps {
+  store: CodexSessionStoreHandle;
+  sessionSyncScheduler: SessionSyncScheduler;
+  catalogPrimer: CatalogPrimer;
+  recentRolloutSyncScheduler: RecentRolloutSyncScheduler;
 }
 
 interface SessionSyncScheduler {
@@ -303,6 +375,14 @@ function defaultJazzDataPath(): string {
   return resolve(defaultFlowDataDirectory(), "codex-sessions.db");
 }
 
+function defaultStreamDataPath(dataPath: string): string {
+  const extension = extname(dataPath);
+  if (!extension) {
+    return `${dataPath}.stream`;
+  }
+  return `${dataPath.slice(0, -extension.length)}.stream${extension}`;
+}
+
 function defaultJazzSocketPath(): string {
   return resolve(defaultFlowSupportDirectory(), "codex-sessions.sock");
 }
@@ -355,6 +435,33 @@ async function resolvePersistentDataPath(dataPath: string): Promise<string> {
   return normalizedPath;
 }
 
+function backendSchemaHash(): string {
+  const candidates = [
+    new URL("../schema/current.js", import.meta.url),
+    new URL("../schema/current.ts", import.meta.url),
+    new URL("../schema/current.sql", import.meta.url),
+    new URL("../schema/app.js", import.meta.url),
+    new URL("../schema/app.ts", import.meta.url),
+  ];
+
+  const errors: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const data = readFileSync(candidate);
+      return createHash("sha256").update(data).digest("hex");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${candidate.pathname}: ${message}`);
+    }
+  }
+
+  throw new Error(`Could not compute codex-sessions schema hash: ${errors.join("; ")}`);
+}
+
+function printUsage(): void {
+  console.log("Usage: codex-sessions-backend <serve|sync|sync-session|schema-hash|list-sessions|search-sessions|...>");
+}
+
 function readFlag(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
   if (index === -1) {
@@ -377,6 +484,74 @@ function readBooleanFlag(flag: string, fallback: boolean): boolean {
     return false;
   }
   throw new Error(`${flag} must be a boolean value`);
+}
+
+function readOptionalNumberFlag(flag: string): number | undefined {
+  const raw = readFlag(flag);
+  if (raw === undefined || raw.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${flag} must be a finite number`);
+  }
+  return parsed;
+}
+
+function readFlagOrEnv(flag: string, ...envNames: string[]): string | undefined {
+  const flagValue = readFlag(flag);
+  if (flagValue !== undefined) {
+    return flagValue;
+  }
+  for (const envName of envNames) {
+    const value = process.env[envName];
+    if (value !== undefined && value.trim() !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readStoreTier(): CodexSessionStoreConfig["tier"] | undefined {
+  const raw = readFlagOrEnv("--tier", "FLOW_CODEX_JAZZ_TIER", "J_SESSIONS_JAZZ_TIER");
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === "edge" || raw === "global" || raw === "local") {
+    return raw;
+  }
+  throw new Error("--tier must be one of edge, global, or local");
+}
+
+function readStoreConfig(dataPath: string): CodexSessionStoreConfig {
+  return {
+    dataPath,
+    appId: readFlagOrEnv("--app-id", "FLOW_CODEX_JAZZ_APP_ID", "J_SESSIONS_JAZZ_APP_ID"),
+    env: readFlagOrEnv("--env", "FLOW_CODEX_JAZZ_ENV", "J_SESSIONS_JAZZ_ENV"),
+    userBranch: readFlagOrEnv("--user-branch", "FLOW_CODEX_JAZZ_USER_BRANCH", "J_SESSIONS_JAZZ_USER_BRANCH"),
+    serverUrl: readFlagOrEnv("--server-url", "FLOW_CODEX_JAZZ_SERVER_URL", "J_SESSIONS_JAZZ_SERVER_URL"),
+    serverPathPrefix: readFlagOrEnv(
+      "--server-path-prefix",
+      "FLOW_CODEX_JAZZ_SERVER_PATH_PREFIX",
+      "J_SESSIONS_JAZZ_SERVER_PATH_PREFIX",
+    ),
+    backendSecret: readFlagOrEnv("--backend-secret", "FLOW_CODEX_JAZZ_BACKEND_SECRET", "J_SESSIONS_JAZZ_BACKEND_SECRET"),
+    adminSecret: readFlagOrEnv("--admin-secret", "FLOW_CODEX_JAZZ_ADMIN_SECRET", "J_SESSIONS_JAZZ_ADMIN_SECRET"),
+    tier: readStoreTier(),
+  };
+}
+
+function localStreamStoreConfig(
+  config: CodexSessionStoreConfig,
+  streamDataPath: string,
+): CodexSessionStoreConfig {
+  return {
+    dataPath: streamDataPath,
+    appId: config.appId,
+    env: config.env,
+    userBranch: config.userBranch,
+    tier: "local",
+  };
 }
 
 function readJsonInput<T>(command: string): T {
@@ -460,6 +635,85 @@ function normalizeRecordCodexTerminalPresenceInput(
     repoRoot: normalizeOptionalPath(input.repoRoot),
     activityPath: normalizeOptionalPath(input.activityPath),
   };
+}
+
+function normalizeRecordCodexStreamEventInput(input: Record<string, unknown>): RecordCodexStreamEventInput {
+  const sessionId = stringField(input, "sessionId", "session_id");
+  const eventKind = stringField(input, "eventKind", "event_kind");
+  const sequence = numberField(input, "sequence");
+  if (!sessionId) {
+    throw new Error("record-event requires sessionId");
+  }
+  if (!eventKind) {
+    throw new Error("record-event requires eventKind");
+  }
+  if (sequence === undefined) {
+    throw new Error("record-event requires sequence");
+  }
+
+  return {
+    eventId: stringField(input, "eventId", "event_id"),
+    sessionId,
+    turnId: stringField(input, "turnId", "turn_id"),
+    sequence,
+    eventKind,
+    eventType: stringField(input, "eventType", "event_type"),
+    sourceId: stringField(input, "sourceId", "source_id"),
+    sourceHost: stringField(input, "sourceHost", "source_host"),
+    sourcePath: stringField(input, "sourcePath", "source_path"),
+    textDelta: stringField(input, "textDelta", "text_delta"),
+    payloadJson: jsonField(input, "payloadJson", "payload_json"),
+    rawJson: jsonField(input, "rawJson", "raw_json"),
+    schemaHash: stringField(input, "schemaHash", "schema_hash"),
+    createdAt: timestampField(input, "createdAt", "created_at"),
+    observedAt: timestampField(input, "observedAt", "observed_at"),
+  };
+}
+
+function field(input: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (input[key] !== undefined) {
+      return input[key];
+    }
+  }
+  return undefined;
+}
+
+function stringField(input: Record<string, unknown>, ...keys: string[]): string | undefined {
+  const value = field(input, ...keys);
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function numberField(input: Record<string, unknown>, ...keys: string[]): number | undefined {
+  const value = field(input, ...keys);
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function jsonField(input: Record<string, unknown>, ...keys: string[]): JsonValue | undefined {
+  const value = field(input, ...keys);
+  return value === undefined ? undefined : value as JsonValue;
+}
+
+function timestampField(
+  input: Record<string, unknown>,
+  ...keys: string[]
+): RecordCodexStreamEventInput["createdAt"] | undefined {
+  const value = field(input, ...keys);
+  if (
+    value instanceof Date
+    || typeof value === "string"
+    || typeof value === "number"
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -572,6 +826,494 @@ function toSessionReferenceRow(session: CodexSession): SessionReferenceRow {
     startedAt: asIsoString(session.created_at),
     completedAt: asNullableIsoString(session.last_completion_at),
   };
+}
+
+function sessionIdFromRolloutPath(rolloutPath: string): string | null {
+  const match = rolloutPath.match(
+    /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i,
+  );
+  return match?.[1] ?? null;
+}
+
+function rolloutEventTypeFromParsed(parsed: Record<string, unknown>): string | null {
+  const payload = typeof parsed.payload === "object" && parsed.payload !== null
+    ? parsed.payload as Record<string, unknown>
+    : null;
+  if (typeof payload?.type === "string") {
+    return payload.type;
+  }
+  const item = typeof parsed.item === "object" && parsed.item !== null
+    ? parsed.item as Record<string, unknown>
+    : null;
+  return typeof item?.type === "string" ? item.type : null;
+}
+
+function rolloutTurnIdFromParsed(parsed: Record<string, unknown>): string | null {
+  const payload = typeof parsed.payload === "object" && parsed.payload !== null
+    ? parsed.payload as Record<string, unknown>
+    : null;
+  if (typeof payload?.turn_id === "string") {
+    return payload.turn_id;
+  }
+  return typeof parsed.turn_id === "string" ? parsed.turn_id : null;
+}
+
+function rolloutEventId(rolloutPath: string, lineNumber: number, byteOffset: number): string {
+  return `file:${createHash("sha256")
+    .update(`${rolloutPath}:${lineNumber}:${byteOffset}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+function fileRolloutEventRow(
+  rolloutPath: string,
+  fallbackSessionId: string | null,
+  lineNumber: number,
+  byteOffset: number,
+  byteLength: number,
+  rawJson: string,
+): RolloutEventRow {
+  const fallbackTimestamp = new Date().toISOString();
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const timestamp = typeof record.timestamp === "string" ? record.timestamp : null;
+      return {
+        id: rolloutEventId(rolloutPath, lineNumber, byteOffset),
+        sourceId: rolloutPath,
+        absolutePath: rolloutPath,
+        sessionId: fallbackSessionId,
+        lineNumber,
+        byteOffset,
+        byteLength,
+        timestamp,
+        recordType: typeof record.type === "string" ? record.type : "unknown",
+        eventType: rolloutEventTypeFromParsed(record),
+        turnId: rolloutTurnIdFromParsed(record),
+        payloadJson: record.payload ?? null,
+        rawJson,
+        createdAt: timestamp ?? fallbackTimestamp,
+      };
+    }
+  } catch {
+    // Keep raw invalid lines visible to tail consumers.
+  }
+
+  return {
+    id: rolloutEventId(rolloutPath, lineNumber, byteOffset),
+    sourceId: rolloutPath,
+    absolutePath: rolloutPath,
+    sessionId: fallbackSessionId,
+    lineNumber,
+    byteOffset,
+    byteLength,
+    timestamp: null,
+    recordType: "invalid_json",
+    eventType: null,
+    turnId: null,
+    payloadJson: null,
+    rawJson,
+    createdAt: fallbackTimestamp,
+  };
+}
+
+async function listRolloutEventRowsFromFile(
+  rolloutPath: string,
+  input: RolloutEventListInput,
+): Promise<RolloutEventRow[]> {
+  const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 100), 500));
+  const fallbackSessionId = input.sessionId ?? sessionIdFromRolloutPath(rolloutPath);
+  const rows: RolloutEventRow[] = [];
+  const stream = createReadStream(rolloutPath, { encoding: "utf8" });
+  let pending = "";
+  let pendingOffset = 0;
+  let nextOffset = 0;
+  let lineNumber = 0;
+
+  for await (const chunk of stream) {
+    let text = pending + chunk;
+    let lineOffset = pendingOffset;
+    pending = "";
+
+    while (true) {
+      const newline = text.indexOf("\n");
+      if (newline === -1) {
+        pending = text;
+        pendingOffset = lineOffset;
+        break;
+      }
+
+      const rawLine = text.slice(0, newline);
+      const byteLength = Buffer.byteLength(rawLine, "utf8") + 1;
+      lineNumber += 1;
+      if (
+        (input.afterLineNumber === undefined || lineNumber > input.afterLineNumber) &&
+        (input.afterByteOffset === undefined || lineOffset > input.afterByteOffset)
+      ) {
+        rows.push(fileRolloutEventRow(
+          rolloutPath,
+          fallbackSessionId,
+          lineNumber,
+          lineOffset,
+          byteLength,
+          rawLine,
+        ));
+        if (rows.length >= limit) {
+          stream.destroy();
+          return rows;
+        }
+      }
+
+      text = text.slice(newline + 1);
+      lineOffset += byteLength;
+    }
+
+    nextOffset += Buffer.byteLength(chunk, "utf8");
+    if (pending) {
+      pendingOffset = nextOffset - Buffer.byteLength(pending, "utf8");
+    }
+  }
+
+  if (pending) {
+    lineNumber += 1;
+    if (
+      (input.afterLineNumber === undefined || lineNumber > input.afterLineNumber) &&
+      (input.afterByteOffset === undefined || pendingOffset > input.afterByteOffset)
+    ) {
+      rows.push(fileRolloutEventRow(
+        rolloutPath,
+        fallbackSessionId,
+        lineNumber,
+        pendingOffset,
+        Buffer.byteLength(pending, "utf8"),
+        pending,
+      ));
+    }
+  }
+
+  return rows;
+}
+
+async function findRolloutPathBySessionId(codexHome: string, sessionId: string): Promise<string | null> {
+  const expectedSuffix = `-${sessionId}.jsonl`;
+  const sessionDate = dateFromUuidV7SessionId(sessionId);
+  if (sessionDate) {
+    for (const offset of [0, -1, 1]) {
+      const day = new Date(sessionDate.getTime() + offset * 24 * 60 * 60 * 1000);
+      const dayRoot = join(
+        codexHome,
+        "sessions",
+        String(day.getUTCFullYear()),
+        String(day.getUTCMonth() + 1).padStart(2, "0"),
+        String(day.getUTCDate()).padStart(2, "0"),
+      );
+      const dayMatch = (await collectRolloutPathsUnder(dayRoot))
+        .find((rolloutPath) => rolloutPath.endsWith(expectedSuffix));
+      if (dayMatch) {
+        return dayMatch;
+      }
+    }
+  }
+
+  const recentRolloutPaths = await collectRecentRolloutPaths(codexHome, 3);
+  const recentMatch = recentRolloutPaths.find((rolloutPath) => rolloutPath.endsWith(expectedSuffix));
+  if (recentMatch) {
+    return recentMatch;
+  }
+  const rolloutPaths = await collectRolloutPathsUnder(join(codexHome, "sessions"));
+  return rolloutPaths.find((rolloutPath) => rolloutPath.endsWith(expectedSuffix)) ?? null;
+}
+
+function dateFromUuidV7SessionId(sessionId: string): Date | null {
+  const timestampHex = sessionId.replaceAll("-", "").slice(0, 12);
+  if (!/^[0-9a-f]{12}$/i.test(timestampHex)) {
+    return null;
+  }
+  const timestampMs = Number.parseInt(timestampHex, 16);
+  if (!Number.isSafeInteger(timestampMs) || timestampMs <= 0) {
+    return null;
+  }
+  const date = new Date(timestampMs);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+async function resolveRolloutPathForEvents(
+  store: ReturnType<typeof createCodexSessionStore>,
+  codexHome: string,
+  input: RolloutEventListInput,
+): Promise<string | null> {
+  if (input.absolutePath) {
+    return input.absolutePath;
+  }
+  if (!input.sessionId) {
+    return null;
+  }
+  const rolloutPath = await findRolloutPathBySessionId(codexHome, input.sessionId);
+  if (rolloutPath) {
+    return rolloutPath;
+  }
+  const session = await store.getSession(input.sessionId);
+  if (session?.rollout_path) {
+    return session.rollout_path;
+  }
+  return null;
+}
+
+async function listRolloutEventRows(
+  store: ReturnType<typeof createCodexSessionStore>,
+  codexHome: string,
+  input: RolloutEventListInput,
+): Promise<RolloutEventRow[]> {
+  const rolloutPath = await resolveRolloutPathForEvents(store, codexHome, input);
+  if (!rolloutPath) {
+    return [];
+  }
+  return listRolloutEventRowsFromFile(rolloutPath, {
+    ...input,
+    absolutePath: rolloutPath,
+  });
+}
+
+function textDeltaFromRolloutPayload(payload: unknown): string | undefined {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return undefined;
+  }
+  const record = payload as Record<string, unknown>;
+  return typeof record.delta === "string" ? record.delta : undefined;
+}
+
+function compactRolloutPayloadJson(row: RolloutEventRow): JsonValue | undefined {
+  if (row.recordType === "session_meta" || row.recordType === "turn_context") {
+    return undefined;
+  }
+  if (typeof row.payloadJson === "object" && row.payloadJson !== null) {
+    const encoded = JSON.stringify(row.payloadJson);
+    if (encoded.length > 16_384) {
+      return {
+        omitted: true,
+        reason: "payload_too_large",
+        byteLength: Buffer.byteLength(encoded, "utf8"),
+      };
+    }
+  }
+  return row.payloadJson as JsonValue;
+}
+
+function rolloutRowToStreamEventInput(
+  row: RolloutEventRow,
+  sourceHost: string,
+): RecordCodexStreamEventInput | null {
+  const sessionId = row.sessionId ?? sessionIdFromRolloutPath(row.absolutePath);
+  if (!sessionId) {
+    return null;
+  }
+  return {
+    eventId: row.id,
+    sessionId,
+    turnId: row.turnId ?? undefined,
+    sequence: row.lineNumber,
+    eventKind: row.recordType,
+    eventType: row.eventType ?? undefined,
+    sourceId: row.sourceId,
+    sourceHost,
+    sourcePath: row.absolutePath,
+    textDelta: textDeltaFromRolloutPayload(row.payloadJson),
+    payloadJson: compactRolloutPayloadJson(row),
+    rawJson: row.recordType === "invalid_json" ? row.rawJson : undefined,
+    schemaHash: backendSchemaHash(),
+    createdAt: row.createdAt,
+    observedAt: new Date(),
+  };
+}
+
+async function replicateRolloutEvents(options: {
+  store: CodexSessionStoreHandle;
+  codexHome: string;
+  input: ReplicateRolloutEventsInput;
+  signal?: AbortSignal;
+  onEvent?: (event: CodexStreamEventRow) => void;
+}): Promise<ReplicateRolloutEventsResult> {
+  const rolloutPath = await resolveRolloutPathForEvents(
+    options.store,
+    options.codexHome,
+    options.input,
+  );
+  if (!rolloutPath) {
+    return {
+      absolutePath: null,
+      sessionId: options.input.sessionId ?? null,
+      recorded: 0,
+      lastLineNumber: options.input.afterLineNumber ?? null,
+      lastByteOffset: options.input.afterByteOffset ?? null,
+      followed: !!options.input.follow,
+    };
+  }
+
+  const sourceHost = options.input.sourceHost?.trim() || hostname();
+  let afterLineNumber = options.input.afterLineNumber;
+  let afterByteOffset = options.input.afterByteOffset;
+  let recorded = 0;
+  let scannedBatches = 0;
+  let hasMore = false;
+  const maxBatches =
+    options.input.maxBatches && options.input.maxBatches > 0
+      ? Math.trunc(options.input.maxBatches)
+      : null;
+
+  const scanAvailableRows = async (): Promise<number> => {
+    let batchRecorded = 0;
+    while (!options.signal?.aborted) {
+      if (maxBatches !== null && scannedBatches >= maxBatches) {
+        hasMore = true;
+        return batchRecorded;
+      }
+      const rows = await listRolloutEventRowsFromFile(rolloutPath, {
+        ...options.input,
+        absolutePath: rolloutPath,
+        afterLineNumber,
+        afterByteOffset,
+        limit: options.input.limit ?? 200,
+      });
+      if (rows.length === 0) {
+        return batchRecorded;
+      }
+      scannedBatches += 1;
+      for (const row of rows) {
+        const input = rolloutRowToStreamEventInput(row, sourceHost);
+        afterLineNumber = row.lineNumber;
+        afterByteOffset = row.byteOffset;
+        if (!input) {
+          continue;
+        }
+        const event = await options.store.recordCodexStreamEvent(input);
+        recorded += 1;
+        batchRecorded += 1;
+        options.onEvent?.(event);
+        if (options.input.yieldBetweenEvents) {
+          await delay(0, options.signal);
+        }
+      }
+      if (rows.length < Math.max(1, Math.min(Math.trunc(options.input.limit ?? 200), 500))) {
+        return batchRecorded;
+      }
+    }
+    return batchRecorded;
+  };
+
+  await scanAvailableRows();
+
+  while (options.input.follow && !options.signal?.aborted) {
+    const reason = await waitForRolloutChange({
+      rolloutPath,
+      pollIntervalMs: options.input.pollIntervalMs,
+      idleTimeoutMs: options.input.idleTimeoutMs,
+      signal: options.signal,
+    });
+    if (reason !== "changed") {
+      break;
+    }
+    await scanAvailableRows();
+  }
+
+  return {
+    absolutePath: rolloutPath,
+    sessionId: options.input.sessionId ?? sessionIdFromRolloutPath(rolloutPath),
+    recorded,
+    lastLineNumber: afterLineNumber ?? null,
+    lastByteOffset: afterByteOffset ?? null,
+    followed: !!options.input.follow,
+    hasMore,
+  };
+}
+
+async function waitForRolloutChange(options: {
+  rolloutPath: string;
+  pollIntervalMs: number;
+  idleTimeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<"changed" | "idle" | "aborted"> {
+  if (options.signal?.aborted) {
+    return "aborted";
+  }
+
+  let done = false;
+  const controller = new AbortController();
+  const abort = () => {
+    done = true;
+    controller.abort();
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
+
+  const startStamp = await rolloutFileStamp(options.rolloutPath);
+  try {
+    const changed = Promise.race([
+      waitForRolloutFsEvent(options.rolloutPath, controller.signal),
+      waitForRolloutStatChange(
+        options.rolloutPath,
+        startStamp,
+        Math.max(10, options.pollIntervalMs),
+        () => done || !!options.signal?.aborted,
+      ),
+      waitForRolloutIdle(options.idleTimeoutMs, options.signal),
+    ]);
+    const result = await changed;
+    return options.signal?.aborted ? "aborted" : result;
+  } finally {
+    abort();
+    options.signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function waitForRolloutFsEvent(
+  rolloutPath: string,
+  signal: AbortSignal,
+): Promise<"changed" | "aborted"> {
+  const targetName = basename(rolloutPath);
+  try {
+    for await (const event of watchPath(dirname(rolloutPath), { signal })) {
+      if (!event.filename || event.filename === targetName) {
+        return "changed";
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== "AbortError") {
+      return "changed";
+    }
+  }
+  return "aborted";
+}
+
+async function waitForRolloutStatChange(
+  rolloutPath: string,
+  startStamp: string | null,
+  pollIntervalMs: number,
+  done: () => boolean,
+): Promise<"changed" | "aborted"> {
+  while (!done()) {
+    await delay(pollIntervalMs);
+    const currentStamp = await rolloutFileStamp(rolloutPath);
+    if (currentStamp !== startStamp) {
+      return "changed";
+    }
+  }
+  return "aborted";
+}
+
+async function waitForRolloutIdle(
+  idleTimeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
+): Promise<"idle" | "aborted"> {
+  if (idleTimeoutMs === undefined) {
+    return new Promise<"idle" | "aborted">(() => undefined);
+  }
+  await delay(Math.max(0, idleTimeoutMs), signal);
+  return signal?.aborted ? "aborted" : "idle";
+}
+
+async function rolloutFileStamp(rolloutPath: string): Promise<string | null> {
+  const fileStat = await stat(rolloutPath).catch(() => null);
+  return fileStat ? `${fileStat.size}:${fileStat.mtimeMs}` : null;
 }
 
 function toJAgentDefinitionRow(definition: JAgentDefinition): JAgentDefinitionRow {
@@ -1151,25 +1893,76 @@ async function loadSessionsByPrefix(options: {
 }
 
 async function dispatchSessionServiceRequest(
-  store: ReturnType<typeof createCodexSessionStore>,
+  getRuntimeDeps: () => SessionServiceRuntimeDeps,
+  getStreamStore: () => CodexSessionStoreHandle,
   request: SessionServiceRequest,
   dataPath: string,
   codexHome: string,
-  sessionSyncScheduler: SessionSyncScheduler,
-  catalogPrimer: CatalogPrimer,
-  recentRolloutSyncScheduler: RecentRolloutSyncScheduler,
   runtimeInfo: SessionServiceRuntimeInfo,
 ): Promise<unknown> {
+  if (request.method === "health") {
+    return {
+      status: "ok",
+      pid: process.pid,
+      schemaHash: backendSchemaHash(),
+      dataPath,
+      streamDataPath: runtimeInfo.streamDataPath,
+      socketPath: runtimeInfo.socketPath,
+      watchRollouts: runtimeInfo.watchRollouts,
+      watchStreamRollouts: runtimeInfo.watchStreamRollouts,
+      timestamp: new Date().toISOString(),
+    };
+  }
+  if (request.method === "record-event") {
+    return asStreamEventJsonLine(
+      await getStreamStore().recordCodexStreamEvent(
+        normalizeRecordCodexStreamEventInput(request.payload as Record<string, unknown>),
+      ),
+    );
+  }
+  if (request.method === "list-stream-events") {
+    return (await getStreamStore().listCodexStreamEvents({
+      sessionId: request.sessionId,
+      turnId: request.turnId,
+      afterSequence: request.afterSequence,
+      limit: request.limit ?? 200,
+      latest: request.latest,
+    })).map((event) => asStreamEventJsonLine(event, {
+      includePayload: request.includePayload !== false,
+    }));
+  }
+  if (request.method === "replicate-rollout-events") {
+    if (!request.sessionId && !request.absolutePath) {
+      throw new Error("replicate-rollout-events requires sessionId or absolutePath");
+    }
+    if (request.follow) {
+      throw new Error("replicate-rollout-events follow mode is only available from the CLI");
+    }
+    return replicateRolloutEvents({
+      store: getStreamStore(),
+      codexHome,
+      input: {
+        sessionId: request.sessionId,
+        absolutePath: request.absolutePath ? expandHomePath(request.absolutePath) : undefined,
+        afterLineNumber: request.afterLineNumber,
+        afterByteOffset: request.afterByteOffset,
+        limit: request.limit ?? 200,
+        follow: false,
+        pollIntervalMs: request.pollIntervalMs ?? 1000,
+        idleTimeoutMs: request.idleTimeoutMs,
+        sourceHost: request.sourceHost,
+      },
+    });
+  }
+
+  const {
+    store,
+    sessionSyncScheduler,
+    catalogPrimer,
+    recentRolloutSyncScheduler,
+  } = getRuntimeDeps();
+
   switch (request.method) {
-    case "health":
-      return {
-        status: "ok",
-        pid: process.pid,
-        dataPath,
-        socketPath: runtimeInfo.socketPath,
-        watchRollouts: runtimeInfo.watchRollouts,
-        timestamp: new Date().toISOString(),
-      };
     case "list-sessions": {
       if (!request.projectRoot) {
         throw new Error("list-sessions requires projectRoot");
@@ -1270,8 +2063,41 @@ async function dispatchSessionServiceRequest(
       });
       return completions.map(asJsonLine);
     }
-<<<<<<< HEAD
-=======
+    case "list-rollout-events": {
+      if (!request.sessionId && !request.absolutePath) {
+        throw new Error("list-rollout-events requires sessionId or absolutePath");
+      }
+      return listRolloutEventRows(store, codexHome, {
+        sessionId: request.sessionId,
+        absolutePath: request.absolutePath ? expandHomePath(request.absolutePath) : undefined,
+        afterLineNumber: request.afterLineNumber,
+        afterByteOffset: request.afterByteOffset,
+        limit: request.limit ?? 100,
+      });
+    }
+    case "replicate-rollout-events": {
+      if (!request.sessionId && !request.absolutePath) {
+        throw new Error("replicate-rollout-events requires sessionId or absolutePath");
+      }
+      if (request.follow) {
+        throw new Error("replicate-rollout-events follow mode is only available from the CLI");
+      }
+      return replicateRolloutEvents({
+        store,
+        codexHome,
+        input: {
+          sessionId: request.sessionId,
+          absolutePath: request.absolutePath ? expandHomePath(request.absolutePath) : undefined,
+          afterLineNumber: request.afterLineNumber,
+          afterByteOffset: request.afterByteOffset,
+          limit: request.limit ?? 200,
+          follow: false,
+          pollIntervalMs: request.pollIntervalMs ?? 1000,
+          idleTimeoutMs: request.idleTimeoutMs,
+          sourceHost: request.sourceHost,
+        },
+      });
+    }
     case "upsert-definition": {
       const input = normalizeDefinitionInput(
         request.payload as UpsertJAgentDefinitionInput,
@@ -1349,13 +2175,6 @@ async function dispatchSessionServiceRequest(
       const artifact = await store.recordJAgentArtifact(input);
       return toJAgentArtifactRow(artifact);
     }
-    case "record-event": {
-      const event = await store.recordJAgentEvent(
-        request.payload as RecordJAgentEventInput,
-      );
-      return toJAgentEventRow(event);
-    }
->>>>>>> 231c3091 (fix(jazz2): harden conversation-turn commits)
     default:
       throw new Error(`Unsupported session service method: ${request.method}`);
   }
@@ -1463,15 +2282,64 @@ async function canConnectToSocket(socketPath: string): Promise<boolean> {
   });
 }
 
+async function canQuerySessionServiceHealth(socketPath: string): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const socket = createConnection({ path: socketPath });
+    let settled = false;
+    let buffer = "";
+
+    const finish = (result: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setEncoding("utf8");
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify({ id: "health-probe", method: "health" })}\n`);
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newlineIndex = buffer.indexOf("\n");
+      if (newlineIndex === -1) {
+        return;
+      }
+      const line = buffer.slice(0, newlineIndex).trim();
+      if (!line) {
+        finish(false);
+        return;
+      }
+      try {
+        const response = JSON.parse(line) as {
+          ok?: unknown;
+          result?: { status?: unknown };
+        };
+        finish(response.ok === true && response.result?.status === "ok");
+      } catch {
+        finish(false);
+      }
+    });
+    socket.once("error", () => {
+      finish(false);
+    });
+    socket.setTimeout(500, () => {
+      finish(false);
+    });
+  });
+}
+
 async function waitForSocketReady(socketPath: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await canConnectToSocket(socketPath)) {
+    if (await canQuerySessionServiceHealth(socketPath)) {
       return true;
     }
     await delay(50);
   }
-  return await canConnectToSocket(socketPath);
+  return await canQuerySessionServiceHealth(socketPath);
 }
 
 function isSessionServiceLockStale(metadata: SessionServiceLockMetadata): boolean {
@@ -1551,7 +2419,7 @@ async function acquireSessionServiceLock(socketPath: string): Promise<SessionSer
 }
 
 async function prepareSocketPath(socketPath: string): Promise<void> {
-  const alreadyServing = await canConnectToSocket(socketPath);
+  const alreadyServing = await canQuerySessionServiceHealth(socketPath);
   if (alreadyServing) {
     throw new Error(`session service already running at ${socketPath}`);
   }
@@ -1579,25 +2447,21 @@ function summarizeSessionServiceRequest(request: SessionServiceRequest): string 
 }
 
 async function dispatchSessionServiceRequestWithTimeout(
-  store: ReturnType<typeof createCodexSessionStore>,
+  getRuntimeDeps: () => SessionServiceRuntimeDeps,
+  getStreamStore: () => CodexSessionStoreHandle,
   request: SessionServiceRequest,
   dataPath: string,
   codexHome: string,
-  sessionSyncScheduler: SessionSyncScheduler,
-  catalogPrimer: CatalogPrimer,
-  recentRolloutSyncScheduler: RecentRolloutSyncScheduler,
   runtimeInfo: SessionServiceRuntimeInfo,
 ): Promise<unknown> {
   const timeoutSentinel = Symbol("session-service-timeout");
   const result = await Promise.race([
     dispatchSessionServiceRequest(
-      store,
+      getRuntimeDeps,
+      getStreamStore,
       request,
       dataPath,
       codexHome,
-      sessionSyncScheduler,
-      catalogPrimer,
-      recentRolloutSyncScheduler,
       runtimeInfo,
     ),
     delay(SESSION_SERVICE_REQUEST_TIMEOUT_MS).then(() => timeoutSentinel),
@@ -1614,12 +2478,10 @@ async function dispatchSessionServiceRequestWithTimeout(
 
 function handleSessionServiceConnection(
   socket: Socket,
-  store: ReturnType<typeof createCodexSessionStore>,
+  getRuntimeDeps: () => SessionServiceRuntimeDeps,
+  getStreamStore: () => CodexSessionStoreHandle,
   dataPath: string,
   codexHome: string,
-  sessionSyncScheduler: SessionSyncScheduler,
-  catalogPrimer: CatalogPrimer,
-  recentRolloutSyncScheduler: RecentRolloutSyncScheduler,
   completionBroadcaster: CompletionBroadcaster,
   runtimeInfo: SessionServiceRuntimeInfo,
 ): void {
@@ -1668,13 +2530,11 @@ function handleSessionServiceConnection(
 
         try {
           const result = await dispatchSessionServiceRequestWithTimeout(
-            store,
+            getRuntimeDeps,
+            getStreamStore,
             request,
             dataPath,
             codexHome,
-            sessionSyncScheduler,
-            catalogPrimer,
-            recentRolloutSyncScheduler,
             runtimeInfo,
           );
           writeSessionServiceResponse(socket, {
@@ -1710,47 +2570,63 @@ function handleSessionServiceConnection(
 }
 
 async function serveSessionQueries(options: {
-  store: ReturnType<typeof createCodexSessionStore>;
+  getStore: () => CodexSessionStoreHandle;
+  getStreamStore: () => CodexSessionStoreHandle;
   socketPath: string;
   dataPath: string;
+  streamDataPath: string;
   codexHome: string;
   pollIntervalMs: number;
   watchRollouts: boolean;
+  watchStreamRollouts: boolean;
+  warmStreamStore: boolean;
 }): Promise<void> {
   await mkdir(dirname(options.socketPath), { recursive: true });
   const instanceLock = await acquireSessionServiceLock(options.socketPath);
   const completionBroadcaster = new CompletionBroadcaster();
-  const sessionSyncScheduler = createSessionSyncScheduler({
-    store: options.store,
-    codexHome: options.codexHome,
-    onProjectionSynced: ({ completionEvents }) => {
-      if (completionEvents.length > 0) {
-        completionBroadcaster.publish(completionEvents);
-      }
-    },
-  });
-  const catalogPrimer = createCatalogPrimer({
-    store: options.store,
-    codexHome: options.codexHome,
-  });
-  const recentRolloutSyncScheduler = createRecentRolloutSyncScheduler({
-    store: options.store,
-    codexHome: options.codexHome,
-  });
+  let runtimeDeps: SessionServiceRuntimeDeps | null = null;
+  const getRuntimeDeps = (): SessionServiceRuntimeDeps => {
+    if (runtimeDeps) {
+      return runtimeDeps;
+    }
+
+    const store = options.getStore();
+    runtimeDeps = {
+      store,
+      sessionSyncScheduler: createSessionSyncScheduler({
+        store,
+        codexHome: options.codexHome,
+        onProjectionSynced: ({ completionEvents }) => {
+          if (completionEvents.length > 0) {
+            completionBroadcaster.publish(completionEvents);
+          }
+        },
+      }),
+      catalogPrimer: createCatalogPrimer({
+        store,
+        codexHome: options.codexHome,
+      }),
+      recentRolloutSyncScheduler: createRecentRolloutSyncScheduler({
+        store,
+        codexHome: options.codexHome,
+      }),
+    };
+    return runtimeDeps;
+  };
 
   const server = createServer((socket) => {
     handleSessionServiceConnection(
       socket,
-      options.store,
+      getRuntimeDeps,
+      options.getStreamStore,
       options.dataPath,
       options.codexHome,
-      sessionSyncScheduler,
-      catalogPrimer,
-      recentRolloutSyncScheduler,
       completionBroadcaster,
       {
         socketPath: options.socketPath,
         watchRollouts: options.watchRollouts,
+        watchStreamRollouts: options.watchStreamRollouts,
+        streamDataPath: options.streamDataPath,
       },
     );
   });
@@ -1779,12 +2655,45 @@ async function serveSessionQueries(options: {
   };
 
   try {
+    await prepareSocketPath(options.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(options.socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    if (options.warmStreamStore) {
+      void options.getStreamStore()
+        .listCodexStreamEvents({ limit: 1 })
+        .catch(handleWatchError("warm-stream-store"));
+    }
+
     const promises: Promise<void>[] = [];
-    if (options.watchRollouts) {
+    if (options.watchStreamRollouts) {
+      const streamRolloutPromise = (async () => {
+        const streamPollIntervalMs = Math.max(1000, options.pollIntervalMs);
+        await delay(streamPollIntervalMs, watchController.signal);
+        await watchRecentRolloutStreamEvents({
+          codexHome: options.codexHome,
+          store: options.getStreamStore(),
+          pollIntervalMs: streamPollIntervalMs,
+          signal: watchController.signal,
+        });
+      })().catch(handleWatchError("watch-stream-rollouts"));
+      promises.push(streamRolloutPromise);
+    }
+
+    const shouldWatchRolloutsInBackground =
+      process.env.FLOW_CODEX_SESSION_BACKGROUND_ROLLOUT_WATCH === "1" ||
+      process.env.FLOW_CODEX_SESSION_BACKGROUND_ROLLOUT_WATCH === "true";
+    if (options.watchRollouts && shouldWatchRolloutsInBackground) {
       const syncPromise = watchCodexRollouts({
         codexHome: options.codexHome,
-        store: options.store,
+        store: getRuntimeDeps().store,
         pollIntervalMs: options.pollIntervalMs,
+        recentScanLimit: 16,
+        fullRescanEveryMs: 24 * 60 * 60 * 1000,
         onProjectionSynced: ({ completionEvents }) => {
           if (completionEvents.length > 0) {
             completionBroadcaster.publish(completionEvents);
@@ -1795,28 +2704,23 @@ async function serveSessionQueries(options: {
       promises.push(syncPromise);
     }
 
-    const completionPromise = watchRecentCompletionEvents({
-      codexHome: options.codexHome,
-      pollIntervalMs: options.pollIntervalMs,
-      bootstrapWindowMs: 10 * 60 * 1000,
-      signal: watchController.signal,
-      onEvents: (completionEvents) => {
-        if (completionEvents.length > 0) {
-          completionBroadcaster.publish(completionEvents);
-        }
-      },
-    }).catch(handleWatchError("watch-completions"));
-    promises.push(completionPromise);
+    const shouldWatchFileCompletions = process.env.FLOW_CODEX_SESSION_FILE_COMPLETION_WATCH === "1"
+      || process.env.FLOW_CODEX_SESSION_FILE_COMPLETION_WATCH === "true";
+    if (shouldWatchFileCompletions) {
+      const completionPromise = watchRecentCompletionEvents({
+        codexHome: options.codexHome,
+        pollIntervalMs: options.pollIntervalMs,
+        bootstrapWindowMs: 10 * 60 * 1000,
+        signal: watchController.signal,
+        onEvents: (completionEvents) => {
+          if (completionEvents.length > 0) {
+            completionBroadcaster.publish(completionEvents);
+          }
+        },
+      }).catch(handleWatchError("watch-completions"));
+      promises.push(completionPromise);
+    }
     watchPromise = Promise.all(promises).then(() => undefined);
-
-    await prepareSocketPath(options.socketPath);
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(options.socketPath, () => {
-        server.off("error", reject);
-        resolve();
-      });
-    });
 
     await new Promise<void>((resolve) => {
       const shutdown = async () => {
@@ -1844,7 +2748,7 @@ async function serveSessionQueries(options: {
 
 async function watchCompletionEvents(options: {
   codexHome: string;
-  dataPath: string;
+  storeConfig: CodexSessionStoreConfig;
   pollIntervalMs: number;
   bootstrapWindowMs: number;
 }): Promise<void> {
@@ -1853,7 +2757,7 @@ async function watchCompletionEvents(options: {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
-  const store = createCodexSessionStore({ dataPath: options.dataPath });
+  const store = createCodexSessionStore(options.storeConfig);
   const emittedIds = new Set<string>();
   const emittedOrder: string[] = [];
   let completedAfter = new Date(Date.now() - options.bootstrapWindowMs);
@@ -1912,6 +2816,73 @@ function asJsonLine(completion: CodexCompletionEvent): Record<string, unknown> {
     completedAt: completion.completedAt,
     updatedAt: completion.updatedAt,
   };
+}
+
+function asStreamEventJsonLine(
+  event: CodexStreamEventRow,
+  options: { includePayload?: boolean } = {},
+): Record<string, unknown> {
+  const line: Record<string, unknown> = {
+    id: event.id,
+    eventId: event.event_id,
+    sessionId: event.session_id,
+    turnId: event.turn_id,
+    sequence: event.sequence,
+    eventKind: event.event_kind,
+    eventType: event.event_type,
+    sourceId: event.source_id,
+    sourceHost: event.source_host,
+    sourcePath: event.source_path,
+    textDelta: event.text_delta,
+    schemaHash: event.schema_hash,
+    createdAt: event.created_at.toISOString(),
+    observedAt: event.observed_at.toISOString(),
+  };
+  if (options.includePayload !== false) {
+    line.payloadJson = event.payload_json;
+    line.rawJson = event.raw_json;
+  }
+  return line;
+}
+
+async function watchStreamEvents(options: {
+  store: CodexSessionStoreHandle;
+  sessionId: string;
+  turnId?: string;
+  afterSequence?: number;
+  limit: number;
+  pollIntervalMs: number;
+}): Promise<void> {
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  let afterSequence = options.afterSequence;
+  const emittedIds = new Set<string>();
+
+  try {
+    while (!controller.signal.aborted) {
+      const events = await options.store.listCodexStreamEvents({
+        sessionId: options.sessionId,
+        turnId: options.turnId,
+        afterSequence,
+        limit: options.limit,
+      });
+      for (const event of events) {
+        if (emittedIds.has(event.event_id)) {
+          continue;
+        }
+        emittedIds.add(event.event_id);
+        afterSequence = Math.max(afterSequence ?? -1, event.sequence);
+        process.stdout.write(`${JSON.stringify(asStreamEventJsonLine(event))}\n`);
+      }
+      await delay(options.pollIntervalMs, controller.signal);
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
 }
 
 interface CompletionSubscriber {
@@ -2048,6 +3019,137 @@ interface CompletionRolloutWatcherOptions {
   onEvents: (events: CodexCompletionEvent[]) => void;
 }
 
+interface StreamRolloutWatcherOptions {
+  codexHome: string;
+  store: CodexSessionStoreHandle;
+  pollIntervalMs: number;
+  signal?: AbortSignal;
+  sourceHost?: string;
+}
+
+interface StreamRolloutCursor {
+  mtimeMs: number;
+  lastLineNumber?: number;
+  lastByteOffset?: number;
+  hasBacklog?: boolean;
+}
+
+interface RecentRolloutPathStat {
+  path: string;
+  mtimeMs: number;
+}
+
+function streamWatchRolloutLimit(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_ROLLOUT_LIMIT ?? "24");
+  return Math.max(1, Math.min(128, Math.trunc(Number.isFinite(parsed) ? parsed : 24)));
+}
+
+function streamWatchDayCount(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_DAYS ?? "2");
+  return Math.max(1, Math.min(14, Math.trunc(Number.isFinite(parsed) ? parsed : 2)));
+}
+
+function streamWatchBatchLimit(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BATCH_LIMIT ?? "5");
+  return Math.max(1, Math.min(5000, Math.trunc(Number.isFinite(parsed) ? parsed : 5)));
+}
+
+function streamWatchBootstrapMode(): "tail" | "backfill" {
+  const raw = (process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE ?? "tail")
+    .trim()
+    .toLowerCase();
+  return raw === "backfill" ? "backfill" : "tail";
+}
+
+async function collectRecentlyModifiedRolloutPaths(
+  codexHome: string,
+  dayCount: number,
+  limit: number,
+): Promise<RecentRolloutPathStat[]> {
+  const paths = await collectRecentRolloutPaths(codexHome, dayCount, {
+    recursive: false,
+  });
+  const rows = await Promise.all(
+    paths.map(async (path): Promise<RecentRolloutPathStat | null> => {
+      const fileStat = await stat(path).catch(() => null);
+      if (!fileStat?.isFile()) {
+        return null;
+      }
+      return { path, mtimeMs: fileStat.mtimeMs };
+    }),
+  );
+  return rows
+    .filter((row): row is RecentRolloutPathStat => row !== null)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, limit);
+}
+
+async function watchRecentRolloutStreamEvents(
+  options: StreamRolloutWatcherOptions,
+): Promise<void> {
+  const cursors = new Map<string, StreamRolloutCursor>();
+  const sourceHost = options.sourceHost?.trim() || hostname();
+  const bootstrapMode = streamWatchBootstrapMode();
+
+  while (!options.signal?.aborted) {
+    const rolloutPaths = await collectRecentlyModifiedRolloutPaths(
+      options.codexHome,
+      streamWatchDayCount(),
+      streamWatchRolloutLimit(),
+    );
+
+    for (const rolloutPath of rolloutPaths) {
+      if (options.signal?.aborted) {
+        return;
+      }
+      await delay(0, options.signal);
+      const cursor = cursors.get(rolloutPath.path);
+      if (cursor && !cursor.hasBacklog && rolloutPath.mtimeMs <= cursor.mtimeMs) {
+        continue;
+      }
+      if (!cursor && bootstrapMode === "tail") {
+        const fileStat = await stat(rolloutPath.path).catch(() => null);
+        cursors.set(rolloutPath.path, {
+          mtimeMs: rolloutPath.mtimeMs,
+          lastByteOffset: fileStat?.isFile() && fileStat.size > 0 ? fileStat.size - 1 : undefined,
+        });
+        continue;
+      }
+
+      const result = await replicateRolloutEvents({
+        store: options.store,
+        codexHome: options.codexHome,
+        signal: options.signal,
+        input: {
+          absolutePath: rolloutPath.path,
+          afterLineNumber: cursor?.lastLineNumber,
+          afterByteOffset: cursor?.lastByteOffset,
+          limit: streamWatchBatchLimit(),
+          maxBatches: 1,
+          follow: false,
+          pollIntervalMs: options.pollIntervalMs,
+          sourceHost,
+          yieldBetweenEvents: true,
+        },
+      });
+
+      cursors.set(rolloutPath.path, {
+        mtimeMs: rolloutPath.mtimeMs,
+        lastLineNumber: result.lastLineNumber ?? cursor?.lastLineNumber,
+        lastByteOffset: result.lastByteOffset ?? cursor?.lastByteOffset,
+        hasBacklog: !!result.hasMore,
+      });
+    }
+
+    await delay(options.pollIntervalMs, options.signal);
+  }
+}
+
+function completionWatchRolloutLimit(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_COMPLETION_WATCH_ROLLOUT_LIMIT ?? "8");
+  return Math.max(1, Math.min(64, Math.trunc(Number.isFinite(parsed) ? parsed : 8)));
+}
+
 async function watchRecentCompletionEvents(
   options: CompletionRolloutWatcherOptions,
 ): Promise<void> {
@@ -2057,11 +3159,15 @@ async function watchRecentCompletionEvents(
   const bootstrapCutoff = Date.now() - options.bootstrapWindowMs;
 
   while (!options.signal?.aborted) {
-    const rolloutPaths = await collectRecentRolloutPaths(options.codexHome, 2);
+    const rolloutPaths = await collectRecentRolloutPaths(options.codexHome, 2, {
+      limit: completionWatchRolloutLimit(),
+      recursive: false,
+    });
     for (const rolloutPath of rolloutPaths) {
       if (options.signal?.aborted) {
         return;
       }
+      await delay(0, options.signal);
       const fileStat = await stat(rolloutPath).catch(() => null);
       if (!fileStat?.isFile()) {
         continue;
@@ -2101,9 +3207,20 @@ async function watchRecentCompletionEvents(
   }
 }
 
-async function collectRecentRolloutPaths(codexHome: string, dayCount: number): Promise<string[]> {
+interface RecentRolloutPathOptions {
+  limit?: number;
+  recursive?: boolean;
+}
+
+async function collectRecentRolloutPaths(
+  codexHome: string,
+  dayCount: number,
+  options: RecentRolloutPathOptions = {},
+): Promise<string[]> {
   const paths: string[] = [];
   const now = new Date();
+  const limit = options.limit && options.limit > 0 ? Math.trunc(options.limit) : null;
+  const recursive = options.recursive ?? true;
 
   for (let offset = 0; offset < dayCount; offset += 1) {
     const day = new Date(now.getTime() - offset * 24 * 60 * 60 * 1000);
@@ -2114,10 +3231,25 @@ async function collectRecentRolloutPaths(codexHome: string, dayCount: number): P
       String(day.getMonth() + 1).padStart(2, "0"),
       String(day.getDate()).padStart(2, "0"),
     );
-    paths.push(...(await collectRolloutPathsUnder(dayRoot)));
+    const dayPaths = recursive
+      ? await collectRolloutPathsUnder(dayRoot)
+      : await collectRolloutPathsInDirectory(dayRoot);
+    paths.push(...dayPaths);
+    if (limit !== null && paths.length > limit * 2) {
+      paths.sort();
+      paths.splice(0, paths.length - limit);
+    }
   }
 
-  return paths.sort();
+  const sorted = paths.sort();
+  return limit === null ? sorted : sorted.slice(-limit);
+}
+
+async function collectRolloutPathsInDirectory(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl"))
+    .map((entry) => join(root, entry.name));
 }
 
 async function collectRolloutPathsUnder(root: string): Promise<string[]> {
@@ -2140,6 +3272,15 @@ async function collectRolloutPathsUnder(root: string): Promise<string[]> {
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "sync";
+  if (command === "help" || command === "--help" || command === "-h") {
+    printUsage();
+    return;
+  }
+  if (command === "schema-hash") {
+    console.log(JSON.stringify({ schemaHash: backendSchemaHash() }));
+    return;
+  }
+
   const codexHome = expandHomePath(
     readFlag("--codex-home")
       ?? process.env.FLOW_CODEX_JAZZ_CODEX_HOME
@@ -2152,6 +3293,14 @@ async function main(): Promise<void> {
       ?? process.env.J_SESSIONS_JAZZ_DATA_PATH
       ?? defaultJazzDataPath(),
   );
+  const storeConfig = readStoreConfig(dataPath);
+  const streamDataPath = await resolvePersistentDataPath(
+    readFlag("--stream-data-path")
+      ?? process.env.FLOW_CODEX_JAZZ_STREAM_DATA_PATH
+      ?? process.env.J_SESSIONS_JAZZ_STREAM_DATA_PATH
+      ?? defaultStreamDataPath(dataPath),
+  );
+  const streamStoreConfig = localStreamStoreConfig(storeConfig, streamDataPath);
   const socketPath = expandHomePath(
     readFlag("--socket-path")
       ?? process.env.FLOW_CODEX_JAZZ_SOCKET_PATH
@@ -2161,32 +3310,153 @@ async function main(): Promise<void> {
   const pollIntervalMs = Number(readFlag("--poll-interval-ms") ?? "1000");
   const bootstrapWindowMs = Number(readFlag("--bootstrap-window-ms") ?? "15000");
   const watchRollouts = readBooleanFlag("--watch-rollouts", command == "serve" ? false : true);
+  const watchStreamRollouts = readBooleanFlag("--watch-stream-rollouts", command === "serve");
+  const warmStreamStore = readBooleanFlag("--warm-stream-store", false);
 
   if (command === "watch-completions") {
     await watchCompletionEvents({
       codexHome,
-      dataPath,
+      storeConfig,
       pollIntervalMs,
       bootstrapWindowMs,
     });
     return;
   }
 
-  const store = createCodexSessionStore({ dataPath });
+  if (command === "serve") {
+    const storeRef: { current?: CodexSessionStoreHandle } = {};
+    const streamStoreRef: { current?: CodexSessionStoreHandle } = {};
+    const getStore = (): CodexSessionStoreHandle => {
+      if (!storeRef.current) {
+        storeRef.current = createCodexSessionStore(storeConfig);
+      }
+      return storeRef.current;
+    };
+    const getStreamStore = (): CodexSessionStoreHandle => {
+      if (!streamStoreRef.current) {
+        streamStoreRef.current = createCodexSessionStore(streamStoreConfig);
+      }
+      return streamStoreRef.current;
+    };
 
-  try {
-    if (command === "serve") {
+    try {
       await serveSessionQueries({
-        store,
+        getStore,
+        getStreamStore,
         socketPath,
         dataPath,
+        streamDataPath,
         codexHome,
         pollIntervalMs,
         watchRollouts,
+        watchStreamRollouts,
+        warmStreamStore,
       });
       return;
+    } finally {
+      await Promise.allSettled([
+        storeRef.current?.shutdown(),
+        streamStoreRef.current?.shutdown(),
+      ]);
     }
+  }
 
+  if (
+    command === "record-event"
+    || command === "list-stream-events"
+    || command === "watch-stream-events"
+    || command === "replicate-rollout-events"
+  ) {
+    const streamStore = createCodexSessionStore(streamStoreConfig);
+    try {
+      if (command === "record-event") {
+        const input = normalizeRecordCodexStreamEventInput(
+          readJsonInput<Record<string, unknown>>(command),
+        );
+        const event = await streamStore.recordCodexStreamEvent(input);
+        console.log(JSON.stringify(asStreamEventJsonLine(event)));
+        return;
+      }
+
+      if (command === "list-stream-events") {
+        const includePayload = readBooleanFlag("--include-payload", true);
+        const events = await streamStore.listCodexStreamEvents({
+          sessionId: readFlag("--session-id"),
+          turnId: readFlag("--turn-id"),
+          afterSequence: readOptionalNumberFlag("--after-sequence"),
+          limit: readOptionalNumberFlag("--limit") ?? 200,
+          latest: readBooleanFlag("--latest", false),
+        });
+        console.log(JSON.stringify(events.map((event) => asStreamEventJsonLine(event, {
+          includePayload,
+        }))));
+        return;
+      }
+
+      if (command === "watch-stream-events") {
+        const sessionId = readFlag("--session-id");
+        if (!sessionId) {
+          throw new Error("watch-stream-events requires --session-id");
+        }
+        await watchStreamEvents({
+          store: streamStore,
+          sessionId,
+          turnId: readFlag("--turn-id"),
+          afterSequence: readOptionalNumberFlag("--after-sequence"),
+          limit: readOptionalNumberFlag("--limit") ?? 200,
+          pollIntervalMs,
+        });
+        return;
+      }
+
+      const sessionId = readFlag("--session-id");
+      const absolutePath = readFlag("--absolute-path");
+      if (!sessionId && !absolutePath) {
+        throw new Error("replicate-rollout-events requires --session-id or --absolute-path");
+      }
+      const follow = readBooleanFlag("--follow", false);
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      try {
+        const result = await replicateRolloutEvents({
+          store: streamStore,
+          codexHome,
+          signal: controller.signal,
+          input: {
+            sessionId,
+            absolutePath: absolutePath ? expandHomePath(absolutePath) : undefined,
+            afterLineNumber: readOptionalNumberFlag("--after-line-number"),
+            afterByteOffset: readOptionalNumberFlag("--after-byte-offset"),
+            limit: readOptionalNumberFlag("--limit") ?? 200,
+            follow,
+            idleTimeoutMs: readOptionalNumberFlag("--idle-timeout-ms"),
+            pollIntervalMs,
+            sourceHost: readFlag("--source-host"),
+          },
+          onEvent: follow
+            ? (event) => {
+              process.stdout.write(`${JSON.stringify(asStreamEventJsonLine(event))}\n`);
+            }
+            : undefined,
+        });
+        if (!follow) {
+          console.log(JSON.stringify(result));
+        }
+      } finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+      return;
+    } finally {
+      await streamStore.shutdown();
+    }
+  }
+
+  const store = createCodexSessionStore(storeConfig);
+
+  try {
     if (command === "sync-session") {
       const sessionId = readFlag("--session-id");
       if (!sessionId) {
@@ -2285,6 +3555,97 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (command === "list-rollout-events") {
+      const sessionId = readFlag("--session-id");
+      const absolutePath = readFlag("--absolute-path");
+      if (!sessionId && !absolutePath) {
+        throw new Error("list-rollout-events requires --session-id or --absolute-path");
+      }
+      const events = await listRolloutEventRows(store, codexHome, {
+        sessionId,
+        absolutePath: absolutePath ? expandHomePath(absolutePath) : undefined,
+        afterLineNumber: readOptionalNumberFlag("--after-line-number"),
+        afterByteOffset: readOptionalNumberFlag("--after-byte-offset"),
+        limit: readOptionalNumberFlag("--limit") ?? 100,
+      });
+      console.log(JSON.stringify(events));
+      return;
+    }
+
+    if (command === "replicate-rollout-events") {
+      const sessionId = readFlag("--session-id");
+      const absolutePath = readFlag("--absolute-path");
+      if (!sessionId && !absolutePath) {
+        throw new Error("replicate-rollout-events requires --session-id or --absolute-path");
+      }
+      const follow = readBooleanFlag("--follow", false);
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      try {
+        const result = await replicateRolloutEvents({
+          store,
+          codexHome,
+          signal: controller.signal,
+          input: {
+            sessionId,
+            absolutePath: absolutePath ? expandHomePath(absolutePath) : undefined,
+            afterLineNumber: readOptionalNumberFlag("--after-line-number"),
+            afterByteOffset: readOptionalNumberFlag("--after-byte-offset"),
+            limit: readOptionalNumberFlag("--limit") ?? 200,
+            follow,
+            idleTimeoutMs: readOptionalNumberFlag("--idle-timeout-ms"),
+            pollIntervalMs,
+            sourceHost: readFlag("--source-host"),
+          },
+          onEvent: follow
+            ? (event) => {
+              process.stdout.write(`${JSON.stringify(asStreamEventJsonLine(event))}\n`);
+            }
+            : undefined,
+        });
+        if (!follow) {
+          console.log(JSON.stringify(result));
+        }
+      } finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+      return;
+    }
+
+    if (command === "list-stream-events") {
+      const includePayload = readBooleanFlag("--include-payload", true);
+      const events = await store.listCodexStreamEvents({
+        sessionId: readFlag("--session-id"),
+        turnId: readFlag("--turn-id"),
+        afterSequence: readOptionalNumberFlag("--after-sequence"),
+        limit: readOptionalNumberFlag("--limit") ?? 200,
+        latest: readBooleanFlag("--latest", false),
+      });
+      console.log(JSON.stringify(events.map((event) => asStreamEventJsonLine(event, {
+        includePayload,
+      }))));
+      return;
+    }
+
+    if (command === "watch-stream-events") {
+      const sessionId = readFlag("--session-id");
+      if (!sessionId) {
+        throw new Error("watch-stream-events requires --session-id");
+      }
+      await watchStreamEvents({
+        store,
+        sessionId,
+        turnId: readFlag("--turn-id"),
+        afterSequence: readOptionalNumberFlag("--after-sequence"),
+        limit: readOptionalNumberFlag("--limit") ?? 200,
+        pollIntervalMs,
+      });
+      return;
+    }
+
     if (command === "list-active-sessions") {
       const limit = Number(readFlag("--limit") ?? "10");
       const projectRoot = readFlag("--project-root");
@@ -2353,6 +3714,15 @@ async function main(): Promise<void> {
       );
       const summary = await store.recordTerminalPresence(input);
       console.log(JSON.stringify(summary));
+      return;
+    }
+
+    if (command === "record-event") {
+      const input = normalizeRecordCodexStreamEventInput(
+        readJsonInput<Record<string, unknown>>(command),
+      );
+      const event = await store.recordCodexStreamEvent(input);
+      console.log(JSON.stringify(asStreamEventJsonLine(event)));
       return;
     }
 

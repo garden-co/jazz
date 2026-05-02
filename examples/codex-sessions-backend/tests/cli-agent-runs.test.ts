@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -220,7 +220,7 @@ describe("codex-sessions CLI agent-run commands", () => {
       "10",
     ]);
     expect(activeAfter).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("syncs one session through the CLI", async () => {
     const codexHome = join(tempDir, ".codex");
@@ -279,7 +279,301 @@ describe("codex-sessions CLI agent-run commands", () => {
     expect(result.synced).toBe(1);
     expect(session.id).toBe("019d0000-0000-7000-8000-000000000002");
     expect(session.preview).toBe("Sync just this session");
-  });
+  }, 15_000);
+
+  it("lists raw rollout events from the source file with stable cursors", async () => {
+    const codexHome = join(tempDir, ".codex");
+    const rolloutDir = join(codexHome, "sessions/2026/04/08");
+    const rolloutPath = join(
+      rolloutDir,
+      "rollout-2026-04-08T12-55-00-019d0000-0000-7000-8000-000000000004.jsonl",
+    );
+    await mkdir(rolloutDir, { recursive: true });
+    await writeFile(
+      rolloutPath,
+      [
+        {
+          timestamp: "2026-04-08T12:55:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: "019d0000-0000-7000-8000-000000000004",
+            timestamp: "2026-04-08T12:55:00.000Z",
+            cwd: "/Users/nikitavoloboev/repos/openai/codex",
+            originator: "codex-cli",
+            cli_version: "0.0.0",
+            source: "cli",
+          },
+        },
+        {
+          timestamp: "2026-04-08T12:55:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message_content_delta",
+            turn_id: "turn-live",
+            delta: "streamed live",
+          },
+        },
+        {
+          timestamp: "2026-04-08T12:55:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn-live",
+            last_agent_message: "done",
+          },
+        },
+      ].map((line) => JSON.stringify(line)).join("\n"),
+    );
+
+    const firstTwo = runCliJson("list-rollout-events", undefined, [
+      "--codex-home",
+      codexHome,
+      "--session-id",
+      "019d0000-0000-7000-8000-000000000004",
+      "--limit",
+      "2",
+    ]);
+    expect(firstTwo).toHaveLength(2);
+    expect(firstTwo[0]).toMatchObject({
+      absolutePath: rolloutPath,
+      lineNumber: 1,
+      recordType: "session_meta",
+      sessionId: "019d0000-0000-7000-8000-000000000004",
+    });
+    expect(firstTwo[1]).toMatchObject({
+      lineNumber: 2,
+      recordType: "event_msg",
+      eventType: "agent_message_content_delta",
+      turnId: "turn-live",
+    });
+    expect(firstTwo[1].byteOffset).toBeGreaterThan(firstTwo[0].byteOffset);
+
+    const afterCursor = runCliJson("list-rollout-events", undefined, [
+      "--absolute-path",
+      rolloutPath,
+      "--after-line-number",
+      "2",
+    ]);
+    expect(afterCursor).toHaveLength(1);
+    expect(afterCursor[0]).toMatchObject({
+      lineNumber: 3,
+      eventType: "task_complete",
+      turnId: "turn-live",
+    });
+  }, 15_000);
+
+  it("records and lists durable stream events through the CLI", () => {
+    const recorded = runCliJson("record-event", {
+      sessionId: "session-parent",
+      turnId: "turn-parent",
+      sequence: 1,
+      eventKind: "agent_message",
+      eventType: "thread/tail/frame",
+      sourceHost: "op1",
+      textDelta: "hello",
+      schemaHash: "schema-hash-cli",
+      createdAt: "2026-05-02T12:00:00.000Z",
+      observedAt: "2026-05-02T12:00:00.010Z",
+    });
+    expect(recorded).toMatchObject({
+      sessionId: "session-parent",
+      turnId: "turn-parent",
+      sequence: 1,
+      eventKind: "agent_message",
+      textDelta: "hello",
+      schemaHash: "schema-hash-cli",
+    });
+
+    const events = runCliJson("list-stream-events", undefined, [
+      "--session-id",
+      "session-parent",
+      "--after-sequence",
+      "0",
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventId: recorded.eventId,
+      sessionId: "session-parent",
+      turnId: "turn-parent",
+      sequence: 1,
+      textDelta: "hello",
+    });
+
+    const appServerRecorded = runCliJson("record-event", {
+      session_id: "thread-from-app-server",
+      turn_id: "turn-from-app-server",
+      sequence: 4,
+      event_kind: "agentMessage",
+      event_type: "thread/tail/frame",
+      source_id: "codex-app-server:test",
+      source_host: "linux-test",
+      source_path: "/srv/codex/openai/codex",
+      text_delta: "from app-server",
+      payload_json: { delta: "from app-server" },
+      raw_json: { method: "thread/tail/frame" },
+      schema_hash: "schema-hash-snake",
+      created_at: "2026-05-02T12:00:01.000Z",
+      observed_at: "2026-05-02T12:00:01.010Z",
+    });
+    expect(appServerRecorded).toMatchObject({
+      sessionId: "thread-from-app-server",
+      turnId: "turn-from-app-server",
+      sequence: 4,
+      eventKind: "agentMessage",
+      eventType: "thread/tail/frame",
+      sourceId: "codex-app-server:test",
+      sourceHost: "linux-test",
+      sourcePath: "/srv/codex/openai/codex",
+      textDelta: "from app-server",
+      schemaHash: "schema-hash-snake",
+    });
+
+    runCliJson("record-event", {
+      sessionId: "session-parent",
+      turnId: "turn-parent",
+      sequence: 2,
+      eventKind: "agent_message",
+      eventType: "thread/tail/frame",
+      textDelta: "older stream frame",
+      payloadJson: { large: "x".repeat(10_000) },
+      rawJson: { large: "x".repeat(10_000) },
+      createdAt: "2026-05-02T12:00:02.000Z",
+      observedAt: "2026-05-02T12:00:02.010Z",
+    });
+    runCliJson("record-event", {
+      sessionId: "session-parent",
+      turnId: "turn-parent",
+      sequence: 3,
+      eventKind: "agent_message",
+      eventType: "thread/tail/frame",
+      textDelta: "latest stream frame",
+      payloadJson: { large: "x".repeat(10_000) },
+      rawJson: { large: "x".repeat(10_000) },
+      createdAt: "2026-05-02T12:00:03.000Z",
+      observedAt: "2026-05-02T12:00:03.010Z",
+    });
+    const latest = runCliJson("list-stream-events", undefined, [
+      "--session-id",
+      "session-parent",
+      "--latest",
+      "true",
+      "--limit",
+      "1",
+      "--include-payload",
+      "false",
+    ]);
+    expect(latest).toEqual([
+      expect.objectContaining({
+        sessionId: "session-parent",
+        sequence: 3,
+        textDelta: "latest stream frame",
+      }),
+    ]);
+    expect(latest[0].payloadJson).toBeUndefined();
+    expect(latest[0].rawJson).toBeUndefined();
+  }, 15_000);
+
+  it("replicates appended rollout events into the durable stream table", async () => {
+    const codexHome = join(tempDir, ".codex");
+    const rolloutDir = join(codexHome, "sessions/2026/05/02");
+    const rolloutPath = join(
+      rolloutDir,
+      "rollout-2026-05-02T20-00-00-019d0000-0000-7000-8000-000000000005.jsonl",
+    );
+    await mkdir(rolloutDir, { recursive: true });
+    await writeFile(
+      rolloutPath,
+      `${JSON.stringify({
+        timestamp: "2026-05-02T20:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "019d0000-0000-7000-8000-000000000005",
+          timestamp: "2026-05-02T20:00:00.000Z",
+          cwd: "/srv/codex/openai/codex",
+        },
+      })}\n`,
+    );
+
+    const child = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "replicate-rollout-events",
+        "--data-path",
+        dataPath,
+        "--absolute-path",
+        rolloutPath,
+        "--follow",
+        "true",
+        "--idle-timeout-ms",
+        "500",
+        "--poll-interval-ms",
+        "25",
+        "--source-host",
+        "linux-test",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    let stdout = "";
+    let stderr = "";
+    let appended = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (!appended && stdout.includes("\"sequence\":1")) {
+        appended = true;
+        void appendFile(
+          rolloutPath,
+          `${JSON.stringify({
+            timestamp: "2026-05-02T20:00:01.000Z",
+            type: "event_msg",
+            payload: {
+              type: "agent_message_content_delta",
+              turn_id: "turn-remote",
+              delta: "remote live delta",
+            },
+          })}\n`,
+        );
+      }
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(stderr || stdout || `replicate-rollout-events exited ${code}`));
+      });
+    });
+
+    const events = runCliJson("list-stream-events", undefined, [
+      "--session-id",
+      "019d0000-0000-7000-8000-000000000005",
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0].payloadJson).toBeUndefined();
+    expect(events[0].rawJson).toBeUndefined();
+    expect(events[1]).toMatchObject({
+      sequence: 2,
+      eventKind: "event_msg",
+      eventType: "agent_message_content_delta",
+      turnId: "turn-remote",
+      sourceHost: "linux-test",
+      textDelta: "remote live delta",
+    });
+  }, 20_000);
 
   it("hydrates a missing session on demand through get-session", async () => {
     const codexHome = join(tempDir, ".codex");

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "build:schema": "node ../../packages/jazz-tools/dist/cli.js build --schema-dir ./schema",
+    "build:schema": "node scripts/generate-app.mjs",
     "smoke": "tsx src/smoke.ts",
     "sync": "tsx src/cli.ts sync",
     "watch": "tsx src/cli.ts watch",

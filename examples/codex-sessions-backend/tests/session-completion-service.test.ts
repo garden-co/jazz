@@ -151,7 +151,250 @@ describe("codex completion session service", () => {
     ]);
   }, 30_000);
 
-  it("streams completion events over the local session socket", async () => {
+  it("answers health without opening the Jazz store when rollout watchers are disabled", async () => {
+    const coldDataPath = join(tempDir, "cold-health.db");
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        coldDataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "true",
+        "--warm-stream-store",
+        "false",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const health = await sendSocketRequest(socketPath, {
+      id: "health-no-watchers",
+      method: "health",
+    });
+    expect(health).toMatchObject({
+      id: "health-no-watchers",
+      ok: true,
+      result: {
+        status: "ok",
+      },
+    });
+    expect(existsSync(coldDataPath)).toBe(false);
+  }, 30_000);
+
+  it("records stream events over the socket without waiting for the sync server", async () => {
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--server-url",
+        "https://203.0.113.1",
+        "--tier",
+        "edge",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+    const startedAt = Date.now();
+    const response = await Promise.race([
+      sendSocketRequest(socketPath, {
+        id: "stream-record",
+        method: "record-event",
+        payload: {
+          session_id: "socket-stream-session",
+          turn_id: "socket-stream-turn",
+          sequence: 1,
+          event_kind: "agentMessage",
+          event_type: "thread/tail/frame",
+          source_id: "codex-app-server:test",
+          text_delta: "socket persisted",
+          created_at: "2026-05-02T22:00:00.000Z",
+          observed_at: "2026-05-02T22:00:00.010Z",
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("record-event timed out")), 1_000),
+      ),
+    ]);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(response).toMatchObject({
+      id: "stream-record",
+      ok: true,
+      result: {
+        sessionId: "socket-stream-session",
+        turnId: "socket-stream-turn",
+        sequence: 1,
+        eventKind: "agentMessage",
+        textDelta: "socket persisted",
+      },
+    });
+
+    const listed = await sendSocketRequest(socketPath, {
+      id: "stream-list",
+      method: "list-stream-events",
+      sessionId: "socket-stream-session",
+      limit: 5,
+    });
+    expect(listed).toMatchObject({ id: "stream-list", ok: true });
+    expect(listed.result).toMatchObject([
+      {
+        sessionId: "socket-stream-session",
+        turnId: "socket-stream-turn",
+        sequence: 1,
+        textDelta: "socket persisted",
+      },
+    ]);
+    expect(existsSync(join(tempDir, "codex-sessions.stream.db"))).toBe(true);
+  }, 30_000);
+
+  it("replicates recent rollout stream events into the stream sidecar while serving", async () => {
+    const today = new Date();
+    const sessionId = "019d0000-0000-7000-8000-000000000092";
+    const todayRolloutDir = join(
+      codexHome,
+      "sessions",
+      String(today.getFullYear()),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    );
+    const liveRolloutPath = join(
+      todayRolloutDir,
+      `rollout-2026-05-02T12-00-00-${sessionId}.jsonl`,
+    );
+    await mkdir(todayRolloutDir, { recursive: true });
+
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE: "backfill",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const now = new Date().toISOString();
+    await writeFile(
+      liveRolloutPath,
+      [
+        JSON.stringify({
+          timestamp: now,
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            timestamp: now,
+            cwd: "/tmp/stream-sidecar-rollout",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-sidecar",
+            delta: "rollout sidecar",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const events = await waitForStreamEvents(socketPath, sessionId, 2);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sequence: 2,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          turnId: "turn-stream-sidecar",
+          textDelta: "rollout sidecar",
+        }),
+      ]),
+    );
+    expect(existsSync(join(tempDir, "codex-sessions.stream.db"))).toBe(true);
+  }, 30_000);
+
+  it("streams completion events over the local session socket when the legacy file watcher is enabled", async () => {
+    const today = new Date();
+    const todayRolloutDir = join(
+      codexHome,
+      "sessions",
+      String(today.getFullYear()),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    );
+    const liveRolloutPath = join(
+      todayRolloutDir,
+      "rollout-2026-04-08T12-00-00-019d0000-0000-7000-8000-000000000002.jsonl",
+    );
+    await mkdir(todayRolloutDir, { recursive: true });
+
     serviceProcess = spawn(
       "pnpm",
       [
@@ -172,6 +415,10 @@ describe("codex completion session service", () => {
       ],
       {
         cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_FILE_COMPLETION_WATCH: "1",
+        },
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
@@ -186,40 +433,42 @@ describe("codex completion session service", () => {
     const eventPromise = waitForCompletionStreamEvent(socketPath, {
       id: "watch-1",
       method: "watch-completions",
-      completedAfter: "2026-04-08T12:00:01.500Z",
+      completedAfter: "1970-01-01T00:00:00.000Z",
       limit: 10,
     });
 
+    const startedAt = new Date();
+    const completedAt = new Date(startedAt.getTime() + 1000);
     await writeFile(
-      rolloutPath,
+      liveRolloutPath,
       [
         JSON.stringify({
-          timestamp: "2026-04-08T12:00:00.000Z",
+          timestamp: startedAt.toISOString(),
           type: "session_meta",
           payload: {
             id: "019d0000-0000-7000-8000-000000000002",
-            timestamp: "2026-04-08T12:00:00.000Z",
+            timestamp: startedAt.toISOString(),
             cwd: "/tmp/demo-stream",
             source: "codex",
           },
         }),
         JSON.stringify({
-          timestamp: "2026-04-08T12:00:01.000Z",
+          timestamp: startedAt.toISOString(),
           type: "event_msg",
           payload: {
             type: "task_started",
             turn_id: "turn-8",
-            started_at: 1775649601,
+            started_at: Math.floor(startedAt.getTime() / 1000),
           },
         }),
         JSON.stringify({
-          timestamp: "2026-04-08T12:00:02.000Z",
+          timestamp: completedAt.toISOString(),
           type: "event_msg",
           payload: {
             type: "task_complete",
             turn_id: "turn-8",
             last_agent_message: "Streamed completion is live.",
-            completed_at: 1775649602,
+            completed_at: Math.floor(completedAt.getTime() / 1000),
             duration_ms: 1000,
           },
         }),
@@ -236,9 +485,9 @@ describe("codex completion session service", () => {
       projectName: "demo-stream",
       summary: "Streamed completion is live.",
       status: "completed",
-      timestamp: "2026-04-08T12:00:02.000Z",
-      completedAt: "2026-04-08T12:00:02.000Z",
-      updatedAt: "2026-04-08T12:00:02.000Z",
+      timestamp: new Date(Math.floor(completedAt.getTime() / 1000) * 1000).toISOString(),
+      completedAt: new Date(Math.floor(completedAt.getTime() / 1000) * 1000).toISOString(),
+      updatedAt: completedAt.toISOString(),
     });
   }, 30_000);
 
@@ -715,4 +964,32 @@ async function waitForCompletionStreamEvent(
       socket.write(`${JSON.stringify(request)}\n`);
     });
   });
+}
+
+async function waitForStreamEvents(
+  socketPath: string,
+  sessionId: string,
+  minCount: number,
+): Promise<Record<string, unknown>[]> {
+  const deadline = Date.now() + 10_000;
+  let lastResponse: { id?: string; ok: boolean; result?: unknown; error?: string } | null = null;
+  while (Date.now() < deadline) {
+    lastResponse = await sendSocketRequest(socketPath, {
+      id: "wait-stream-events",
+      method: "list-stream-events",
+      sessionId,
+      limit: 20,
+    });
+    if (!lastResponse.ok) {
+      throw new Error(lastResponse.error ?? "list-stream-events failed");
+    }
+    const events = Array.isArray(lastResponse.result)
+      ? lastResponse.result as Record<string, unknown>[]
+      : [];
+    if (events.length >= minCount) {
+      return events;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for stream events: ${JSON.stringify(lastResponse)}`);
 }

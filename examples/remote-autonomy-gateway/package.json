@@ -1,0 +1,22 @@
+{
+  "name": "remote-autonomy-gateway",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "bun run src/main.ts",
+    "start": "bun run src/main.ts",
+    "test": "vitest run tests --exclude dist/**"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41",
+    "elysia": "^1.4.28",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
