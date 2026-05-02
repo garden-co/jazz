@@ -84,6 +84,9 @@ impl SyncManager {
         client_id: ClientId,
         settlement: BatchSettlement,
     ) {
+        let Some(settlement) = self.batch_settlement_for_client(client_id, &settlement) else {
+            return;
+        };
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::BatchSettlement { settlement },
