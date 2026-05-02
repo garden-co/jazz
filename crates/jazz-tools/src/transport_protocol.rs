@@ -113,6 +113,8 @@ impl ServerEvent {
 pub enum ErrorCode {
     /// Invalid request format.
     BadRequest,
+    /// Client and server do not share a compatible sync protocol version.
+    IncompatibleProtocol,
     /// Authentication required or failed.
     Unauthorized,
     /// Permission denied by policy.
