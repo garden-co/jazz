@@ -79,11 +79,20 @@ fn row_batch_created_stamps_local_durability_into_storage() {
         )
         .unwrap();
 
-    assert_eq!(visible.confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(visible.confirmed_tier, None);
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(history[0].confirmed_tier, None);
     assert_eq!(
-        load_visible_row(&io, "users", row_id, "main").confirmed_tier,
+        io.load_authoritative_batch_settlement(history[0].batch_id)
+            .unwrap()
+            .and_then(|settlement| settlement.confirmed_tier()),
+        Some(DurabilityTier::EdgeServer)
+    );
+    assert_eq!(
+        io.load_visible_region_row_for_tier("users", "main", row_id, DurabilityTier::EdgeServer)
+            .unwrap()
+            .expect("tiered visible row")
+            .confirmed_tier,
         Some(DurabilityTier::EdgeServer)
     );
 }
@@ -130,10 +139,16 @@ fn row_batch_state_changed_updates_row_region_confirmed_tier_monotonically() {
         .unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(history.len(), 1);
-    // Tier-only acks are metadata on the history batch. They must not force a
-    // visible-row rewrite, because visibility is re-settled by batch seals.
+    // Tier-only acks are stored as authoritative batch settlements. They must
+    // not force visible/history row rewrites.
     assert_eq!(visible[0].confirmed_tier, None);
-    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(history[0].confirmed_tier, None);
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id)
+            .unwrap()
+            .and_then(|settlement| settlement.confirmed_tier()),
+        Some(DurabilityTier::EdgeServer)
+    );
 }
 
 #[test]
@@ -170,7 +185,48 @@ fn row_batch_state_changed_tier_only_does_not_enqueue_pending_row_update() {
             .unwrap()
             .expect("history row")
             .confirmed_tier,
+        None
+    );
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id)
+            .unwrap()
+            .and_then(|settlement| settlement.confirmed_tier()),
         Some(DurabilityTier::EdgeServer)
+    );
+}
+
+#[test]
+fn row_batch_state_changed_tier_only_persists_authoritative_settlement() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let batch_id = row.batch_id;
+    seed_visible_row(&mut sm, &mut io, "users", row);
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::RowBatchStateChanged {
+            row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id,
+            }],
+        })
     );
 }
 
