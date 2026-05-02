@@ -4,10 +4,8 @@
 //! visible region consistent afterward:
 //! - [`apply_row_batch`] — insert or update a history batch, then recompute and
 //!   persist visibility (and supersede stale staging siblings if needed)
-//! - [`patch_row_batch_state`] — flip an existing batch's state/tier and
+//! - [`patch_row_batch_state`] — flip an existing batch's state and
 //!   recompute visibility
-//! - [`patch_row_batch_confirmed_tier`] — update only batch durability metadata
-//!   when visibility cannot change
 //!
 //! Each mutation captures the visible row before/after the change as an
 //! [`AppliedRowBatch`], from which a [`RowVisibilityChange`] is derived for
@@ -421,51 +419,4 @@ pub fn patch_row_batch_state<H: Storage>(
         previous_row: previous_visible.clone(),
         is_new_object: previous_visible.is_none(),
     }))
-}
-
-pub fn patch_row_batch_confirmed_tier<H: Storage>(
-    io: &mut H,
-    object_id: ObjectId,
-    branch_name: &BranchName,
-    batch_id: BatchId,
-    confirmed_tier: DurabilityTier,
-) -> Result<bool, RowHistoryError> {
-    let row_locator = row_locator_from_storage(io, object_id)?;
-    let table = row_locator.table.to_string();
-    let mut patched_row = io
-        .load_history_row_batch(&table, branch_name.as_str(), object_id, batch_id)
-        .map_err(RowHistoryError::StorageError)?
-        .ok_or(RowHistoryError::ObjectNotFound(object_id))?;
-
-    if patched_row.branch.as_str() != branch_name.as_str() {
-        return Ok(false);
-    }
-
-    let next_tier = match patched_row.confirmed_tier {
-        Some(existing) => existing.max(confirmed_tier),
-        None => confirmed_tier,
-    };
-    if patched_row.confirmed_tier == Some(next_tier) {
-        return Ok(false);
-    }
-    patched_row.confirmed_tier = Some(next_tier);
-
-    let context = crate::storage::resolve_history_row_write_context(io, &table, &patched_row)
-        .map_err(RowHistoryError::StorageError)?;
-    let encoded_history =
-        crate::storage::encode_history_row_bytes_with_context(&context, &patched_row)
-            .map_err(RowHistoryError::StorageError)?;
-
-    <H as Storage>::apply_prepared_row_mutation(
-        io,
-        &table,
-        std::slice::from_ref(&patched_row),
-        &[],
-        std::slice::from_ref(&encoded_history),
-        &[],
-        &[],
-    )
-    .map_err(RowHistoryError::StorageError)?;
-
-    Ok(true)
 }

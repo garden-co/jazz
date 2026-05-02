@@ -4,8 +4,7 @@ use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
-    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch,
-    patch_row_batch_confirmed_tier, patch_row_batch_state,
+    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, patch_row_batch_state,
 };
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
@@ -363,13 +362,15 @@ impl SyncManager {
         storage: &mut H,
         metadata: Option<RowMetadata>,
         mut row: StoredRowBatch,
+        record_local_settlement: bool,
     ) -> Option<AppliedRowBatch> {
-        if let Some(local_tier) = self.max_local_durability_tier() {
-            row.confirmed_tier = Some(match row.confirmed_tier {
-                Some(existing) => existing.max(local_tier),
-                None => local_tier,
-            });
-        }
+        let authoritative_tier = match (row.confirmed_tier, self.max_local_durability_tier()) {
+            (Some(incoming), Some(local)) => Some(incoming.max(local)),
+            (Some(incoming), None) => Some(incoming),
+            (None, Some(local)) => Some(local),
+            (None, None) => None,
+        };
+        row.confirmed_tier = None;
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
@@ -387,6 +388,37 @@ impl SyncManager {
                     return None;
                 }
             };
+        if record_local_settlement
+            && let Some(confirmed_tier) = authoritative_tier
+            && row.state.is_visible()
+        {
+            let visible_members = vec![VisibleBatchMember {
+                object_id: row.row_id,
+                branch_name,
+                batch_id: row.batch_id,
+            }];
+            let settlement = match row.state {
+                RowState::VisibleDirect => BatchSettlement::DurableDirect {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                    visible_members,
+                },
+                RowState::VisibleTransactional => BatchSettlement::AcceptedTransaction {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                    visible_members,
+                },
+                RowState::StagingPending | RowState::Superseded | RowState::Rejected => {
+                    unreachable!("row.state.is_visible() guarded non-visible states")
+                }
+            };
+            if self
+                .persist_authoritative_batch_settlement(storage, &settlement)
+                .is_ok()
+            {
+                self.pending_batch_settlements.push(settlement.clone());
+            }
+        }
 
         Some(AppliedRowBatch {
             metadata,
@@ -408,25 +440,7 @@ impl SyncManager {
             return;
         }
 
-        if state.is_none()
-            && let Some(tier) = confirmed_tier
-        {
-            match patch_row_batch_confirmed_tier(storage, row_id, &branch_name, batch_id, tier) {
-                Ok(_) => {
-                    self.received_row_batch_acks
-                        .push((RowBatchKey::new(row_id, branch_name, batch_id), tier));
-                }
-                Err(err) => {
-                    tracing::error!(
-                        %row_id,
-                        %branch_name,
-                        ?batch_id,
-                        ?confirmed_tier,
-                        ?err,
-                        "failed to apply row batch confirmed tier"
-                    );
-                }
-            }
+        if state.is_none() && confirmed_tier.is_some() {
             return;
         }
 
@@ -541,6 +555,40 @@ impl SyncManager {
                             visible_members,
                         })
                     }
+                }
+            })
+            .or_else(|| {
+                let confirmed_tier = confirmed_tier?;
+                let row_locator = storage.load_row_locator(row_id).ok().flatten()?;
+                let row = storage
+                    .load_history_row_batch(
+                        row_locator.table.as_str(),
+                        branch_name.as_str(),
+                        row_id,
+                        batch_id,
+                    )
+                    .ok()
+                    .flatten()?;
+                if !row.state.is_visible() {
+                    return None;
+                }
+                let visible_members = vec![VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }];
+                match row.state {
+                    RowState::VisibleDirect => Some(BatchSettlement::DurableDirect {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members,
+                    }),
+                    RowState::VisibleTransactional => Some(BatchSettlement::AcceptedTransaction {
+                        batch_id,
+                        confirmed_tier,
+                        visible_members,
+                    }),
+                    RowState::StagingPending | RowState::Superseded | RowState::Rejected => None,
                 }
             })
     }
@@ -1133,7 +1181,8 @@ impl SyncManager {
                     %branch_name,
                     "server→row-batch payload"
                 );
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), true)
+                {
                     let local_tiers = self.my_tiers.iter().copied().collect::<Vec<_>>();
                     for tier in local_tiers {
                         if incoming_confirmed_tier.is_some_and(|confirmed| confirmed >= tier) {
@@ -1198,6 +1247,10 @@ impl SyncManager {
                         .is_ok()
                 });
                 if let Some(settlement) = persisted_settlement.clone() {
+                    if let Some(tier) = confirmed_tier {
+                        self.received_row_batch_acks
+                            .push((RowBatchKey::new(row_id, branch_name, batch_id), tier));
+                    }
                     self.pending_batch_settlements.push(settlement);
                 }
                 for cid in interested {
@@ -1728,7 +1781,8 @@ impl SyncManager {
                     .or_default()
                     .insert(client_id);
 
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), false)
+                {
                     if let Some(table) = applied.metadata.get(MetadataKey::Table.as_str()).cloned()
                     {
                         self.forward_row_batch_to_servers_with_storage(

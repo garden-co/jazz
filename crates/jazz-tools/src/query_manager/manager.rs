@@ -1092,6 +1092,21 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
+        &mut self,
+        confirmed_tier: DurabilityTier,
+    ) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription
+                .durability_tier
+                .is_some_and(|required_tier| confirmed_tier >= required_tier)
+            {
+                subscription.needs_visibility_recompute = true;
+                subscription.graph.mark_all_dirty();
+            }
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
@@ -1136,6 +1151,20 @@ impl QueryManager {
         for query_id in remote_scope_dirty_query_ids {
             if let Some(sub) = self.subscriptions.get_mut(&QuerySubscriptionId(query_id.0)) {
                 sub.needs_visibility_recompute = true;
+            }
+        }
+        let batch_settlements = self.sync_manager.pending_batch_settlements().to_vec();
+        for settlement in &batch_settlements {
+            if let Some(confirmed_tier) = settlement.confirmed_tier() {
+                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+            }
+            for member in settlement.visible_members() {
+                if let Ok(Some(locator)) = storage.load_row_locator(member.object_id) {
+                    self.mark_row_updated_in_subscriptions(
+                        locator.table.as_str(),
+                        member.object_id,
+                    );
+                }
             }
         }
         self.pending_catalogue_updates.extend(
@@ -1477,10 +1506,6 @@ impl QueryManager {
         self.settle_server_subscriptions(storage_ref);
     }
 
-    pub(crate) fn enqueue_row_visibility_change(&mut self, update: RowVisibilityChange) {
-        self.pending_row_visibility_changes.push(update);
-    }
-
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
@@ -1790,7 +1815,7 @@ impl QueryManager {
     /// Mark a row as updated in all subscriptions for a table.
     /// This triggers content change detection during settle().
     /// Checks all tables involved in the subscription (including joined tables).
-    pub(super) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         // Mark local subscriptions
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
@@ -1805,7 +1830,7 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_updated(id);
