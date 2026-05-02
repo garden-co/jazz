@@ -900,12 +900,18 @@ impl<'a> Normalizer<'a> {
                 format!("batch_ids:[{batches}]")
             }
             SyncPayload::SealBatch { submission } => {
+                let members = submission
+                    .members
+                    .iter()
+                    .map(|member| format!("row:{}", self.object(&member.object_id)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
-                    "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
-                    submission.batch_id,
-                    submission.target_branch_name,
-                    submission.members,
-                    submission.captured_frontier
+                    "seal batch:{} target:{} members:[{}] frontier:{}",
+                    self.batch(&submission.batch_id),
+                    self.branch(&submission.target_branch_name),
+                    members,
+                    submission.captured_frontier.len()
                 )
             }
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -1093,12 +1099,18 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
             format!("batch_ids:[{batches}]")
         }
         SyncPayload::SealBatch { submission } => {
+            let members = submission
+                .members
+                .iter()
+                .map(|member| format!("row:{}", names.object(&member.object_id)))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
-                submission.batch_id,
+                "seal batch:{} target:{} members:[{}] frontier:{}",
+                names.batch(&submission.batch_id),
                 submission.target_branch_name,
-                submission.members,
-                submission.captured_frontier
+                members,
+                submission.captured_frontier.len()
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
