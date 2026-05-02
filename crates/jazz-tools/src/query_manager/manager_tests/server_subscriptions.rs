@@ -206,6 +206,35 @@ fn server_authorizes_subscription_sync_scope_without_rechecking_output_scope() {
 }
 
 #[test]
+fn authorization_schema_context_is_reused_for_matching_env_and_user_branch() {
+    let schema = owned_items_schema();
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+    let mut server_qm = QueryManager::new(SyncManager::new());
+    server_qm.set_current_schema(schema.clone(), "dev", "main");
+    server_qm.set_authorization_schema(schema.clone());
+    server_qm.set_known_schemas(std::sync::Arc::new(HashMap::from([(schema_hash, schema)])));
+
+    let (_, first_context) = server_qm
+        .authorization_schema_for_context("dev", "main")
+        .expect("authorization context should be available");
+    let (_, second_context) = server_qm
+        .authorization_schema_for_context("dev", "main")
+        .expect("authorization context should be cached");
+
+    assert!(
+        std::sync::Arc::ptr_eq(&first_context, &second_context),
+        "authorization schema context should be reused for repeated subscription settlement"
+    );
+    assert_eq!(server_qm.authorization_context_cache.len(), 1);
+
+    server_qm.set_known_schemas(std::sync::Arc::new(HashMap::new()));
+    assert!(
+        server_qm.authorization_context_cache.is_empty(),
+        "known schema changes must invalidate cached authorization contexts"
+    );
+}
+
+#[test]
 fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

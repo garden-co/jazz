@@ -131,7 +131,7 @@ impl QueryManager {
 
         for (hash, schema) in self.known_schemas.iter() {
             if *hash != full_hash {
-                schema_context.add_pending_schema(schema.clone());
+                schema_context.add_pending_schema_with_hash(*hash, schema.clone());
             }
         }
 
@@ -160,10 +160,10 @@ impl QueryManager {
     }
 
     pub(super) fn authorization_schema_for_context(
-        &self,
+        &mut self,
         env: &str,
         user_branch: &str,
-    ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+    ) -> Option<(Arc<Schema>, Arc<crate::schema_manager::SchemaContext>)> {
         if self.authorization_schema_required && self.authorization_schema.is_none() {
             return None;
         }
@@ -172,6 +172,11 @@ impl QueryManager {
             .authorization_schema
             .clone()
             .or_else(|| (!self.schema.is_empty()).then(|| self.schema.clone()))?;
+
+        let cache_key = (env.to_string(), user_branch.to_string());
+        if let Some(context) = self.authorization_context_cache.get(&cache_key) {
+            return Some((schema, context.clone()));
+        }
 
         let mut schema_context =
             crate::schema_manager::SchemaContext::new((*schema).clone(), env, user_branch);
@@ -182,19 +187,23 @@ impl QueryManager {
 
         for (hash, known_schema) in self.known_schemas.iter() {
             if *hash != schema_context.current_hash {
-                schema_context.add_pending_schema(known_schema.clone());
+                schema_context.add_pending_schema_with_hash(*hash, known_schema.clone());
             }
         }
 
         schema_context.try_activate_pending();
 
+        let schema_context = Arc::new(schema_context);
+        self.authorization_context_cache
+            .insert(cache_key, schema_context.clone());
+
         Some((schema, schema_context))
     }
 
     pub(super) fn authorization_schema_for_branch(
-        &self,
+        &mut self,
         branch_name: &BranchName,
-    ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+    ) -> Option<(Arc<Schema>, Arc<crate::schema_manager::SchemaContext>)> {
         if let Some(composed) = ComposedBranchName::parse(branch_name) {
             if let Some(parts) =
                 self.authorization_schema_for_context(&composed.env, &composed.user_branch)
@@ -220,22 +229,21 @@ impl QueryManager {
 
             for (hash, known_schema) in self.known_schemas.iter() {
                 if *hash != full_hash {
-                    schema_context.add_pending_schema(known_schema.clone());
+                    schema_context.add_pending_schema_with_hash(*hash, known_schema.clone());
                 }
             }
 
             schema_context.try_activate_pending();
 
-            return Some((Arc::new(target_schema), schema_context));
+            return Some((Arc::new(target_schema), Arc::new(schema_context)));
         }
 
         if self.schema_context.is_initialized() {
+            let env = self.schema_context.env.clone();
+            let user_branch = self.schema_context.user_branch.clone();
             return self
-                .authorization_schema_for_context(
-                    &self.schema_context.env,
-                    &self.schema_context.user_branch,
-                )
-                .or_else(|| Some((self.schema.clone(), self.schema_context.clone())));
+                .authorization_schema_for_context(&env, &user_branch)
+                .or_else(|| Some((self.schema.clone(), Arc::new(self.schema_context.clone()))));
         }
 
         None
