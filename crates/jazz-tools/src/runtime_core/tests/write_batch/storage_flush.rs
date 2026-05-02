@@ -131,6 +131,7 @@ fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
         payload: SyncPayload::QuerySettled {
             query_id: crate::sync_manager::QueryId(1),
             tier: DurabilityTier::Local,
+            scope: vec![],
             through_seq: 1,
         },
     });

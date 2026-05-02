@@ -646,14 +646,6 @@ impl SyncManager {
                 true,
             );
         }
-
-        self.outbox.push(OutboxEntry {
-            destination: Destination::Client(client_id),
-            payload: SyncPayload::QueryScopeSnapshot {
-                query_id,
-                scope: sorted_query_scope_snapshot(&scope),
-            },
-        });
     }
 
     /// Drop a client's query subscription state.
@@ -856,12 +848,14 @@ impl SyncManager {
         client_id: ClientId,
         query_id: QueryId,
         tier: DurabilityTier,
+        scope: &HashSet<(ObjectId, BranchName)>,
     ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::QuerySettled {
                 query_id,
                 tier,
+                scope: sorted_query_scope_snapshot(scope),
                 through_seq: 0,
             },
         });

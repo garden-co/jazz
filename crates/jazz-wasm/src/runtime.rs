@@ -499,6 +499,7 @@ impl Scheduler for WasmScheduler {
 struct JsSyncSenderInner {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
+    next_client_sequences: RefCell<HashMap<String, u64>>,
 }
 
 #[derive(Clone)]
@@ -517,6 +518,7 @@ impl JsSyncSender {
             inner: Rc::new(JsSyncSenderInner {
                 callback: RefCell::new(None),
                 use_binary_encoding,
+                next_client_sequences: RefCell::new(HashMap::new()),
             }),
         }
     }
@@ -534,25 +536,60 @@ impl SyncSender for JsSyncSender {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
+            let sequence = if destination_kind == "client" {
+                let mut next_sequences = self.inner.next_client_sequences.borrow_mut();
+                let sequence = next_sequences
+                    .entry(destination_id.clone())
+                    .and_modify(|next| *next += 1)
+                    .or_insert(1);
+                Some(*sequence)
+            } else {
+                None
+            };
+            let payload = match (&message.payload, sequence) {
+                (
+                    SyncPayload::QuerySettled {
+                        query_id,
+                        tier,
+                        scope,
+                        ..
+                    },
+                    Some(sequence),
+                ) => SyncPayload::QuerySettled {
+                    query_id: *query_id,
+                    tier: *tier,
+                    scope: scope.clone(),
+                    through_seq: sequence.saturating_sub(1),
+                },
+                _ => message.payload,
+            };
             if self.inner.use_binary_encoding || destination_kind == "client" {
-                if let Ok(payload_bytes) = message.payload.to_bytes() {
+                if let Ok(payload_bytes) = payload.to_bytes() {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
-                    let _ = callback.call4(
+                    let sequence_js = sequence
+                        .map(|sequence| JsValue::from_f64(sequence as f64))
+                        .unwrap_or(JsValue::NULL);
+                    let _ = callback.call5(
                         &JsValue::NULL,
                         &JsValue::from_str(destination_kind),
                         &JsValue::from_str(&destination_id),
                         &payload_js.into(),
                         &JsValue::from_bool(is_catalogue),
+                        &sequence_js,
                     );
                 }
             } else {
-                let payload_json = message.payload.to_json().unwrap();
-                let _ = callback.call4(
+                let payload_json = payload.to_json().unwrap();
+                let sequence_js = sequence
+                    .map(|sequence| JsValue::from_f64(sequence as f64))
+                    .unwrap_or(JsValue::NULL);
+                let _ = callback.call5(
                     &JsValue::NULL,
                     &JsValue::from_str(destination_kind),
                     &JsValue::from_str(&destination_id),
                     &JsValue::from_str(&payload_json),
                     &JsValue::from_bool(is_catalogue),
+                    &sequence_js,
                 );
             }
         }

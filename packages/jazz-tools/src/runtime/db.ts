@@ -2689,10 +2689,35 @@ export class Db {
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
+      if (beforeExecute && !deliveredFirstTieredDelta) {
+        pendingFirstTieredDelta = typedDelta;
+        if (firstTieredDeltaTimer) {
+          clearTimeout(firstTieredDeltaTimer);
+        }
+        firstTieredDeltaTimer = setTimeout(deliverFirstTieredDelta, 50);
+        return;
+      }
       callback(typedDelta);
     };
 
     const queryOptions = ordinaryDbQueryOptions(options);
+    const beforeExecute =
+      queryOptions.tier && queryOptions.tier !== "local"
+        ? () => this.ensureQueryReady(queryOptions)
+        : undefined;
+    let deliveredFirstTieredDelta = false;
+    let pendingFirstTieredDelta: SubscriptionDelta<T> | undefined;
+    let firstTieredDeltaTimer: ReturnType<typeof setTimeout> | undefined;
+    const deliverFirstTieredDelta = () => {
+      firstTieredDeltaTimer = undefined;
+      if (!pendingFirstTieredDelta) {
+        return;
+      }
+      const pendingDelta = pendingFirstTieredDelta;
+      pendingFirstTieredDelta = undefined;
+      deliveredFirstTieredDelta = true;
+      callback(pendingDelta);
+    };
     const subId =
       session !== undefined
         ? client.subscribeInternal(
@@ -2701,8 +2726,9 @@ export class Db {
             session,
             queryOptions,
             runtimeSchema.peek(),
+            beforeExecute,
           )
-        : client.subscribe(wasmQuery, handleDelta, queryOptions);
+        : client.subscribe(wasmQuery, handleDelta, queryOptions, beforeExecute);
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
       builtQuery.table,
@@ -2711,6 +2737,9 @@ export class Db {
 
     // Return unsubscribe function
     return () => {
+      if (firstTieredDeltaTimer) {
+        clearTimeout(firstTieredDeltaTimer);
+      }
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       client.unsubscribe(subId);
       manager.clear();
@@ -3077,19 +3106,49 @@ class ClientBackedDb extends Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const queryOptions = ordinaryDbQueryOptions(options);
+    const beforeExecute =
+      queryOptions.tier && queryOptions.tier !== "local"
+        ? () => this.ensureQueryReady(queryOptions)
+        : undefined;
+    let deliveredFirstTieredDelta = false;
+    let pendingFirstTieredDelta: SubscriptionDelta<T> | undefined;
+    let firstTieredDeltaTimer: ReturnType<typeof setTimeout> | undefined;
+    const deliverFirstTieredDelta = () => {
+      firstTieredDeltaTimer = undefined;
+      if (!pendingFirstTieredDelta) {
+        return;
+      }
+      const pendingDelta = pendingFirstTieredDelta;
+      pendingFirstTieredDelta = undefined;
+      deliveredFirstTieredDelta = true;
+      callback(pendingDelta);
+    };
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
       (delta) => {
         const typedDelta = manager.handleDelta(delta, transform);
+        if (beforeExecute && !deliveredFirstTieredDelta) {
+          pendingFirstTieredDelta = typedDelta;
+          if (firstTieredDeltaTimer) {
+            clearTimeout(firstTieredDeltaTimer);
+          }
+          firstTieredDeltaTimer = setTimeout(deliverFirstTieredDelta, 50);
+          return;
+        }
         callback(typedDelta);
       },
       this.session,
-      ordinaryDbQueryOptions(options),
+      queryOptions,
       runtimeSchema.peek(),
+      beforeExecute,
     );
 
     return () => {
+      if (firstTieredDeltaTimer) {
+        clearTimeout(firstTieredDeltaTimer);
+      }
       this.runtimeClient.unsubscribe(subId);
       manager.clear();
     };
