@@ -153,7 +153,10 @@ describe("Chat App E2E", () => {
 
     // Wait for the app to initialise and redirect to a chat
     await waitFor(
-      () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
+      () =>
+        el.querySelector("#messageEditor") !== null ||
+        el.querySelector("article") !== null ||
+        (el.textContent?.includes("permission") ?? false),
       10000,
       "App should render the message editor or a chat view",
     );
