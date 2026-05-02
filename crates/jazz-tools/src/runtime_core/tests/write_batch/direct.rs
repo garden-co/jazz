@@ -67,6 +67,47 @@ fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
 }
 
 #[test]
+fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "offline-direct-batch-replay-test",
+        Box::new(MemoryStorage::new()),
+    );
+    let server_id = ServerId::new();
+
+    let ((row_id, _row_values), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.seal_batch(batch_id).unwrap();
+    let sealed_submission = core
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("offline write should retain a local batch record")
+        .sealed_submission
+        .expect("offline direct write should still seal the local batch");
+
+    core.add_server(server_id);
+    core.batched_tick();
+
+    let outbox = core.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::RowBatchCreated { row, .. },
+        } if *id == server_id && row.row_id == row_id && row.batch_id == batch_id
+    )));
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::SealBatch { submission },
+        } if *id == server_id && *submission == sealed_submission
+    )));
+}
+
+#[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =

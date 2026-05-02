@@ -178,6 +178,34 @@ fn direct_batch_from_client_sends_one_settlement_on_seal() {
 }
 
 #[test]
+fn seal_batch_to_servers_targets_pending_server_transport() {
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+
+    sm.add_pending_server(server_id);
+    sm.seal_batch_to_servers(sealed_submission(
+        batch_id,
+        "main",
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: row.content_digest(),
+        }],
+        Vec::new(),
+    ));
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::SealBatch { submission },
+        } if id == server_id && submission.batch_id == batch_id
+    )));
+}
+
+#[test]
 fn direct_batch_from_client_settles_when_rows_arrive_after_seal() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
