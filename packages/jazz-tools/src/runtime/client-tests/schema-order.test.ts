@@ -82,6 +82,76 @@ describe("JazzClient schema order", () => {
     });
   });
 
+  it("aligns create result rows from declared schema context without runtime schema hashing", async () => {
+    const getSchema = vi.fn(() => {
+      throw new Error("create result alignment should not fetch runtime schema");
+    });
+    const getSchemaHash = vi.fn(() => {
+      throw new Error("create result alignment should not hash runtime schema");
+    });
+    const runtime: Runtime = {
+      ...runtimeBatchRecordStubs,
+      insert: () => ({
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: false },
+        ],
+        batchId: "batch-id",
+      }),
+      update: () => ({
+        batchId: "batch-id",
+      }),
+      delete: () => ({
+        batchId: "batch-id",
+      }),
+      query: async () => [],
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema,
+      getSchemaHash,
+    };
+    const schema = {
+      todos: {
+        columns: [
+          {
+            name: "title",
+            column_type: { type: "Text" as const },
+            nullable: false,
+          },
+          {
+            name: "done",
+            column_type: { type: "Boolean" as const },
+            nullable: false,
+          },
+        ],
+      },
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema,
+    });
+
+    const result = client.create("todos", {
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
+
+    expect(result.value.values).toEqual([
+      { type: "Text", value: "Buy milk" },
+      { type: "Boolean", value: false },
+    ]);
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
+  });
+
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,

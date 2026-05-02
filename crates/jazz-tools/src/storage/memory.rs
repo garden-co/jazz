@@ -2366,6 +2366,90 @@ mod tests {
     }
 
     #[test]
+    fn typed_history_appends_reuse_catalogue_descriptor_for_same_schema() {
+        use crate::catalogue::CatalogueEntry;
+        use crate::metadata::{MetadataKey, ObjectType};
+        use crate::query_manager::types::{SchemaBuilder, SchemaHash, TableSchema, Value};
+        use crate::schema_manager::encoding::encode_schema;
+
+        let mut storage = CountingCatalogueLoadsStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("done", ColumnType::Boolean),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+
+        storage
+            .upsert_catalogue_entry(&CatalogueEntry {
+                object_id: schema_hash.to_object_id(),
+                metadata: HashMap::from([(
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                )]),
+                content: encode_schema(&schema),
+            })
+            .unwrap();
+
+        let alice_task_id = ObjectId::new();
+        let bob_task_id = ObjectId::new();
+        let row_locator = RowLocator {
+            table: "tasks".into(),
+            origin_schema_hash: Some(schema_hash),
+        };
+        storage
+            .put_row_locator(alice_task_id, Some(&row_locator))
+            .unwrap();
+        storage
+            .put_row_locator(bob_task_id, Some(&row_locator))
+            .unwrap();
+
+        let alice_task = crate::row_histories::StoredRowBatch::new(
+            alice_task_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[
+                    Value::Text("Prepare dropdown seeds".into()),
+                    Value::Boolean(false),
+                ],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 100),
+            HashMap::new(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+        let bob_task = crate::row_histories::StoredRowBatch::new(
+            bob_task_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[
+                    Value::Text("Verify seeded rows".into()),
+                    Value::Boolean(true),
+                ],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("bob".to_string(), 101),
+            HashMap::new(),
+            crate::row_histories::RowState::VisibleDirect,
+            None,
+        );
+
+        storage
+            .append_history_region_rows("tasks", &[alice_task, bob_task])
+            .unwrap();
+
+        assert_eq!(storage.catalogue_loads(), 1);
+    }
+
+    #[test]
     fn typed_history_appends_use_row_locator_schema_before_catalogue_scans() {
         use crate::catalogue::CatalogueEntry;
         use crate::metadata::{MetadataKey, ObjectType};

@@ -84,3 +84,37 @@ fn direct_query_manager_catalogues_known_schemas_only_once_per_storage() {
         "ordinary writes should not recatalogue unchanged schemas on the same storage",
     );
 }
+
+#[test]
+fn direct_query_manager_insert_uses_prepared_write_context_without_catalogue_loads() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::new();
+    qm.ensure_known_schemas_catalogued(&mut storage)
+        .expect("schema bootstrap should succeed");
+    storage.reset_catalogue_loads();
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(1)],
+    )
+    .expect("insert should succeed");
+
+    assert_eq!(
+        storage.catalogue_loads(),
+        0,
+        "prepared local inserts already have the table descriptor and should not reload catalogue descriptors during history apply",
+    );
+}
+
+#[test]
+fn direct_query_manager_process_has_no_stale_subscription_work_without_subscriptions() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = MemoryStorage::new();
+
+    assert!(!qm.has_stale_subscriptions());
+    qm.process(&mut storage);
+    assert!(!qm.has_stale_subscriptions());
+}

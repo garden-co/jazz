@@ -27,10 +27,8 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
-  // After a brief sync window, if the chat row is still not visible to this
-  // user, we know they don't have permission (private chat, not a member).
-  const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
-  const chat = chatRows[0];
+  const chatRowsResult = useAll(app.chats.where({ id: chatId }));
+  const chatRows = chatRowsResult ?? [];
   const chatKnown = chatRows.length > 0;
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
@@ -77,14 +75,10 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       });
   }, [userId, chatKnown, isMember, chatId, db, sharedWriteOptions]);
 
-  const [accessChecked, setAccessChecked] = useState(false);
   useEffect(() => {
-    setAccessChecked(false);
     autoJoined.current = false;
     autoJoinPending.current = false;
     setMembershipReady(false);
-    const timer = setTimeout(() => setAccessChecked(true), 1500);
-    return () => clearTimeout(timer);
   }, [chatId]);
 
   const observer = useRef<IntersectionObserver | null>(null);
@@ -120,7 +114,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     db.delete(app.messages, messageId);
   };
 
-  if (accessChecked && !chatKnown && userId) {
+  if (chatRowsResult !== undefined && !chatKnown && userId) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>

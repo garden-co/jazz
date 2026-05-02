@@ -1972,7 +1972,11 @@ export class JazzClient {
           : this.runtime.insert(table, values);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.context.schema,
+      ),
     };
   }
 
@@ -2167,7 +2171,6 @@ export class JazzClient {
     query: string | QueryInput,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
-    beforeExecute?: () => Promise<void>,
   ): number {
     return this.subscribeInternal(
       query,
@@ -2175,7 +2178,6 @@ export class JazzClient {
       this.resolvedSession ?? undefined,
       options,
       undefined,
-      beforeExecute,
     );
   }
 
@@ -2195,7 +2197,6 @@ export class JazzClient {
     session?: Session,
     options?: QueryExecutionOptions,
     runtimeSchema?: WasmSchema,
-    beforeExecute?: () => Promise<void>,
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const sessionJson = session ? JSON.stringify(session) : undefined;
@@ -2211,8 +2212,7 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.scheduler(async () => {
-      await beforeExecute?.();
+    this.scheduler(() => {
       this.runtime.executeSubscription(handle, (...args: unknown[]) => {
         const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
         if (deltaJsonOrObject === undefined) {

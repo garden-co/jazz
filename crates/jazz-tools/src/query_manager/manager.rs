@@ -199,8 +199,8 @@ pub(crate) struct QuerySubscription {
     /// Optional one-shot overlay keyed by row id for a specific local batch.
     /// When present, reads must not fall back to unrelated pending local rows.
     pub(crate) local_overlay_rows: HashMap<ObjectId, RowBatchKey>,
-    /// True once the initial upstream query frontier has been replayed.
-    pub(crate) query_frontier_complete: bool,
+    /// Highest durability tier at which the initial upstream query frontier has settled.
+    pub(crate) query_frontier_settled_tier: Option<DurabilityTier>,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
@@ -731,6 +731,14 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn has_stale_subscriptions(&self) -> bool {
+        self.subscriptions.values().any(|sub| sub.needs_recompile)
+            || self
+                .server_subscriptions
+                .values()
+                .any(|sub| sub.needs_recompile)
+    }
+
     pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -791,6 +799,10 @@ impl QueryManager {
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
+        if !self.has_stale_subscriptions() {
+            return;
+        }
+
         let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
         let current_schema = self.schema.clone();
         let current_schema_context = self.schema_context.clone();
@@ -1020,13 +1032,26 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
-    pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, _tier: DurabilityTier) {
+    pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, tier: DurabilityTier) {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
-            if !sub.query_frontier_complete {
+            let was_unsatisfied = !Self::subscription_query_frontier_satisfied(sub);
+            sub.query_frontier_settled_tier = Some(
+                sub.query_frontier_settled_tier
+                    .map_or(tier, |current| current.max(tier)),
+            );
+            if was_unsatisfied && Self::subscription_query_frontier_satisfied(sub) {
                 sub.needs_visibility_recompute = true;
             }
-            sub.query_frontier_complete = true;
+        }
+    }
+
+    pub(crate) fn subscription_query_frontier_satisfied(sub: &QuerySubscription) -> bool {
+        match sub.durability_tier {
+            Some(required_tier) => sub
+                .query_frontier_settled_tier
+                .is_some_and(|settled_tier| settled_tier >= required_tier),
+            None => true,
         }
     }
 
@@ -1263,7 +1288,7 @@ impl QueryManager {
             }
 
             if !subscription.settled_once
-                && !subscription.query_frontier_complete
+                && !Self::subscription_query_frontier_satisfied(&subscription)
                 && self.sync_manager.has_servers_or_pending_servers()
             {
                 // Graph state updated by settle(), but don't deliver until the
@@ -1290,7 +1315,7 @@ impl QueryManager {
             };
 
             if subscription.sync_backed
-                && subscription.query_frontier_complete
+                && Self::subscription_query_frontier_satisfied(&subscription)
                 && self
                     .sync_manager
                     .has_remote_query_scope_snapshot(QueryId(sub_id.0))
