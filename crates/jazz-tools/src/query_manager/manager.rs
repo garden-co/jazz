@@ -731,6 +731,14 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn has_stale_subscriptions(&self) -> bool {
+        self.subscriptions.values().any(|sub| sub.needs_recompile)
+            || self
+                .server_subscriptions
+                .values()
+                .any(|sub| sub.needs_recompile)
+    }
+
     pub(crate) fn ensure_known_schemas_catalogued<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -791,6 +799,10 @@ impl QueryManager {
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
+        if !self.has_stale_subscriptions() {
+            return;
+        }
+
         let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
         let current_schema = self.schema.clone();
         let current_schema_context = self.schema_context.clone();

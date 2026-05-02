@@ -107,3 +107,14 @@ fn direct_query_manager_insert_uses_prepared_write_context_without_catalogue_loa
         "prepared local inserts already have the table descriptor and should not reload catalogue descriptors during history apply",
     );
 }
+
+#[test]
+fn direct_query_manager_process_has_no_stale_subscription_work_without_subscriptions() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    qm.set_current_schema(test_schema(), "dev", "main");
+    let mut storage = MemoryStorage::new();
+
+    assert!(!qm.has_stale_subscriptions());
+    qm.process(&mut storage);
+    assert!(!qm.has_stale_subscriptions());
+}

@@ -156,21 +156,23 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 })
             })
             .collect::<Result<Vec<_>, RuntimeError>>()?;
-        members.sort_by(|left, right| {
-            left.object_id
-                .uuid()
-                .as_bytes()
-                .cmp(right.object_id.uuid().as_bytes())
-                .then_with(|| left.table_name.cmp(&right.table_name))
-                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| {
-                    left.schema_hash
-                        .as_bytes()
-                        .cmp(right.schema_hash.as_bytes())
-                })
-                .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
-        });
-        members.dedup();
+        if members.len() > 1 {
+            members.sort_by(|left, right| {
+                left.object_id
+                    .uuid()
+                    .as_bytes()
+                    .cmp(right.object_id.uuid().as_bytes())
+                    .then_with(|| left.table_name.cmp(&right.table_name))
+                    .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+                    .then_with(|| {
+                        left.schema_hash
+                            .as_bytes()
+                            .cmp(right.schema_hash.as_bytes())
+                    })
+                    .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
+            });
+            members.dedup();
+        }
         if members.is_empty() {
             return Err(RuntimeError::WriteError(format!(
                 "missing local batch member rows for {batch_id:?} / {row_id:?}"
