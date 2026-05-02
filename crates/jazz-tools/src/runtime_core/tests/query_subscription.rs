@@ -1467,6 +1467,8 @@ fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_reject
         assert_eq!(decode_added_rows(&calls[1])[0].0, row_id);
     }
 
+    s.a.seal_batch(batch_id).unwrap();
+
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
         payload: SyncPayload::BatchSettlement {
