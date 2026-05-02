@@ -129,6 +129,7 @@ fn get_branch(qm: &QueryManager) -> String {
 struct CountingCatalogueUpsertsStorage {
     inner: MemoryStorage,
     catalogue_upserts: Cell<usize>,
+    catalogue_loads: Cell<usize>,
     visible_query_loads: Cell<usize>,
 }
 
@@ -141,12 +142,21 @@ impl CountingCatalogueUpsertsStorage {
         Self {
             inner,
             catalogue_upserts: Cell::new(0),
+            catalogue_loads: Cell::new(0),
             visible_query_loads: Cell::new(0),
         }
     }
 
     fn catalogue_upserts(&self) -> usize {
         self.catalogue_upserts.get()
+    }
+
+    fn catalogue_loads(&self) -> usize {
+        self.catalogue_loads.get()
+    }
+
+    fn reset_catalogue_loads(&self) {
+        self.catalogue_loads.set(0);
     }
 
     fn visible_query_loads(&self) -> usize {
@@ -253,6 +263,7 @@ impl Storage for CountingCatalogueUpsertsStorage {
         &self,
         object_id: crate::object::ObjectId,
     ) -> Result<Option<crate::catalogue::CatalogueEntry>, StorageError> {
+        self.catalogue_loads.set(self.catalogue_loads.get() + 1);
         self.inner.load_catalogue_entry(object_id)
     }
 
