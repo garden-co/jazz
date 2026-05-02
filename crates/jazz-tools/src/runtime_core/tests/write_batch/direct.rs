@@ -85,6 +85,39 @@ fn rc_update_sync() {
 }
 
 #[test]
+fn rc_late_insert_settlement_does_not_hide_newer_update() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), insert_batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+
+    s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
+        .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let query = Query::new("users");
+    let results = execute_query(&mut s.a, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Bob".into()));
+}
+
+#[test]
 fn rc_delete_sync() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =

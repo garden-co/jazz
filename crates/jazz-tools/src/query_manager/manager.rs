@@ -1385,6 +1385,11 @@ impl QueryManager {
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
     }
+
+    pub(crate) fn enqueue_row_visibility_change(&mut self, update: RowVisibilityChange) {
+        self.pending_row_visibility_changes.push(update);
+    }
+
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
