@@ -156,9 +156,10 @@ impl QueryManager {
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
-        let query_frontier_complete = durability_tier.is_none()
+        let query_frontier_settled_tier = (durability_tier.is_none()
             || !self.should_send_local_subscription_upstream(propagation)
-            || !self.sync_manager.has_servers_or_pending_servers();
+            || !self.sync_manager.has_servers_or_pending_servers())
+        .then_some(DurabilityTier::GlobalServer);
         tracing::debug!(
             sub_id = id.0,
             ?branches,
@@ -180,7 +181,7 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows,
-                query_frontier_complete,
+                query_frontier_settled_tier,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 policy_context_tables,
@@ -262,7 +263,7 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows: HashMap::new(),
-                query_frontier_complete: true,
+                query_frontier_settled_tier: Some(DurabilityTier::GlobalServer),
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 policy_context_tables,
