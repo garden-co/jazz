@@ -1972,7 +1972,11 @@ export class JazzClient {
           : this.runtime.insert(table, values);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.context.schema,
+      ),
     };
   }
 
