@@ -554,15 +554,6 @@ export class DbTransaction {
     }
   }
 
-  private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    const { client } = this.bindTable(table, "DbTransaction");
-    return resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-  }
-
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbTransactionBinding {
     const existingBinding = dbTransactionBindings.get(this);
     if (existingBinding) {
@@ -606,8 +597,9 @@ export class DbTransaction {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeTransaction = this.requireRuntimeTransaction("insert");
     const row = options
       ? runtimeTransaction.create(table._table, values, options)
@@ -623,8 +615,9 @@ export class DbTransaction {
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeTransaction("upsert").upsert(table._table, values, options);
   }
 
@@ -636,8 +629,9 @@ export class DbTransaction {
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeTransaction("update").update(id, updates);
   }
 
@@ -728,15 +722,6 @@ export class DbDirectBatch {
     private readonly beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
   ) {}
 
-  private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    const { client } = this.bindTable(table, "DbDirectBatch");
-    return resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-  }
-
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbDirectBatchBinding {
     const existingBinding = dbDirectBatchBindings.get(this);
     if (existingBinding) {
@@ -781,8 +766,9 @@ export class DbDirectBatch {
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeBatch = this.requireRuntimeBatch("insert");
     const row = options
       ? runtimeBatch.create(table._table, values, options)
@@ -792,15 +778,17 @@ export class DbDirectBatch {
 
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeBatch("upsert").upsert(table._table, values, options);
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeBatch("update").update(id, updates);
   }
 
@@ -2933,12 +2921,8 @@ class ClientBackedDb extends Db {
     data: Init,
     options?: CreateOptions,
   ): WriteResult<T> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, inputSchema, table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     return this.runtimeClient
       .createHandleInternal(table._table, values, this.session, this.attribution, options)
       .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
@@ -2949,12 +2933,8 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options: UpsertOptions,
   ): WriteHandle {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, inputSchema, table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     return this.runtimeClient.upsertHandleInternal(
       table._table,
       values,
@@ -2971,12 +2951,8 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, inputSchema, table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     return this.runtimeClient.updateHandleInternal(
       id,
       updates,

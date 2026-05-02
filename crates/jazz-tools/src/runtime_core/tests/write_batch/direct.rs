@@ -183,7 +183,7 @@ fn rc_direct_batch_reuses_loaded_local_batch_record_while_building() {
 }
 
 #[test]
-fn rc_worker_direct_batch_retains_all_visible_members() {
+fn rc_worker_direct_batch_persists_visible_members_on_seal() {
     let mut s = create_3tier_rc();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default()
@@ -207,12 +207,21 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
     assert_eq!(first_batch_id, batch_id);
     assert_eq!(second_batch_id, batch_id);
 
+    assert_eq!(
+        s.b.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "open direct batches should not persist replayable durability records before seal"
+    );
+
+    s.b.seal_batch(batch_id).unwrap();
+
     let branch_name = s.b.schema_manager().branch_name();
     let local_record =
         s.b.storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .expect("worker should retain one direct batch record for shared writes");
+            .expect("sealed direct batch should persist one record for shared writes");
+    assert!(local_record.sealed);
 
     match local_record.latest_settlement {
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
@@ -292,7 +301,7 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
 }
 
 #[test]
-fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
+fn rc_open_direct_batch_has_no_persisted_local_batch_record() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default()
@@ -306,12 +315,11 @@ fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
     )
     .unwrap();
 
-    let record = core
-        .local_batch_record(batch_id)
-        .unwrap()
-        .expect("open direct batch should have a local record");
-    assert!(!record.sealed);
-    assert!(record.sealed_submission.is_none());
+    assert_eq!(
+        core.local_batch_record(batch_id).unwrap(),
+        None,
+        "open direct batches are in-memory builders until sealed"
+    );
 }
 
 #[test]
