@@ -7,7 +7,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
 use futures::channel::mpsc;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 1;
+pub const SYNC_PROTOCOL_VERSION: u32 = 2;
 
 pub trait TickNotifier: 'static {
     fn notify(&self);
