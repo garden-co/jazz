@@ -282,6 +282,17 @@ fn rc_worker_direct_batch_persists_visible_members_on_seal() {
         }
         other => panic!("expected durable direct settlement, got {other:?}"),
     }
+
+    let first_visible_row =
+        s.b.storage()
+            .load_visible_region_row("users", branch_name.as_str(), first_row_id)
+            .unwrap()
+            .expect("sealed direct batch member should stay visible");
+    assert_eq!(
+        first_visible_row.confirmed_tier,
+        Some(DurabilityTier::Local),
+        "sealing a direct batch should make member rows locally durable"
+    );
 }
 
 #[test]

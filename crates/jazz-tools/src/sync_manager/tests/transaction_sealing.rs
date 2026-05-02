@@ -178,6 +178,99 @@ fn direct_batch_from_client_sends_one_settlement_on_seal() {
 }
 
 #[test]
+fn direct_batch_from_client_settles_when_rows_arrive_after_seal() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let alice_id = ObjectId::new();
+    let bob_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let alice = row_with_batch_state(
+        visible_row(alice_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    let bob = row_with_batch_state(
+        visible_row(bob_id, "main", Vec::new(), 1_100, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: alice.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: alice.clone(),
+        },
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                "main",
+                vec![
+                    SealedBatchMember {
+                        object_id: alice_id,
+                        row_digest: alice.content_digest(),
+                    },
+                    SealedBatchMember {
+                        object_id: bob_id,
+                        row_digest: bob.content_digest(),
+                    },
+                ],
+                Vec::new(),
+            ),
+        },
+    );
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: bob.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: bob,
+        },
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement {
+                settlement: BatchSettlement::DurableDirect {
+                    batch_id: settled_batch_id,
+                    confirmed_tier: DurabilityTier::Local,
+                    visible_members,
+                },
+            },
+        } if *id == client_id
+            && *settled_batch_id == batch_id
+            && visible_members.len() == 2
+            && visible_members.iter().any(|member| member.object_id == alice_id)
+            && visible_members.iter().any(|member| member.object_id == bob_id)
+    )));
+}
+
+#[test]
 fn seal_batch_collapses_same_row_to_latest_visible_member() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();

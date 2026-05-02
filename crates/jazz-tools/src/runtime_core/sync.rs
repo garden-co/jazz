@@ -74,6 +74,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager_mut()
             .add_server_with_storage(&self.storage, server_id, skip_catalogue_sync);
         let pending_batch_ids = self.pending_batch_ids_needing_reconciliation();
+        for batch_id in &pending_batch_ids {
+            self.retransmit_local_batch_to_servers(*batch_id);
+        }
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()

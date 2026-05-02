@@ -1341,6 +1341,11 @@ impl SyncManager {
                         if let Some(existing_history_row) = existing_history_row.as_ref()
                             && Self::matches_replayed_row_batch(existing_history_row, row)
                         {
+                            self.try_accept_completed_sealed_batch_from_client(
+                                storage,
+                                client_id,
+                                row.batch_id,
+                            );
                             if let Some(settlement) = self
                                 .load_batch_settlement_by_batch_id_from_storage(
                                     storage,
@@ -1563,24 +1568,18 @@ impl SyncManager {
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
-                    ) {
-                        if let Some(update) = applied.visibility_change {
-                            self.pending_row_visibility_changes.push(update);
-                            self.forward_update_to_clients_except_with_storage(
-                                storage,
-                                object_id,
-                                branch_name,
-                                client_id,
-                            );
-                        }
-                    } else {
-                        self.try_accept_completed_sealed_batch_from_client(
+                    ) && let Some(update) = applied.visibility_change
+                    {
+                        self.pending_row_visibility_changes.push(update);
+                        self.forward_update_to_clients_except_with_storage(
                             storage,
+                            object_id,
+                            branch_name,
                             client_id,
-                            applied.row.batch_id,
                         );
                     }
                 }
+                self.try_accept_completed_sealed_batch_from_client(storage, client_id, batch_id);
             }
             SyncPayload::SealBatch { submission } => {
                 if submission.members.is_empty() {

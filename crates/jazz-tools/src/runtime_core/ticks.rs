@@ -231,7 +231,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
+    pub(super) fn retransmit_local_batch_to_servers(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) {
         let sealed_submission = self
             .storage
             .load_local_batch_record(batch_id)
