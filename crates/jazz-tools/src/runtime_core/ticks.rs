@@ -1,7 +1,7 @@
 use super::*;
 use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
-use crate::row_histories::patch_row_batch_state;
+use crate::row_histories::patch_row_batch_confirmed_tier;
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -105,19 +105,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     visible_members, ..
                 } => {
                     for member in visible_members {
-                        match patch_row_batch_state(
+                        match patch_row_batch_confirmed_tier(
                             &mut self.storage,
                             member.object_id,
                             &member.branch_name,
                             member.batch_id,
-                            None,
-                            Some(acked_tier),
+                            acked_tier,
                         ) {
-                            Ok(Some(update)) => self
-                                .schema_manager
-                                .query_manager_mut()
-                                .enqueue_row_visibility_change(update),
-                            Ok(None) => {}
+                            Ok(_) => {}
                             Err(error) => {
                                 tracing::debug!(
                                     object_id = %member.object_id,
@@ -315,13 +310,39 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         >= pending_settled.through_seq
                 });
                 if is_ready {
+                    tracing::warn!(
+                        target: "jazz_timing",
+                        query_id = pending_settled.query_id.0,
+                        ?pending_settled.tier,
+                        ?pending_settled.server_id,
+                        through_seq = pending_settled.through_seq,
+                        "[jazz timing] runtime QuerySettled watermark ready"
+                    );
                     ready.push(pending_settled);
                 } else {
+                    let applied_seq = pending_settled
+                        .server_id
+                        .and_then(|server_id| self.last_applied_server_seq.get(&server_id).copied())
+                        .unwrap_or(0);
+                    tracing::debug!(
+                        target: "jazz_timing",
+                        query_id = pending_settled.query_id.0,
+                        ?pending_settled.tier,
+                        ?pending_settled.server_id,
+                        through_seq = pending_settled.through_seq,
+                        applied_seq,
+                        "[jazz timing] runtime QuerySettled watermark blocked"
+                    );
                     blocked.push(pending_settled);
                 }
             }
 
             if !blocked.is_empty() {
+                tracing::debug!(
+                    target: "jazz_timing",
+                    count = blocked.len(),
+                    "[jazz timing] runtime requeueing blocked QuerySettled messages"
+                );
                 self.schema_manager
                     .query_manager_mut()
                     .sync_manager_mut()
@@ -335,6 +356,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             {
                 let query_manager = self.schema_manager.query_manager_mut();
                 for pending_settled in ready_query_settled {
+                    tracing::warn!(
+                        target: "jazz_timing",
+                        query_id = pending_settled.query_id.0,
+                        ?pending_settled.tier,
+                        "[jazz timing] runtime applying ready QuerySettled"
+                    );
                     query_manager
                         .apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 }
@@ -511,6 +538,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .take_outbox();
         if !outbox.is_empty() {
             debug!(count = outbox.len(), "{log_message}");
+            let mut row_batches = 0usize;
+            let mut query_subscriptions = 0usize;
+            let mut query_settled = 0usize;
+            let mut other = 0usize;
+            for msg in &outbox {
+                match &msg.payload {
+                    crate::sync_manager::SyncPayload::RowBatchCreated { .. }
+                    | crate::sync_manager::SyncPayload::RowBatchNeeded { .. } => {
+                        row_batches += 1;
+                    }
+                    crate::sync_manager::SyncPayload::QuerySubscription { .. } => {
+                        query_subscriptions += 1;
+                    }
+                    crate::sync_manager::SyncPayload::QuerySettled { .. } => {
+                        query_settled += 1;
+                    }
+                    _ => {
+                        other += 1;
+                    }
+                }
+            }
+            tracing::warn!(
+                target: "jazz_timing",
+                count = outbox.len(),
+                row_batches,
+                query_subscriptions,
+                query_settled,
+                other,
+                "[jazz timing] runtime flushing outbox"
+            );
         }
 
         let mut unsent = Vec::new();
@@ -551,6 +608,56 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             while let Some(message) = handle.try_recv_inbound() {
                 inbound.push(message);
             }
+        }
+
+        if !inbound.is_empty() {
+            let mut first_seq = None;
+            let mut last_seq = None;
+            let mut row_batches = 0usize;
+            let mut query_settled = 0usize;
+            let mut other = 0usize;
+
+            for message in &inbound {
+                match message {
+                    crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
+                        if let Some(sequence) = *sequence {
+                            first_seq = Some(
+                                first_seq.map_or(sequence, |current: u64| current.min(sequence)),
+                            );
+                            last_seq = Some(
+                                last_seq.map_or(sequence, |current: u64| current.max(sequence)),
+                            );
+                        }
+                        match &entry.payload {
+                            crate::sync_manager::SyncPayload::RowBatchCreated { .. }
+                            | crate::sync_manager::SyncPayload::RowBatchNeeded { .. } => {
+                                row_batches += 1;
+                            }
+                            crate::sync_manager::SyncPayload::QuerySettled { .. } => {
+                                query_settled += 1;
+                            }
+                            _ => {
+                                other += 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        other += 1;
+                    }
+                }
+            }
+
+            tracing::warn!(
+                target: "jazz_timing",
+                %server_id,
+                count = inbound.len(),
+                ?first_seq,
+                ?last_seq,
+                row_batches,
+                query_settled,
+                other,
+                "[jazz timing] runtime drained transport inbound"
+            );
         }
 
         for message in inbound {
