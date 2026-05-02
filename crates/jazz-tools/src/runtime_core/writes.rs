@@ -5,7 +5,7 @@ use crate::batch_fate::{
 };
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
-use crate::row_histories::BatchId;
+use crate::row_histories::{BatchId, patch_row_batch_state};
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -764,7 +764,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         record.mark_sealed(submission.clone());
         if record.mode == BatchMode::Direct {
-            let visible_members = record
+            let confirmed_tier = self.local_write_confirmed_tier();
+            let visible_members: Vec<_> = record
                 .members
                 .iter()
                 .map(|member| VisibleBatchMember {
@@ -773,9 +774,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     batch_id,
                 })
                 .collect();
+            for member in &visible_members {
+                let visibility_change = patch_row_batch_state(
+                    &mut self.storage,
+                    member.object_id,
+                    &member.branch_name,
+                    member.batch_id,
+                    None,
+                    Some(confirmed_tier),
+                )
+                .map_err(|err| {
+                    RuntimeError::WriteError(format!(
+                        "mark direct batch row locally durable: {err:?}"
+                    ))
+                })?;
+                if let Some(update) = visibility_change {
+                    self.schema_manager
+                        .query_manager_mut()
+                        .enqueue_row_visibility_change(update);
+                }
+            }
             record.apply_settlement(BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: self.local_write_confirmed_tier(),
+                confirmed_tier,
                 visible_members,
             });
         }
