@@ -279,6 +279,223 @@ export interface TaskRecord {
   updated_at: Date;
 }
 
+export interface DesignerCadWorkspace {
+  id: string;
+  workspace_id: string;
+  workspace_key: string;
+  title?: string;
+  repo_root?: string;
+  workspace_root?: string;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadDocument {
+  id: string;
+  document_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  file_path: string;
+  language: string;
+  source_kind: string;
+  source_hash?: string;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadSession {
+  id: string;
+  cad_session_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  document_id: string;
+  document_row_id: string;
+  codex_session_id?: string;
+  agent_run_id?: string;
+  status: string;
+  active_tool_session_id?: string;
+  latest_projection_id?: string;
+  opened_by?: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+  closed_at?: Date;
+}
+
+export interface DesignerCadEvent {
+  id: string;
+  event_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  event_kind: string;
+  actor_kind: string;
+  actor_id?: string;
+  tool_session_id?: string;
+  operation_id?: string;
+  preview_id?: string;
+  source_event_id?: string;
+  payload_json?: JsonValue;
+  occurred_at: Date;
+  observed_at: Date;
+}
+
+export interface DesignerCadSceneNode {
+  id: string;
+  node_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  document_id: string;
+  document_row_id: string;
+  projection_id: string;
+  kind: string;
+  label?: string;
+  path?: string;
+  parent_node_id?: string;
+  stable_ref?: string;
+  visibility?: string;
+  source_span_json?: JsonValue;
+  geometry_ref_json?: JsonValue;
+  metadata_json?: JsonValue;
+  updated_at: Date;
+}
+
+export interface DesignerCadSelection {
+  id: string;
+  selection_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  actor_kind: string;
+  actor_id?: string;
+  target_kind: string;
+  target_id: string;
+  node_id?: string;
+  selection_json?: JsonValue;
+  status: string;
+  updated_at: Date;
+}
+
+export interface DesignerCadToolSession {
+  id: string;
+  tool_session_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_kind: string;
+  actor_kind: string;
+  actor_id?: string;
+  status: string;
+  input_json?: JsonValue;
+  state_json?: JsonValue;
+  started_at: Date;
+  updated_at: Date;
+  completed_at?: Date;
+}
+
+export interface DesignerCadOperation {
+  id: string;
+  operation_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_session_id?: string;
+  tool_session_row_id?: string;
+  actor_kind: string;
+  actor_id?: string;
+  operation_kind: string;
+  status: string;
+  operation_json: JsonValue;
+  validation_json?: JsonValue;
+  result_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+  applied_at?: Date;
+}
+
+export interface DesignerCadSourceEdit {
+  id: string;
+  edit_id: string;
+  operation_id: string;
+  operation_row_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  file_path: string;
+  range_json: JsonValue;
+  text_preview?: string;
+  text_sha256?: string;
+  status: string;
+  created_at: Date;
+}
+
+export interface DesignerCadPreviewHandle {
+  id: string;
+  preview_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_session_id?: string;
+  tool_session_row_id?: string;
+  operation_id?: string;
+  operation_row_id?: string;
+  preview_kind: string;
+  target_json?: JsonValue;
+  status: string;
+  handle_ref?: string;
+  created_at: Date;
+  updated_at: Date;
+  disposed_at?: Date;
+}
+
+export interface DesignerCadPreviewUpdate {
+  id: string;
+  update_id: string;
+  preview_id: string;
+  preview_row_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  params_json?: JsonValue;
+  mesh_ref_json?: JsonValue;
+  status: string;
+  error_text?: string;
+  requested_at: Date;
+  completed_at?: Date;
+}
+
+export interface DesignerCadWidget {
+  id: string;
+  widget_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  widget_key: string;
+  title?: string;
+  source_kind: string;
+  source_path?: string;
+  version?: string;
+  status: string;
+  manifest_json?: JsonValue;
+  state_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadSteer {
+  id: string;
+  steer_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  actor_kind: string;
+  actor_id?: string;
+  target_agent_id?: string;
+  target_run_id?: string;
+  message_text: string;
+  context_json?: JsonValue;
+  status: string;
+  created_at: Date;
+}
+
 export interface AgentInit {
   agent_id: string;
   lane?: string | null;
@@ -527,6 +744,210 @@ export interface TaskRecordInit {
   metadata_json?: JsonValue | null;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface DesignerCadWorkspaceInit {
+  workspace_id: string;
+  workspace_key: string;
+  title?: string | null;
+  repo_root?: string | null;
+  workspace_root?: string | null;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadDocumentInit {
+  document_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  file_path: string;
+  language: string;
+  source_kind: string;
+  source_hash?: string | null;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadSessionInit {
+  cad_session_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  document_id: string;
+  document_row_id: string;
+  codex_session_id?: string | null;
+  agent_run_id?: string | null;
+  status: string;
+  active_tool_session_id?: string | null;
+  latest_projection_id?: string | null;
+  opened_by?: string | null;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+  closed_at?: Date | null;
+}
+
+export interface DesignerCadEventInit {
+  event_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  event_kind: string;
+  actor_kind: string;
+  actor_id?: string | null;
+  tool_session_id?: string | null;
+  operation_id?: string | null;
+  preview_id?: string | null;
+  source_event_id?: string | null;
+  payload_json?: JsonValue | null;
+  occurred_at: Date;
+  observed_at: Date;
+}
+
+export interface DesignerCadSceneNodeInit {
+  node_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  document_id: string;
+  document_row_id: string;
+  projection_id: string;
+  kind: string;
+  label?: string | null;
+  path?: string | null;
+  parent_node_id?: string | null;
+  stable_ref?: string | null;
+  visibility?: string | null;
+  source_span_json?: JsonValue | null;
+  geometry_ref_json?: JsonValue | null;
+  metadata_json?: JsonValue | null;
+  updated_at: Date;
+}
+
+export interface DesignerCadSelectionInit {
+  selection_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  actor_kind: string;
+  actor_id?: string | null;
+  target_kind: string;
+  target_id: string;
+  node_id?: string | null;
+  selection_json?: JsonValue | null;
+  status: string;
+  updated_at: Date;
+}
+
+export interface DesignerCadToolSessionInit {
+  tool_session_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_kind: string;
+  actor_kind: string;
+  actor_id?: string | null;
+  status: string;
+  input_json?: JsonValue | null;
+  state_json?: JsonValue | null;
+  started_at: Date;
+  updated_at: Date;
+  completed_at?: Date | null;
+}
+
+export interface DesignerCadOperationInit {
+  operation_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_session_id?: string | null;
+  tool_session_row_id?: string | null;
+  actor_kind: string;
+  actor_id?: string | null;
+  operation_kind: string;
+  status: string;
+  operation_json: JsonValue;
+  validation_json?: JsonValue | null;
+  result_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+  applied_at?: Date | null;
+}
+
+export interface DesignerCadSourceEditInit {
+  edit_id: string;
+  operation_id: string;
+  operation_row_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  file_path: string;
+  range_json: JsonValue;
+  text_preview?: string | null;
+  text_sha256?: string | null;
+  status: string;
+  created_at: Date;
+}
+
+export interface DesignerCadPreviewHandleInit {
+  preview_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  tool_session_id?: string | null;
+  tool_session_row_id?: string | null;
+  operation_id?: string | null;
+  operation_row_id?: string | null;
+  preview_kind: string;
+  target_json?: JsonValue | null;
+  status: string;
+  handle_ref?: string | null;
+  created_at: Date;
+  updated_at: Date;
+  disposed_at?: Date | null;
+}
+
+export interface DesignerCadPreviewUpdateInit {
+  update_id: string;
+  preview_id: string;
+  preview_row_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  sequence: number;
+  params_json?: JsonValue | null;
+  mesh_ref_json?: JsonValue | null;
+  status: string;
+  error_text?: string | null;
+  requested_at: Date;
+  completed_at?: Date | null;
+}
+
+export interface DesignerCadWidgetInit {
+  widget_id: string;
+  workspace_id: string;
+  workspace_row_id: string;
+  widget_key: string;
+  title?: string | null;
+  source_kind: string;
+  source_path?: string | null;
+  version?: string | null;
+  status: string;
+  manifest_json?: JsonValue | null;
+  state_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCadSteerInit {
+  steer_id: string;
+  cad_session_id: string;
+  cad_session_row_id: string;
+  actor_kind: string;
+  actor_id?: string | null;
+  target_agent_id?: string | null;
+  target_run_id?: string | null;
+  message_text: string;
+  context_json?: JsonValue | null;
+  status: string;
+  created_at: Date;
 }
 
 export interface AgentWhereInput {
@@ -843,6 +1264,262 @@ export interface TaskRecordWhereInput {
   $canDelete?: boolean;
 }
 
+export interface DesignerCadWorkspaceWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_key?: string | { eq?: string; ne?: string; contains?: string };
+  title?: string | { eq?: string; ne?: string; contains?: string };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_root?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadDocumentWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  document_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_row_id?: string | { eq?: string; ne?: string };
+  file_path?: string | { eq?: string; ne?: string; contains?: string };
+  language?: string | { eq?: string; ne?: string; contains?: string };
+  source_kind?: string | { eq?: string; ne?: string; contains?: string };
+  source_hash?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadSessionWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_row_id?: string | { eq?: string; ne?: string };
+  document_id?: string | { eq?: string; ne?: string; contains?: string };
+  document_row_id?: string | { eq?: string; ne?: string };
+  codex_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_run_id?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  active_tool_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  latest_projection_id?: string | { eq?: string; ne?: string; contains?: string };
+  opened_by?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  closed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadEventWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  event_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  event_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  tool_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  operation_id?: string | { eq?: string; ne?: string; contains?: string };
+  preview_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_event_id?: string | { eq?: string; ne?: string; contains?: string };
+  payload_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  occurred_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  observed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadSceneNodeWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  node_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  document_id?: string | { eq?: string; ne?: string; contains?: string };
+  document_row_id?: string | { eq?: string; ne?: string };
+  projection_id?: string | { eq?: string; ne?: string; contains?: string };
+  kind?: string | { eq?: string; ne?: string; contains?: string };
+  label?: string | { eq?: string; ne?: string; contains?: string };
+  path?: string | { eq?: string; ne?: string; contains?: string };
+  parent_node_id?: string | { eq?: string; ne?: string; contains?: string };
+  stable_ref?: string | { eq?: string; ne?: string; contains?: string };
+  visibility?: string | { eq?: string; ne?: string; contains?: string };
+  source_span_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  geometry_ref_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadSelectionWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  selection_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  target_kind?: string | { eq?: string; ne?: string; contains?: string };
+  target_id?: string | { eq?: string; ne?: string; contains?: string };
+  node_id?: string | { eq?: string; ne?: string; contains?: string };
+  selection_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadToolSessionWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  tool_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  tool_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  input_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  state_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  started_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  completed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadOperationWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  operation_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  tool_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  tool_session_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  operation_kind?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  operation_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  validation_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  result_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  applied_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadSourceEditWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  edit_id?: string | { eq?: string; ne?: string; contains?: string };
+  operation_id?: string | { eq?: string; ne?: string; contains?: string };
+  operation_row_id?: string | { eq?: string; ne?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  file_path?: string | { eq?: string; ne?: string; contains?: string };
+  range_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  text_preview?: string | { eq?: string; ne?: string; contains?: string };
+  text_sha256?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadPreviewHandleWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  preview_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  tool_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  tool_session_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  operation_id?: string | { eq?: string; ne?: string; contains?: string };
+  operation_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  preview_kind?: string | { eq?: string; ne?: string; contains?: string };
+  target_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  handle_ref?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  disposed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadPreviewUpdateWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  update_id?: string | { eq?: string; ne?: string; contains?: string };
+  preview_id?: string | { eq?: string; ne?: string; contains?: string };
+  preview_row_id?: string | { eq?: string; ne?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  params_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  mesh_ref_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  error_text?: string | { eq?: string; ne?: string; contains?: string };
+  requested_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  completed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadWidgetWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  widget_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_row_id?: string | { eq?: string; ne?: string };
+  widget_key?: string | { eq?: string; ne?: string; contains?: string };
+  title?: string | { eq?: string; ne?: string; contains?: string };
+  source_kind?: string | { eq?: string; ne?: string; contains?: string };
+  source_path?: string | { eq?: string; ne?: string; contains?: string };
+  version?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  manifest_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  state_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCadSteerWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  steer_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  cad_session_row_id?: string | { eq?: string; ne?: string };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  target_agent_id?: string | { eq?: string; ne?: string; contains?: string };
+  target_run_id?: string | { eq?: string; ne?: string; contains?: string };
+  message_text?: string | { eq?: string; ne?: string; contains?: string };
+  context_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 type AnyAgentQueryBuilder<T = any> = { readonly _table: "agents" } & QueryBuilder<T>;
 type AnyAgentRunQueryBuilder<T = any> = { readonly _table: "agent_runs" } & QueryBuilder<T>;
 type AnyRunItemQueryBuilder<T = any> = { readonly _table: "run_items" } & QueryBuilder<T>;
@@ -859,6 +1536,19 @@ type AnyDaemonLogEventQueryBuilder<T = any> = { readonly _table: "daemon_log_eve
 type AnyDaemonLogCheckpointQueryBuilder<T = any> = { readonly _table: "daemon_log_checkpoints" } & QueryBuilder<T>;
 type AnyDaemonLogSummaryQueryBuilder<T = any> = { readonly _table: "daemon_log_summaries" } & QueryBuilder<T>;
 type AnyTaskRecordQueryBuilder<T = any> = { readonly _table: "task_records" } & QueryBuilder<T>;
+type AnyDesignerCadWorkspaceQueryBuilder<T = any> = { readonly _table: "designer_cad_workspaces" } & QueryBuilder<T>;
+type AnyDesignerCadDocumentQueryBuilder<T = any> = { readonly _table: "designer_cad_documents" } & QueryBuilder<T>;
+type AnyDesignerCadSessionQueryBuilder<T = any> = { readonly _table: "designer_cad_sessions" } & QueryBuilder<T>;
+type AnyDesignerCadEventQueryBuilder<T = any> = { readonly _table: "designer_cad_events" } & QueryBuilder<T>;
+type AnyDesignerCadSceneNodeQueryBuilder<T = any> = { readonly _table: "designer_cad_scene_nodes" } & QueryBuilder<T>;
+type AnyDesignerCadSelectionQueryBuilder<T = any> = { readonly _table: "designer_cad_selections" } & QueryBuilder<T>;
+type AnyDesignerCadToolSessionQueryBuilder<T = any> = { readonly _table: "designer_cad_tool_sessions" } & QueryBuilder<T>;
+type AnyDesignerCadOperationQueryBuilder<T = any> = { readonly _table: "designer_cad_operations" } & QueryBuilder<T>;
+type AnyDesignerCadSourceEditQueryBuilder<T = any> = { readonly _table: "designer_cad_source_edits" } & QueryBuilder<T>;
+type AnyDesignerCadPreviewHandleQueryBuilder<T = any> = { readonly _table: "designer_cad_preview_handles" } & QueryBuilder<T>;
+type AnyDesignerCadPreviewUpdateQueryBuilder<T = any> = { readonly _table: "designer_cad_preview_updates" } & QueryBuilder<T>;
+type AnyDesignerCadWidgetQueryBuilder<T = any> = { readonly _table: "designer_cad_widgets" } & QueryBuilder<T>;
+type AnyDesignerCadSteerQueryBuilder<T = any> = { readonly _table: "designer_cad_steers" } & QueryBuilder<T>;
 
 export interface AgentInclude {
   agent_runsViaAgent_row?: true | AgentRunInclude | AnyAgentRunQueryBuilder<any>;
@@ -935,6 +1625,83 @@ export interface DaemonLogCheckpointInclude {
 
 export interface DaemonLogSummaryInclude {
   source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
+}
+
+export interface DesignerCadWorkspaceInclude {
+  designer_cad_documentsViaWorkspace_row?: true | DesignerCadDocumentInclude | AnyDesignerCadDocumentQueryBuilder<any>;
+  designer_cad_sessionsViaWorkspace_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  designer_cad_widgetsViaWorkspace_row?: true | DesignerCadWidgetInclude | AnyDesignerCadWidgetQueryBuilder<any>;
+}
+
+export interface DesignerCadDocumentInclude {
+  workspace_row?: true | DesignerCadWorkspaceInclude | AnyDesignerCadWorkspaceQueryBuilder<any>;
+  designer_cad_sessionsViaDocument_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  designer_cad_scene_nodesViaDocument_row?: true | DesignerCadSceneNodeInclude | AnyDesignerCadSceneNodeQueryBuilder<any>;
+}
+
+export interface DesignerCadSessionInclude {
+  workspace_row?: true | DesignerCadWorkspaceInclude | AnyDesignerCadWorkspaceQueryBuilder<any>;
+  document_row?: true | DesignerCadDocumentInclude | AnyDesignerCadDocumentQueryBuilder<any>;
+  designer_cad_eventsViaCad_session_row?: true | DesignerCadEventInclude | AnyDesignerCadEventQueryBuilder<any>;
+  designer_cad_scene_nodesViaCad_session_row?: true | DesignerCadSceneNodeInclude | AnyDesignerCadSceneNodeQueryBuilder<any>;
+  designer_cad_selectionsViaCad_session_row?: true | DesignerCadSelectionInclude | AnyDesignerCadSelectionQueryBuilder<any>;
+  designer_cad_tool_sessionsViaCad_session_row?: true | DesignerCadToolSessionInclude | AnyDesignerCadToolSessionQueryBuilder<any>;
+  designer_cad_operationsViaCad_session_row?: true | DesignerCadOperationInclude | AnyDesignerCadOperationQueryBuilder<any>;
+  designer_cad_source_editsViaCad_session_row?: true | DesignerCadSourceEditInclude | AnyDesignerCadSourceEditQueryBuilder<any>;
+  designer_cad_preview_handlesViaCad_session_row?: true | DesignerCadPreviewHandleInclude | AnyDesignerCadPreviewHandleQueryBuilder<any>;
+  designer_cad_preview_updatesViaCad_session_row?: true | DesignerCadPreviewUpdateInclude | AnyDesignerCadPreviewUpdateQueryBuilder<any>;
+  designer_cad_steersViaCad_session_row?: true | DesignerCadSteerInclude | AnyDesignerCadSteerQueryBuilder<any>;
+}
+
+export interface DesignerCadEventInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+}
+
+export interface DesignerCadSceneNodeInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  document_row?: true | DesignerCadDocumentInclude | AnyDesignerCadDocumentQueryBuilder<any>;
+}
+
+export interface DesignerCadSelectionInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+}
+
+export interface DesignerCadToolSessionInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  designer_cad_operationsViaTool_session_row?: true | DesignerCadOperationInclude | AnyDesignerCadOperationQueryBuilder<any>;
+  designer_cad_preview_handlesViaTool_session_row?: true | DesignerCadPreviewHandleInclude | AnyDesignerCadPreviewHandleQueryBuilder<any>;
+}
+
+export interface DesignerCadOperationInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  tool_session_row?: true | DesignerCadToolSessionInclude | AnyDesignerCadToolSessionQueryBuilder<any>;
+  designer_cad_source_editsViaOperation_row?: true | DesignerCadSourceEditInclude | AnyDesignerCadSourceEditQueryBuilder<any>;
+  designer_cad_preview_handlesViaOperation_row?: true | DesignerCadPreviewHandleInclude | AnyDesignerCadPreviewHandleQueryBuilder<any>;
+}
+
+export interface DesignerCadSourceEditInclude {
+  operation_row?: true | DesignerCadOperationInclude | AnyDesignerCadOperationQueryBuilder<any>;
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+}
+
+export interface DesignerCadPreviewHandleInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+  tool_session_row?: true | DesignerCadToolSessionInclude | AnyDesignerCadToolSessionQueryBuilder<any>;
+  operation_row?: true | DesignerCadOperationInclude | AnyDesignerCadOperationQueryBuilder<any>;
+  designer_cad_preview_updatesViaPreview_row?: true | DesignerCadPreviewUpdateInclude | AnyDesignerCadPreviewUpdateQueryBuilder<any>;
+}
+
+export interface DesignerCadPreviewUpdateInclude {
+  preview_row?: true | DesignerCadPreviewHandleInclude | AnyDesignerCadPreviewHandleQueryBuilder<any>;
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
+}
+
+export interface DesignerCadWidgetInclude {
+  workspace_row?: true | DesignerCadWorkspaceInclude | AnyDesignerCadWorkspaceQueryBuilder<any>;
+}
+
+export interface DesignerCadSteerInclude {
+  cad_session_row?: true | DesignerCadSessionInclude | AnyDesignerCadSessionQueryBuilder<any>;
 }
 
 export type AgentIncludedRelations<I extends AgentInclude = {}, R extends boolean = false> = {
@@ -1332,6 +2099,451 @@ export type DaemonLogSummaryIncludedRelations<I extends DaemonLogSummaryInclude 
     : never;
 };
 
+export type DesignerCadWorkspaceIncludedRelations<I extends DesignerCadWorkspaceInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "designer_cad_documentsViaWorkspace_row"
+      ? NonNullable<I["designer_cad_documentsViaWorkspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadDocument[]
+          : RelationInclude extends AnyDesignerCadDocumentQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadDocumentInclude
+              ? DesignerCadDocumentWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_sessionsViaWorkspace_row"
+      ? NonNullable<I["designer_cad_sessionsViaWorkspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSession[]
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSessionInclude
+              ? DesignerCadSessionWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_widgetsViaWorkspace_row"
+      ? NonNullable<I["designer_cad_widgetsViaWorkspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadWidget[]
+          : RelationInclude extends AnyDesignerCadWidgetQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadWidgetInclude
+              ? DesignerCadWidgetWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadDocumentIncludedRelations<I extends DesignerCadDocumentInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "workspace_row"
+      ? NonNullable<I["workspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadWorkspace : DesignerCadWorkspace | undefined
+          : RelationInclude extends AnyDesignerCadWorkspaceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadWorkspaceInclude
+              ? R extends true ? DesignerCadWorkspaceWithIncludes<RelationInclude, false> : DesignerCadWorkspaceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_cad_sessionsViaDocument_row"
+      ? NonNullable<I["designer_cad_sessionsViaDocument_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSession[]
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSessionInclude
+              ? DesignerCadSessionWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_scene_nodesViaDocument_row"
+      ? NonNullable<I["designer_cad_scene_nodesViaDocument_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSceneNode[]
+          : RelationInclude extends AnyDesignerCadSceneNodeQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSceneNodeInclude
+              ? DesignerCadSceneNodeWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadSessionIncludedRelations<I extends DesignerCadSessionInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "workspace_row"
+      ? NonNullable<I["workspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadWorkspace : DesignerCadWorkspace | undefined
+          : RelationInclude extends AnyDesignerCadWorkspaceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadWorkspaceInclude
+              ? R extends true ? DesignerCadWorkspaceWithIncludes<RelationInclude, false> : DesignerCadWorkspaceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "document_row"
+      ? NonNullable<I["document_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadDocument : DesignerCadDocument | undefined
+          : RelationInclude extends AnyDesignerCadDocumentQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadDocumentInclude
+              ? R extends true ? DesignerCadDocumentWithIncludes<RelationInclude, false> : DesignerCadDocumentWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_cad_eventsViaCad_session_row"
+      ? NonNullable<I["designer_cad_eventsViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadEvent[]
+          : RelationInclude extends AnyDesignerCadEventQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadEventInclude
+              ? DesignerCadEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_scene_nodesViaCad_session_row"
+      ? NonNullable<I["designer_cad_scene_nodesViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSceneNode[]
+          : RelationInclude extends AnyDesignerCadSceneNodeQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSceneNodeInclude
+              ? DesignerCadSceneNodeWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_selectionsViaCad_session_row"
+      ? NonNullable<I["designer_cad_selectionsViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSelection[]
+          : RelationInclude extends AnyDesignerCadSelectionQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSelectionInclude
+              ? DesignerCadSelectionWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_tool_sessionsViaCad_session_row"
+      ? NonNullable<I["designer_cad_tool_sessionsViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadToolSession[]
+          : RelationInclude extends AnyDesignerCadToolSessionQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadToolSessionInclude
+              ? DesignerCadToolSessionWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_operationsViaCad_session_row"
+      ? NonNullable<I["designer_cad_operationsViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadOperation[]
+          : RelationInclude extends AnyDesignerCadOperationQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadOperationInclude
+              ? DesignerCadOperationWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_source_editsViaCad_session_row"
+      ? NonNullable<I["designer_cad_source_editsViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSourceEdit[]
+          : RelationInclude extends AnyDesignerCadSourceEditQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSourceEditInclude
+              ? DesignerCadSourceEditWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_preview_handlesViaCad_session_row"
+      ? NonNullable<I["designer_cad_preview_handlesViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadPreviewHandle[]
+          : RelationInclude extends AnyDesignerCadPreviewHandleQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadPreviewHandleInclude
+              ? DesignerCadPreviewHandleWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_preview_updatesViaCad_session_row"
+      ? NonNullable<I["designer_cad_preview_updatesViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadPreviewUpdate[]
+          : RelationInclude extends AnyDesignerCadPreviewUpdateQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadPreviewUpdateInclude
+              ? DesignerCadPreviewUpdateWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_steersViaCad_session_row"
+      ? NonNullable<I["designer_cad_steersViaCad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSteer[]
+          : RelationInclude extends AnyDesignerCadSteerQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSteerInclude
+              ? DesignerCadSteerWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadEventIncludedRelations<I extends DesignerCadEventInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadSceneNodeIncludedRelations<I extends DesignerCadSceneNodeInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "document_row"
+      ? NonNullable<I["document_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadDocument : DesignerCadDocument | undefined
+          : RelationInclude extends AnyDesignerCadDocumentQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadDocumentInclude
+              ? R extends true ? DesignerCadDocumentWithIncludes<RelationInclude, false> : DesignerCadDocumentWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadSelectionIncludedRelations<I extends DesignerCadSelectionInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadToolSessionIncludedRelations<I extends DesignerCadToolSessionInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_cad_operationsViaTool_session_row"
+      ? NonNullable<I["designer_cad_operationsViaTool_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadOperation[]
+          : RelationInclude extends AnyDesignerCadOperationQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadOperationInclude
+              ? DesignerCadOperationWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_preview_handlesViaTool_session_row"
+      ? NonNullable<I["designer_cad_preview_handlesViaTool_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadPreviewHandle[]
+          : RelationInclude extends AnyDesignerCadPreviewHandleQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadPreviewHandleInclude
+              ? DesignerCadPreviewHandleWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadOperationIncludedRelations<I extends DesignerCadOperationInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "tool_session_row"
+      ? NonNullable<I["tool_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadToolSession | undefined
+          : RelationInclude extends AnyDesignerCadToolSessionQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCadToolSessionInclude
+              ? DesignerCadToolSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_cad_source_editsViaOperation_row"
+      ? NonNullable<I["designer_cad_source_editsViaOperation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadSourceEdit[]
+          : RelationInclude extends AnyDesignerCadSourceEditQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadSourceEditInclude
+              ? DesignerCadSourceEditWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_cad_preview_handlesViaOperation_row"
+      ? NonNullable<I["designer_cad_preview_handlesViaOperation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadPreviewHandle[]
+          : RelationInclude extends AnyDesignerCadPreviewHandleQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadPreviewHandleInclude
+              ? DesignerCadPreviewHandleWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadSourceEditIncludedRelations<I extends DesignerCadSourceEditInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "operation_row"
+      ? NonNullable<I["operation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadOperation : DesignerCadOperation | undefined
+          : RelationInclude extends AnyDesignerCadOperationQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadOperationInclude
+              ? R extends true ? DesignerCadOperationWithIncludes<RelationInclude, false> : DesignerCadOperationWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadPreviewHandleIncludedRelations<I extends DesignerCadPreviewHandleInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "tool_session_row"
+      ? NonNullable<I["tool_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadToolSession | undefined
+          : RelationInclude extends AnyDesignerCadToolSessionQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCadToolSessionInclude
+              ? DesignerCadToolSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "operation_row"
+      ? NonNullable<I["operation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadOperation | undefined
+          : RelationInclude extends AnyDesignerCadOperationQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCadOperationInclude
+              ? DesignerCadOperationWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_cad_preview_updatesViaPreview_row"
+      ? NonNullable<I["designer_cad_preview_updatesViaPreview_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCadPreviewUpdate[]
+          : RelationInclude extends AnyDesignerCadPreviewUpdateQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCadPreviewUpdateInclude
+              ? DesignerCadPreviewUpdateWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadPreviewUpdateIncludedRelations<I extends DesignerCadPreviewUpdateInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "preview_row"
+      ? NonNullable<I["preview_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadPreviewHandle : DesignerCadPreviewHandle | undefined
+          : RelationInclude extends AnyDesignerCadPreviewHandleQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadPreviewHandleInclude
+              ? R extends true ? DesignerCadPreviewHandleWithIncludes<RelationInclude, false> : DesignerCadPreviewHandleWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadWidgetIncludedRelations<I extends DesignerCadWidgetInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "workspace_row"
+      ? NonNullable<I["workspace_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadWorkspace : DesignerCadWorkspace | undefined
+          : RelationInclude extends AnyDesignerCadWorkspaceQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadWorkspaceInclude
+              ? R extends true ? DesignerCadWorkspaceWithIncludes<RelationInclude, false> : DesignerCadWorkspaceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCadSteerIncludedRelations<I extends DesignerCadSteerInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "cad_session_row"
+      ? NonNullable<I["cad_session_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCadSession : DesignerCadSession | undefined
+          : RelationInclude extends AnyDesignerCadSessionQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCadSessionInclude
+              ? R extends true ? DesignerCadSessionWithIncludes<RelationInclude, false> : DesignerCadSessionWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
 export interface AgentRelations {
   agent_runsViaAgent_row: AgentRun[];
   agent_state_snapshotsViaAgent_row: AgentStateSnapshot[];
@@ -1409,6 +2621,83 @@ export interface DaemonLogSummaryRelations {
   source_row: DaemonLogSource | undefined;
 }
 
+export interface DesignerCadWorkspaceRelations {
+  designer_cad_documentsViaWorkspace_row: DesignerCadDocument[];
+  designer_cad_sessionsViaWorkspace_row: DesignerCadSession[];
+  designer_cad_widgetsViaWorkspace_row: DesignerCadWidget[];
+}
+
+export interface DesignerCadDocumentRelations {
+  workspace_row: DesignerCadWorkspace | undefined;
+  designer_cad_sessionsViaDocument_row: DesignerCadSession[];
+  designer_cad_scene_nodesViaDocument_row: DesignerCadSceneNode[];
+}
+
+export interface DesignerCadSessionRelations {
+  workspace_row: DesignerCadWorkspace | undefined;
+  document_row: DesignerCadDocument | undefined;
+  designer_cad_eventsViaCad_session_row: DesignerCadEvent[];
+  designer_cad_scene_nodesViaCad_session_row: DesignerCadSceneNode[];
+  designer_cad_selectionsViaCad_session_row: DesignerCadSelection[];
+  designer_cad_tool_sessionsViaCad_session_row: DesignerCadToolSession[];
+  designer_cad_operationsViaCad_session_row: DesignerCadOperation[];
+  designer_cad_source_editsViaCad_session_row: DesignerCadSourceEdit[];
+  designer_cad_preview_handlesViaCad_session_row: DesignerCadPreviewHandle[];
+  designer_cad_preview_updatesViaCad_session_row: DesignerCadPreviewUpdate[];
+  designer_cad_steersViaCad_session_row: DesignerCadSteer[];
+}
+
+export interface DesignerCadEventRelations {
+  cad_session_row: DesignerCadSession | undefined;
+}
+
+export interface DesignerCadSceneNodeRelations {
+  cad_session_row: DesignerCadSession | undefined;
+  document_row: DesignerCadDocument | undefined;
+}
+
+export interface DesignerCadSelectionRelations {
+  cad_session_row: DesignerCadSession | undefined;
+}
+
+export interface DesignerCadToolSessionRelations {
+  cad_session_row: DesignerCadSession | undefined;
+  designer_cad_operationsViaTool_session_row: DesignerCadOperation[];
+  designer_cad_preview_handlesViaTool_session_row: DesignerCadPreviewHandle[];
+}
+
+export interface DesignerCadOperationRelations {
+  cad_session_row: DesignerCadSession | undefined;
+  tool_session_row: DesignerCadToolSession | undefined;
+  designer_cad_source_editsViaOperation_row: DesignerCadSourceEdit[];
+  designer_cad_preview_handlesViaOperation_row: DesignerCadPreviewHandle[];
+}
+
+export interface DesignerCadSourceEditRelations {
+  operation_row: DesignerCadOperation | undefined;
+  cad_session_row: DesignerCadSession | undefined;
+}
+
+export interface DesignerCadPreviewHandleRelations {
+  cad_session_row: DesignerCadSession | undefined;
+  tool_session_row: DesignerCadToolSession | undefined;
+  operation_row: DesignerCadOperation | undefined;
+  designer_cad_preview_updatesViaPreview_row: DesignerCadPreviewUpdate[];
+}
+
+export interface DesignerCadPreviewUpdateRelations {
+  preview_row: DesignerCadPreviewHandle | undefined;
+  cad_session_row: DesignerCadSession | undefined;
+}
+
+export interface DesignerCadWidgetRelations {
+  workspace_row: DesignerCadWorkspace | undefined;
+}
+
+export interface DesignerCadSteerRelations {
+  cad_session_row: DesignerCadSession | undefined;
+}
+
 export type AgentWithIncludes<I extends AgentInclude = {}, R extends boolean = false> = Agent & AgentIncludedRelations<I, R>;
 
 export type AgentRunWithIncludes<I extends AgentRunInclude = {}, R extends boolean = false> = AgentRun & AgentRunIncludedRelations<I, R>;
@@ -1438,6 +2727,32 @@ export type DaemonLogEventWithIncludes<I extends DaemonLogEventInclude = {}, R e
 export type DaemonLogCheckpointWithIncludes<I extends DaemonLogCheckpointInclude = {}, R extends boolean = false> = DaemonLogCheckpoint & DaemonLogCheckpointIncludedRelations<I, R>;
 
 export type DaemonLogSummaryWithIncludes<I extends DaemonLogSummaryInclude = {}, R extends boolean = false> = DaemonLogSummary & DaemonLogSummaryIncludedRelations<I, R>;
+
+export type DesignerCadWorkspaceWithIncludes<I extends DesignerCadWorkspaceInclude = {}, R extends boolean = false> = DesignerCadWorkspace & DesignerCadWorkspaceIncludedRelations<I, R>;
+
+export type DesignerCadDocumentWithIncludes<I extends DesignerCadDocumentInclude = {}, R extends boolean = false> = DesignerCadDocument & DesignerCadDocumentIncludedRelations<I, R>;
+
+export type DesignerCadSessionWithIncludes<I extends DesignerCadSessionInclude = {}, R extends boolean = false> = DesignerCadSession & DesignerCadSessionIncludedRelations<I, R>;
+
+export type DesignerCadEventWithIncludes<I extends DesignerCadEventInclude = {}, R extends boolean = false> = DesignerCadEvent & DesignerCadEventIncludedRelations<I, R>;
+
+export type DesignerCadSceneNodeWithIncludes<I extends DesignerCadSceneNodeInclude = {}, R extends boolean = false> = DesignerCadSceneNode & DesignerCadSceneNodeIncludedRelations<I, R>;
+
+export type DesignerCadSelectionWithIncludes<I extends DesignerCadSelectionInclude = {}, R extends boolean = false> = DesignerCadSelection & DesignerCadSelectionIncludedRelations<I, R>;
+
+export type DesignerCadToolSessionWithIncludes<I extends DesignerCadToolSessionInclude = {}, R extends boolean = false> = DesignerCadToolSession & DesignerCadToolSessionIncludedRelations<I, R>;
+
+export type DesignerCadOperationWithIncludes<I extends DesignerCadOperationInclude = {}, R extends boolean = false> = DesignerCadOperation & DesignerCadOperationIncludedRelations<I, R>;
+
+export type DesignerCadSourceEditWithIncludes<I extends DesignerCadSourceEditInclude = {}, R extends boolean = false> = DesignerCadSourceEdit & DesignerCadSourceEditIncludedRelations<I, R>;
+
+export type DesignerCadPreviewHandleWithIncludes<I extends DesignerCadPreviewHandleInclude = {}, R extends boolean = false> = DesignerCadPreviewHandle & DesignerCadPreviewHandleIncludedRelations<I, R>;
+
+export type DesignerCadPreviewUpdateWithIncludes<I extends DesignerCadPreviewUpdateInclude = {}, R extends boolean = false> = DesignerCadPreviewUpdate & DesignerCadPreviewUpdateIncludedRelations<I, R>;
+
+export type DesignerCadWidgetWithIncludes<I extends DesignerCadWidgetInclude = {}, R extends boolean = false> = DesignerCadWidget & DesignerCadWidgetIncludedRelations<I, R>;
+
+export type DesignerCadSteerWithIncludes<I extends DesignerCadSteerInclude = {}, R extends boolean = false> = DesignerCadSteer & DesignerCadSteerIncludedRelations<I, R>;
 
 export type AgentSelectableColumn = keyof Agent | PermissionIntrospectionColumn | "*";
 export type AgentOrderableColumn = keyof Agent | PermissionIntrospectionColumn;
@@ -1548,6 +2863,97 @@ export type TaskRecordSelectableColumn = keyof TaskRecord | PermissionIntrospect
 export type TaskRecordOrderableColumn = keyof TaskRecord | PermissionIntrospectionColumn;
 
 export type TaskRecordSelected<S extends TaskRecordSelectableColumn = keyof TaskRecord> = ("*" extends S ? TaskRecord : Pick<TaskRecord, Extract<S | "id", keyof TaskRecord>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn | "*";
+export type DesignerCadWorkspaceOrderableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn;
+
+export type DesignerCadWorkspaceSelected<S extends DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace> = ("*" extends S ? DesignerCadWorkspace : Pick<DesignerCadWorkspace, Extract<S | "id", keyof DesignerCadWorkspace>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadWorkspaceSelectedWithIncludes<I extends DesignerCadWorkspaceInclude = {}, S extends DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace, R extends boolean = false> = DesignerCadWorkspaceSelected<S> & DesignerCadWorkspaceIncludedRelations<I, R>;
+
+export type DesignerCadDocumentSelectableColumn = keyof DesignerCadDocument | PermissionIntrospectionColumn | "*";
+export type DesignerCadDocumentOrderableColumn = keyof DesignerCadDocument | PermissionIntrospectionColumn;
+
+export type DesignerCadDocumentSelected<S extends DesignerCadDocumentSelectableColumn = keyof DesignerCadDocument> = ("*" extends S ? DesignerCadDocument : Pick<DesignerCadDocument, Extract<S | "id", keyof DesignerCadDocument>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadDocumentSelectedWithIncludes<I extends DesignerCadDocumentInclude = {}, S extends DesignerCadDocumentSelectableColumn = keyof DesignerCadDocument, R extends boolean = false> = DesignerCadDocumentSelected<S> & DesignerCadDocumentIncludedRelations<I, R>;
+
+export type DesignerCadSessionSelectableColumn = keyof DesignerCadSession | PermissionIntrospectionColumn | "*";
+export type DesignerCadSessionOrderableColumn = keyof DesignerCadSession | PermissionIntrospectionColumn;
+
+export type DesignerCadSessionSelected<S extends DesignerCadSessionSelectableColumn = keyof DesignerCadSession> = ("*" extends S ? DesignerCadSession : Pick<DesignerCadSession, Extract<S | "id", keyof DesignerCadSession>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadSessionSelectedWithIncludes<I extends DesignerCadSessionInclude = {}, S extends DesignerCadSessionSelectableColumn = keyof DesignerCadSession, R extends boolean = false> = DesignerCadSessionSelected<S> & DesignerCadSessionIncludedRelations<I, R>;
+
+export type DesignerCadEventSelectableColumn = keyof DesignerCadEvent | PermissionIntrospectionColumn | "*";
+export type DesignerCadEventOrderableColumn = keyof DesignerCadEvent | PermissionIntrospectionColumn;
+
+export type DesignerCadEventSelected<S extends DesignerCadEventSelectableColumn = keyof DesignerCadEvent> = ("*" extends S ? DesignerCadEvent : Pick<DesignerCadEvent, Extract<S | "id", keyof DesignerCadEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadEventSelectedWithIncludes<I extends DesignerCadEventInclude = {}, S extends DesignerCadEventSelectableColumn = keyof DesignerCadEvent, R extends boolean = false> = DesignerCadEventSelected<S> & DesignerCadEventIncludedRelations<I, R>;
+
+export type DesignerCadSceneNodeSelectableColumn = keyof DesignerCadSceneNode | PermissionIntrospectionColumn | "*";
+export type DesignerCadSceneNodeOrderableColumn = keyof DesignerCadSceneNode | PermissionIntrospectionColumn;
+
+export type DesignerCadSceneNodeSelected<S extends DesignerCadSceneNodeSelectableColumn = keyof DesignerCadSceneNode> = ("*" extends S ? DesignerCadSceneNode : Pick<DesignerCadSceneNode, Extract<S | "id", keyof DesignerCadSceneNode>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadSceneNodeSelectedWithIncludes<I extends DesignerCadSceneNodeInclude = {}, S extends DesignerCadSceneNodeSelectableColumn = keyof DesignerCadSceneNode, R extends boolean = false> = DesignerCadSceneNodeSelected<S> & DesignerCadSceneNodeIncludedRelations<I, R>;
+
+export type DesignerCadSelectionSelectableColumn = keyof DesignerCadSelection | PermissionIntrospectionColumn | "*";
+export type DesignerCadSelectionOrderableColumn = keyof DesignerCadSelection | PermissionIntrospectionColumn;
+
+export type DesignerCadSelectionSelected<S extends DesignerCadSelectionSelectableColumn = keyof DesignerCadSelection> = ("*" extends S ? DesignerCadSelection : Pick<DesignerCadSelection, Extract<S | "id", keyof DesignerCadSelection>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadSelectionSelectedWithIncludes<I extends DesignerCadSelectionInclude = {}, S extends DesignerCadSelectionSelectableColumn = keyof DesignerCadSelection, R extends boolean = false> = DesignerCadSelectionSelected<S> & DesignerCadSelectionIncludedRelations<I, R>;
+
+export type DesignerCadToolSessionSelectableColumn = keyof DesignerCadToolSession | PermissionIntrospectionColumn | "*";
+export type DesignerCadToolSessionOrderableColumn = keyof DesignerCadToolSession | PermissionIntrospectionColumn;
+
+export type DesignerCadToolSessionSelected<S extends DesignerCadToolSessionSelectableColumn = keyof DesignerCadToolSession> = ("*" extends S ? DesignerCadToolSession : Pick<DesignerCadToolSession, Extract<S | "id", keyof DesignerCadToolSession>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadToolSessionSelectedWithIncludes<I extends DesignerCadToolSessionInclude = {}, S extends DesignerCadToolSessionSelectableColumn = keyof DesignerCadToolSession, R extends boolean = false> = DesignerCadToolSessionSelected<S> & DesignerCadToolSessionIncludedRelations<I, R>;
+
+export type DesignerCadOperationSelectableColumn = keyof DesignerCadOperation | PermissionIntrospectionColumn | "*";
+export type DesignerCadOperationOrderableColumn = keyof DesignerCadOperation | PermissionIntrospectionColumn;
+
+export type DesignerCadOperationSelected<S extends DesignerCadOperationSelectableColumn = keyof DesignerCadOperation> = ("*" extends S ? DesignerCadOperation : Pick<DesignerCadOperation, Extract<S | "id", keyof DesignerCadOperation>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadOperationSelectedWithIncludes<I extends DesignerCadOperationInclude = {}, S extends DesignerCadOperationSelectableColumn = keyof DesignerCadOperation, R extends boolean = false> = DesignerCadOperationSelected<S> & DesignerCadOperationIncludedRelations<I, R>;
+
+export type DesignerCadSourceEditSelectableColumn = keyof DesignerCadSourceEdit | PermissionIntrospectionColumn | "*";
+export type DesignerCadSourceEditOrderableColumn = keyof DesignerCadSourceEdit | PermissionIntrospectionColumn;
+
+export type DesignerCadSourceEditSelected<S extends DesignerCadSourceEditSelectableColumn = keyof DesignerCadSourceEdit> = ("*" extends S ? DesignerCadSourceEdit : Pick<DesignerCadSourceEdit, Extract<S | "id", keyof DesignerCadSourceEdit>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadSourceEditSelectedWithIncludes<I extends DesignerCadSourceEditInclude = {}, S extends DesignerCadSourceEditSelectableColumn = keyof DesignerCadSourceEdit, R extends boolean = false> = DesignerCadSourceEditSelected<S> & DesignerCadSourceEditIncludedRelations<I, R>;
+
+export type DesignerCadPreviewHandleSelectableColumn = keyof DesignerCadPreviewHandle | PermissionIntrospectionColumn | "*";
+export type DesignerCadPreviewHandleOrderableColumn = keyof DesignerCadPreviewHandle | PermissionIntrospectionColumn;
+
+export type DesignerCadPreviewHandleSelected<S extends DesignerCadPreviewHandleSelectableColumn = keyof DesignerCadPreviewHandle> = ("*" extends S ? DesignerCadPreviewHandle : Pick<DesignerCadPreviewHandle, Extract<S | "id", keyof DesignerCadPreviewHandle>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadPreviewHandleSelectedWithIncludes<I extends DesignerCadPreviewHandleInclude = {}, S extends DesignerCadPreviewHandleSelectableColumn = keyof DesignerCadPreviewHandle, R extends boolean = false> = DesignerCadPreviewHandleSelected<S> & DesignerCadPreviewHandleIncludedRelations<I, R>;
+
+export type DesignerCadPreviewUpdateSelectableColumn = keyof DesignerCadPreviewUpdate | PermissionIntrospectionColumn | "*";
+export type DesignerCadPreviewUpdateOrderableColumn = keyof DesignerCadPreviewUpdate | PermissionIntrospectionColumn;
+
+export type DesignerCadPreviewUpdateSelected<S extends DesignerCadPreviewUpdateSelectableColumn = keyof DesignerCadPreviewUpdate> = ("*" extends S ? DesignerCadPreviewUpdate : Pick<DesignerCadPreviewUpdate, Extract<S | "id", keyof DesignerCadPreviewUpdate>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadPreviewUpdateSelectedWithIncludes<I extends DesignerCadPreviewUpdateInclude = {}, S extends DesignerCadPreviewUpdateSelectableColumn = keyof DesignerCadPreviewUpdate, R extends boolean = false> = DesignerCadPreviewUpdateSelected<S> & DesignerCadPreviewUpdateIncludedRelations<I, R>;
+
+export type DesignerCadWidgetSelectableColumn = keyof DesignerCadWidget | PermissionIntrospectionColumn | "*";
+export type DesignerCadWidgetOrderableColumn = keyof DesignerCadWidget | PermissionIntrospectionColumn;
+
+export type DesignerCadWidgetSelected<S extends DesignerCadWidgetSelectableColumn = keyof DesignerCadWidget> = ("*" extends S ? DesignerCadWidget : Pick<DesignerCadWidget, Extract<S | "id", keyof DesignerCadWidget>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadWidgetSelectedWithIncludes<I extends DesignerCadWidgetInclude = {}, S extends DesignerCadWidgetSelectableColumn = keyof DesignerCadWidget, R extends boolean = false> = DesignerCadWidgetSelected<S> & DesignerCadWidgetIncludedRelations<I, R>;
+
+export type DesignerCadSteerSelectableColumn = keyof DesignerCadSteer | PermissionIntrospectionColumn | "*";
+export type DesignerCadSteerOrderableColumn = keyof DesignerCadSteer | PermissionIntrospectionColumn;
+
+export type DesignerCadSteerSelected<S extends DesignerCadSteerSelectableColumn = keyof DesignerCadSteer> = ("*" extends S ? DesignerCadSteer : Pick<DesignerCadSteer, Extract<S | "id", keyof DesignerCadSteer>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCadSteerSelectedWithIncludes<I extends DesignerCadSteerInclude = {}, S extends DesignerCadSteerSelectableColumn = keyof DesignerCadSteer, R extends boolean = false> = DesignerCadSteerSelected<S> & DesignerCadSteerIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "agents": {
@@ -3037,6 +4443,1232 @@ export const wasmSchema: WasmSchema = {
       },
       {
         "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_workspaces": {
+    "columns": [
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_key",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_documents": {
+    "columns": [
+      {
+        "name": "document_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_workspaces"
+      },
+      {
+        "name": "file_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "language",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_hash",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_sessions": {
+    "columns": [
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_workspaces"
+      },
+      {
+        "name": "document_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "document_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_documents"
+      },
+      {
+        "name": "codex_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "agent_run_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "active_tool_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "latest_projection_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "opened_by",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "closed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_cad_events": {
+    "columns": [
+      {
+        "name": "event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "event_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tool_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "operation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "preview_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "payload_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "occurred_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "observed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_scene_nodes": {
+    "columns": [
+      {
+        "name": "node_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "document_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "document_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_documents"
+      },
+      {
+        "name": "projection_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "label",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "parent_node_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "stable_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "visibility",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_span_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "geometry_ref_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_selections": {
+    "columns": [
+      {
+        "name": "selection_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "target_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "target_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "node_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "selection_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_tool_sessions": {
+    "columns": [
+      {
+        "name": "tool_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "tool_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "input_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "state_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "started_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "completed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_cad_operations": {
+    "columns": [
+      {
+        "name": "operation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "tool_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tool_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_cad_tool_sessions"
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "operation_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "operation_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": false
+      },
+      {
+        "name": "validation_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "result_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "applied_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_cad_source_edits": {
+    "columns": [
+      {
+        "name": "edit_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "operation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "operation_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_operations"
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "file_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "range_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": false
+      },
+      {
+        "name": "text_preview",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "text_sha256",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_preview_handles": {
+    "columns": [
+      {
+        "name": "preview_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "tool_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tool_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_cad_tool_sessions"
+      },
+      {
+        "name": "operation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "operation_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_cad_operations"
+      },
+      {
+        "name": "preview_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "target_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "handle_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "disposed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_cad_preview_updates": {
+    "columns": [
+      {
+        "name": "update_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "preview_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "preview_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_preview_handles"
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "params_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "mesh_ref_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "error_text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "requested_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "completed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_cad_widgets": {
+    "columns": [
+      {
+        "name": "widget_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_workspaces"
+      },
+      {
+        "name": "widget_key",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "title",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_path",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "version",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "manifest_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "state_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_cad_steers": {
+    "columns": [
+      {
+        "name": "steer_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "cad_session_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_cad_sessions"
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "target_agent_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "target_run_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "message_text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "context_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "created_at",
         "column_type": {
           "type": "Timestamp"
         },
@@ -6228,6 +8860,2606 @@ export class TaskRecordQueryBuilder<I extends Record<string, never> = {}, S exte
   }
 }
 
+export class DesignerCadWorkspaceQueryBuilder<I extends DesignerCadWorkspaceInclude = {}, S extends DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace, R extends boolean = false> implements QueryBuilder<DesignerCadWorkspaceSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_workspaces";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadWorkspaceSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadWorkspaceInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadWorkspaceInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadWorkspaceWhereInput): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadWorkspaceSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadWorkspaceQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadWorkspaceInclude>(relations: NewI): DesignerCadWorkspaceQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadWorkspaceQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadWorkspaceOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "designer_cad_documentsViaWorkspace_row" | "designer_cad_sessionsViaWorkspace_row" | "designer_cad_widgetsViaWorkspace_row"): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadWorkspaceWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadWorkspaceQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadWorkspaceInclude = I, CloneS extends DesignerCadWorkspaceSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadWorkspaceQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadWorkspaceQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadDocumentQueryBuilder<I extends DesignerCadDocumentInclude = {}, S extends DesignerCadDocumentSelectableColumn = keyof DesignerCadDocument, R extends boolean = false> implements QueryBuilder<DesignerCadDocumentSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_documents";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadDocumentSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadDocumentInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadDocumentInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadDocumentWhereInput): DesignerCadDocumentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadDocumentSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadDocumentQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadDocumentInclude>(relations: NewI): DesignerCadDocumentQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadDocumentQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadDocumentOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadDocumentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadDocumentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadDocumentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "workspace_row" | "designer_cad_sessionsViaDocument_row" | "designer_cad_scene_nodesViaDocument_row"): DesignerCadDocumentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadDocumentWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadDocumentQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadDocumentInclude = I, CloneS extends DesignerCadDocumentSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadDocumentQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadDocumentQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadSessionQueryBuilder<I extends DesignerCadSessionInclude = {}, S extends DesignerCadSessionSelectableColumn = keyof DesignerCadSession, R extends boolean = false> implements QueryBuilder<DesignerCadSessionSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_sessions";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadSessionSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadSessionInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadSessionInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadSessionWhereInput): DesignerCadSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadSessionSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadSessionQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadSessionInclude>(relations: NewI): DesignerCadSessionQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadSessionQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadSessionOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "workspace_row" | "document_row" | "designer_cad_eventsViaCad_session_row" | "designer_cad_scene_nodesViaCad_session_row" | "designer_cad_selectionsViaCad_session_row" | "designer_cad_tool_sessionsViaCad_session_row" | "designer_cad_operationsViaCad_session_row" | "designer_cad_source_editsViaCad_session_row" | "designer_cad_preview_handlesViaCad_session_row" | "designer_cad_preview_updatesViaCad_session_row" | "designer_cad_steersViaCad_session_row"): DesignerCadSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadSessionWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadSessionQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadSessionInclude = I, CloneS extends DesignerCadSessionSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadSessionQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadSessionQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadEventQueryBuilder<I extends DesignerCadEventInclude = {}, S extends DesignerCadEventSelectableColumn = keyof DesignerCadEvent, R extends boolean = false> implements QueryBuilder<DesignerCadEventSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_events";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadEventSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadEventInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadEventInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadEventWhereInput): DesignerCadEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadEventSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadEventQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadEventInclude>(relations: NewI): DesignerCadEventQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadEventQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadEventOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row"): DesignerCadEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadEventWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadEventQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadEventInclude = I, CloneS extends DesignerCadEventSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadEventQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadEventQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadSceneNodeQueryBuilder<I extends DesignerCadSceneNodeInclude = {}, S extends DesignerCadSceneNodeSelectableColumn = keyof DesignerCadSceneNode, R extends boolean = false> implements QueryBuilder<DesignerCadSceneNodeSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_scene_nodes";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadSceneNodeSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadSceneNodeInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadSceneNodeInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadSceneNodeWhereInput): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadSceneNodeSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadSceneNodeQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadSceneNodeInclude>(relations: NewI): DesignerCadSceneNodeQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadSceneNodeQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadSceneNodeOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row" | "document_row"): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadSceneNodeWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadSceneNodeQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadSceneNodeInclude = I, CloneS extends DesignerCadSceneNodeSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadSceneNodeQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadSceneNodeQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadSelectionQueryBuilder<I extends DesignerCadSelectionInclude = {}, S extends DesignerCadSelectionSelectableColumn = keyof DesignerCadSelection, R extends boolean = false> implements QueryBuilder<DesignerCadSelectionSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_selections";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadSelectionSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadSelectionInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadSelectionInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadSelectionWhereInput): DesignerCadSelectionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadSelectionSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadSelectionQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadSelectionInclude>(relations: NewI): DesignerCadSelectionQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadSelectionQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadSelectionOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadSelectionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadSelectionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadSelectionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row"): DesignerCadSelectionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadSelectionWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadSelectionQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadSelectionInclude = I, CloneS extends DesignerCadSelectionSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadSelectionQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadSelectionQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadToolSessionQueryBuilder<I extends DesignerCadToolSessionInclude = {}, S extends DesignerCadToolSessionSelectableColumn = keyof DesignerCadToolSession, R extends boolean = false> implements QueryBuilder<DesignerCadToolSessionSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_tool_sessions";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadToolSessionSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadToolSessionInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadToolSessionInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadToolSessionWhereInput): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadToolSessionSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadToolSessionQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadToolSessionInclude>(relations: NewI): DesignerCadToolSessionQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadToolSessionQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadToolSessionOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row" | "designer_cad_operationsViaTool_session_row" | "designer_cad_preview_handlesViaTool_session_row"): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadToolSessionWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadToolSessionQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadToolSessionInclude = I, CloneS extends DesignerCadToolSessionSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadToolSessionQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadToolSessionQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadOperationQueryBuilder<I extends DesignerCadOperationInclude = {}, S extends DesignerCadOperationSelectableColumn = keyof DesignerCadOperation, R extends boolean = false> implements QueryBuilder<DesignerCadOperationSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_operations";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadOperationSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadOperationInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadOperationInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadOperationWhereInput): DesignerCadOperationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadOperationSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadOperationQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadOperationInclude>(relations: NewI): DesignerCadOperationQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadOperationQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadOperationOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadOperationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadOperationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadOperationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row" | "tool_session_row" | "designer_cad_source_editsViaOperation_row" | "designer_cad_preview_handlesViaOperation_row"): DesignerCadOperationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadOperationWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadOperationQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadOperationInclude = I, CloneS extends DesignerCadOperationSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadOperationQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadOperationQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadSourceEditQueryBuilder<I extends DesignerCadSourceEditInclude = {}, S extends DesignerCadSourceEditSelectableColumn = keyof DesignerCadSourceEdit, R extends boolean = false> implements QueryBuilder<DesignerCadSourceEditSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_source_edits";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadSourceEditSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadSourceEditInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadSourceEditInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadSourceEditWhereInput): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadSourceEditSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadSourceEditQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadSourceEditInclude>(relations: NewI): DesignerCadSourceEditQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadSourceEditQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadSourceEditOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "operation_row" | "cad_session_row"): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadSourceEditWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadSourceEditQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadSourceEditInclude = I, CloneS extends DesignerCadSourceEditSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadSourceEditQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadSourceEditQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadPreviewHandleQueryBuilder<I extends DesignerCadPreviewHandleInclude = {}, S extends DesignerCadPreviewHandleSelectableColumn = keyof DesignerCadPreviewHandle, R extends boolean = false> implements QueryBuilder<DesignerCadPreviewHandleSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_preview_handles";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadPreviewHandleSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadPreviewHandleInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadPreviewHandleInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadPreviewHandleWhereInput): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadPreviewHandleSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadPreviewHandleQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadPreviewHandleInclude>(relations: NewI): DesignerCadPreviewHandleQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadPreviewHandleQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadPreviewHandleOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row" | "tool_session_row" | "operation_row" | "designer_cad_preview_updatesViaPreview_row"): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadPreviewHandleWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadPreviewHandleQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadPreviewHandleInclude = I, CloneS extends DesignerCadPreviewHandleSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadPreviewHandleQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadPreviewHandleQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadPreviewUpdateQueryBuilder<I extends DesignerCadPreviewUpdateInclude = {}, S extends DesignerCadPreviewUpdateSelectableColumn = keyof DesignerCadPreviewUpdate, R extends boolean = false> implements QueryBuilder<DesignerCadPreviewUpdateSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_preview_updates";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadPreviewUpdateSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadPreviewUpdateInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadPreviewUpdateInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadPreviewUpdateWhereInput): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadPreviewUpdateSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadPreviewUpdateQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadPreviewUpdateInclude>(relations: NewI): DesignerCadPreviewUpdateQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadPreviewUpdateQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadPreviewUpdateOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "preview_row" | "cad_session_row"): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadPreviewUpdateWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadPreviewUpdateQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadPreviewUpdateInclude = I, CloneS extends DesignerCadPreviewUpdateSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadPreviewUpdateQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadPreviewUpdateQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadWidgetQueryBuilder<I extends DesignerCadWidgetInclude = {}, S extends DesignerCadWidgetSelectableColumn = keyof DesignerCadWidget, R extends boolean = false> implements QueryBuilder<DesignerCadWidgetSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_widgets";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadWidgetSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadWidgetInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadWidgetInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadWidgetWhereInput): DesignerCadWidgetQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadWidgetSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadWidgetQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadWidgetInclude>(relations: NewI): DesignerCadWidgetQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadWidgetQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadWidgetOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadWidgetQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadWidgetQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadWidgetQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "workspace_row"): DesignerCadWidgetQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadWidgetWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadWidgetQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadWidgetInclude = I, CloneS extends DesignerCadWidgetSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadWidgetQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadWidgetQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCadSteerQueryBuilder<I extends DesignerCadSteerInclude = {}, S extends DesignerCadSteerSelectableColumn = keyof DesignerCadSteer, R extends boolean = false> implements QueryBuilder<DesignerCadSteerSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_cad_steers";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCadSteerSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCadSteerInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCadSteerInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCadSteerWhereInput): DesignerCadSteerQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCadSteerSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCadSteerQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCadSteerInclude>(relations: NewI): DesignerCadSteerQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCadSteerQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCadSteerOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCadSteerQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCadSteerQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCadSteerQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "cad_session_row"): DesignerCadSteerQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCadSteerWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCadSteerQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCadSteerInclude = I, CloneS extends DesignerCadSteerSelectableColumn = S, CloneR extends boolean = R>(): DesignerCadSteerQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCadSteerQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export interface GeneratedApp {
   agents: AgentQueryBuilder;
   agent_runs: AgentRunQueryBuilder;
@@ -6245,6 +11477,19 @@ export interface GeneratedApp {
   daemon_log_checkpoints: DaemonLogCheckpointQueryBuilder;
   daemon_log_summaries: DaemonLogSummaryQueryBuilder;
   task_records: TaskRecordQueryBuilder;
+  designer_cad_workspaces: DesignerCadWorkspaceQueryBuilder;
+  designer_cad_documents: DesignerCadDocumentQueryBuilder;
+  designer_cad_sessions: DesignerCadSessionQueryBuilder;
+  designer_cad_events: DesignerCadEventQueryBuilder;
+  designer_cad_scene_nodes: DesignerCadSceneNodeQueryBuilder;
+  designer_cad_selections: DesignerCadSelectionQueryBuilder;
+  designer_cad_tool_sessions: DesignerCadToolSessionQueryBuilder;
+  designer_cad_operations: DesignerCadOperationQueryBuilder;
+  designer_cad_source_edits: DesignerCadSourceEditQueryBuilder;
+  designer_cad_preview_handles: DesignerCadPreviewHandleQueryBuilder;
+  designer_cad_preview_updates: DesignerCadPreviewUpdateQueryBuilder;
+  designer_cad_widgets: DesignerCadWidgetQueryBuilder;
+  designer_cad_steers: DesignerCadSteerQueryBuilder;
   wasmSchema: WasmSchema;
 }
 
@@ -6265,6 +11510,19 @@ export const app: GeneratedApp = {
   daemon_log_checkpoints: new DaemonLogCheckpointQueryBuilder(),
   daemon_log_summaries: new DaemonLogSummaryQueryBuilder(),
   task_records: new TaskRecordQueryBuilder(),
+  designer_cad_workspaces: new DesignerCadWorkspaceQueryBuilder(),
+  designer_cad_documents: new DesignerCadDocumentQueryBuilder(),
+  designer_cad_sessions: new DesignerCadSessionQueryBuilder(),
+  designer_cad_events: new DesignerCadEventQueryBuilder(),
+  designer_cad_scene_nodes: new DesignerCadSceneNodeQueryBuilder(),
+  designer_cad_selections: new DesignerCadSelectionQueryBuilder(),
+  designer_cad_tool_sessions: new DesignerCadToolSessionQueryBuilder(),
+  designer_cad_operations: new DesignerCadOperationQueryBuilder(),
+  designer_cad_source_edits: new DesignerCadSourceEditQueryBuilder(),
+  designer_cad_preview_handles: new DesignerCadPreviewHandleQueryBuilder(),
+  designer_cad_preview_updates: new DesignerCadPreviewUpdateQueryBuilder(),
+  designer_cad_widgets: new DesignerCadWidgetQueryBuilder(),
+  designer_cad_steers: new DesignerCadSteerQueryBuilder(),
   wasmSchema,
 };
 

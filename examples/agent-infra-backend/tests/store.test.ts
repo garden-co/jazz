@@ -209,6 +209,236 @@ describe("AgentDataStore", () => {
     expect(task?.pr).toBe("https://github.com/fl2024008/prometheus/pull/3296");
   });
 
+  it("records Designer CAD sessions as a steerable operation stream", async () => {
+    await store.recordDesignerCadWorkspace({
+      workspaceId: "workspace-build123d",
+      workspaceKey: "prom-designer",
+      title: "Prom Designer CAD",
+      repoRoot: "~/code/prom",
+      workspaceRoot: "~/work/prom-agent/ide/designer",
+      metadataJson: { branch: "shiva/designer/cad/e2e-parity-clean-port" },
+    });
+    const document = await store.recordDesignerCadDocument({
+      workspaceId: "workspace-build123d",
+      documentId: "doc-torus",
+      filePath: "test-workspace/torus.build123d.py",
+      sourceHash: "sha256:source-1",
+    });
+    const cadSession = await store.recordDesignerCadSession({
+      cadSessionId: "cad-session-1",
+      workspaceId: "workspace-build123d",
+      documentId: document.document_id,
+      codexSessionId: "codex:019dea80-dee6-7c93-b8f9-15cbd75246dc",
+      openedBy: "alice",
+      latestProjectionId: "projection-1",
+    });
+    const toolSession = await store.recordDesignerCadToolSession({
+      toolSessionId: "tool-press-pull-1",
+      cadSessionId: cadSession.cad_session_id,
+      toolKind: "press-pull",
+      actorKind: "human",
+      actorId: "alice",
+      inputJson: { target: "sketch_0" },
+    });
+    await store.upsertDesignerCadSceneNode({
+      nodeId: "node-sketch-0",
+      cadSessionId: cadSession.cad_session_id,
+      projectionId: "projection-1",
+      kind: "sketch",
+      label: "sketch_0",
+      path: "sketches/sketch_0",
+      stableRef: "build123d:sketch:0",
+      sourceSpanJson: { startLine: 12, endLine: 21 },
+    });
+    await store.upsertDesignerCadSelection({
+      cadSessionId: cadSession.cad_session_id,
+      actorKind: "human",
+      actorId: "alice",
+      targetKind: "scene-node",
+      targetId: "node-sketch-0",
+      nodeId: "node-sketch-0",
+      selectionJson: { faceIndices: [0] },
+    });
+    const operation = await store.recordDesignerCadOperation({
+      operationId: "op-extrude-sketch-0",
+      cadSessionId: cadSession.cad_session_id,
+      toolSessionId: toolSession.tool_session_id,
+      actorKind: "human",
+      actorId: "alice",
+      operationKind: "addFeature",
+      status: "validated",
+      operationJson: {
+        kind: "addFeature",
+        feature: { kind: "extrude", params: { amount: 10 } },
+      },
+      validationJson: { ok: true },
+    });
+    await store.recordDesignerCadSourceEdit({
+      editId: "edit-extrude-sketch-0",
+      operationId: operation.operation_id,
+      sequence: 1,
+      filePath: "test-workspace/torus.build123d.py",
+      rangeJson: { startLine: 38, startColumn: 1, endLine: 38, endColumn: 1 },
+      textPreview: "extrude_sketch_0 = extrude(sketch_0, amount=10.0)",
+      status: "planned",
+    });
+    const preview = await store.recordDesignerCadPreviewHandle({
+      previewId: "preview-extrude-sketch-0",
+      cadSessionId: cadSession.cad_session_id,
+      toolSessionId: toolSession.tool_session_id,
+      operationId: operation.operation_id,
+      previewKind: "press-pull-sketch",
+      targetJson: { sketchVarName: "sketch_0" },
+      handleRef: "docp-preview:handle-1",
+    });
+    await store.recordDesignerCadPreviewUpdate({
+      updateId: "preview-update-1",
+      previewId: preview.preview_id,
+      sequence: 1,
+      paramsJson: { amount: 10 },
+      meshRefJson: { artifact: "mesh://preview-1" },
+    });
+    await store.recordDesignerCadWidget({
+      workspaceId: "workspace-build123d",
+      widgetKey: "cad/press-pull",
+      title: "Press Pull",
+      sourceKind: "designer-widget",
+      sourcePath: "~/.designer/widgets/cad/press-pull",
+      version: "1",
+      manifestJson: { tools: ["press-pull"] },
+    });
+    await store.recordDesignerCadSteer({
+      steerId: "steer-1",
+      cadSessionId: cadSession.cad_session_id,
+      actorKind: "human",
+      actorId: "alice",
+      targetAgentId: "clanka-cad",
+      messageText: "Use the current preview and keep the source edit via CodeBridge.",
+      contextJson: { selectedNodeId: "node-sketch-0" },
+    });
+    await store.recordDesignerCadEvent({
+      eventId: "event-1",
+      cadSessionId: cadSession.cad_session_id,
+      sequence: 1,
+      eventKind: "tool.started",
+      actorKind: "human",
+      actorId: "alice",
+      toolSessionId: toolSession.tool_session_id,
+      payloadJson: { toolKind: "press-pull" },
+    });
+    await store.recordDesignerCadEvent({
+      eventId: "event-2",
+      cadSessionId: cadSession.cad_session_id,
+      sequence: 2,
+      eventKind: "operation.validated",
+      actorKind: "system",
+      operationId: operation.operation_id,
+      payloadJson: { ok: true },
+    });
+
+    const eventsAfterOne = await store.listDesignerCadEvents({
+      cadSessionId: cadSession.cad_session_id,
+      afterSequence: 1,
+    });
+    const operations = await store.listDesignerCadOperations({
+      cadSessionId: cadSession.cad_session_id,
+      status: "validated",
+    });
+    const summary = await store.getDesignerCadSessionSummary(
+      cadSession.cad_session_id,
+    );
+
+    expect(eventsAfterOne.map((event) => event.event_id)).toEqual(["event-2"]);
+    expect(operations.map((item) => item.operation_id)).toEqual([
+      "op-extrude-sketch-0",
+    ]);
+    expect(summary?.workspace.workspace_key).toBe("prom-designer");
+    expect(summary?.document.file_path).toBe("test-workspace/torus.build123d.py");
+    expect(summary?.events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(summary?.sceneNodes[0]?.stable_ref).toBe("build123d:sketch:0");
+    expect(summary?.sourceEdits[0]?.operation_id).toBe("op-extrude-sketch-0");
+    expect(summary?.previewUpdates[0]?.mesh_ref_json).toEqual({
+      artifact: "mesh://preview-1",
+    });
+    expect(summary?.widgets[0]?.widget_key).toBe("cad/press-pull");
+    expect(summary?.steers[0]?.target_agent_id).toBe("clanka-cad");
+  });
+
+  it("guards Designer CAD stream replay and relation consistency", async () => {
+    await store.recordDesignerCadWorkspace({
+      workspaceId: "workspace-a",
+      workspaceKey: "workspace-a",
+    });
+    await store.recordDesignerCadWorkspace({
+      workspaceId: "workspace-b",
+      workspaceKey: "workspace-b",
+    });
+    await store.recordDesignerCadDocument({
+      workspaceId: "workspace-a",
+      documentId: "doc-a",
+      filePath: "model.build123d.py",
+    });
+
+    await expect(
+      store.recordDesignerCadSession({
+        cadSessionId: "cad-session-mismatch",
+        workspaceId: "workspace-b",
+        documentId: "doc-a",
+      }),
+    ).rejects.toThrow(/not in workspace/);
+
+    await store.recordDesignerCadSession({
+      cadSessionId: "cad-session-pagination",
+      workspaceId: "workspace-a",
+      documentId: "doc-a",
+    });
+    await expect(
+      store.recordDesignerCadOperation({
+        operationId: "op-missing-tool",
+        cadSessionId: "cad-session-pagination",
+        toolSessionId: "missing-tool",
+        actorKind: "agent",
+        operationKind: "addFeature",
+        operationJson: { kind: "addFeature" },
+      }),
+    ).rejects.toThrow(/tool session/);
+
+    for (let sequence = 1; sequence <= 401; sequence += 1) {
+      await store.recordDesignerCadEvent({
+        cadSessionId: "cad-session-pagination",
+        sequence,
+        eventKind: "stream.delta",
+        actorKind: "agent",
+        sourceEventId: `source-${sequence}`,
+        payloadJson: { sequence },
+      });
+    }
+    const replayed = await store.recordDesignerCadEvent({
+      cadSessionId: "cad-session-pagination",
+      sequence: 401,
+      eventKind: "stream.delta",
+      actorKind: "agent",
+      sourceEventId: "source-401",
+      payloadJson: { sequence: 401, replayed: true },
+    });
+
+    const afterFourHundred = await store.listDesignerCadEvents({
+      cadSessionId: "cad-session-pagination",
+      afterSequence: 400,
+    });
+    const summary = await store.getDesignerCadSessionSummary(
+      "cad-session-pagination",
+    );
+
+    expect(replayed.event_id).toBe("cad-session-pagination:source-401");
+    expect(afterFourHundred.map((event) => event.sequence)).toEqual([401]);
+    expect(afterFourHundred[0]?.payload_json).toEqual({
+      sequence: 401,
+      replayed: true,
+    });
+    expect(summary?.events).toHaveLength(401);
+  }, 30_000);
+
   it("records daemon log sources, chunks, events, checkpoints, and summaries", async () => {
     const source = await store.recordDaemonLogSource({
       sourceId: "flow:sync:stderr",

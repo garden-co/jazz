@@ -249,3 +249,207 @@ table("task_records", {
   created_at: col.timestamp(),
   updated_at: col.timestamp(),
 });
+
+table("designer_cad_workspaces", {
+  workspace_id: col.string(),
+  workspace_key: col.string(),
+  title: col.string().optional(),
+  repo_root: col.string().optional(),
+  workspace_root: col.string().optional(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_cad_documents", {
+  document_id: col.string(),
+  workspace_id: col.string(),
+  workspace_row_id: col.ref("designer_cad_workspaces"),
+  file_path: col.string(),
+  language: col.string(),
+  source_kind: col.string(),
+  source_hash: col.string().optional(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_cad_sessions", {
+  cad_session_id: col.string(),
+  workspace_id: col.string(),
+  workspace_row_id: col.ref("designer_cad_workspaces"),
+  document_id: col.string(),
+  document_row_id: col.ref("designer_cad_documents"),
+  codex_session_id: col.string().optional(),
+  agent_run_id: col.string().optional(),
+  status: col.string(),
+  active_tool_session_id: col.string().optional(),
+  latest_projection_id: col.string().optional(),
+  opened_by: col.string().optional(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  closed_at: col.timestamp().optional(),
+});
+
+table("designer_cad_events", {
+  event_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  sequence: col.int(),
+  event_kind: col.string(),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  tool_session_id: col.string().optional(),
+  operation_id: col.string().optional(),
+  preview_id: col.string().optional(),
+  source_event_id: col.string().optional(),
+  payload_json: col.json().optional(),
+  occurred_at: col.timestamp(),
+  observed_at: col.timestamp(),
+});
+
+table("designer_cad_scene_nodes", {
+  node_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  document_id: col.string(),
+  document_row_id: col.ref("designer_cad_documents"),
+  projection_id: col.string(),
+  kind: col.string(),
+  label: col.string().optional(),
+  path: col.string().optional(),
+  parent_node_id: col.string().optional(),
+  stable_ref: col.string().optional(),
+  visibility: col.string().optional(),
+  source_span_json: col.json().optional(),
+  geometry_ref_json: col.json().optional(),
+  metadata_json: col.json().optional(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_cad_selections", {
+  selection_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  target_kind: col.string(),
+  target_id: col.string(),
+  node_id: col.string().optional(),
+  selection_json: col.json().optional(),
+  status: col.string(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_cad_tool_sessions", {
+  tool_session_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  tool_kind: col.string(),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  status: col.string(),
+  input_json: col.json().optional(),
+  state_json: col.json().optional(),
+  started_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  completed_at: col.timestamp().optional(),
+});
+
+table("designer_cad_operations", {
+  operation_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  tool_session_id: col.string().optional(),
+  tool_session_row_id: col.ref("designer_cad_tool_sessions").optional(),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  operation_kind: col.string(),
+  status: col.string(),
+  operation_json: col.json(),
+  validation_json: col.json().optional(),
+  result_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  applied_at: col.timestamp().optional(),
+});
+
+table("designer_cad_source_edits", {
+  edit_id: col.string(),
+  operation_id: col.string(),
+  operation_row_id: col.ref("designer_cad_operations"),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  sequence: col.int(),
+  file_path: col.string(),
+  range_json: col.json(),
+  text_preview: col.string().optional(),
+  text_sha256: col.string().optional(),
+  status: col.string(),
+  created_at: col.timestamp(),
+});
+
+table("designer_cad_preview_handles", {
+  preview_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  tool_session_id: col.string().optional(),
+  tool_session_row_id: col.ref("designer_cad_tool_sessions").optional(),
+  operation_id: col.string().optional(),
+  operation_row_id: col.ref("designer_cad_operations").optional(),
+  preview_kind: col.string(),
+  target_json: col.json().optional(),
+  status: col.string(),
+  handle_ref: col.string().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  disposed_at: col.timestamp().optional(),
+});
+
+table("designer_cad_preview_updates", {
+  update_id: col.string(),
+  preview_id: col.string(),
+  preview_row_id: col.ref("designer_cad_preview_handles"),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  sequence: col.int(),
+  params_json: col.json().optional(),
+  mesh_ref_json: col.json().optional(),
+  status: col.string(),
+  error_text: col.string().optional(),
+  requested_at: col.timestamp(),
+  completed_at: col.timestamp().optional(),
+});
+
+table("designer_cad_widgets", {
+  widget_id: col.string(),
+  workspace_id: col.string(),
+  workspace_row_id: col.ref("designer_cad_workspaces"),
+  widget_key: col.string(),
+  title: col.string().optional(),
+  source_kind: col.string(),
+  source_path: col.string().optional(),
+  version: col.string().optional(),
+  status: col.string(),
+  manifest_json: col.json().optional(),
+  state_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_cad_steers", {
+  steer_id: col.string(),
+  cad_session_id: col.string(),
+  cad_session_row_id: col.ref("designer_cad_sessions"),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  target_agent_id: col.string().optional(),
+  target_run_id: col.string().optional(),
+  message_text: col.string(),
+  context_json: col.json().optional(),
+  status: col.string(),
+  created_at: col.timestamp(),
+});

@@ -27,6 +27,19 @@ import {
   type DaemonLogSourceInit,
   type DaemonLogSummary,
   type DaemonLogSummaryInit,
+  type DesignerCadDocument,
+  type DesignerCadEvent,
+  type DesignerCadOperation,
+  type DesignerCadPreviewHandle,
+  type DesignerCadPreviewUpdate,
+  type DesignerCadSceneNode,
+  type DesignerCadSelection,
+  type DesignerCadSession,
+  type DesignerCadSourceEdit,
+  type DesignerCadSteer,
+  type DesignerCadToolSession,
+  type DesignerCadWidget,
+  type DesignerCadWorkspace,
   type JsonValue,
   type MemoryLink,
   type MemoryLinkInit,
@@ -237,6 +250,219 @@ export interface RecordSourceFileInput {
   runId?: string;
   checksum?: string;
   createdAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadWorkspaceInput {
+  workspaceId: string;
+  workspaceKey?: string;
+  title?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadDocumentInput {
+  workspaceId: string;
+  documentId?: string;
+  filePath: string;
+  language?: string;
+  sourceKind?: string;
+  sourceHash?: string;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadSessionInput {
+  cadSessionId?: string;
+  workspaceId: string;
+  documentId: string;
+  codexSessionId?: string;
+  agentRunId?: string;
+  status?: string;
+  activeToolSessionId?: string;
+  latestProjectionId?: string;
+  openedBy?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  closedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadEventInput {
+  eventId?: string;
+  cadSessionId: string;
+  sequence: number;
+  eventKind: string;
+  actorKind: string;
+  actorId?: string;
+  toolSessionId?: string;
+  operationId?: string;
+  previewId?: string;
+  sourceEventId?: string;
+  payloadJson?: JsonValue;
+  occurredAt?: TimestampInput;
+  observedAt?: TimestampInput;
+}
+
+export interface UpsertDesignerCadSceneNodeInput {
+  nodeId: string;
+  cadSessionId: string;
+  documentId?: string;
+  projectionId: string;
+  kind: string;
+  label?: string;
+  path?: string;
+  parentNodeId?: string;
+  stableRef?: string;
+  visibility?: string;
+  sourceSpanJson?: JsonValue;
+  geometryRefJson?: JsonValue;
+  metadataJson?: JsonValue;
+  updatedAt?: TimestampInput;
+}
+
+export interface UpsertDesignerCadSelectionInput {
+  selectionId?: string;
+  cadSessionId: string;
+  actorKind: string;
+  actorId?: string;
+  targetKind: string;
+  targetId: string;
+  nodeId?: string;
+  selectionJson?: JsonValue;
+  status?: string;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadToolSessionInput {
+  toolSessionId?: string;
+  cadSessionId: string;
+  toolKind: string;
+  actorKind: string;
+  actorId?: string;
+  status?: string;
+  inputJson?: JsonValue;
+  stateJson?: JsonValue;
+  startedAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  completedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadOperationInput {
+  operationId?: string;
+  cadSessionId: string;
+  toolSessionId?: string;
+  actorKind: string;
+  actorId?: string;
+  operationKind: string;
+  status?: string;
+  operationJson: JsonValue;
+  validationJson?: JsonValue;
+  resultJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  appliedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadSourceEditInput {
+  editId?: string;
+  operationId: string;
+  sequence: number;
+  filePath: string;
+  rangeJson: JsonValue;
+  textPreview?: string;
+  textSha256?: string;
+  status?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadPreviewHandleInput {
+  previewId?: string;
+  cadSessionId: string;
+  toolSessionId?: string;
+  operationId?: string;
+  previewKind: string;
+  targetJson?: JsonValue;
+  status?: string;
+  handleRef?: string;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  disposedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadPreviewUpdateInput {
+  updateId?: string;
+  previewId: string;
+  sequence: number;
+  paramsJson?: JsonValue;
+  meshRefJson?: JsonValue;
+  status?: string;
+  errorText?: string;
+  requestedAt?: TimestampInput;
+  completedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadWidgetInput {
+  widgetId?: string;
+  workspaceId: string;
+  widgetKey: string;
+  title?: string;
+  sourceKind?: string;
+  sourcePath?: string;
+  version?: string;
+  status?: string;
+  manifestJson?: JsonValue;
+  stateJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCadSteerInput {
+  steerId?: string;
+  cadSessionId: string;
+  actorKind: string;
+  actorId?: string;
+  targetAgentId?: string;
+  targetRunId?: string;
+  messageText: string;
+  contextJson?: JsonValue;
+  status?: string;
+  createdAt?: TimestampInput;
+}
+
+export interface ListDesignerCadEventsInput {
+  cadSessionId?: string;
+  eventKind?: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface ListDesignerCadOperationsInput {
+  cadSessionId?: string;
+  toolSessionId?: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface DesignerCadSessionSummary {
+  workspace: DesignerCadWorkspace;
+  document: DesignerCadDocument;
+  session: DesignerCadSession;
+  events: DesignerCadEvent[];
+  sceneNodes: DesignerCadSceneNode[];
+  selections: DesignerCadSelection[];
+  toolSessions: DesignerCadToolSession[];
+  operations: DesignerCadOperation[];
+  sourceEdits: DesignerCadSourceEdit[];
+  previewHandles: DesignerCadPreviewHandle[];
+  previewUpdates: DesignerCadPreviewUpdate[];
+  widgets: DesignerCadWidget[];
+  steers: DesignerCadSteer[];
 }
 
 export type DaemonLogManager = "flow" | "launchd" | "manual" | "systemd" | string;
@@ -1623,6 +1849,972 @@ export class AgentDataStore {
       },
       { tier: this.writeTier },
     );
+  }
+
+  async recordDesignerCadWorkspace(
+    input: RecordDesignerCadWorkspaceInput,
+    session?: Session,
+  ): Promise<DesignerCadWorkspace> {
+    const db = this.getDb(session);
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadWorkspaceByExternalId(
+      db,
+      input.workspaceId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_workspaces, existing.id, {
+        workspace_key: input.workspaceKey ?? existing.workspace_key,
+        title: input.title,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_workspaces.where({
+          workspace_id: input.workspaceId,
+        }),
+        "designer cad workspace",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_workspaces,
+      {
+        workspace_id: input.workspaceId,
+        workspace_key: input.workspaceKey ?? input.workspaceId,
+        title: input.title,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        status: input.status ?? "active",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadDocument(
+    input: RecordDesignerCadDocumentInput,
+    session?: Session,
+  ): Promise<DesignerCadDocument> {
+    const db = this.getDb(session);
+    const workspace = await this.requireDesignerCadWorkspaceByExternalId(
+      db,
+      input.workspaceId,
+    );
+    const documentId = input.documentId ?? `${input.workspaceId}:${input.filePath}`;
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadDocumentByExternalId(
+      db,
+      documentId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_documents, existing.id, {
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        file_path: input.filePath,
+        language: input.language ?? existing.language,
+        source_kind: input.sourceKind ?? existing.source_kind,
+        source_hash: input.sourceHash,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireDesignerCadDocumentByExternalId(db, documentId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_documents,
+      {
+        document_id: documentId,
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        file_path: input.filePath,
+        language: input.language ?? "build123d-python",
+        source_kind: input.sourceKind ?? "workspace-file",
+        source_hash: input.sourceHash,
+        status: input.status ?? "active",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadSession(
+    input: RecordDesignerCadSessionInput,
+    session?: Session,
+  ): Promise<DesignerCadSession> {
+    const db = this.getDb(session);
+    const workspace = await this.requireDesignerCadWorkspaceByExternalId(
+      db,
+      input.workspaceId,
+    );
+    const document = await this.requireDesignerCadDocumentByExternalId(
+      db,
+      input.documentId,
+    );
+    if (document.workspace_id !== input.workspaceId) {
+      throw new Error(
+        `designer cad document ${input.documentId} is not in workspace ${input.workspaceId}`,
+      );
+    }
+    const cadSessionId = input.cadSessionId ?? randomUUID();
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadSessionByExternalId(
+      db,
+      cadSessionId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_sessions, existing.id, {
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        document_id: input.documentId,
+        document_row_id: document.id,
+        codex_session_id: input.codexSessionId,
+        agent_run_id: input.agentRunId,
+        status: input.status ?? existing.status,
+        active_tool_session_id: input.activeToolSessionId,
+        latest_projection_id: input.latestProjectionId,
+        opened_by: input.openedBy,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+        closed_at: input.closedAt ? asDate(input.closedAt) : undefined,
+      });
+      return this.requireDesignerCadSessionByExternalId(db, cadSessionId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_sessions,
+      {
+        cad_session_id: cadSessionId,
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        document_id: input.documentId,
+        document_row_id: document.id,
+        codex_session_id: input.codexSessionId,
+        agent_run_id: input.agentRunId,
+        status: input.status ?? "active",
+        active_tool_session_id: input.activeToolSessionId,
+        latest_projection_id: input.latestProjectionId,
+        opened_by: input.openedBy,
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+        closed_at: input.closedAt ? asDate(input.closedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadEvent(
+    input: RecordDesignerCadEventInput,
+    session?: Session,
+  ): Promise<DesignerCadEvent> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const deterministicEventId =
+      input.eventId ??
+      (input.sourceEventId
+        ? `${input.cadSessionId}:${input.sourceEventId}`
+        : `${input.cadSessionId}:${input.sequence}`);
+    const existingById = await db.one(
+      app.designer_cad_events.where({ event_id: deterministicEventId }),
+    );
+    const existingBySequence = existingById
+      ? null
+      : await db.one(
+          app.designer_cad_events.where({
+            cad_session_id: input.cadSessionId,
+            sequence: input.sequence,
+          }),
+        );
+    const existing = existingById ?? existingBySequence;
+    const effectiveEventId = existing?.event_id ?? deterministicEventId;
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_events, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        event_kind: input.eventKind,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        tool_session_id: input.toolSessionId,
+        operation_id: input.operationId,
+        preview_id: input.previewId,
+        source_event_id: input.sourceEventId,
+        payload_json: input.payloadJson,
+        occurred_at: input.occurredAt ? asDate(input.occurredAt) : undefined,
+        observed_at: input.observedAt ? asDate(input.observedAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_events.where({ event_id: effectiveEventId }),
+        "designer cad event",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_events,
+      {
+        event_id: effectiveEventId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        event_kind: input.eventKind,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        tool_session_id: input.toolSessionId,
+        operation_id: input.operationId,
+        preview_id: input.previewId,
+        source_event_id: input.sourceEventId,
+        payload_json: input.payloadJson,
+        occurred_at: asDate(input.occurredAt),
+        observed_at: asDate(input.observedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async upsertDesignerCadSceneNode(
+    input: UpsertDesignerCadSceneNodeInput,
+    session?: Session,
+  ): Promise<DesignerCadSceneNode> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const document = await this.requireDesignerCadDocumentByExternalId(
+      db,
+      input.documentId ?? cadSession.document_id,
+    );
+    if (document.document_id !== cadSession.document_id) {
+      throw new Error(
+        `designer cad scene node document ${document.document_id} does not match session document ${cadSession.document_id}`,
+      );
+    }
+    const existing = await db.one(
+      app.designer_cad_scene_nodes.where({
+        cad_session_id: input.cadSessionId,
+        node_id: input.nodeId,
+      }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_scene_nodes, existing.id, {
+        document_id: document.document_id,
+        document_row_id: document.id,
+        projection_id: input.projectionId,
+        kind: input.kind,
+        label: input.label,
+        path: input.path,
+        parent_node_id: input.parentNodeId,
+        stable_ref: input.stableRef,
+        visibility: input.visibility,
+        source_span_json: input.sourceSpanJson,
+        geometry_ref_json: input.geometryRefJson,
+        metadata_json: input.metadataJson,
+        updated_at: asDate(input.updatedAt),
+      });
+      return this.requireDesignerCadSceneNodeByExternalId(
+        db,
+        input.cadSessionId,
+        input.nodeId,
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_scene_nodes,
+      {
+        node_id: input.nodeId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        document_id: document.document_id,
+        document_row_id: document.id,
+        projection_id: input.projectionId,
+        kind: input.kind,
+        label: input.label,
+        path: input.path,
+        parent_node_id: input.parentNodeId,
+        stable_ref: input.stableRef,
+        visibility: input.visibility,
+        source_span_json: input.sourceSpanJson,
+        geometry_ref_json: input.geometryRefJson,
+        metadata_json: input.metadataJson,
+        updated_at: asDate(input.updatedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async upsertDesignerCadSelection(
+    input: UpsertDesignerCadSelectionInput,
+    session?: Session,
+  ): Promise<DesignerCadSelection> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const selectionId =
+      input.selectionId ??
+      `${input.cadSessionId}:${input.actorKind}:${input.actorId ?? "anonymous"}`;
+    if (input.nodeId) {
+      await this.requireDesignerCadSceneNodeByExternalId(
+        db,
+        input.cadSessionId,
+        input.nodeId,
+      );
+    }
+    const existing = await db.one(
+      app.designer_cad_selections.where({ selection_id: selectionId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_selections, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        target_kind: input.targetKind,
+        target_id: input.targetId,
+        node_id: input.nodeId,
+        selection_json: input.selectionJson,
+        status: input.status ?? existing.status,
+        updated_at: asDate(input.updatedAt),
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_selections.where({ selection_id: selectionId }),
+        "designer cad selection",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_selections,
+      {
+        selection_id: selectionId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        target_kind: input.targetKind,
+        target_id: input.targetId,
+        node_id: input.nodeId,
+        selection_json: input.selectionJson,
+        status: input.status ?? "active",
+        updated_at: asDate(input.updatedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadToolSession(
+    input: RecordDesignerCadToolSessionInput,
+    session?: Session,
+  ): Promise<DesignerCadToolSession> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const toolSessionId = input.toolSessionId ?? randomUUID();
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadToolSessionByExternalId(
+      db,
+      toolSessionId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_tool_sessions, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_kind: input.toolKind,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        status: input.status ?? existing.status,
+        input_json: input.inputJson,
+        state_json: input.stateJson,
+        started_at: input.startedAt ? asDate(input.startedAt) : undefined,
+        updated_at: now,
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      });
+      return this.requireDesignerCadToolSessionByExternalId(db, toolSessionId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_tool_sessions,
+      {
+        tool_session_id: toolSessionId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_kind: input.toolKind,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        status: input.status ?? "active",
+        input_json: input.inputJson,
+        state_json: input.stateJson,
+        started_at: asDate(input.startedAt),
+        updated_at: now,
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadOperation(
+    input: RecordDesignerCadOperationInput,
+    session?: Session,
+  ): Promise<DesignerCadOperation> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const toolSession = input.toolSessionId
+      ? await this.requireDesignerCadToolSessionByExternalId(
+          db,
+          input.toolSessionId,
+        )
+      : null;
+    if (toolSession && toolSession.cad_session_id !== input.cadSessionId) {
+      throw new Error(
+        `designer cad tool session ${toolSession.tool_session_id} is not in session ${input.cadSessionId}`,
+      );
+    }
+    const operationId = input.operationId ?? randomUUID();
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadOperationByExternalId(
+      db,
+      operationId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_operations, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_session_id: input.toolSessionId,
+        tool_session_row_id: toolSession?.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        operation_kind: input.operationKind,
+        status: input.status ?? existing.status,
+        operation_json: input.operationJson,
+        validation_json: input.validationJson,
+        result_json: input.resultJson,
+        updated_at: now,
+        applied_at: input.appliedAt ? asDate(input.appliedAt) : undefined,
+      });
+      return this.requireDesignerCadOperationByExternalId(db, operationId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_operations,
+      {
+        operation_id: operationId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_session_id: input.toolSessionId,
+        tool_session_row_id: toolSession?.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        operation_kind: input.operationKind,
+        status: input.status ?? "queued",
+        operation_json: input.operationJson,
+        validation_json: input.validationJson,
+        result_json: input.resultJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+        applied_at: input.appliedAt ? asDate(input.appliedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadSourceEdit(
+    input: RecordDesignerCadSourceEditInput,
+    session?: Session,
+  ): Promise<DesignerCadSourceEdit> {
+    const db = this.getDb(session);
+    const operation = await this.requireDesignerCadOperationByExternalId(
+      db,
+      input.operationId,
+    );
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      operation.cad_session_id,
+    );
+    const editId = input.editId ?? randomUUID();
+    const existing = await db.one(
+      app.designer_cad_source_edits.where({ edit_id: editId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_source_edits, existing.id, {
+        operation_id: input.operationId,
+        operation_row_id: operation.id,
+        cad_session_id: operation.cad_session_id,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        file_path: input.filePath,
+        range_json: input.rangeJson,
+        text_preview: input.textPreview,
+        text_sha256: input.textSha256,
+        status: input.status ?? existing.status,
+        created_at: input.createdAt ? asDate(input.createdAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_source_edits.where({ edit_id: editId }),
+        "designer cad source edit",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_source_edits,
+      {
+        edit_id: editId,
+        operation_id: input.operationId,
+        operation_row_id: operation.id,
+        cad_session_id: operation.cad_session_id,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        file_path: input.filePath,
+        range_json: input.rangeJson,
+        text_preview: input.textPreview,
+        text_sha256: input.textSha256,
+        status: input.status ?? "planned",
+        created_at: asDate(input.createdAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadPreviewHandle(
+    input: RecordDesignerCadPreviewHandleInput,
+    session?: Session,
+  ): Promise<DesignerCadPreviewHandle> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const toolSession = input.toolSessionId
+      ? await this.requireDesignerCadToolSessionByExternalId(
+          db,
+          input.toolSessionId,
+        )
+      : null;
+    const operation = input.operationId
+      ? await this.requireDesignerCadOperationByExternalId(
+          db,
+          input.operationId,
+        )
+      : null;
+    if (toolSession && toolSession.cad_session_id !== input.cadSessionId) {
+      throw new Error(
+        `designer cad tool session ${toolSession.tool_session_id} is not in session ${input.cadSessionId}`,
+      );
+    }
+    if (operation && operation.cad_session_id !== input.cadSessionId) {
+      throw new Error(
+        `designer cad operation ${operation.operation_id} is not in session ${input.cadSessionId}`,
+      );
+    }
+    const previewId = input.previewId ?? randomUUID();
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCadPreviewHandleByExternalId(
+      db,
+      previewId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_preview_handles, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_session_id: input.toolSessionId,
+        tool_session_row_id: toolSession?.id,
+        operation_id: input.operationId,
+        operation_row_id: operation?.id,
+        preview_kind: input.previewKind,
+        target_json: input.targetJson,
+        status: input.status ?? existing.status,
+        handle_ref: input.handleRef,
+        updated_at: now,
+        disposed_at: input.disposedAt ? asDate(input.disposedAt) : undefined,
+      });
+      return this.requireDesignerCadPreviewHandleByExternalId(db, previewId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_preview_handles,
+      {
+        preview_id: previewId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        tool_session_id: input.toolSessionId,
+        tool_session_row_id: toolSession?.id,
+        operation_id: input.operationId,
+        operation_row_id: operation?.id,
+        preview_kind: input.previewKind,
+        target_json: input.targetJson,
+        status: input.status ?? "prepared",
+        handle_ref: input.handleRef,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+        disposed_at: input.disposedAt ? asDate(input.disposedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadPreviewUpdate(
+    input: RecordDesignerCadPreviewUpdateInput,
+    session?: Session,
+  ): Promise<DesignerCadPreviewUpdate> {
+    const db = this.getDb(session);
+    const preview = await this.requireDesignerCadPreviewHandleByExternalId(
+      db,
+      input.previewId,
+    );
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      preview.cad_session_id,
+    );
+    const updateId = input.updateId ?? randomUUID();
+    const existing = await db.one(
+      app.designer_cad_preview_updates.where({ update_id: updateId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_preview_updates, existing.id, {
+        preview_id: input.previewId,
+        preview_row_id: preview.id,
+        cad_session_id: preview.cad_session_id,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        params_json: input.paramsJson,
+        mesh_ref_json: input.meshRefJson,
+        status: input.status ?? existing.status,
+        error_text: input.errorText,
+        requested_at: input.requestedAt ? asDate(input.requestedAt) : undefined,
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_preview_updates.where({ update_id: updateId }),
+        "designer cad preview update",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_preview_updates,
+      {
+        update_id: updateId,
+        preview_id: input.previewId,
+        preview_row_id: preview.id,
+        cad_session_id: preview.cad_session_id,
+        cad_session_row_id: cadSession.id,
+        sequence: input.sequence,
+        params_json: input.paramsJson,
+        mesh_ref_json: input.meshRefJson,
+        status: input.status ?? "completed",
+        error_text: input.errorText,
+        requested_at: asDate(input.requestedAt),
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadWidget(
+    input: RecordDesignerCadWidgetInput,
+    session?: Session,
+  ): Promise<DesignerCadWidget> {
+    const db = this.getDb(session);
+    const workspace = await this.requireDesignerCadWorkspaceByExternalId(
+      db,
+      input.workspaceId,
+    );
+    const widgetId = input.widgetId ?? `${input.workspaceId}:${input.widgetKey}`;
+    const now = asDate(input.updatedAt);
+    const existing = await db.one(
+      app.designer_cad_widgets.where({ widget_id: widgetId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_widgets, existing.id, {
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        widget_key: input.widgetKey,
+        title: input.title,
+        source_kind: input.sourceKind ?? existing.source_kind,
+        source_path: input.sourcePath,
+        version: input.version,
+        status: input.status ?? existing.status,
+        manifest_json: input.manifestJson,
+        state_json: input.stateJson,
+        updated_at: now,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_widgets.where({ widget_id: widgetId }),
+        "designer cad widget",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_widgets,
+      {
+        widget_id: widgetId,
+        workspace_id: input.workspaceId,
+        workspace_row_id: workspace.id,
+        widget_key: input.widgetKey,
+        title: input.title,
+        source_kind: input.sourceKind ?? "designer-widget",
+        source_path: input.sourcePath,
+        version: input.version,
+        status: input.status ?? "active",
+        manifest_json: input.manifestJson,
+        state_json: input.stateJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCadSteer(
+    input: RecordDesignerCadSteerInput,
+    session?: Session,
+  ): Promise<DesignerCadSteer> {
+    const db = this.getDb(session);
+    const cadSession = await this.requireDesignerCadSessionByExternalId(
+      db,
+      input.cadSessionId,
+    );
+    const steerId = input.steerId ?? randomUUID();
+    const existing = await db.one(
+      app.designer_cad_steers.where({ steer_id: steerId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_cad_steers, existing.id, {
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        target_agent_id: input.targetAgentId,
+        target_run_id: input.targetRunId,
+        message_text: input.messageText,
+        context_json: input.contextJson,
+        status: input.status ?? existing.status,
+        created_at: input.createdAt ? asDate(input.createdAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_cad_steers.where({ steer_id: steerId }),
+        "designer cad steer",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_cad_steers,
+      {
+        steer_id: steerId,
+        cad_session_id: input.cadSessionId,
+        cad_session_row_id: cadSession.id,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        target_agent_id: input.targetAgentId,
+        target_run_id: input.targetRunId,
+        message_text: input.messageText,
+        context_json: input.contextJson,
+        status: input.status ?? "queued",
+        created_at: asDate(input.createdAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async listDesignerCadEvents(
+    input: ListDesignerCadEventsInput = {},
+    session?: Session,
+  ): Promise<DesignerCadEvent[]> {
+    const db = this.getDb(session);
+    const rows = input.cadSessionId
+      ? await db.all(
+          app.designer_cad_events
+            .where({ cad_session_id: input.cadSessionId })
+            .orderBy("sequence", "asc"),
+        )
+      : await db.all(
+          app.designer_cad_events
+            .orderBy("sequence", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((event) => {
+        if (input.cadSessionId && event.cad_session_id !== input.cadSessionId)
+          return false;
+        if (input.eventKind && event.event_kind !== input.eventKind)
+          return false;
+        if (
+          input.afterSequence !== undefined &&
+          event.sequence <= input.afterSequence
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async listDesignerCadOperations(
+    input: ListDesignerCadOperationsInput = {},
+    session?: Session,
+  ): Promise<DesignerCadOperation[]> {
+    const db = this.getDb(session);
+    const rows = input.cadSessionId
+      ? await db.all(
+          app.designer_cad_operations
+            .where({ cad_session_id: input.cadSessionId })
+            .orderBy("updated_at", "desc"),
+        )
+      : await db.all(
+          app.designer_cad_operations
+            .orderBy("updated_at", "desc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 4),
+        );
+
+    return rows
+      .filter((operation) => {
+        if (
+          input.cadSessionId &&
+          operation.cad_session_id !== input.cadSessionId
+        ) {
+          return false;
+        }
+        if (
+          input.toolSessionId &&
+          operation.tool_session_id !== input.toolSessionId
+        ) {
+          return false;
+        }
+        if (input.status && operation.status !== input.status) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async getDesignerCadSessionSummary(
+    cadSessionId: string,
+    session?: Session,
+  ): Promise<DesignerCadSessionSummary | null> {
+    const db = this.getDb(session);
+    const cadSession = await this.getDesignerCadSessionByExternalId(
+      db,
+      cadSessionId,
+    );
+    if (!cadSession) return null;
+
+    const [workspace, document] = await Promise.all([
+      this.requireDesignerCadWorkspaceByExternalId(db, cadSession.workspace_id),
+      this.requireDesignerCadDocumentByExternalId(db, cadSession.document_id),
+    ]);
+    const [
+      events,
+      sceneNodes,
+      selections,
+      toolSessions,
+      operations,
+      sourceEdits,
+      previewHandles,
+      previewUpdates,
+      widgets,
+      steers,
+    ] = await Promise.all([
+      db.all(
+        app.designer_cad_events
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("sequence", "asc"),
+      ),
+      db.all(
+        app.designer_cad_scene_nodes
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("updated_at", "asc"),
+      ),
+      db.all(
+        app.designer_cad_selections
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("updated_at", "desc"),
+      ),
+      db.all(
+        app.designer_cad_tool_sessions
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("started_at", "asc"),
+      ),
+      db.all(
+        app.designer_cad_operations
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("created_at", "asc"),
+      ),
+      db.all(
+        app.designer_cad_source_edits
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("sequence", "asc"),
+      ),
+      db.all(
+        app.designer_cad_preview_handles
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("created_at", "asc"),
+      ),
+      db.all(
+        app.designer_cad_preview_updates
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("sequence", "asc"),
+      ),
+      db.all(
+        app.designer_cad_widgets
+          .where({ workspace_id: cadSession.workspace_id })
+          .orderBy("updated_at", "desc"),
+      ),
+      db.all(
+        app.designer_cad_steers
+          .where({ cad_session_id: cadSessionId })
+          .orderBy("created_at", "asc"),
+      ),
+    ]);
+
+    return {
+      workspace,
+      document,
+      session: cadSession,
+      events,
+      sceneNodes,
+      selections,
+      toolSessions,
+      operations,
+      sourceEdits,
+      previewHandles,
+      previewUpdates,
+      widgets,
+      steers,
+    };
   }
 
   async recordDaemonLogSource(
@@ -3261,6 +4453,62 @@ export class AgentDataStore {
     return db.one(app.daemon_log_chunks.where({ chunk_id: chunkId }));
   }
 
+  private async getDesignerCadWorkspaceByExternalId(
+    db: Db,
+    workspaceId: string,
+  ): Promise<DesignerCadWorkspace | null> {
+    return db.one(
+      app.designer_cad_workspaces.where({ workspace_id: workspaceId }),
+    );
+  }
+
+  private async getDesignerCadDocumentByExternalId(
+    db: Db,
+    documentId: string,
+  ): Promise<DesignerCadDocument | null> {
+    return db.one(
+      app.designer_cad_documents.where({ document_id: documentId }),
+    );
+  }
+
+  private async getDesignerCadSessionByExternalId(
+    db: Db,
+    cadSessionId: string,
+  ): Promise<DesignerCadSession | null> {
+    return db.one(
+      app.designer_cad_sessions.where({ cad_session_id: cadSessionId }),
+    );
+  }
+
+  private async getDesignerCadToolSessionByExternalId(
+    db: Db,
+    toolSessionId: string,
+  ): Promise<DesignerCadToolSession | null> {
+    return db.one(
+      app.designer_cad_tool_sessions.where({
+        tool_session_id: toolSessionId,
+      }),
+    );
+  }
+
+  private async getDesignerCadOperationByExternalId(
+    db: Db,
+    operationId: string,
+  ): Promise<DesignerCadOperation | null> {
+    return db.one(
+      app.designer_cad_operations.where({ operation_id: operationId }),
+    );
+  }
+
+  private async getDesignerCadPreviewHandleByExternalId(
+    db: Db,
+    previewId: string,
+  ): Promise<DesignerCadPreviewHandle | null> {
+    return db.one(
+      app.designer_cad_preview_handles.where({ preview_id: previewId }),
+    );
+  }
+
   private async requireDaemonLogSourceByExternalId(
     db: Db,
     sourceId: string,
@@ -3281,6 +4529,109 @@ export class AgentDataStore {
       throw new Error(`daemon log chunk ${chunkId} not found`);
     }
     return chunk;
+  }
+
+  private async requireDesignerCadWorkspaceByExternalId(
+    db: Db,
+    workspaceId: string,
+  ): Promise<DesignerCadWorkspace> {
+    const workspace = await this.getDesignerCadWorkspaceByExternalId(
+      db,
+      workspaceId,
+    );
+    if (!workspace) {
+      throw new Error(`designer cad workspace ${workspaceId} not found`);
+    }
+    return workspace;
+  }
+
+  private async requireDesignerCadDocumentByExternalId(
+    db: Db,
+    documentId: string,
+  ): Promise<DesignerCadDocument> {
+    const document = await this.getDesignerCadDocumentByExternalId(
+      db,
+      documentId,
+    );
+    if (!document) {
+      throw new Error(`designer cad document ${documentId} not found`);
+    }
+    return document;
+  }
+
+  private async requireDesignerCadSessionByExternalId(
+    db: Db,
+    cadSessionId: string,
+  ): Promise<DesignerCadSession> {
+    const cadSession = await this.getDesignerCadSessionByExternalId(
+      db,
+      cadSessionId,
+    );
+    if (!cadSession) {
+      throw new Error(`designer cad session ${cadSessionId} not found`);
+    }
+    return cadSession;
+  }
+
+  private async requireDesignerCadSceneNodeByExternalId(
+    db: Db,
+    cadSessionId: string,
+    nodeId: string,
+  ): Promise<DesignerCadSceneNode> {
+    const node = await db.one(
+      app.designer_cad_scene_nodes.where({
+        cad_session_id: cadSessionId,
+        node_id: nodeId,
+      }),
+    );
+    if (!node) {
+      throw new Error(
+        `designer cad scene node ${cadSessionId}:${nodeId} not found`,
+      );
+    }
+    return node;
+  }
+
+  private async requireDesignerCadToolSessionByExternalId(
+    db: Db,
+    toolSessionId: string,
+  ): Promise<DesignerCadToolSession> {
+    const toolSession = await this.getDesignerCadToolSessionByExternalId(
+      db,
+      toolSessionId,
+    );
+    if (!toolSession) {
+      throw new Error(`designer cad tool session ${toolSessionId} not found`);
+    }
+    return toolSession;
+  }
+
+  private async requireDesignerCadOperationByExternalId(
+    db: Db,
+    operationId: string,
+  ): Promise<DesignerCadOperation> {
+    const operation = await this.getDesignerCadOperationByExternalId(
+      db,
+      operationId,
+    );
+    if (!operation) {
+      throw new Error(`designer cad operation ${operationId} not found`);
+    }
+    return operation;
+  }
+
+  private async requireDesignerCadPreviewHandleByExternalId(
+    db: Db,
+    previewId: string,
+  ): Promise<DesignerCadPreviewHandle> {
+    const preview = await this.getDesignerCadPreviewHandleByExternalId(
+      db,
+      previewId,
+    );
+    if (!preview) {
+      throw new Error(`designer cad preview ${previewId} not found`);
+    }
+    return preview;
   }
 
   private async ensureCursorReviewControlRun(db: Db): Promise<AgentRun> {
