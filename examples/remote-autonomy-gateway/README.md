@@ -45,6 +45,26 @@ export REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS="3000"
 By default the local Jazz2 stores connect to the configured sync server. Set
 `REMOTE_AUTONOMY_CONNECT_SYNC=0` for isolated local tests.
 
+## Agent Infra CLI Remote Store
+
+The lower-level agent-infra CLI used by `prom-db` can also connect its persistent
+store to the sync server directly. This keeps the local SQLite file as a cache
+while writes are committed with Jazz durability:
+
+```sh
+export PROM_DB_JAZZ_SERVER_URL="$REMOTE_AUTONOMY_SYNC_SERVER_URL"
+export PROM_DB_JAZZ_APP_ID="run-agent-infra"
+export PROM_DB_JAZZ_ENV="remote-autonomy"
+export PROM_DB_JAZZ_USER_BRANCH="main"
+export PROM_DB_JAZZ_TIER="edge"
+```
+
+Use `config` to verify the resolved store without printing secrets:
+
+```sh
+pnpm --filter ./examples/agent-infra-backend cli config
+```
+
 ## Workflow Shape
 
 1. `start` calls `/health` and `/v1/bootstrap`.
