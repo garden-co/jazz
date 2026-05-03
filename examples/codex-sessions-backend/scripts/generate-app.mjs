@@ -25,7 +25,7 @@ const schema = getCollectedSchema();
 const generatedClient = generateClient(schema).replace(
   /^\/\/ AUTO-GENERATED FILE - DO NOT EDIT\r?\n/,
   "",
-);
+).trimEnd();
 
 const appParts = [
   "// AUTO-GENERATED FILE - DO NOT EDIT",
