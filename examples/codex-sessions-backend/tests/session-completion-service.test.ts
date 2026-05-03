@@ -505,6 +505,104 @@ describe("codex completion session service", () => {
     );
   }, 30_000);
 
+  it("captures a new rollout file in tail bootstrap mode from its first line", async () => {
+    const today = new Date();
+    const sessionId = "019d0000-0000-7000-8000-000000000094";
+    const todayRolloutDir = join(
+      codexHome,
+      "sessions",
+      String(today.getFullYear()),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    );
+    const liveRolloutPath = join(
+      todayRolloutDir,
+      `rollout-2026-05-02T12-00-00-${sessionId}.jsonl`,
+    );
+    await mkdir(todayRolloutDir, { recursive: true });
+
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE: "tail",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const now = new Date().toISOString();
+    await writeFile(
+      liveRolloutPath,
+      [
+        JSON.stringify({
+          timestamp: now,
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            timestamp: now,
+            cwd: "/tmp/stream-tail-new-rollout",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-tail-new",
+            delta: "tail mode first write",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const events = await waitForStreamEvents(socketPath, sessionId, 2);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sequence: 1,
+          eventKind: "session_meta",
+        }),
+        expect.objectContaining({
+          sessionId,
+          sequence: 2,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          textDelta: "tail mode first write",
+        }),
+      ]),
+    );
+  }, 30_000);
+
   it("streams completion events over the local session socket when the legacy file watcher is enabled", async () => {
     const today = new Date();
     const todayRolloutDir = join(

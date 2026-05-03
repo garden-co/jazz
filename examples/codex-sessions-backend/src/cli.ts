@@ -3067,6 +3067,11 @@ function streamWatchErrorBackoffMs(): number {
   return Math.max(50, Math.min(30_000, Math.trunc(Number.isFinite(parsed) ? parsed : 500)));
 }
 
+function streamWatchBootstrapGraceMs(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_GRACE_MS ?? "15000");
+  return Math.max(0, Math.min(120_000, Math.trunc(Number.isFinite(parsed) ? parsed : 15_000)));
+}
+
 function streamWatchBootstrapMode(): "tail" | "backfill" {
   const raw = (process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE ?? "tail")
     .trim()
@@ -3104,6 +3109,8 @@ async function watchRecentRolloutStreamEvents(
   const sourceHost = options.sourceHost?.trim() || hostname();
   const bootstrapMode = streamWatchBootstrapMode();
   const errorBackoffMs = streamWatchErrorBackoffMs();
+  const bootstrapGraceMs = streamWatchBootstrapGraceMs();
+  const watcherStartedAtMs = Date.now();
 
   while (!options.signal?.aborted) {
     const rolloutPaths = await collectRecentlyModifiedRolloutPaths(
@@ -3128,7 +3135,7 @@ async function watchRecentRolloutStreamEvents(
           mtimeMs: rolloutPath.mtimeMs,
         });
       }
-      if (!cursor && bootstrapMode === "tail") {
+      if (!cursor && bootstrapMode === "tail" && rolloutPath.mtimeMs < watcherStartedAtMs - bootstrapGraceMs) {
         const fileStat = await stat(rolloutPath.path).catch(() => null);
         cursors.set(rolloutPath.path, {
           mtimeMs: rolloutPath.mtimeMs,
