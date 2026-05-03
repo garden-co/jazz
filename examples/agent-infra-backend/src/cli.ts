@@ -23,9 +23,25 @@ import {
   type DaemonLogSummary,
   type JobEventRecord,
   type JobRecord,
+  wasmSchema,
   createAgentDataStore,
+  type AgentDataStoreConfig,
   type CancelJobInput,
   type ClaimJobInput,
+  type DesignerCadDocument,
+  type DesignerCadEvent,
+  type DesignerCadOperation,
+  type DesignerCadPreviewHandle,
+  type DesignerCadPreviewUpdate,
+  type DesignerCadSceneNode,
+  type DesignerCadSelection,
+  type DesignerCadSession,
+  type DesignerCadSessionSummary,
+  type DesignerCadSourceEdit,
+  type DesignerCadSteer,
+  type DesignerCadToolSession,
+  type DesignerCadWidget,
+  type DesignerCadWorkspace,
   type ListAgentClaimsInput,
   type ListBranchFileReviewStatesInput,
   type ListCommitTurnOperationsInput,
@@ -34,8 +50,21 @@ import {
   type ListDaemonLogEventsInput,
   type ListDaemonLogSourcesInput,
   type ListDaemonLogSummariesInput,
+  type ListDesignerCadEventsInput,
+  type ListDesignerCadOperationsInput,
   type ListJobsInput,
   type ListTaskRecordsInput,
+  type RecordDesignerCadDocumentInput,
+  type RecordDesignerCadEventInput,
+  type RecordDesignerCadOperationInput,
+  type RecordDesignerCadPreviewHandleInput,
+  type RecordDesignerCadPreviewUpdateInput,
+  type RecordDesignerCadSessionInput,
+  type RecordDesignerCadSourceEditInput,
+  type RecordDesignerCadSteerInput,
+  type RecordDesignerCadToolSessionInput,
+  type RecordDesignerCadWidgetInput,
+  type RecordDesignerCadWorkspaceInput,
   type RecordAgentClaimInput,
   type RecordBranchFileReviewStateInput,
   type RecordCommitTurnOperationInput,
@@ -63,11 +92,23 @@ import {
   type SourceFile,
   type TaskRecord,
   type UpdateJobInput,
+  type UpsertDesignerCadSceneNodeInput,
+  type UpsertDesignerCadSelectionInput,
   type WireEvent,
   type WorkspaceSnapshot,
   type UpsertTaskRecordInput,
 } from "./index.js";
 import { projectDoDesignerTasks, syncDoDesignerTasks } from "./task_records.js";
+
+const DEFAULT_AGENT_INFRA_APP_ID = "run-agent-infra";
+const DEFAULT_AGENT_INFRA_DATA_PATH = "~/.jazz2/agent-infra.db";
+
+type WriteTier = "local" | "edge" | "global";
+
+type CliStoreConfig = AgentDataStoreConfig & {
+  appId: string;
+  dataPath: string;
+};
 
 interface SerializedTaskRecord {
   taskId: string;
@@ -539,7 +580,7 @@ function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
 }
 
-function readWriteTierFlag(): "local" | "edge" | "global" | undefined {
+function readWriteTierFlag(): WriteTier | undefined {
   const tier = readFlag("--tier");
   if (!tier) {
     return undefined;
@@ -548,6 +589,170 @@ function readWriteTierFlag(): "local" | "edge" | "global" | undefined {
     return tier;
   }
   throw new Error(`invalid --tier ${tier}; expected local, edge, or global`);
+}
+
+function readFlagOrEnv(flag: string, envName: string): string | undefined {
+  return readFlag(flag) ?? process.env[envName];
+}
+
+function readSecretFlagOrEnv(
+  flag: string,
+  envFlag: string,
+  defaultEnvName: string,
+): string | undefined {
+  const value = readFlag(flag);
+  if (value !== undefined) {
+    return value;
+  }
+  const selectedEnvName = readFlag(envFlag) ?? defaultEnvName;
+  return process.env[selectedEnvName];
+}
+
+function readIntegerFlag(flag: string): number | undefined {
+  const value = readFlag(flag);
+  return value ? Number.parseInt(value, 10) : undefined;
+}
+
+function readCliStoreConfig(
+  dataPath: string,
+  tier: WriteTier | undefined,
+): CliStoreConfig {
+  return {
+    appId:
+      readFlagOrEnv("--app-id", "JAZZ2_AGENT_INFRA_APP_ID") ??
+      DEFAULT_AGENT_INFRA_APP_ID,
+    dataPath,
+    env: readFlagOrEnv("--jazz-env", "JAZZ2_AGENT_INFRA_ENV"),
+    userBranch: readFlagOrEnv(
+      "--user-branch",
+      "JAZZ2_AGENT_INFRA_USER_BRANCH",
+    ),
+    serverUrl: readFlagOrEnv(
+      "--server-url",
+      "JAZZ2_AGENT_INFRA_SERVER_URL",
+    ),
+    backendSecret: readSecretFlagOrEnv(
+      "--backend-secret",
+      "--backend-secret-env",
+      "JAZZ2_AGENT_INFRA_BACKEND_SECRET",
+    ),
+    adminSecret: readSecretFlagOrEnv(
+      "--admin-secret",
+      "--admin-secret-env",
+      "JAZZ2_AGENT_INFRA_ADMIN_SECRET",
+    ),
+    ...(tier ? { tier } : {}),
+  };
+}
+
+function serializeStoreConfig(config: CliStoreConfig) {
+  return {
+    appId: config.appId,
+    dataPath: config.dataPath,
+    env: config.env ?? "dev",
+    userBranch: config.userBranch ?? "main",
+    serverUrl: config.serverUrl ?? null,
+    tier: config.tier ?? "edge",
+    backendSecretConfigured: Boolean(config.backendSecret),
+    adminSecretConfigured: Boolean(config.adminSecret),
+  };
+}
+
+function buildStoreForwardArgs(config: CliStoreConfig): string[] {
+  const args = ["--data-path", config.dataPath, "--app-id", config.appId];
+  if (config.env) {
+    args.push("--jazz-env", config.env);
+  }
+  if (config.userBranch) {
+    args.push("--user-branch", config.userBranch);
+  }
+  if (config.serverUrl) {
+    args.push("--server-url", config.serverUrl);
+  }
+  if (config.tier) {
+    args.push("--tier", config.tier);
+  }
+  return args;
+}
+
+function buildStoreForwardEnv(config: CliStoreConfig): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...(config.backendSecret
+      ? { JAZZ2_AGENT_INFRA_BACKEND_SECRET: config.backendSecret }
+      : {}),
+    ...(config.adminSecret
+      ? { JAZZ2_AGENT_INFRA_ADMIN_SECRET: config.adminSecret }
+      : {}),
+  };
+}
+
+function normalizeHttpServerUrl(serverUrl: string): string {
+  const parsed = new URL(serverUrl.trim());
+  if (parsed.protocol === "ws:") {
+    parsed.protocol = "http:";
+  } else if (parsed.protocol === "wss:") {
+    parsed.protocol = "https:";
+  } else if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `Invalid server URL "${serverUrl}": expected http://, https://, ws://, or wss://`,
+    );
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error(
+      `Invalid server URL "${serverUrl}": must not include query parameters or a hash fragment`,
+    );
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function appScopedUrl(serverUrl: string, appId: string, suffix: string): string {
+  return `${normalizeHttpServerUrl(serverUrl)}/apps/${encodeURIComponent(
+    appId,
+  )}/${suffix.replace(/^\/+/, "")}`;
+}
+
+async function publishAgentInfraSchema(config: CliStoreConfig) {
+  if (!config.serverUrl) {
+    throw new Error("publish-schema requires --server-url");
+  }
+  if (!config.adminSecret) {
+    throw new Error(
+      "publish-schema requires --admin-secret or JAZZ2_AGENT_INFRA_ADMIN_SECRET",
+    );
+  }
+
+  const response = await fetch(
+    appScopedUrl(config.serverUrl, config.appId, "admin/schemas"),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Jazz-Admin-Secret": config.adminSecret,
+      },
+      body: JSON.stringify({ schema: wasmSchema }),
+    },
+  );
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(
+      `Schema publish failed: ${response.status} ${response.statusText}${detail}`,
+    );
+  }
+
+  const result = (await response.json()) as {
+    objectId?: string;
+    hash?: string;
+  };
+  return {
+    appId: config.appId,
+    serverUrl: normalizeHttpServerUrl(config.serverUrl),
+    objectId: result.objectId,
+    hash: result.hash,
+  };
 }
 
 function requireCommand(): string {
@@ -627,6 +832,241 @@ function serializeTaskRecord(record: TaskRecord): SerializedTaskRecord {
 
 function serializeNullableDate(value: Date | undefined): string | null {
   return value ? value.toISOString() : null;
+}
+
+function serializeDesignerCadWorkspace(record: DesignerCadWorkspace) {
+  return {
+    workspaceId: record.workspace_id,
+    workspaceKey: record.workspace_key,
+    title: record.title ?? null,
+    repoRoot: record.repo_root ?? null,
+    workspaceRoot: record.workspace_root ?? null,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadDocument(record: DesignerCadDocument) {
+  return {
+    documentId: record.document_id,
+    workspaceId: record.workspace_id,
+    filePath: record.file_path,
+    language: record.language,
+    sourceKind: record.source_kind,
+    sourceHash: record.source_hash ?? null,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadSession(record: DesignerCadSession) {
+  return {
+    cadSessionId: record.cad_session_id,
+    workspaceId: record.workspace_id,
+    documentId: record.document_id,
+    codexSessionId: record.codex_session_id ?? null,
+    agentRunId: record.agent_run_id ?? null,
+    status: record.status,
+    activeToolSessionId: record.active_tool_session_id ?? null,
+    latestProjectionId: record.latest_projection_id ?? null,
+    openedBy: record.opened_by ?? null,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+    closedAt: serializeNullableDate(record.closed_at),
+  };
+}
+
+function serializeDesignerCadEvent(record: DesignerCadEvent) {
+  return {
+    eventId: record.event_id,
+    cadSessionId: record.cad_session_id,
+    sequence: record.sequence,
+    eventKind: record.event_kind,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    toolSessionId: record.tool_session_id ?? null,
+    operationId: record.operation_id ?? null,
+    previewId: record.preview_id ?? null,
+    sourceEventId: record.source_event_id ?? null,
+    payloadJson: record.payload_json ?? null,
+    occurredAt: record.occurred_at.toISOString(),
+    observedAt: record.observed_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadSceneNode(record: DesignerCadSceneNode) {
+  return {
+    nodeId: record.node_id,
+    cadSessionId: record.cad_session_id,
+    documentId: record.document_id,
+    projectionId: record.projection_id,
+    kind: record.kind,
+    label: record.label ?? null,
+    path: record.path ?? null,
+    parentNodeId: record.parent_node_id ?? null,
+    stableRef: record.stable_ref ?? null,
+    visibility: record.visibility,
+    sourceSpanJson: record.source_span_json ?? null,
+    geometryRefJson: record.geometry_ref_json ?? null,
+    metadataJson: record.metadata_json ?? null,
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadSelection(record: DesignerCadSelection) {
+  return {
+    selectionId: record.selection_id,
+    cadSessionId: record.cad_session_id,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    targetKind: record.target_kind,
+    targetId: record.target_id,
+    nodeId: record.node_id ?? null,
+    selectionJson: record.selection_json ?? null,
+    status: record.status,
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadToolSession(record: DesignerCadToolSession) {
+  return {
+    toolSessionId: record.tool_session_id,
+    cadSessionId: record.cad_session_id,
+    toolKind: record.tool_kind,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    status: record.status,
+    inputJson: record.input_json ?? null,
+    stateJson: record.state_json ?? null,
+    startedAt: record.started_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+    completedAt: serializeNullableDate(record.completed_at),
+  };
+}
+
+function serializeDesignerCadOperation(record: DesignerCadOperation) {
+  return {
+    operationId: record.operation_id,
+    cadSessionId: record.cad_session_id,
+    toolSessionId: record.tool_session_id ?? null,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    operationKind: record.operation_kind,
+    status: record.status,
+    operationJson: record.operation_json,
+    validationJson: record.validation_json ?? null,
+    resultJson: record.result_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+    appliedAt: serializeNullableDate(record.applied_at),
+  };
+}
+
+function serializeDesignerCadSourceEdit(record: DesignerCadSourceEdit) {
+  return {
+    editId: record.edit_id,
+    operationId: record.operation_id,
+    cadSessionId: record.cad_session_id,
+    sequence: record.sequence,
+    filePath: record.file_path,
+    rangeJson: record.range_json,
+    textPreview: record.text_preview ?? null,
+    textSha256: record.text_sha256 ?? null,
+    status: record.status,
+    createdAt: record.created_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadPreviewHandle(record: DesignerCadPreviewHandle) {
+  return {
+    previewId: record.preview_id,
+    cadSessionId: record.cad_session_id,
+    toolSessionId: record.tool_session_id ?? null,
+    operationId: record.operation_id ?? null,
+    previewKind: record.preview_kind,
+    targetJson: record.target_json ?? null,
+    status: record.status,
+    handleRef: record.handle_ref ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+    disposedAt: serializeNullableDate(record.disposed_at),
+  };
+}
+
+function serializeDesignerCadPreviewUpdate(record: DesignerCadPreviewUpdate) {
+  return {
+    updateId: record.update_id,
+    previewId: record.preview_id,
+    cadSessionId: record.cad_session_id,
+    sequence: record.sequence,
+    paramsJson: record.params_json ?? null,
+    meshRefJson: record.mesh_ref_json ?? null,
+    status: record.status,
+    errorText: record.error_text ?? null,
+    requestedAt: record.requested_at.toISOString(),
+    completedAt: serializeNullableDate(record.completed_at),
+  };
+}
+
+function serializeDesignerCadWidget(record: DesignerCadWidget) {
+  return {
+    widgetId: record.widget_id,
+    workspaceId: record.workspace_id,
+    widgetKey: record.widget_key,
+    title: record.title ?? null,
+    sourceKind: record.source_kind,
+    sourcePath: record.source_path ?? null,
+    version: record.version ?? null,
+    status: record.status,
+    manifestJson: record.manifest_json ?? null,
+    stateJson: record.state_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadSteer(record: DesignerCadSteer) {
+  return {
+    steerId: record.steer_id,
+    cadSessionId: record.cad_session_id,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    targetAgentId: record.target_agent_id ?? null,
+    targetRunId: record.target_run_id ?? null,
+    messageText: record.message_text,
+    contextJson: record.context_json ?? null,
+    status: record.status,
+    createdAt: record.created_at.toISOString(),
+  };
+}
+
+function serializeDesignerCadSessionSummary(
+  summary: DesignerCadSessionSummary,
+) {
+  return {
+    workspace: serializeDesignerCadWorkspace(summary.workspace),
+    document: serializeDesignerCadDocument(summary.document),
+    session: serializeDesignerCadSession(summary.session),
+    events: summary.events.map(serializeDesignerCadEvent),
+    sceneNodes: summary.sceneNodes.map(serializeDesignerCadSceneNode),
+    selections: summary.selections.map(serializeDesignerCadSelection),
+    toolSessions: summary.toolSessions.map(serializeDesignerCadToolSession),
+    operations: summary.operations.map(serializeDesignerCadOperation),
+    sourceEdits: summary.sourceEdits.map(serializeDesignerCadSourceEdit),
+    previewHandles: summary.previewHandles.map(
+      serializeDesignerCadPreviewHandle,
+    ),
+    previewUpdates: summary.previewUpdates.map(
+      serializeDesignerCadPreviewUpdate,
+    ),
+    widgets: summary.widgets.map(serializeDesignerCadWidget),
+    steers: summary.steers.map(serializeDesignerCadSteer),
+  };
 }
 
 function serializeAgentRun(run: AgentRun): SerializedAgentRun {
@@ -1096,7 +1536,7 @@ interface ServeJsonRequest {
 
 async function runServeJsonCommand(
   request: ServeJsonRequest,
-  dataPath: string,
+  storeConfig: CliStoreConfig,
 ): Promise<unknown> {
   const command = request.command?.trim();
   if (!command || command === "serve-json") {
@@ -1105,9 +1545,15 @@ async function runServeJsonCommand(
   const args = Array.isArray(request.args) ? request.args.map(String) : [];
   const child = spawn(
     process.execPath,
-    [path.resolve(process.argv[1]), command, ...args, "--data-path", dataPath],
+    [
+      path.resolve(process.argv[1]),
+      command,
+      ...args,
+      ...buildStoreForwardArgs(storeConfig),
+    ],
     {
       cwd: process.cwd(),
+      env: buildStoreForwardEnv(storeConfig),
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
@@ -1132,7 +1578,7 @@ async function runServeJsonCommand(
   return stdoutText.trim() ? JSON.parse(stdoutText) : null;
 }
 
-async function serveJson(dataPath: string): Promise<void> {
+async function serveJson(storeConfig: CliStoreConfig): Promise<void> {
   const lines = readline.createInterface({
     input: process.stdin,
     crlfDelay: Infinity,
@@ -1143,7 +1589,7 @@ async function serveJson(dataPath: string): Promise<void> {
     }
     try {
       const request = JSON.parse(line) as ServeJsonRequest;
-      const result = await runServeJsonCommand(request, dataPath);
+      const result = await runServeJsonCommand(request, storeConfig);
       process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1155,21 +1601,29 @@ async function serveJson(dataPath: string): Promise<void> {
 async function main(): Promise<void> {
   const command = requireCommand();
   const dataPath = await resolvePersistentDataPath(
-    readFlag("--data-path") ?? "~/.jazz2/agent-infra.db",
+    readFlagOrEnv("--data-path", "JAZZ2_AGENT_INFRA_DATA_PATH") ??
+      DEFAULT_AGENT_INFRA_DATA_PATH,
   );
   const tier = readWriteTierFlag();
+  const storeConfig = readCliStoreConfig(dataPath, tier);
   await mkdir(path.dirname(dataPath), { recursive: true });
 
   if (command === "serve-json") {
-    await serveJson(dataPath);
+    await serveJson(storeConfig);
     return;
   }
 
-  const store = createAgentDataStore({
-    appId: "run-agent-infra",
-    dataPath,
-    ...(tier ? { tier } : {}),
-  });
+  if (command === "storage-config") {
+    renderJson(serializeStoreConfig(storeConfig));
+    return;
+  }
+
+  if (command === "publish-schema") {
+    renderJson(await publishAgentInfraSchema(storeConfig));
+    return;
+  }
+
+  const store = createAgentDataStore(storeConfig);
 
   try {
     switch (command) {
@@ -1432,6 +1886,147 @@ async function main(): Promise<void> {
         renderJson(serializeRunSummary(summary));
         break;
       }
+      case "record-designer-cad-workspace": {
+        const input = readJsonInput<RecordDesignerCadWorkspaceInput>(
+          "record-designer-cad-workspace",
+        );
+        const workspace = await store.recordDesignerCadWorkspace(input);
+        renderJson(serializeDesignerCadWorkspace(workspace));
+        break;
+      }
+      case "record-designer-cad-document": {
+        const input = readJsonInput<RecordDesignerCadDocumentInput>(
+          "record-designer-cad-document",
+        );
+        const document = await store.recordDesignerCadDocument(input);
+        renderJson(serializeDesignerCadDocument(document));
+        break;
+      }
+      case "record-designer-cad-session": {
+        const input = readJsonInput<RecordDesignerCadSessionInput>(
+          "record-designer-cad-session",
+        );
+        const cadSession = await store.recordDesignerCadSession(input);
+        renderJson(serializeDesignerCadSession(cadSession));
+        break;
+      }
+      case "record-designer-cad-event": {
+        const input = readJsonInput<RecordDesignerCadEventInput>(
+          "record-designer-cad-event",
+        );
+        const event = await store.recordDesignerCadEvent(input);
+        renderJson(serializeDesignerCadEvent(event));
+        break;
+      }
+      case "upsert-designer-cad-scene-node": {
+        const input = readJsonInput<UpsertDesignerCadSceneNodeInput>(
+          "upsert-designer-cad-scene-node",
+        );
+        const node = await store.upsertDesignerCadSceneNode(input);
+        renderJson(serializeDesignerCadSceneNode(node));
+        break;
+      }
+      case "upsert-designer-cad-selection": {
+        const input = readJsonInput<UpsertDesignerCadSelectionInput>(
+          "upsert-designer-cad-selection",
+        );
+        const selection = await store.upsertDesignerCadSelection(input);
+        renderJson(serializeDesignerCadSelection(selection));
+        break;
+      }
+      case "record-designer-cad-tool-session": {
+        const input = readJsonInput<RecordDesignerCadToolSessionInput>(
+          "record-designer-cad-tool-session",
+        );
+        const toolSession = await store.recordDesignerCadToolSession(input);
+        renderJson(serializeDesignerCadToolSession(toolSession));
+        break;
+      }
+      case "record-designer-cad-operation": {
+        const input = readJsonInput<RecordDesignerCadOperationInput>(
+          "record-designer-cad-operation",
+        );
+        const operation = await store.recordDesignerCadOperation(input);
+        renderJson(serializeDesignerCadOperation(operation));
+        break;
+      }
+      case "record-designer-cad-source-edit": {
+        const input = readJsonInput<RecordDesignerCadSourceEditInput>(
+          "record-designer-cad-source-edit",
+        );
+        const edit = await store.recordDesignerCadSourceEdit(input);
+        renderJson(serializeDesignerCadSourceEdit(edit));
+        break;
+      }
+      case "record-designer-cad-preview-handle": {
+        const input = readJsonInput<RecordDesignerCadPreviewHandleInput>(
+          "record-designer-cad-preview-handle",
+        );
+        const preview = await store.recordDesignerCadPreviewHandle(input);
+        renderJson(serializeDesignerCadPreviewHandle(preview));
+        break;
+      }
+      case "record-designer-cad-preview-update": {
+        const input = readJsonInput<RecordDesignerCadPreviewUpdateInput>(
+          "record-designer-cad-preview-update",
+        );
+        const update = await store.recordDesignerCadPreviewUpdate(input);
+        renderJson(serializeDesignerCadPreviewUpdate(update));
+        break;
+      }
+      case "record-designer-cad-widget": {
+        const input = readJsonInput<RecordDesignerCadWidgetInput>(
+          "record-designer-cad-widget",
+        );
+        const widget = await store.recordDesignerCadWidget(input);
+        renderJson(serializeDesignerCadWidget(widget));
+        break;
+      }
+      case "record-designer-cad-steer": {
+        const input = readJsonInput<RecordDesignerCadSteerInput>(
+          "record-designer-cad-steer",
+        );
+        const steer = await store.recordDesignerCadSteer(input);
+        renderJson(serializeDesignerCadSteer(steer));
+        break;
+      }
+      case "list-designer-cad-events": {
+        const query: ListDesignerCadEventsInput = {
+          cadSessionId: readFlag("--cad-session-id"),
+          eventKind: readFlag("--event-kind"),
+          afterSequence: readIntegerFlag("--after-sequence"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const events = await store.listDesignerCadEvents(query);
+        renderJson(events.map(serializeDesignerCadEvent));
+        break;
+      }
+      case "list-designer-cad-operations": {
+        const query: ListDesignerCadOperationsInput = {
+          cadSessionId: readFlag("--cad-session-id"),
+          toolSessionId: readFlag("--tool-session-id"),
+          status: readFlag("--status"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const operations = await store.listDesignerCadOperations(query);
+        renderJson(operations.map(serializeDesignerCadOperation));
+        break;
+      }
+      case "get-designer-cad-session-summary": {
+        const cadSessionId = readFlag("--cad-session-id");
+        if (!cadSessionId) {
+          throw new Error(
+            "get-designer-cad-session-summary requires --cad-session-id",
+          );
+        }
+        const summary =
+          await store.getDesignerCadSessionSummary(cadSessionId);
+        if (!summary) {
+          throw new Error(`designer cad session ${cadSessionId} not found`);
+        }
+        renderJson(serializeDesignerCadSessionSummary(summary));
+        break;
+      }
       case "record-cursor-review-op": {
         const input = readJsonInput<RecordCursorReviewOperationInput>(
           "record-cursor-review-op",
@@ -1639,6 +2234,7 @@ async function main(): Promise<void> {
         throw new Error(`unknown command ${command}`);
     }
   } finally {
+    store.flush();
     await store.shutdown();
   }
 }

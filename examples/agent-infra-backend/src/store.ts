@@ -1326,6 +1326,7 @@ export class AgentDataStore {
   constructor(
     private readonly context: JazzContext,
     private readonly writeTier: DurabilityTier,
+    private readonly useBackendSync = false,
   ) {}
 
   flush(): void {
@@ -4365,7 +4366,9 @@ export class AgentDataStore {
   private getDb(session?: Session): Db {
     const db = session
       ? this.context.forSession(session, app)
-      : this.context.db(app);
+      : this.useBackendSync
+        ? this.context.asBackend(app)
+        : this.context.db(app);
     const compatible = db as Db & {
       insertDurable?: (
         table: unknown,
@@ -5325,5 +5328,5 @@ export function createAgentDataStore(
     adminSecret: config.adminSecret,
     tier,
   });
-  return new AgentDataStore(context, tier);
+  return new AgentDataStore(context, tier, Boolean(config.serverUrl));
 }

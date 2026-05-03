@@ -144,3 +144,71 @@ node examples/agent-infra-backend/dist/src/cli.js get-run-summary \
 
 These commands are JSON-in / JSON-out on purpose so Barnum and the Go
 front-door agents can call them deterministically without scraping human text.
+
+## Remote Jazz Storage
+
+The same domain CLI can target a remote Jazz sync server. Publish the generated
+agent-infra schema first, then pass the remote connection flags to normal write
+commands:
+
+```sh
+node examples/agent-infra-backend/dist/src/cli.js publish-schema \
+  --app-id "$JAZZ2_AGENT_INFRA_APP_ID" \
+  --server-url "$JAZZ2_AGENT_INFRA_SERVER_URL" \
+  --admin-secret "$JAZZ2_AGENT_INFRA_ADMIN_SECRET" \
+  --data-path ~/.jazz2/agent-infra.db
+```
+
+All commands accept:
+
+- `--app-id` or `JAZZ2_AGENT_INFRA_APP_ID`
+- `--server-url` or `JAZZ2_AGENT_INFRA_SERVER_URL`
+- `--backend-secret`, `--backend-secret-env`, or `JAZZ2_AGENT_INFRA_BACKEND_SECRET`
+- `--admin-secret`, `--admin-secret-env`, or `JAZZ2_AGENT_INFRA_ADMIN_SECRET`
+- `--jazz-env`, `--user-branch`, `--tier`, and `--data-path`
+
+When `--server-url` is set, backend-owned store operations use
+backend-authenticated sync through `backendSecret`.
+
+## Designer CAD Commands
+
+The Designer CAD surface stores collaborative `.build123d.py` work as a
+workspace/document/session plus operation, source-edit, preview, widget, steer,
+and event rows. This is the JSON surface for Prom Designer and Codex/OpenClaw
+harnesses:
+
+```sh
+node examples/agent-infra-backend/dist/src/cli.js record-designer-cad-workspace \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"workspaceId":"workspace-build123d","workspaceKey":"prom-designer","repoRoot":"~/code/prom","workspaceRoot":"~/code/prom/ide/designer"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-cad-document \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"workspaceId":"workspace-build123d","documentId":"doc-bracket","filePath":"workspace/bracket.build123d.py"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-cad-session \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"cadSessionId":"cad-session-1","workspaceId":"workspace-build123d","documentId":"doc-bracket","codexSessionId":"codex:019deb0a-d19b-7d92-81dd-76612d076d4c","openedBy":"alice"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-cad-operation \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"operationId":"op-1","cadSessionId":"cad-session-1","actorKind":"agent","actorId":"codex:019defcc-a8da-76d0-942e-b0dbaff55f86","operationKind":"source.patch","status":"validated","operationJson":{"filePath":"workspace/bracket.build123d.py"}}'
+
+node examples/agent-infra-backend/dist/src/cli.js get-designer-cad-session-summary \
+  --data-path ~/.jazz2/agent-infra.db \
+  --cad-session-id cad-session-1
+```
+
+Related commands:
+
+- `record-designer-cad-event`
+- `upsert-designer-cad-scene-node`
+- `upsert-designer-cad-selection`
+- `record-designer-cad-tool-session`
+- `record-designer-cad-source-edit`
+- `record-designer-cad-preview-handle`
+- `record-designer-cad-preview-update`
+- `record-designer-cad-widget`
+- `record-designer-cad-steer`
+- `list-designer-cad-events`
+- `list-designer-cad-operations`
