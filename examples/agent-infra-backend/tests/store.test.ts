@@ -471,6 +471,103 @@ describe("AgentDataStore", () => {
     );
   });
 
+  it("records Designer agents and object-backed live commits", async () => {
+    const patchObject = await store.recordDesignerObjectRef({
+      objectRefId: "obj-commit-01f4d1e-patch",
+      provider: "oci",
+      uri: "oci://designer-commits/prom/live/01f4d1e.patch",
+      contentType: "text/x-diff",
+      objectKind: "vcs.commit.patch",
+    });
+    const manifestObject = await store.recordDesignerObjectRef({
+      objectRefId: "obj-commit-01f4d1e-manifest",
+      provider: "oci",
+      uri: "oci://designer-commits/prom/live/01f4d1e.json",
+      contentType: "application/json",
+      objectKind: "vcs.commit.manifest",
+    });
+    const agent = await store.recordDesignerAgent({
+      agentId: "agent.remote-codex.designer",
+      agentKind: "codex",
+      provider: "openai-codex",
+      displayName: "Remote Codex Designer",
+      model: "gpt-5.5",
+      defaultContextJson: {
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        workspaceRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      },
+      status: "active",
+    });
+    await store.recordDesignerAgentTool({
+      toolId: "agent.remote-codex.designer:tool:apply_patch",
+      agentId: agent.agent_id,
+      toolName: "apply_patch",
+      toolKind: "workspace.edit",
+      scopeJson: {
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        allowedPathPrefixes: ["ide/designer"],
+      },
+    });
+    await store.recordDesignerAgentContext({
+      contextId: "agent.remote-codex.designer:context:prom-live",
+      agentId: agent.agent_id,
+      contextKind: "workflow",
+      sourceKind: "jazz.row",
+      inlineContextJson: {
+        branch: "live",
+        invariant: "all committed changes are reflected into Jazz2",
+      },
+      priority: 10,
+    });
+
+    const commit = await store.recordDesignerLiveCommit({
+      commitId: "01f4d1ea1cea8f331c1691a3312c6df1043db08b",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      branch: "live",
+      bookmark: "nikiv-live",
+      subject: "fix(designer): harden remote codex chat replay",
+      body:
+        "Prevent replayed pending Remote Codex turns from resurrecting an already committed assistant answer as a stream draft.",
+      traceRef:
+        "codex:1_eyJzIjoiMDE5ZGViMGEtZDE5Yi03ZDkyLTgxZGQtNzY2MTJkMDc2ZDRjIiwidCI6MX0",
+      sourceSessionId: "codex:019deb0a-d19b-7d92-81dd-76612d076d4c",
+      sourceTurnOrdinal: 1,
+      agentId: agent.agent_id,
+      courierRunId: "live-commit-courier:6e5b4fe709dd9c25",
+      changedPathsJson: [
+        "ide/designer/src/v2/chat/HarnessChatTile.tsx",
+        "ide/designer/src/v2/chat/harness-trace.ts",
+      ],
+      patchObjectRefId: patchObject.object_ref_id,
+      manifestObjectRefId: manifestObject.object_ref_id,
+      status: "reflected",
+      committedAt: "2026-05-03T22:53:03Z",
+      reflectedAt: "2026-05-03T22:54:34Z",
+    });
+
+    const commits = await store.listDesignerLiveCommits({
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      branch: "live",
+      sourceSessionId: "codex:019deb0a-d19b-7d92-81dd-76612d076d4c",
+    });
+    const summary = await store.getDesignerLiveCommitSummary(commit.commit_id);
+    const tools = await store.listDesignerAgentTools({ agentId: agent.agent_id });
+    const contexts = await store.listDesignerAgentContexts({
+      agentId: agent.agent_id,
+    });
+
+    expect(commits.map((item) => item.commit_id)).toEqual([
+      "01f4d1ea1cea8f331c1691a3312c6df1043db08b",
+    ]);
+    expect(summary?.patchObject?.uri).toBe(
+      "oci://designer-commits/prom/live/01f4d1e.patch",
+    );
+    expect(summary?.agent?.display_name).toBe("Remote Codex Designer");
+    expect(tools[0]?.tool_name).toBe("apply_patch");
+    expect(contexts[0]?.context_kind).toBe("workflow");
+  });
+
   it("guards Designer CAD stream replay and relation consistency", async () => {
     await store.recordDesignerCadWorkspace({
       workspaceId: "workspace-a",

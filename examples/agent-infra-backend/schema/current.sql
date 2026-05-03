@@ -265,6 +265,51 @@ CREATE TABLE designer_object_refs (
     updated_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE designer_agents (
+    agent_id TEXT NOT NULL,
+    agent_kind TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    model TEXT,
+    default_context_json JSON,
+    tool_contract_json JSON,
+    status TEXT NOT NULL,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE designer_agent_tools (
+    tool_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    agent_row_id UUID REFERENCES designer_agents NOT NULL,
+    tool_name TEXT NOT NULL,
+    tool_kind TEXT NOT NULL,
+    input_schema_json JSON,
+    output_schema_json JSON,
+    scope_json JSON,
+    status TEXT NOT NULL,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE designer_agent_contexts (
+    context_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    agent_row_id UUID REFERENCES designer_agents NOT NULL,
+    context_kind TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    object_ref_id TEXT,
+    object_ref_row_id UUID REFERENCES designer_object_refs,
+    inline_context_json JSON,
+    priority INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE designer_codex_conversations (
     conversation_id TEXT NOT NULL,
     provider TEXT NOT NULL,
@@ -322,6 +367,43 @@ CREATE TABLE designer_telemetry_events (
     payload_object_row_id UUID REFERENCES designer_object_refs NOT NULL,
     properties_json JSON,
     occurred_at TIMESTAMP NOT NULL,
+    ingested_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE designer_live_commits (
+    commit_id TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    workspace_root TEXT,
+    branch TEXT NOT NULL,
+    bookmark TEXT,
+    live_ref TEXT,
+    tree_id TEXT,
+    parent_commit_ids_json JSON,
+    subject TEXT NOT NULL,
+    body TEXT,
+    author_name TEXT,
+    author_email TEXT,
+    committer_name TEXT,
+    committer_email TEXT,
+    trace_ref TEXT,
+    source_session_id TEXT,
+    source_turn_ordinal INTEGER,
+    source_conversation_id TEXT,
+    source_conversation_row_id UUID REFERENCES designer_codex_conversations,
+    source_turn_id TEXT,
+    source_turn_row_id UUID REFERENCES designer_codex_turns,
+    agent_id TEXT,
+    agent_row_id UUID REFERENCES designer_agents,
+    courier_run_id TEXT,
+    live_snapshot_ref TEXT,
+    changed_paths_json JSON,
+    patch_object_ref_id TEXT,
+    patch_object_row_id UUID REFERENCES designer_object_refs,
+    manifest_object_ref_id TEXT,
+    manifest_object_row_id UUID REFERENCES designer_object_refs,
+    status TEXT NOT NULL,
+    committed_at TIMESTAMP,
+    reflected_at TIMESTAMP,
     ingested_at TIMESTAMP NOT NULL
 );
 

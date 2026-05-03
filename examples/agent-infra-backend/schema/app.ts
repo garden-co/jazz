@@ -297,6 +297,54 @@ export interface DesignerObjectRef {
   updated_at: Date;
 }
 
+export interface DesignerAgent {
+  id: string;
+  agent_id: string;
+  agent_kind: string;
+  provider: string;
+  display_name: string;
+  model?: string;
+  default_context_json?: JsonValue;
+  tool_contract_json?: JsonValue;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerAgentTool {
+  id: string;
+  tool_id: string;
+  agent_id: string;
+  agent_row_id: string;
+  tool_name: string;
+  tool_kind: string;
+  input_schema_json?: JsonValue;
+  output_schema_json?: JsonValue;
+  scope_json?: JsonValue;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerAgentContext {
+  id: string;
+  context_id: string;
+  agent_id: string;
+  agent_row_id: string;
+  context_kind: string;
+  source_kind: string;
+  object_ref_id?: string;
+  object_ref_row_id?: string;
+  inline_context_json?: JsonValue;
+  priority: number;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface DesignerCodexConversation {
   id: string;
   conversation_id: string;
@@ -357,6 +405,44 @@ export interface DesignerTelemetryEvent {
   payload_object_row_id: string;
   properties_json?: JsonValue;
   occurred_at: Date;
+  ingested_at: Date;
+}
+
+export interface DesignerLiveCommit {
+  id: string;
+  commit_id: string;
+  repo_root: string;
+  workspace_root?: string;
+  branch: string;
+  bookmark?: string;
+  live_ref?: string;
+  tree_id?: string;
+  parent_commit_ids_json?: JsonValue;
+  subject: string;
+  body?: string;
+  author_name?: string;
+  author_email?: string;
+  committer_name?: string;
+  committer_email?: string;
+  trace_ref?: string;
+  source_session_id?: string;
+  source_turn_ordinal?: number;
+  source_conversation_id?: string;
+  source_conversation_row_id?: string;
+  source_turn_id?: string;
+  source_turn_row_id?: string;
+  agent_id?: string;
+  agent_row_id?: string;
+  courier_run_id?: string;
+  live_snapshot_ref?: string;
+  changed_paths_json?: JsonValue;
+  patch_object_ref_id?: string;
+  patch_object_row_id?: string;
+  manifest_object_ref_id?: string;
+  manifest_object_row_id?: string;
+  status: string;
+  committed_at?: Date;
+  reflected_at?: Date;
   ingested_at: Date;
 }
 
@@ -844,6 +930,51 @@ export interface DesignerObjectRefInit {
   updated_at: Date;
 }
 
+export interface DesignerAgentInit {
+  agent_id: string;
+  agent_kind: string;
+  provider: string;
+  display_name: string;
+  model?: string | null;
+  default_context_json?: JsonValue | null;
+  tool_contract_json?: JsonValue | null;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerAgentToolInit {
+  tool_id: string;
+  agent_id: string;
+  agent_row_id: string;
+  tool_name: string;
+  tool_kind: string;
+  input_schema_json?: JsonValue | null;
+  output_schema_json?: JsonValue | null;
+  scope_json?: JsonValue | null;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerAgentContextInit {
+  context_id: string;
+  agent_id: string;
+  agent_row_id: string;
+  context_kind: string;
+  source_kind: string;
+  object_ref_id?: string | null;
+  object_ref_row_id?: string | null;
+  inline_context_json?: JsonValue | null;
+  priority: number;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface DesignerCodexConversationInit {
   conversation_id: string;
   provider: string;
@@ -901,6 +1032,43 @@ export interface DesignerTelemetryEventInit {
   payload_object_row_id: string;
   properties_json?: JsonValue | null;
   occurred_at: Date;
+  ingested_at: Date;
+}
+
+export interface DesignerLiveCommitInit {
+  commit_id: string;
+  repo_root: string;
+  workspace_root?: string | null;
+  branch: string;
+  bookmark?: string | null;
+  live_ref?: string | null;
+  tree_id?: string | null;
+  parent_commit_ids_json?: JsonValue | null;
+  subject: string;
+  body?: string | null;
+  author_name?: string | null;
+  author_email?: string | null;
+  committer_name?: string | null;
+  committer_email?: string | null;
+  trace_ref?: string | null;
+  source_session_id?: string | null;
+  source_turn_ordinal?: number | null;
+  source_conversation_id?: string | null;
+  source_conversation_row_id?: string | null;
+  source_turn_id?: string | null;
+  source_turn_row_id?: string | null;
+  agent_id?: string | null;
+  agent_row_id?: string | null;
+  courier_run_id?: string | null;
+  live_snapshot_ref?: string | null;
+  changed_paths_json?: JsonValue | null;
+  patch_object_ref_id?: string | null;
+  patch_object_row_id?: string | null;
+  manifest_object_ref_id?: string | null;
+  manifest_object_row_id?: string | null;
+  status: string;
+  committed_at?: Date | null;
+  reflected_at?: Date | null;
   ingested_at: Date;
 }
 
@@ -1443,6 +1611,63 @@ export interface DesignerObjectRefWhereInput {
   $canDelete?: boolean;
 }
 
+export interface DesignerAgentWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  agent_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_kind?: string | { eq?: string; ne?: string; contains?: string };
+  provider?: string | { eq?: string; ne?: string; contains?: string };
+  display_name?: string | { eq?: string; ne?: string; contains?: string };
+  model?: string | { eq?: string; ne?: string; contains?: string };
+  default_context_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  tool_contract_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerAgentToolWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  tool_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_row_id?: string | { eq?: string; ne?: string };
+  tool_name?: string | { eq?: string; ne?: string; contains?: string };
+  tool_kind?: string | { eq?: string; ne?: string; contains?: string };
+  input_schema_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  output_schema_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  scope_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerAgentContextWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  context_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_row_id?: string | { eq?: string; ne?: string };
+  context_kind?: string | { eq?: string; ne?: string; contains?: string };
+  source_kind?: string | { eq?: string; ne?: string; contains?: string };
+  object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  object_ref_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  inline_context_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  priority?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 export interface DesignerCodexConversationWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   conversation_id?: string | { eq?: string; ne?: string; contains?: string };
@@ -1509,6 +1734,47 @@ export interface DesignerTelemetryEventWhereInput {
   payload_object_row_id?: string | { eq?: string; ne?: string };
   properties_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
   occurred_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  ingested_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerLiveCommitWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  commit_id?: string | { eq?: string; ne?: string; contains?: string };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_root?: string | { eq?: string; ne?: string; contains?: string };
+  branch?: string | { eq?: string; ne?: string; contains?: string };
+  bookmark?: string | { eq?: string; ne?: string; contains?: string };
+  live_ref?: string | { eq?: string; ne?: string; contains?: string };
+  tree_id?: string | { eq?: string; ne?: string; contains?: string };
+  parent_commit_ids_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  subject?: string | { eq?: string; ne?: string; contains?: string };
+  body?: string | { eq?: string; ne?: string; contains?: string };
+  author_name?: string | { eq?: string; ne?: string; contains?: string };
+  author_email?: string | { eq?: string; ne?: string; contains?: string };
+  committer_name?: string | { eq?: string; ne?: string; contains?: string };
+  committer_email?: string | { eq?: string; ne?: string; contains?: string };
+  trace_ref?: string | { eq?: string; ne?: string; contains?: string };
+  source_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_turn_ordinal?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  source_conversation_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_conversation_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  source_turn_id?: string | { eq?: string; ne?: string; contains?: string };
+  source_turn_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  agent_id?: string | { eq?: string; ne?: string; contains?: string };
+  agent_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  courier_run_id?: string | { eq?: string; ne?: string; contains?: string };
+  live_snapshot_ref?: string | { eq?: string; ne?: string; contains?: string };
+  changed_paths_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  patch_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  patch_object_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  manifest_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  manifest_object_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  committed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  reflected_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
   ingested_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -1788,9 +2054,13 @@ type AnyDaemonLogCheckpointQueryBuilder<T = any> = { readonly _table: "daemon_lo
 type AnyDaemonLogSummaryQueryBuilder<T = any> = { readonly _table: "daemon_log_summaries" } & QueryBuilder<T>;
 type AnyTaskRecordQueryBuilder<T = any> = { readonly _table: "task_records" } & QueryBuilder<T>;
 type AnyDesignerObjectRefQueryBuilder<T = any> = { readonly _table: "designer_object_refs" } & QueryBuilder<T>;
+type AnyDesignerAgentQueryBuilder<T = any> = { readonly _table: "designer_agents" } & QueryBuilder<T>;
+type AnyDesignerAgentToolQueryBuilder<T = any> = { readonly _table: "designer_agent_tools" } & QueryBuilder<T>;
+type AnyDesignerAgentContextQueryBuilder<T = any> = { readonly _table: "designer_agent_contexts" } & QueryBuilder<T>;
 type AnyDesignerCodexConversationQueryBuilder<T = any> = { readonly _table: "designer_codex_conversations" } & QueryBuilder<T>;
 type AnyDesignerCodexTurnQueryBuilder<T = any> = { readonly _table: "designer_codex_turns" } & QueryBuilder<T>;
 type AnyDesignerTelemetryEventQueryBuilder<T = any> = { readonly _table: "designer_telemetry_events" } & QueryBuilder<T>;
+type AnyDesignerLiveCommitQueryBuilder<T = any> = { readonly _table: "designer_live_commits" } & QueryBuilder<T>;
 type AnyDesignerCadWorkspaceQueryBuilder<T = any> = { readonly _table: "designer_cad_workspaces" } & QueryBuilder<T>;
 type AnyDesignerCadDocumentQueryBuilder<T = any> = { readonly _table: "designer_cad_documents" } & QueryBuilder<T>;
 type AnyDesignerCadSessionQueryBuilder<T = any> = { readonly _table: "designer_cad_sessions" } & QueryBuilder<T>;
@@ -1883,17 +2153,36 @@ export interface DaemonLogSummaryInclude {
 }
 
 export interface DesignerObjectRefInclude {
+  designer_agent_contextsViaObject_ref_row?: true | DesignerAgentContextInclude | AnyDesignerAgentContextQueryBuilder<any>;
   designer_codex_conversationsViaTranscript_object_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
   designer_codex_turnsViaPayload_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
   designer_codex_turnsViaPrompt_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
   designer_codex_turnsViaResponse_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
   designer_telemetry_eventsViaPayload_object_row?: true | DesignerTelemetryEventInclude | AnyDesignerTelemetryEventQueryBuilder<any>;
+  designer_live_commitsViaPatch_object_row?: true | DesignerLiveCommitInclude | AnyDesignerLiveCommitQueryBuilder<any>;
+  designer_live_commitsViaManifest_object_row?: true | DesignerLiveCommitInclude | AnyDesignerLiveCommitQueryBuilder<any>;
+}
+
+export interface DesignerAgentInclude {
+  designer_agent_toolsViaAgent_row?: true | DesignerAgentToolInclude | AnyDesignerAgentToolQueryBuilder<any>;
+  designer_agent_contextsViaAgent_row?: true | DesignerAgentContextInclude | AnyDesignerAgentContextQueryBuilder<any>;
+  designer_live_commitsViaAgent_row?: true | DesignerLiveCommitInclude | AnyDesignerLiveCommitQueryBuilder<any>;
+}
+
+export interface DesignerAgentToolInclude {
+  agent_row?: true | DesignerAgentInclude | AnyDesignerAgentQueryBuilder<any>;
+}
+
+export interface DesignerAgentContextInclude {
+  agent_row?: true | DesignerAgentInclude | AnyDesignerAgentQueryBuilder<any>;
+  object_ref_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
 }
 
 export interface DesignerCodexConversationInclude {
   transcript_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
   designer_codex_turnsViaConversation_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
   designer_telemetry_eventsViaConversation_row?: true | DesignerTelemetryEventInclude | AnyDesignerTelemetryEventQueryBuilder<any>;
+  designer_live_commitsViaSource_conversation_row?: true | DesignerLiveCommitInclude | AnyDesignerLiveCommitQueryBuilder<any>;
 }
 
 export interface DesignerCodexTurnInclude {
@@ -1901,11 +2190,20 @@ export interface DesignerCodexTurnInclude {
   payload_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
   prompt_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
   response_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+  designer_live_commitsViaSource_turn_row?: true | DesignerLiveCommitInclude | AnyDesignerLiveCommitQueryBuilder<any>;
 }
 
 export interface DesignerTelemetryEventInclude {
   conversation_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
   payload_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+}
+
+export interface DesignerLiveCommitInclude {
+  source_conversation_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
+  source_turn_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
+  agent_row?: true | DesignerAgentInclude | AnyDesignerAgentQueryBuilder<any>;
+  patch_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+  manifest_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
 }
 
 export interface DesignerCadWorkspaceInclude {
@@ -2382,7 +2680,17 @@ export type DaemonLogSummaryIncludedRelations<I extends DaemonLogSummaryInclude 
 
 export type DesignerObjectRefIncludedRelations<I extends DesignerObjectRefInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "designer_codex_conversationsViaTranscript_object_row"
+    K extends "designer_agent_contextsViaObject_ref_row"
+      ? NonNullable<I["designer_agent_contextsViaObject_ref_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerAgentContext[]
+          : RelationInclude extends AnyDesignerAgentContextQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerAgentContextInclude
+              ? DesignerAgentContextWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_codex_conversationsViaTranscript_object_row"
       ? NonNullable<I["designer_codex_conversationsViaTranscript_object_row"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? DesignerCodexConversation[]
@@ -2432,6 +2740,101 @@ export type DesignerObjectRefIncludedRelations<I extends DesignerObjectRefInclud
               ? DesignerTelemetryEventWithIncludes<RelationInclude, false>[]
               : never
         : never
+    : K extends "designer_live_commitsViaPatch_object_row"
+      ? NonNullable<I["designer_live_commitsViaPatch_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerLiveCommit[]
+          : RelationInclude extends AnyDesignerLiveCommitQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerLiveCommitInclude
+              ? DesignerLiveCommitWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_live_commitsViaManifest_object_row"
+      ? NonNullable<I["designer_live_commitsViaManifest_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerLiveCommit[]
+          : RelationInclude extends AnyDesignerLiveCommitQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerLiveCommitInclude
+              ? DesignerLiveCommitWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerAgentIncludedRelations<I extends DesignerAgentInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "designer_agent_toolsViaAgent_row"
+      ? NonNullable<I["designer_agent_toolsViaAgent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerAgentTool[]
+          : RelationInclude extends AnyDesignerAgentToolQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerAgentToolInclude
+              ? DesignerAgentToolWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_agent_contextsViaAgent_row"
+      ? NonNullable<I["designer_agent_contextsViaAgent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerAgentContext[]
+          : RelationInclude extends AnyDesignerAgentContextQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerAgentContextInclude
+              ? DesignerAgentContextWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_live_commitsViaAgent_row"
+      ? NonNullable<I["designer_live_commitsViaAgent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerLiveCommit[]
+          : RelationInclude extends AnyDesignerLiveCommitQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerLiveCommitInclude
+              ? DesignerLiveCommitWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerAgentToolIncludedRelations<I extends DesignerAgentToolInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "agent_row"
+      ? NonNullable<I["agent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerAgent : DesignerAgent | undefined
+          : RelationInclude extends AnyDesignerAgentQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerAgentInclude
+              ? R extends true ? DesignerAgentWithIncludes<RelationInclude, false> : DesignerAgentWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerAgentContextIncludedRelations<I extends DesignerAgentContextInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "agent_row"
+      ? NonNullable<I["agent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerAgent : DesignerAgent | undefined
+          : RelationInclude extends AnyDesignerAgentQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerAgentInclude
+              ? R extends true ? DesignerAgentWithIncludes<RelationInclude, false> : DesignerAgentWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "object_ref_row"
+      ? NonNullable<I["object_ref_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
     : never;
 };
 
@@ -2465,6 +2868,16 @@ export type DesignerCodexConversationIncludedRelations<I extends DesignerCodexCo
             ? QueryRow[]
             : RelationInclude extends DesignerTelemetryEventInclude
               ? DesignerTelemetryEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_live_commitsViaSource_conversation_row"
+      ? NonNullable<I["designer_live_commitsViaSource_conversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerLiveCommit[]
+          : RelationInclude extends AnyDesignerLiveCommitQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerLiveCommitInclude
+              ? DesignerLiveCommitWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
@@ -2512,6 +2925,16 @@ export type DesignerCodexTurnIncludedRelations<I extends DesignerCodexTurnInclud
               ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
               : never
         : never
+    : K extends "designer_live_commitsViaSource_turn_row"
+      ? NonNullable<I["designer_live_commitsViaSource_turn_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerLiveCommit[]
+          : RelationInclude extends AnyDesignerLiveCommitQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerLiveCommitInclude
+              ? DesignerLiveCommitWithIncludes<RelationInclude, false>[]
+              : never
+        : never
     : never;
 };
 
@@ -2535,6 +2958,61 @@ export type DesignerTelemetryEventIncludedRelations<I extends DesignerTelemetryE
             ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends DesignerObjectRefInclude
               ? R extends true ? DesignerObjectRefWithIncludes<RelationInclude, false> : DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerLiveCommitIncludedRelations<I extends DesignerLiveCommitInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "source_conversation_row"
+      ? NonNullable<I["source_conversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexConversation | undefined
+          : RelationInclude extends AnyDesignerCodexConversationQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCodexConversationInclude
+              ? DesignerCodexConversationWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "source_turn_row"
+      ? NonNullable<I["source_turn_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexTurn | undefined
+          : RelationInclude extends AnyDesignerCodexTurnQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCodexTurnInclude
+              ? DesignerCodexTurnWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "agent_row"
+      ? NonNullable<I["agent_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerAgent | undefined
+          : RelationInclude extends AnyDesignerAgentQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerAgentInclude
+              ? DesignerAgentWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "patch_object_row"
+      ? NonNullable<I["patch_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "manifest_object_row"
+      ? NonNullable<I["manifest_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
@@ -3063,17 +3541,36 @@ export interface DaemonLogSummaryRelations {
 }
 
 export interface DesignerObjectRefRelations {
+  designer_agent_contextsViaObject_ref_row: DesignerAgentContext[];
   designer_codex_conversationsViaTranscript_object_row: DesignerCodexConversation[];
   designer_codex_turnsViaPayload_object_row: DesignerCodexTurn[];
   designer_codex_turnsViaPrompt_object_row: DesignerCodexTurn[];
   designer_codex_turnsViaResponse_object_row: DesignerCodexTurn[];
   designer_telemetry_eventsViaPayload_object_row: DesignerTelemetryEvent[];
+  designer_live_commitsViaPatch_object_row: DesignerLiveCommit[];
+  designer_live_commitsViaManifest_object_row: DesignerLiveCommit[];
+}
+
+export interface DesignerAgentRelations {
+  designer_agent_toolsViaAgent_row: DesignerAgentTool[];
+  designer_agent_contextsViaAgent_row: DesignerAgentContext[];
+  designer_live_commitsViaAgent_row: DesignerLiveCommit[];
+}
+
+export interface DesignerAgentToolRelations {
+  agent_row: DesignerAgent | undefined;
+}
+
+export interface DesignerAgentContextRelations {
+  agent_row: DesignerAgent | undefined;
+  object_ref_row: DesignerObjectRef | undefined;
 }
 
 export interface DesignerCodexConversationRelations {
   transcript_object_row: DesignerObjectRef | undefined;
   designer_codex_turnsViaConversation_row: DesignerCodexTurn[];
   designer_telemetry_eventsViaConversation_row: DesignerTelemetryEvent[];
+  designer_live_commitsViaSource_conversation_row: DesignerLiveCommit[];
 }
 
 export interface DesignerCodexTurnRelations {
@@ -3081,11 +3578,20 @@ export interface DesignerCodexTurnRelations {
   payload_object_row: DesignerObjectRef | undefined;
   prompt_object_row: DesignerObjectRef | undefined;
   response_object_row: DesignerObjectRef | undefined;
+  designer_live_commitsViaSource_turn_row: DesignerLiveCommit[];
 }
 
 export interface DesignerTelemetryEventRelations {
   conversation_row: DesignerCodexConversation | undefined;
   payload_object_row: DesignerObjectRef | undefined;
+}
+
+export interface DesignerLiveCommitRelations {
+  source_conversation_row: DesignerCodexConversation | undefined;
+  source_turn_row: DesignerCodexTurn | undefined;
+  agent_row: DesignerAgent | undefined;
+  patch_object_row: DesignerObjectRef | undefined;
+  manifest_object_row: DesignerObjectRef | undefined;
 }
 
 export interface DesignerCadWorkspaceRelations {
@@ -3197,11 +3703,19 @@ export type DaemonLogSummaryWithIncludes<I extends DaemonLogSummaryInclude = {},
 
 export type DesignerObjectRefWithIncludes<I extends DesignerObjectRefInclude = {}, R extends boolean = false> = DesignerObjectRef & DesignerObjectRefIncludedRelations<I, R>;
 
+export type DesignerAgentWithIncludes<I extends DesignerAgentInclude = {}, R extends boolean = false> = DesignerAgent & DesignerAgentIncludedRelations<I, R>;
+
+export type DesignerAgentToolWithIncludes<I extends DesignerAgentToolInclude = {}, R extends boolean = false> = DesignerAgentTool & DesignerAgentToolIncludedRelations<I, R>;
+
+export type DesignerAgentContextWithIncludes<I extends DesignerAgentContextInclude = {}, R extends boolean = false> = DesignerAgentContext & DesignerAgentContextIncludedRelations<I, R>;
+
 export type DesignerCodexConversationWithIncludes<I extends DesignerCodexConversationInclude = {}, R extends boolean = false> = DesignerCodexConversation & DesignerCodexConversationIncludedRelations<I, R>;
 
 export type DesignerCodexTurnWithIncludes<I extends DesignerCodexTurnInclude = {}, R extends boolean = false> = DesignerCodexTurn & DesignerCodexTurnIncludedRelations<I, R>;
 
 export type DesignerTelemetryEventWithIncludes<I extends DesignerTelemetryEventInclude = {}, R extends boolean = false> = DesignerTelemetryEvent & DesignerTelemetryEventIncludedRelations<I, R>;
+
+export type DesignerLiveCommitWithIncludes<I extends DesignerLiveCommitInclude = {}, R extends boolean = false> = DesignerLiveCommit & DesignerLiveCommitIncludedRelations<I, R>;
 
 export type DesignerCadWorkspaceWithIncludes<I extends DesignerCadWorkspaceInclude = {}, R extends boolean = false> = DesignerCadWorkspace & DesignerCadWorkspaceIncludedRelations<I, R>;
 
@@ -3346,6 +3860,27 @@ export type DesignerObjectRefSelected<S extends DesignerObjectRefSelectableColum
 
 export type DesignerObjectRefSelectedWithIncludes<I extends DesignerObjectRefInclude = {}, S extends DesignerObjectRefSelectableColumn = keyof DesignerObjectRef, R extends boolean = false> = DesignerObjectRefSelected<S> & DesignerObjectRefIncludedRelations<I, R>;
 
+export type DesignerAgentSelectableColumn = keyof DesignerAgent | PermissionIntrospectionColumn | "*";
+export type DesignerAgentOrderableColumn = keyof DesignerAgent | PermissionIntrospectionColumn;
+
+export type DesignerAgentSelected<S extends DesignerAgentSelectableColumn = keyof DesignerAgent> = ("*" extends S ? DesignerAgent : Pick<DesignerAgent, Extract<S | "id", keyof DesignerAgent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerAgentSelectedWithIncludes<I extends DesignerAgentInclude = {}, S extends DesignerAgentSelectableColumn = keyof DesignerAgent, R extends boolean = false> = DesignerAgentSelected<S> & DesignerAgentIncludedRelations<I, R>;
+
+export type DesignerAgentToolSelectableColumn = keyof DesignerAgentTool | PermissionIntrospectionColumn | "*";
+export type DesignerAgentToolOrderableColumn = keyof DesignerAgentTool | PermissionIntrospectionColumn;
+
+export type DesignerAgentToolSelected<S extends DesignerAgentToolSelectableColumn = keyof DesignerAgentTool> = ("*" extends S ? DesignerAgentTool : Pick<DesignerAgentTool, Extract<S | "id", keyof DesignerAgentTool>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerAgentToolSelectedWithIncludes<I extends DesignerAgentToolInclude = {}, S extends DesignerAgentToolSelectableColumn = keyof DesignerAgentTool, R extends boolean = false> = DesignerAgentToolSelected<S> & DesignerAgentToolIncludedRelations<I, R>;
+
+export type DesignerAgentContextSelectableColumn = keyof DesignerAgentContext | PermissionIntrospectionColumn | "*";
+export type DesignerAgentContextOrderableColumn = keyof DesignerAgentContext | PermissionIntrospectionColumn;
+
+export type DesignerAgentContextSelected<S extends DesignerAgentContextSelectableColumn = keyof DesignerAgentContext> = ("*" extends S ? DesignerAgentContext : Pick<DesignerAgentContext, Extract<S | "id", keyof DesignerAgentContext>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerAgentContextSelectedWithIncludes<I extends DesignerAgentContextInclude = {}, S extends DesignerAgentContextSelectableColumn = keyof DesignerAgentContext, R extends boolean = false> = DesignerAgentContextSelected<S> & DesignerAgentContextIncludedRelations<I, R>;
+
 export type DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation | PermissionIntrospectionColumn | "*";
 export type DesignerCodexConversationOrderableColumn = keyof DesignerCodexConversation | PermissionIntrospectionColumn;
 
@@ -3366,6 +3901,13 @@ export type DesignerTelemetryEventOrderableColumn = keyof DesignerTelemetryEvent
 export type DesignerTelemetryEventSelected<S extends DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent> = ("*" extends S ? DesignerTelemetryEvent : Pick<DesignerTelemetryEvent, Extract<S | "id", keyof DesignerTelemetryEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type DesignerTelemetryEventSelectedWithIncludes<I extends DesignerTelemetryEventInclude = {}, S extends DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent, R extends boolean = false> = DesignerTelemetryEventSelected<S> & DesignerTelemetryEventIncludedRelations<I, R>;
+
+export type DesignerLiveCommitSelectableColumn = keyof DesignerLiveCommit | PermissionIntrospectionColumn | "*";
+export type DesignerLiveCommitOrderableColumn = keyof DesignerLiveCommit | PermissionIntrospectionColumn;
+
+export type DesignerLiveCommitSelected<S extends DesignerLiveCommitSelectableColumn = keyof DesignerLiveCommit> = ("*" extends S ? DesignerLiveCommit : Pick<DesignerLiveCommit, Extract<S | "id", keyof DesignerLiveCommit>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerLiveCommitSelectedWithIncludes<I extends DesignerLiveCommitInclude = {}, S extends DesignerLiveCommitSelectableColumn = keyof DesignerLiveCommit, R extends boolean = false> = DesignerLiveCommitSelected<S> & DesignerLiveCommitIncludedRelations<I, R>;
 
 export type DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn | "*";
 export type DesignerCadWorkspaceOrderableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn;
@@ -5055,6 +5597,273 @@ export const wasmSchema: WasmSchema = {
       }
     ]
   },
+  "designer_agents": {
+    "columns": [
+      {
+        "name": "agent_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "agent_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "provider",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "display_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "model",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "default_context_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tool_contract_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_agent_tools": {
+    "columns": [
+      {
+        "name": "tool_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "agent_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "agent_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_agents"
+      },
+      {
+        "name": "tool_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "tool_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "input_schema_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "output_schema_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "scope_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_agent_contexts": {
+    "columns": [
+      {
+        "name": "context_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "agent_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "agent_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_agents"
+      },
+      {
+        "name": "context_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "object_ref_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "inline_context_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "priority",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
   "designer_codex_conversations": {
     "columns": [
       {
@@ -5421,6 +6230,253 @@ export const wasmSchema: WasmSchema = {
           "type": "Timestamp"
         },
         "nullable": false
+      },
+      {
+        "name": "ingested_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_live_commits": {
+    "columns": [
+      {
+        "name": "commit_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "workspace_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "branch",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "bookmark",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "live_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "tree_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "parent_commit_ids_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "subject",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "body",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "author_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "author_email",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "committer_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "committer_email",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "trace_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_turn_ordinal",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_conversation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_conversation_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_codex_conversations"
+      },
+      {
+        "name": "source_turn_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_turn_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_codex_turns"
+      },
+      {
+        "name": "agent_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "agent_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_agents"
+      },
+      {
+        "name": "courier_run_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "live_snapshot_ref",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "changed_paths_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "patch_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "patch_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "manifest_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "manifest_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "committed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "reflected_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
       },
       {
         "name": "ingested_at",
@@ -9915,7 +10971,7 @@ export class DesignerObjectRefQueryBuilder<I extends DesignerObjectRefInclude = 
     return clone;
   }
 
-  hopTo(relation: "designer_codex_conversationsViaTranscript_object_row" | "designer_codex_turnsViaPayload_object_row" | "designer_codex_turnsViaPrompt_object_row" | "designer_codex_turnsViaResponse_object_row" | "designer_telemetry_eventsViaPayload_object_row"): DesignerObjectRefQueryBuilder<I, S, R> {
+  hopTo(relation: "designer_agent_contextsViaObject_ref_row" | "designer_codex_conversationsViaTranscript_object_row" | "designer_codex_turnsViaPayload_object_row" | "designer_codex_turnsViaPrompt_object_row" | "designer_codex_turnsViaResponse_object_row" | "designer_telemetry_eventsViaPayload_object_row" | "designer_live_commitsViaPatch_object_row" | "designer_live_commitsViaManifest_object_row"): DesignerObjectRefQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -10041,6 +11097,606 @@ export class DesignerObjectRefQueryBuilder<I extends DesignerObjectRefInclude = 
   }
 }
 
+export class DesignerAgentQueryBuilder<I extends DesignerAgentInclude = {}, S extends DesignerAgentSelectableColumn = keyof DesignerAgent, R extends boolean = false> implements QueryBuilder<DesignerAgentSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_agents";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerAgentSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerAgentInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerAgentInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerAgentWhereInput): DesignerAgentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerAgentSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerAgentQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerAgentInclude>(relations: NewI): DesignerAgentQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerAgentQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerAgentOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerAgentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerAgentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerAgentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "designer_agent_toolsViaAgent_row" | "designer_agent_contextsViaAgent_row" | "designer_live_commitsViaAgent_row"): DesignerAgentQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerAgentWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerAgentQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerAgentInclude = I, CloneS extends DesignerAgentSelectableColumn = S, CloneR extends boolean = R>(): DesignerAgentQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerAgentQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerAgentToolQueryBuilder<I extends DesignerAgentToolInclude = {}, S extends DesignerAgentToolSelectableColumn = keyof DesignerAgentTool, R extends boolean = false> implements QueryBuilder<DesignerAgentToolSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_agent_tools";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerAgentToolSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerAgentToolInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerAgentToolInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerAgentToolWhereInput): DesignerAgentToolQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerAgentToolSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerAgentToolQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerAgentToolInclude>(relations: NewI): DesignerAgentToolQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerAgentToolQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerAgentToolOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerAgentToolQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerAgentToolQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerAgentToolQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "agent_row"): DesignerAgentToolQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerAgentToolWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerAgentToolQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerAgentToolInclude = I, CloneS extends DesignerAgentToolSelectableColumn = S, CloneR extends boolean = R>(): DesignerAgentToolQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerAgentToolQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerAgentContextQueryBuilder<I extends DesignerAgentContextInclude = {}, S extends DesignerAgentContextSelectableColumn = keyof DesignerAgentContext, R extends boolean = false> implements QueryBuilder<DesignerAgentContextSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_agent_contexts";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerAgentContextSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerAgentContextInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerAgentContextInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerAgentContextWhereInput): DesignerAgentContextQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerAgentContextSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerAgentContextQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerAgentContextInclude>(relations: NewI): DesignerAgentContextQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerAgentContextQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerAgentContextOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerAgentContextQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerAgentContextQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerAgentContextQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "agent_row" | "object_ref_row"): DesignerAgentContextQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerAgentContextWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerAgentContextQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerAgentContextInclude = I, CloneS extends DesignerAgentContextSelectableColumn = S, CloneR extends boolean = R>(): DesignerAgentContextQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerAgentContextQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export class DesignerCodexConversationQueryBuilder<I extends DesignerCodexConversationInclude = {}, S extends DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation, R extends boolean = false> implements QueryBuilder<DesignerCodexConversationSelectedWithIncludes<I, S, R>> {
   readonly _table = "designer_codex_conversations";
   readonly _schema: WasmSchema = wasmSchema;
@@ -10115,7 +11771,7 @@ export class DesignerCodexConversationQueryBuilder<I extends DesignerCodexConver
     return clone;
   }
 
-  hopTo(relation: "transcript_object_row" | "designer_codex_turnsViaConversation_row" | "designer_telemetry_eventsViaConversation_row"): DesignerCodexConversationQueryBuilder<I, S, R> {
+  hopTo(relation: "transcript_object_row" | "designer_codex_turnsViaConversation_row" | "designer_telemetry_eventsViaConversation_row" | "designer_live_commitsViaSource_conversation_row"): DesignerCodexConversationQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -10315,7 +11971,7 @@ export class DesignerCodexTurnQueryBuilder<I extends DesignerCodexTurnInclude = 
     return clone;
   }
 
-  hopTo(relation: "conversation_row" | "payload_object_row" | "prompt_object_row" | "response_object_row"): DesignerCodexTurnQueryBuilder<I, S, R> {
+  hopTo(relation: "conversation_row" | "payload_object_row" | "prompt_object_row" | "response_object_row" | "designer_live_commitsViaSource_turn_row"): DesignerCodexTurnQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -10622,6 +12278,206 @@ export class DesignerTelemetryEventQueryBuilder<I extends DesignerTelemetryEvent
 
   private _clone<CloneI extends DesignerTelemetryEventInclude = I, CloneS extends DesignerTelemetryEventSelectableColumn = S, CloneR extends boolean = R>(): DesignerTelemetryEventQueryBuilder<CloneI, CloneS, CloneR> {
     const clone = new DesignerTelemetryEventQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerLiveCommitQueryBuilder<I extends DesignerLiveCommitInclude = {}, S extends DesignerLiveCommitSelectableColumn = keyof DesignerLiveCommit, R extends boolean = false> implements QueryBuilder<DesignerLiveCommitSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_live_commits";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerLiveCommitSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerLiveCommitInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerLiveCommitInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerLiveCommitWhereInput): DesignerLiveCommitQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerLiveCommitSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerLiveCommitQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerLiveCommitInclude>(relations: NewI): DesignerLiveCommitQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerLiveCommitQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerLiveCommitOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerLiveCommitQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerLiveCommitQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerLiveCommitQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "source_conversation_row" | "source_turn_row" | "agent_row" | "patch_object_row" | "manifest_object_row"): DesignerLiveCommitQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerLiveCommitWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerLiveCommitQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerLiveCommitInclude = I, CloneS extends DesignerLiveCommitSelectableColumn = S, CloneR extends boolean = R>(): DesignerLiveCommitQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerLiveCommitQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
     clone._requireIncludes = this._requireIncludes;
@@ -13259,9 +15115,13 @@ export interface GeneratedApp {
   daemon_log_summaries: DaemonLogSummaryQueryBuilder;
   task_records: TaskRecordQueryBuilder;
   designer_object_refs: DesignerObjectRefQueryBuilder;
+  designer_agents: DesignerAgentQueryBuilder;
+  designer_agent_tools: DesignerAgentToolQueryBuilder;
+  designer_agent_contexts: DesignerAgentContextQueryBuilder;
   designer_codex_conversations: DesignerCodexConversationQueryBuilder;
   designer_codex_turns: DesignerCodexTurnQueryBuilder;
   designer_telemetry_events: DesignerTelemetryEventQueryBuilder;
+  designer_live_commits: DesignerLiveCommitQueryBuilder;
   designer_cad_workspaces: DesignerCadWorkspaceQueryBuilder;
   designer_cad_documents: DesignerCadDocumentQueryBuilder;
   designer_cad_sessions: DesignerCadSessionQueryBuilder;
@@ -13296,9 +15156,13 @@ export const app: GeneratedApp = {
   daemon_log_summaries: new DaemonLogSummaryQueryBuilder(),
   task_records: new TaskRecordQueryBuilder(),
   designer_object_refs: new DesignerObjectRefQueryBuilder(),
+  designer_agents: new DesignerAgentQueryBuilder(),
+  designer_agent_tools: new DesignerAgentToolQueryBuilder(),
+  designer_agent_contexts: new DesignerAgentContextQueryBuilder(),
   designer_codex_conversations: new DesignerCodexConversationQueryBuilder(),
   designer_codex_turns: new DesignerCodexTurnQueryBuilder(),
   designer_telemetry_events: new DesignerTelemetryEventQueryBuilder(),
+  designer_live_commits: new DesignerLiveCommitQueryBuilder(),
   designer_cad_workspaces: new DesignerCadWorkspaceQueryBuilder(),
   designer_cad_documents: new DesignerCadDocumentQueryBuilder(),
   designer_cad_sessions: new DesignerCadSessionQueryBuilder(),
