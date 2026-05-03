@@ -6481,7 +6481,7 @@ export function createAgentDataStore(
   config: AgentDataStoreConfig,
 ): AgentDataStore {
   const tier = config.tier ?? "edge";
-  const context = createJazzContext({
+  const contextOptions = {
     appId: config.appId ?? DEFAULT_APP_ID,
     app,
     permissions: {},
@@ -6489,9 +6489,11 @@ export function createAgentDataStore(
     env: config.env ?? "dev",
     userBranch: config.userBranch ?? "main",
     serverUrl: config.serverUrl,
+    serverPathPrefix: config.serverPathPrefix,
     backendSecret: config.backendSecret,
     adminSecret: config.adminSecret,
     tier,
-  });
+  } as Parameters<typeof createJazzContext>[0] & { serverPathPrefix?: string };
+  const context = createJazzContext(contextOptions);
   return new AgentDataStore(context, tier, Boolean(config.serverUrl));
 }

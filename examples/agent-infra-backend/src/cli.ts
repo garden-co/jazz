@@ -7,6 +7,7 @@ import readline from "node:readline";
 import {
   type AgentRun,
   type AgentRunSummary,
+  type AgentDataStoreConfig,
   type AgentStateSnapshot,
   type AgentClaimRecord,
   type Artifact,
@@ -25,7 +26,6 @@ import {
   type JobRecord,
   wasmSchema,
   createAgentDataStore,
-  type AgentDataStoreConfig,
   type CancelJobInput,
   type ClaimJobInput,
   type DesignerAgent,
@@ -125,8 +125,6 @@ import { projectDoDesignerTasks, syncDoDesignerTasks } from "./task_records.js";
 
 const DEFAULT_AGENT_INFRA_APP_ID = "run-agent-infra";
 const DEFAULT_AGENT_INFRA_DATA_PATH = "~/.jazz2/agent-infra.db";
-
-type WriteTier = "local" | "edge" | "global";
 
 type CliStoreConfig = AgentDataStoreConfig & {
   appId: string;
@@ -603,8 +601,28 @@ function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
 }
 
-function readWriteTierFlag(): WriteTier | undefined {
-  const tier = readFlag("--tier");
+function readFlagOrEnv(flag: string, ...envNames: string[]): string | undefined {
+  const flagValue = readFlag(flag);
+  if (flagValue !== undefined) {
+    return flagValue;
+  }
+  for (const envName of envNames) {
+    const value = process.env[envName];
+    if (value !== undefined && value.trim() !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readWriteTierFlag(): AgentDataStoreConfig["tier"] | undefined {
+  const tier = readFlagOrEnv(
+    "--tier",
+    "PROM_DB_JAZZ_TIER",
+    "FLOW_AGENT_INFRA_JAZZ_TIER",
+    "J_AGENT_INFRA_JAZZ_TIER",
+    "JAZZ2_AGENT_INFRA_TIER",
+  );
   if (!tier) {
     return undefined;
   }
@@ -614,21 +632,26 @@ function readWriteTierFlag(): WriteTier | undefined {
   throw new Error(`invalid --tier ${tier}; expected local, edge, or global`);
 }
 
-function readFlagOrEnv(flag: string, envName: string): string | undefined {
-  return readFlag(flag) ?? process.env[envName];
-}
-
 function readSecretFlagOrEnv(
   flag: string,
   envFlag: string,
-  defaultEnvName: string,
+  ...envNames: string[]
 ): string | undefined {
   const value = readFlag(flag);
   if (value !== undefined) {
     return value;
   }
-  const selectedEnvName = readFlag(envFlag) ?? defaultEnvName;
-  return process.env[selectedEnvName];
+  const selectedEnvName = readFlag(envFlag);
+  if (selectedEnvName) {
+    return process.env[selectedEnvName];
+  }
+  for (const envName of envNames) {
+    const envValue = process.env[envName];
+    if (envValue !== undefined && envValue.trim() !== "") {
+      return envValue;
+    }
+  }
+  return undefined;
 }
 
 function readIntegerFlag(flag: string): number | undefined {
@@ -636,65 +659,81 @@ function readIntegerFlag(flag: string): number | undefined {
   return value ? Number.parseInt(value, 10) : undefined;
 }
 
-function readCliStoreConfig(
-  dataPath: string,
-  tier: WriteTier | undefined,
-): CliStoreConfig {
+function readStoreConfig(dataPath: string): CliStoreConfig {
   return {
-    appId:
-      readFlagOrEnv("--app-id", "JAZZ2_AGENT_INFRA_APP_ID") ??
-      DEFAULT_AGENT_INFRA_APP_ID,
     dataPath,
-    env: readFlagOrEnv("--jazz-env", "JAZZ2_AGENT_INFRA_ENV"),
+    appId:
+      readFlagOrEnv(
+        "--app-id",
+        "PROM_DB_JAZZ_APP_ID",
+        "FLOW_AGENT_INFRA_JAZZ_APP_ID",
+        "J_AGENT_INFRA_JAZZ_APP_ID",
+        "REMOTE_AUTONOMY_AGENT_APP_ID",
+        "JAZZ2_AGENT_INFRA_APP_ID",
+      ) ?? DEFAULT_AGENT_INFRA_APP_ID,
+    env:
+      readFlagOrEnv(
+        "--env",
+        "PROM_DB_JAZZ_ENV",
+        "FLOW_AGENT_INFRA_JAZZ_ENV",
+        "J_AGENT_INFRA_JAZZ_ENV",
+        "REMOTE_AUTONOMY_ENV",
+      ) ?? readFlagOrEnv("--jazz-env", "JAZZ2_AGENT_INFRA_ENV"),
     userBranch: readFlagOrEnv(
       "--user-branch",
+      "PROM_DB_JAZZ_USER_BRANCH",
+      "FLOW_AGENT_INFRA_JAZZ_USER_BRANCH",
+      "J_AGENT_INFRA_JAZZ_USER_BRANCH",
+      "REMOTE_AUTONOMY_USER_BRANCH",
       "JAZZ2_AGENT_INFRA_USER_BRANCH",
     ),
     serverUrl: readFlagOrEnv(
       "--server-url",
+      "PROM_DB_JAZZ_SERVER_URL",
+      "FLOW_AGENT_INFRA_JAZZ_SERVER_URL",
+      "J_AGENT_INFRA_JAZZ_SERVER_URL",
+      "REMOTE_AUTONOMY_SYNC_SERVER_URL",
       "JAZZ2_AGENT_INFRA_SERVER_URL",
+    ),
+    serverPathPrefix: readFlagOrEnv(
+      "--server-path-prefix",
+      "PROM_DB_JAZZ_SERVER_PATH_PREFIX",
+      "FLOW_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX",
+      "J_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX",
+      "REMOTE_AUTONOMY_SYNC_SERVER_PATH_PREFIX",
+      "JAZZ2_AGENT_INFRA_SERVER_PATH_PREFIX",
     ),
     backendSecret: readSecretFlagOrEnv(
       "--backend-secret",
       "--backend-secret-env",
+      "PROM_DB_JAZZ_BACKEND_SECRET",
+      "FLOW_AGENT_INFRA_JAZZ_BACKEND_SECRET",
+      "J_AGENT_INFRA_JAZZ_BACKEND_SECRET",
+      "REMOTE_AUTONOMY_BACKEND_SECRET",
       "JAZZ2_AGENT_INFRA_BACKEND_SECRET",
     ),
     adminSecret: readSecretFlagOrEnv(
       "--admin-secret",
       "--admin-secret-env",
+      "PROM_DB_JAZZ_ADMIN_SECRET",
+      "FLOW_AGENT_INFRA_JAZZ_ADMIN_SECRET",
+      "J_AGENT_INFRA_JAZZ_ADMIN_SECRET",
+      "REMOTE_AUTONOMY_ADMIN_SECRET",
       "JAZZ2_AGENT_INFRA_ADMIN_SECRET",
     ),
-    ...(tier ? { tier } : {}),
+    tier: readWriteTierFlag(),
   };
 }
 
-function serializeStoreConfig(config: CliStoreConfig) {
-  return {
-    appId: config.appId,
-    dataPath: config.dataPath,
-    env: config.env ?? "dev",
-    userBranch: config.userBranch ?? "main",
-    serverUrl: config.serverUrl ?? null,
-    tier: config.tier ?? "edge",
-    backendSecretConfigured: Boolean(config.backendSecret),
-    adminSecretConfigured: Boolean(config.adminSecret),
-  };
-}
-
-function buildStoreForwardArgs(config: CliStoreConfig): string[] {
+function storeConfigArgs(config: CliStoreConfig): string[] {
   const args = ["--data-path", config.dataPath, "--app-id", config.appId];
-  if (config.env) {
-    args.push("--jazz-env", config.env);
+  if (config.env) args.push("--env", config.env);
+  if (config.userBranch) args.push("--user-branch", config.userBranch);
+  if (config.serverUrl) args.push("--server-url", config.serverUrl);
+  if (config.serverPathPrefix) {
+    args.push("--server-path-prefix", config.serverPathPrefix);
   }
-  if (config.userBranch) {
-    args.push("--user-branch", config.userBranch);
-  }
-  if (config.serverUrl) {
-    args.push("--server-url", config.serverUrl);
-  }
-  if (config.tier) {
-    args.push("--tier", config.tier);
-  }
+  if (config.tier) args.push("--tier", config.tier);
   return args;
 }
 
@@ -702,11 +741,25 @@ function buildStoreForwardEnv(config: CliStoreConfig): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ...(config.backendSecret
-      ? { JAZZ2_AGENT_INFRA_BACKEND_SECRET: config.backendSecret }
+      ? { PROM_DB_JAZZ_BACKEND_SECRET: config.backendSecret }
       : {}),
     ...(config.adminSecret
-      ? { JAZZ2_AGENT_INFRA_ADMIN_SECRET: config.adminSecret }
+      ? { PROM_DB_JAZZ_ADMIN_SECRET: config.adminSecret }
       : {}),
+  };
+}
+
+function serializeStoreConfig(config: CliStoreConfig): Record<string, unknown> {
+  return {
+    dataPath: config.dataPath,
+    appId: config.appId,
+    env: config.env ?? "dev",
+    userBranch: config.userBranch ?? "main",
+    serverUrl: config.serverUrl ?? null,
+    serverPathPrefix: config.serverPathPrefix ?? null,
+    hasBackendSecret: Boolean(config.backendSecret),
+    hasAdminSecret: Boolean(config.adminSecret),
+    tier: config.tier ?? "edge",
   };
 }
 
@@ -742,7 +795,7 @@ async function publishAgentInfraSchema(config: CliStoreConfig) {
   }
   if (!config.adminSecret) {
     throw new Error(
-      "publish-schema requires --admin-secret or JAZZ2_AGENT_INFRA_ADMIN_SECRET",
+      "publish-schema requires --admin-secret or a configured admin secret",
     );
   }
 
@@ -1763,10 +1816,11 @@ async function runServeJsonCommand(
   const child = spawn(
     process.execPath,
     [
+      ...process.execArgv,
       path.resolve(process.argv[1]),
       command,
       ...args,
-      ...buildStoreForwardArgs(storeConfig),
+      ...storeConfigArgs(storeConfig),
     ],
     {
       cwd: process.cwd(),
@@ -1818,12 +1872,21 @@ async function serveJson(storeConfig: CliStoreConfig): Promise<void> {
 async function main(): Promise<void> {
   const command = requireCommand();
   const dataPath = await resolvePersistentDataPath(
-    readFlagOrEnv("--data-path", "JAZZ2_AGENT_INFRA_DATA_PATH") ??
-      DEFAULT_AGENT_INFRA_DATA_PATH,
+    readFlagOrEnv(
+      "--data-path",
+      "PROM_DB_DATA_PATH",
+      "FLOW_AGENT_INFRA_JAZZ_DATA_PATH",
+      "J_AGENT_INFRA_JAZZ_DATA_PATH",
+      "JAZZ2_AGENT_INFRA_DATA_PATH",
+    ) ?? DEFAULT_AGENT_INFRA_DATA_PATH,
   );
-  const tier = readWriteTierFlag();
-  const storeConfig = readCliStoreConfig(dataPath, tier);
+  const storeConfig = readStoreConfig(dataPath);
   await mkdir(path.dirname(dataPath), { recursive: true });
+
+  if (command === "config") {
+    renderJson(serializeStoreConfig(storeConfig));
+    return;
+  }
 
   if (command === "serve-json") {
     await serveJson(storeConfig);
