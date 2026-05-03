@@ -1,5 +1,7 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { createInterface } from "node:readline";
 import type {
   CodexCompletionEvent,
   CodexSessionProjection,
@@ -45,10 +47,13 @@ interface BuiltSessionProjection {
   lineCount: number;
 }
 
+const MAX_PROJECTION_TEXT_CHARS = 12_000;
+
 export interface SyncCodexRolloutsOptions {
   codexHome: string;
   store: CodexSessionStore;
   signal?: AbortSignal;
+  maxRolloutBytes?: number;
   onProjectionSynced?: (event: SyncedProjectionEvent) => void;
 }
 
@@ -118,6 +123,16 @@ function coerceDate(value: Date | string | number): Date {
   return value instanceof Date ? value : new Date(value);
 }
 
+function trimProjectionText(value: string): string {
+  return value.length <= MAX_PROJECTION_TEXT_CHARS
+    ? value
+    : value.slice(value.length - MAX_PROJECTION_TEXT_CHARS);
+}
+
+function appendProjectionText(current: string | undefined, delta: string): string {
+  return trimProjectionText(`${current ?? ""}${delta}`);
+}
+
 function latestTurnDate(
   turns: CodexTurnProjection[],
   predicate: (turn: CodexTurnProjection) => boolean,
@@ -126,16 +141,6 @@ function latestTurnDate(
   const matchedTurn = [...turns].reverse().find(predicate);
   const value = matchedTurn ? selectDate(matchedTurn) : undefined;
   return value === undefined ? undefined : coerceDate(value);
-}
-
-function appendText(existing: string | undefined, next: string): string {
-  if (!next) {
-    return existing ?? "";
-  }
-  if (!existing) {
-    return next;
-  }
-  return `${existing}\n\n${next}`;
 }
 
 function normalizeSessionIdFromPath(rolloutPath: string): string | undefined {
@@ -439,10 +444,10 @@ class SessionProjectionBuilder {
       return;
     }
     const turn = this.ensureTurn(undefined, lineTimestamp);
-    turn.userMessage = appendText(turn.userMessage, message);
+    turn.userMessage = appendProjectionText(turn.userMessage, message);
     turn.lastUserAt = lineTimestamp;
     turn.updatedAt = lineTimestamp;
-    this.firstUserMessage ??= message;
+    this.firstUserMessage ??= trimProjectionText(message);
     this.latestUserMessage = turn.userMessage;
     this.lastUserAt = lineTimestamp;
   }
@@ -466,7 +471,7 @@ class SessionProjectionBuilder {
       return;
     }
     const turn = this.ensureTurn(getString(payload.turn_id), lineTimestamp);
-    turn.assistantPartial = `${turn.assistantPartial ?? ""}${delta}`;
+    turn.assistantPartial = appendProjectionText(turn.assistantPartial, delta);
     turn.lastAssistantAt = lineTimestamp;
     turn.updatedAt = lineTimestamp;
     this.lastAssistantAt = lineTimestamp;
@@ -478,7 +483,7 @@ class SessionProjectionBuilder {
       return;
     }
     const turn = this.ensureTurn(getString(payload.turn_id), lineTimestamp);
-    turn.planText = `${turn.planText ?? ""}${delta}`;
+    turn.planText = appendProjectionText(turn.planText, delta);
     turn.updatedAt = lineTimestamp;
   }
 
@@ -488,7 +493,7 @@ class SessionProjectionBuilder {
       return;
     }
     const turn = this.ensureTurn(getString(payload.turn_id), lineTimestamp);
-    turn.reasoningSummary = `${turn.reasoningSummary ?? ""}${delta}`;
+    turn.reasoningSummary = appendProjectionText(turn.reasoningSummary, delta);
     turn.updatedAt = lineTimestamp;
   }
 
@@ -550,14 +555,14 @@ class SessionProjectionBuilder {
     if (previous === message) {
       return;
     }
-    turn.assistantSegments.push(message);
+    turn.assistantSegments.push(trimProjectionText(message));
   }
 
   private joinAssistantSegments(turn: MutableTurn): string | undefined {
     if (turn.assistantSegments.length === 0) {
       return undefined;
     }
-    return turn.assistantSegments.join("\n\n");
+    return trimProjectionText(turn.assistantSegments.join("\n\n"));
   }
 }
 
@@ -648,6 +653,7 @@ async function syncRolloutPath(
   rolloutPath: string,
   onProjectionSynced: ((event: SyncedProjectionEvent) => void) | undefined,
   signal?: AbortSignal,
+  maxRolloutBytes?: number,
 ): Promise<boolean> {
   if (signal?.aborted) {
     return false;
@@ -660,9 +666,11 @@ async function syncRolloutPath(
   if (syncState && syncState.synced_at.getTime() >= fileStat.mtime.getTime()) {
     return false;
   }
+  if (maxRolloutBytes !== undefined && fileStat.size > maxRolloutBytes) {
+    return false;
+  }
 
-  const rolloutText = await readFile(rolloutPath, "utf8");
-  const built = buildSessionProjectionFromRollout(rolloutPath, rolloutText);
+  const built = await buildSessionProjectionFromRolloutFile(rolloutPath, signal);
   if (!built) {
     return false;
   }
@@ -689,6 +697,7 @@ async function syncRolloutPaths(
   rolloutPaths: string[],
   onProjectionSynced: ((event: SyncedProjectionEvent) => void) | undefined,
   signal?: AbortSignal,
+  maxRolloutBytes?: number,
 ): Promise<{ scanned: number; synced: number }> {
   let synced = 0;
 
@@ -696,7 +705,7 @@ async function syncRolloutPaths(
     if (signal?.aborted) {
       break;
     }
-    if (await syncRolloutPath(store, rolloutPath, onProjectionSynced, signal)) {
+    if (await syncRolloutPath(store, rolloutPath, onProjectionSynced, signal, maxRolloutBytes)) {
       synced += 1;
     }
   }
@@ -754,8 +763,7 @@ export async function syncRecentSessionsForProjectRoot(
 
     scanned += 1;
 
-    const rolloutText = await readFile(rolloutPath, "utf8");
-    const built = buildSessionProjectionFromRollout(rolloutPath, rolloutText);
+    const built = await buildSessionProjectionFromRolloutFile(rolloutPath, options.signal);
     if (!built || built.projection.projectRoot !== options.projectRoot) {
       continue;
     }
@@ -766,6 +774,7 @@ export async function syncRecentSessionsForProjectRoot(
       rolloutPath,
       options.onProjectionSynced,
       options.signal,
+      options.maxRolloutBytes,
     );
     if (didSync) {
       synced += 1;
@@ -814,6 +823,7 @@ export async function syncSessionsByPrefix(
       rolloutPath,
       options.onProjectionSynced,
       options.signal,
+      options.maxRolloutBytes,
     );
     if (didSync) {
       synced += 1;
@@ -835,31 +845,68 @@ export function buildSessionProjectionFromRollout(
   let lineCount = 0;
 
   for (const rawLine of rolloutText.split("\n")) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      continue;
+    if (handleRawRolloutLine(builder, rawLine)) {
+      lineCount += 1;
     }
-    lineCount += 1;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (!isRecord(parsed) || typeof parsed.type !== "string") {
-      continue;
-    }
-    const line: RolloutLine = {
-      timestamp: getString(parsed.timestamp),
-      type: parsed.type,
-      payload: isRecord(parsed.payload) ? parsed.payload : undefined,
-    };
-    const lineTimestamp = parseIsoDate(line.timestamp) ?? new Date();
-    builder.handleLine(line, lineTimestamp);
   }
 
   return builder.finish(lineCount);
+}
+
+export async function buildSessionProjectionFromRolloutFile(
+  rolloutPath: string,
+  signal?: AbortSignal,
+): Promise<BuiltSessionProjection | null> {
+  const builder = new SessionProjectionBuilder(rolloutPath);
+  let lineCount = 0;
+  const stream = createReadStream(rolloutPath, { encoding: "utf8" });
+  const abortStream = () => stream.destroy();
+  signal?.addEventListener("abort", abortStream, { once: true });
+
+  try {
+    const lines = createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+    for await (const rawLine of lines) {
+      if (signal?.aborted) {
+        break;
+      }
+      if (handleRawRolloutLine(builder, rawLine)) {
+        lineCount += 1;
+      }
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortStream);
+    stream.destroy();
+  }
+
+  return signal?.aborted ? null : builder.finish(lineCount);
+}
+
+function handleRawRolloutLine(builder: SessionProjectionBuilder, rawLine: string): boolean {
+  const trimmed = rawLine.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return true;
+  }
+  if (!isRecord(parsed) || typeof parsed.type !== "string") {
+    return true;
+  }
+  const line: RolloutLine = {
+    timestamp: getString(parsed.timestamp),
+    type: parsed.type,
+    payload: isRecord(parsed.payload) ? parsed.payload : undefined,
+  };
+  const lineTimestamp = parseIsoDate(line.timestamp) ?? new Date();
+  builder.handleLine(line, lineTimestamp);
+  return true;
 }
 
 export async function syncCodexRollouts(
@@ -872,6 +919,7 @@ export async function syncCodexRollouts(
     rolloutPaths,
     options.onProjectionSynced,
     options.signal,
+    options.maxRolloutBytes,
   );
 }
 
@@ -888,6 +936,7 @@ export async function syncNewestCodexRollouts(
     rolloutPaths,
     options.onProjectionSynced,
     options.signal,
+    options.maxRolloutBytes,
   );
 }
 
@@ -901,6 +950,7 @@ export async function syncCodexSessionRollout(
       existingSession.rollout_path,
       options.onProjectionSynced,
       options.signal,
+      options.maxRolloutBytes,
     );
     const backfilled = synced
       ? false
@@ -923,6 +973,7 @@ export async function syncCodexSessionRollout(
     located.rolloutPath,
     options.onProjectionSynced,
     options.signal,
+    options.maxRolloutBytes,
   );
   return {
     scanned: located.scanned,
@@ -950,6 +1001,7 @@ export async function watchCodexRollouts(
             await collectNewestRolloutPaths(sessionsRoot, recentScanLimit),
             options.onProjectionSynced,
             options.signal,
+            options.maxRolloutBytes,
           );
     if (now - lastFullScanAt >= fullRescanEveryMs) {
       lastFullScanAt = now;

@@ -6,6 +6,7 @@ import {
   createCodexSessionStore,
   syncCodexSessionRollout,
   syncCodexRollouts,
+  syncNewestCodexRollouts,
   syncRecentSessionsForProjectRoot,
   syncSessionsByPrefix,
   type CodexSessionStore,
@@ -152,6 +153,91 @@ describe("codex session projector", () => {
     expect(summary?.turns[0]?.status).toBe("completed");
     expect(summary?.syncState?.absolute_path).toBe(rolloutPath);
     expect(summary?.syncState?.line_count).toBe(8);
+  });
+
+  it("bounds projected rollout text while syncing from files", async () => {
+    const longUserMessage = `${"u".repeat(16_000)}user-tail`;
+    const longAssistantDelta = `${"a".repeat(16_000)}assistant-tail`;
+    await writeRollout([
+      {
+        timestamp: "2026-04-07T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "019d0000-0000-7000-8000-000000000001",
+          timestamp: "2026-04-07T10:00:00.000Z",
+          cwd: "/tmp/demo",
+          source: "codex",
+        },
+      },
+      {
+        timestamp: "2026-04-07T10:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: "turn-large-text",
+          started_at: 1775556001,
+        },
+      },
+      {
+        timestamp: "2026-04-07T10:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: longUserMessage,
+        },
+      },
+      {
+        timestamp: "2026-04-07T10:00:03.000Z",
+        type: "event_msg",
+        payload: {
+          type: "agent_message_content_delta",
+          turn_id: "turn-large-text",
+          delta: longAssistantDelta,
+        },
+      },
+    ]);
+
+    await syncCodexRollouts({ codexHome, store });
+
+    const summary = await store.getSessionSummary("019d0000-0000-7000-8000-000000000001");
+    expect(summary?.session.latest_user_message?.length).toBeLessThanOrEqual(12_000);
+    expect(summary?.session.latest_user_message).toMatch(/user-tail$/);
+    expect(summary?.session.latest_assistant_partial?.length).toBeLessThanOrEqual(12_000);
+    expect(summary?.session.latest_assistant_partial).toMatch(/assistant-tail$/);
+    expect(summary?.syncState?.line_count).toBe(4);
+  });
+
+  it("skips over-budget rollout files during bounded sync", async () => {
+    await writeRollout([
+      {
+        timestamp: "2026-04-07T10:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          id: "019d0000-0000-7000-8000-000000000001",
+          timestamp: "2026-04-07T10:00:00.000Z",
+          cwd: "/tmp/demo",
+          source: "codex",
+        },
+      },
+      {
+        timestamp: "2026-04-07T10:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "large rollout",
+        },
+      },
+    ]);
+
+    const result = await syncNewestCodexRollouts({
+      codexHome,
+      store,
+      limit: 1,
+      maxRolloutBytes: 1,
+    });
+
+    expect(result).toEqual({ scanned: 1, synced: 0 });
+    expect(await store.getSessionSummary("019d0000-0000-7000-8000-000000000001")).toBeNull();
   });
 
   it("syncs a single session without scanning every rollout body", async () => {

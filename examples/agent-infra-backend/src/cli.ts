@@ -283,6 +283,12 @@ interface SerializedDaemonLogSummary {
   createdAt: string;
 }
 
+interface RecordDaemonLogBatchInput {
+  source?: RecordDaemonLogSourceInput;
+  chunk: RecordDaemonLogChunkInput;
+  events: RecordDaemonLogEventInput[];
+}
+
 interface SerializedAgentStateSnapshot {
   snapshotId: string;
   agentId: string;
@@ -531,6 +537,17 @@ function readFlag(flag: string): string | undefined {
 
 function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
+}
+
+function readWriteTierFlag(): "local" | "edge" | "global" | undefined {
+  const tier = readFlag("--tier");
+  if (!tier) {
+    return undefined;
+  }
+  if (tier === "local" || tier === "edge" || tier === "global") {
+    return tier;
+  }
+  throw new Error(`invalid --tier ${tier}; expected local, edge, or global`);
 }
 
 function requireCommand(): string {
@@ -1140,6 +1157,7 @@ async function main(): Promise<void> {
   const dataPath = await resolvePersistentDataPath(
     readFlag("--data-path") ?? "~/.jazz2/agent-infra.db",
   );
+  const tier = readWriteTierFlag();
   await mkdir(path.dirname(dataPath), { recursive: true });
 
   if (command === "serve-json") {
@@ -1150,6 +1168,7 @@ async function main(): Promise<void> {
   const store = createAgentDataStore({
     appId: "run-agent-infra",
     dataPath,
+    ...(tier ? { tier } : {}),
   });
 
   try {
@@ -1320,6 +1339,25 @@ async function main(): Promise<void> {
         );
         const event = await store.recordDaemonLogEvent(input);
         renderJson(serializeDaemonLogEvent(event));
+        break;
+      }
+      case "record-daemon-log-batch": {
+        const input = readJsonInput<RecordDaemonLogBatchInput>(
+          "record-daemon-log-batch",
+        );
+        const source = input.source
+          ? await store.recordDaemonLogSource(input.source)
+          : null;
+        const chunk = await store.recordDaemonLogChunk(input.chunk);
+        const events: DaemonLogEvent[] = [];
+        for (const eventInput of input.events) {
+          events.push(await store.recordDaemonLogEvent(eventInput));
+        }
+        renderJson({
+          source: source ? serializeDaemonLogSource(source) : null,
+          chunk: serializeDaemonLogChunk(chunk),
+          events: events.map(serializeDaemonLogEvent),
+        });
         break;
       }
       case "list-daemon-log-events": {

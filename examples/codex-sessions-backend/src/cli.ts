@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { createReadStream, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, watch as watchPath } from "node:fs/promises";
+import { createReadStream, readFileSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { mkdir, readdir, stat, watch as watchPath } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
@@ -36,7 +36,7 @@ import {
   type UpsertJAgentDefinitionInput,
 } from "./store.js";
 import {
-  buildSessionProjectionFromRollout,
+  buildSessionProjectionFromRolloutFile,
   type SyncedProjectionEvent,
   syncCodexRollouts,
   syncCodexSessionRollout,
@@ -306,6 +306,7 @@ const SESSION_SERVICE_STALE_LOCK_GRACE_MS = 30_000;
 const SESSION_SERVICE_REQUEST_TIMEOUT_MS = 2_500;
 const ACTIVE_SESSION_RECENT_SYNC_LIMIT = 32;
 const ACTIVE_SESSION_RECENT_SYNC_BUDGET_MS = 400;
+const DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES = 8 * 1024 * 1024;
 
 function logBackgroundError(label: string, error: unknown): void {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -334,6 +335,18 @@ function activeSessionFreshSyncLimit(limit: number): number {
     8,
     Math.min(Math.max(1, Math.trunc(limit)) * 2, ACTIVE_SESSION_RECENT_SYNC_LIMIT),
   );
+}
+
+function backgroundProjectionMaxRolloutBytes(): number | undefined {
+  const raw = process.env.FLOW_CODEX_SESSION_PROJECTION_MAX_ROLLOUT_BYTES;
+  if (raw === "0" || raw === "false" || raw === "unlimited") {
+    return undefined;
+  }
+  const parsed = Number(raw ?? String(DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES));
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES;
+  }
+  return Math.max(1, Math.trunc(parsed));
 }
 
 function warmActiveSessionPresenceInBackground(
@@ -1741,6 +1754,7 @@ function createCatalogPrimer(options: {
 function createRecentRolloutSyncScheduler(options: {
   store: ReturnType<typeof createCodexSessionStore>;
   codexHome: string;
+  maxRolloutBytes?: number;
 }): RecentRolloutSyncScheduler {
   let inFlight: Promise<void> | null = null;
   let lastSyncedAt = 0;
@@ -1770,6 +1784,7 @@ function createRecentRolloutSyncScheduler(options: {
         codexHome: options.codexHome,
         store: options.store,
         limit: targetLimit,
+        maxRolloutBytes: options.maxRolloutBytes,
       });
       lastSyncedAt = Date.now();
     })();
@@ -2617,6 +2632,7 @@ async function serveSessionQueries(options: {
       recentRolloutSyncScheduler: createRecentRolloutSyncScheduler({
         store,
         codexHome: options.codexHome,
+        maxRolloutBytes: backgroundProjectionMaxRolloutBytes(),
       }),
     };
     return runtimeDeps;
@@ -2702,6 +2718,7 @@ async function serveSessionQueries(options: {
         pollIntervalMs: options.pollIntervalMs,
         recentScanLimit: 16,
         fullRescanEveryMs: 24 * 60 * 60 * 1000,
+        maxRolloutBytes: backgroundProjectionMaxRolloutBytes(),
         onProjectionSynced: ({ completionEvents }) => {
           if (completionEvents.length > 0) {
             completionBroadcaster.publish(completionEvents);
@@ -3072,6 +3089,11 @@ function streamWatchBootstrapGraceMs(): number {
   return Math.max(0, Math.min(120_000, Math.trunc(Number.isFinite(parsed) ? parsed : 15_000)));
 }
 
+function streamWatchBootstrapBackfillMaxBytes(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_BACKFILL_MAX_BYTES ?? `${8 * 1024 * 1024}`);
+  return Math.max(0, Math.trunc(Number.isFinite(parsed) ? parsed : 8 * 1024 * 1024));
+}
+
 function streamWatchBootstrapMode(): "tail" | "backfill" {
   const raw = (process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE ?? "tail")
     .trim()
@@ -3110,6 +3132,7 @@ async function watchRecentRolloutStreamEvents(
   const bootstrapMode = streamWatchBootstrapMode();
   const errorBackoffMs = streamWatchErrorBackoffMs();
   const bootstrapGraceMs = streamWatchBootstrapGraceMs();
+  const bootstrapBackfillMaxBytes = streamWatchBootstrapBackfillMaxBytes();
   const watcherStartedAtMs = Date.now();
 
   while (!options.signal?.aborted) {
@@ -3133,15 +3156,21 @@ async function watchRecentRolloutStreamEvents(
           store: options.store,
           rolloutPath: rolloutPath.path,
           mtimeMs: rolloutPath.mtimeMs,
+          backfillMaxBytes: bootstrapBackfillMaxBytes,
         });
       }
-      if (!cursor && bootstrapMode === "tail" && rolloutPath.mtimeMs < watcherStartedAtMs - bootstrapGraceMs) {
+      if (!cursor && bootstrapMode === "tail") {
         const fileStat = await stat(rolloutPath.path).catch(() => null);
-        cursors.set(rolloutPath.path, {
-          mtimeMs: rolloutPath.mtimeMs,
-          lastByteOffset: fileStat?.isFile() && fileStat.size > 0 ? fileStat.size - 1 : undefined,
-        });
-        continue;
+        const shouldTail =
+          rolloutPath.mtimeMs < watcherStartedAtMs - bootstrapGraceMs ||
+          !!fileStat?.isFile() && fileStat.size > bootstrapBackfillMaxBytes;
+        if (shouldTail) {
+          cursors.set(rolloutPath.path, {
+            mtimeMs: rolloutPath.mtimeMs,
+            lastByteOffset: fileStat?.isFile() && fileStat.size > 0 ? fileStat.size - 1 : undefined,
+          });
+          continue;
+        }
       }
 
       let result: ReplicateRolloutEventsResult;
@@ -3191,6 +3220,7 @@ async function latestRecordedStreamCursor(options: {
   store: CodexSessionStoreHandle;
   rolloutPath: string;
   mtimeMs: number;
+  backfillMaxBytes: number;
 }): Promise<StreamRolloutCursor | undefined> {
   const sessionId = sessionIdFromRolloutPath(options.rolloutPath);
   if (!sessionId) {
@@ -3212,11 +3242,21 @@ async function latestRecordedStreamCursor(options: {
     return undefined;
   }
 
+  const fileStat = await stat(options.rolloutPath).catch(() => null);
+  const shouldResumeByLine =
+    fileStat?.isFile() &&
+    fileStat.size <= options.backfillMaxBytes;
+
   return {
     mtimeMs: options.mtimeMs,
     lastLineNumber: latestForPath.sequence,
+    lastByteOffset: shouldResumeByLine ? undefined : fileEndByteOffset(fileStat),
     hasBacklog: true,
   };
+}
+
+function fileEndByteOffset(fileStat: Stats | null): number | undefined {
+  return fileStat?.isFile() && fileStat.size > 0 ? fileStat.size - 1 : undefined;
 }
 
 function completionWatchRolloutLimit(): number {
@@ -3254,11 +3294,7 @@ async function watchRecentCompletionEvents(
       }
       seenRolloutMtimes.set(rolloutPath, currentMtime);
 
-      const rolloutText = await readFile(rolloutPath, "utf8").catch(() => null);
-      if (!rolloutText) {
-        continue;
-      }
-      const built = buildSessionProjectionFromRollout(rolloutPath, rolloutText);
+      const built = await buildSessionProjectionFromRolloutFile(rolloutPath, options.signal);
       if (!built) {
         continue;
       }
