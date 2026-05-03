@@ -925,11 +925,19 @@ async function listRolloutEventRowsFromFile(
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 100), 500));
   const fallbackSessionId = input.sessionId ?? sessionIdFromRolloutPath(rolloutPath);
   const rows: RolloutEventRow[] = [];
-  const stream = createReadStream(rolloutPath, { encoding: "utf8" });
+  const canSeek =
+    input.afterLineNumber !== undefined &&
+    input.afterByteOffset !== undefined &&
+    input.afterByteOffset >= 0;
+  const startOffset = canSeek ? input.afterByteOffset! + 1 : 0;
+  const stream = createReadStream(rolloutPath, {
+    encoding: "utf8",
+    start: startOffset,
+  });
   let pending = "";
-  let pendingOffset = 0;
-  let nextOffset = 0;
-  let lineNumber = 0;
+  let pendingOffset = startOffset;
+  let nextOffset = startOffset;
+  let lineNumber = canSeek ? input.afterLineNumber! : 0;
 
   for await (const chunk of stream) {
     let text = pending + chunk;
@@ -1182,7 +1190,7 @@ async function replicateRolloutEvents(options: {
       for (const row of rows) {
         const input = rolloutRowToStreamEventInput(row, sourceHost);
         afterLineNumber = row.lineNumber;
-        afterByteOffset = row.byteOffset;
+        afterByteOffset = row.byteOffset + Math.max(0, row.byteLength - 1);
         if (!input) {
           continue;
         }
@@ -2672,7 +2680,7 @@ async function serveSessionQueries(options: {
     const promises: Promise<void>[] = [];
     if (options.watchStreamRollouts) {
       const streamRolloutPromise = (async () => {
-        const streamPollIntervalMs = Math.max(1000, options.pollIntervalMs);
+        const streamPollIntervalMs = Math.max(50, options.pollIntervalMs);
         await delay(streamPollIntervalMs, watchController.signal);
         await watchRecentRolloutStreamEvents({
           codexHome: options.codexHome,
@@ -3050,8 +3058,13 @@ function streamWatchDayCount(): number {
 }
 
 function streamWatchBatchLimit(): number {
-  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BATCH_LIMIT ?? "5");
-  return Math.max(1, Math.min(5000, Math.trunc(Number.isFinite(parsed) ? parsed : 5)));
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BATCH_LIMIT ?? "100");
+  return Math.max(1, Math.min(5000, Math.trunc(Number.isFinite(parsed) ? parsed : 100)));
+}
+
+function streamWatchErrorBackoffMs(): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_ERROR_BACKOFF_MS ?? "500");
+  return Math.max(50, Math.min(30_000, Math.trunc(Number.isFinite(parsed) ? parsed : 500)));
 }
 
 function streamWatchBootstrapMode(): "tail" | "backfill" {
@@ -3090,6 +3103,7 @@ async function watchRecentRolloutStreamEvents(
   const cursors = new Map<string, StreamRolloutCursor>();
   const sourceHost = options.sourceHost?.trim() || hostname();
   const bootstrapMode = streamWatchBootstrapMode();
+  const errorBackoffMs = streamWatchErrorBackoffMs();
 
   while (!options.signal?.aborted) {
     const rolloutPaths = await collectRecentlyModifiedRolloutPaths(
@@ -3103,9 +3117,16 @@ async function watchRecentRolloutStreamEvents(
         return;
       }
       await delay(0, options.signal);
-      const cursor = cursors.get(rolloutPath.path);
+      let cursor = cursors.get(rolloutPath.path);
       if (cursor && !cursor.hasBacklog && rolloutPath.mtimeMs <= cursor.mtimeMs) {
         continue;
+      }
+      if (!cursor) {
+        cursor = await latestRecordedStreamCursor({
+          store: options.store,
+          rolloutPath: rolloutPath.path,
+          mtimeMs: rolloutPath.mtimeMs,
+        });
       }
       if (!cursor && bootstrapMode === "tail") {
         const fileStat = await stat(rolloutPath.path).catch(() => null);
@@ -3116,22 +3137,36 @@ async function watchRecentRolloutStreamEvents(
         continue;
       }
 
-      const result = await replicateRolloutEvents({
-        store: options.store,
-        codexHome: options.codexHome,
-        signal: options.signal,
-        input: {
-          absolutePath: rolloutPath.path,
-          afterLineNumber: cursor?.lastLineNumber,
-          afterByteOffset: cursor?.lastByteOffset,
-          limit: streamWatchBatchLimit(),
-          maxBatches: 1,
-          follow: false,
-          pollIntervalMs: options.pollIntervalMs,
-          sourceHost,
-          yieldBetweenEvents: true,
-        },
-      });
+      let result: ReplicateRolloutEventsResult;
+      try {
+        result = await replicateRolloutEvents({
+          store: options.store,
+          codexHome: options.codexHome,
+          signal: options.signal,
+          input: {
+            absolutePath: rolloutPath.path,
+            afterLineNumber: cursor?.lastLineNumber,
+            afterByteOffset: cursor?.lastByteOffset,
+            limit: streamWatchBatchLimit(),
+            maxBatches: 1,
+            follow: false,
+            pollIntervalMs: options.pollIntervalMs,
+            sourceHost,
+            yieldBetweenEvents: true,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.stack ?? error.message : String(error);
+        console.error(`[watch-stream-rollouts] ${rolloutPath.path}: ${message}`);
+        if (cursor) {
+          cursors.set(rolloutPath.path, {
+            ...cursor,
+            hasBacklog: true,
+          });
+        }
+        await delay(errorBackoffMs, options.signal);
+        continue;
+      }
 
       cursors.set(rolloutPath.path, {
         mtimeMs: rolloutPath.mtimeMs,
@@ -3143,6 +3178,38 @@ async function watchRecentRolloutStreamEvents(
 
     await delay(options.pollIntervalMs, options.signal);
   }
+}
+
+async function latestRecordedStreamCursor(options: {
+  store: CodexSessionStoreHandle;
+  rolloutPath: string;
+  mtimeMs: number;
+}): Promise<StreamRolloutCursor | undefined> {
+  const sessionId = sessionIdFromRolloutPath(options.rolloutPath);
+  if (!sessionId) {
+    return undefined;
+  }
+
+  const events = await options.store.listCodexStreamEvents({
+    sessionId,
+    latest: true,
+    limit: 20,
+  });
+  const latestForPath = events
+    .filter((event) =>
+      event.source_path === options.rolloutPath ||
+      event.source_id === options.rolloutPath
+    )
+    .at(-1);
+  if (!latestForPath) {
+    return undefined;
+  }
+
+  return {
+    mtimeMs: options.mtimeMs,
+    lastLineNumber: latestForPath.sequence,
+    hasBacklog: true,
+  };
 }
 
 function completionWatchRolloutLimit(): number {

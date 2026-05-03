@@ -380,6 +380,131 @@ describe("codex completion session service", () => {
     expect(existsSync(join(tempDir, "codex-sessions.stream.db"))).toBe(true);
   }, 30_000);
 
+  it("resumes stream rollout replication from the latest recorded Jazz2 sequence", async () => {
+    const today = new Date();
+    const sessionId = "019d0000-0000-7000-8000-000000000093";
+    const todayRolloutDir = join(
+      codexHome,
+      "sessions",
+      String(today.getFullYear()),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0"),
+    );
+    const liveRolloutPath = join(
+      todayRolloutDir,
+      `rollout-2026-05-02T12-00-00-${sessionId}.jsonl`,
+    );
+    await mkdir(todayRolloutDir, { recursive: true });
+    const now = new Date().toISOString();
+    await writeFile(
+      liveRolloutPath,
+      [
+        JSON.stringify({
+          timestamp: now,
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            timestamp: now,
+            cwd: "/tmp/stream-resume-rollout",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-resume",
+            delta: "missed while worker was down",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-resume",
+            delta: "caught after restart",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const streamStore = createCodexSessionStore({
+      dataPath: join(tempDir, "codex-sessions.stream.db"),
+    });
+    await streamStore.recordCodexStreamEvent({
+      eventId: "seeded-session-meta",
+      sessionId,
+      sequence: 1,
+      eventKind: "session_meta",
+      eventType: "session_meta",
+      sourceId: liveRolloutPath,
+      sourcePath: liveRolloutPath,
+      schemaHash: "schema-hash-1",
+      createdAt: now,
+      observedAt: now,
+    });
+    await streamStore.shutdown();
+
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE: "tail",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const events = await waitForStreamEvents(socketPath, sessionId, 3);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sequence: 2,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          textDelta: "missed while worker was down",
+        }),
+        expect.objectContaining({
+          sessionId,
+          sequence: 3,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          textDelta: "caught after restart",
+        }),
+      ]),
+    );
+  }, 30_000);
+
   it("streams completion events over the local session socket when the legacy file watcher is enabled", async () => {
     const today = new Date();
     const todayRolloutDir = join(
