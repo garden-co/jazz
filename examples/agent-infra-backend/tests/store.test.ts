@@ -364,6 +364,113 @@ describe("AgentDataStore", () => {
     expect(summary?.steers[0]?.target_agent_id).toBe("clanka-cad");
   });
 
+  it("records Designer Codex conversations with object-backed payloads and telemetry", async () => {
+    const transcriptObject = await store.recordDesignerObjectRef({
+      objectRefId: "obj-transcript-019dec01",
+      provider: "oci",
+      uri: "oci://designer-codex/conversations/019dec01/transcript.jsonl",
+      bucket: "designer-codex",
+      key: "conversations/019dec01/transcript.jsonl",
+      digestSha256: "sha256:transcript",
+      byteSize: 4096,
+      contentType: "application/jsonl",
+      objectKind: "codex.transcript",
+      metadataJson: {
+        sourceSession: "codex:019dec01-6eaa-7650-986f-f41ab49a59fd",
+      },
+    });
+    const turnPayloadObject = await store.recordDesignerObjectRef({
+      objectRefId: "obj-turn-1",
+      provider: "oci",
+      uri: "oci://designer-codex/conversations/019dec01/turns/0001.json",
+      digestSha256: "sha256:turn-1",
+      contentType: "application/json",
+      objectKind: "codex.turn",
+    });
+    const telemetryPayloadObject = await store.recordDesignerObjectRef({
+      objectRefId: "obj-telemetry-1",
+      provider: "oci",
+      uri: "oci://designer-telemetry/events/usage/0001.json",
+      digestSha256: "sha256:telemetry-1",
+      contentType: "application/json",
+      objectKind: "designer.telemetry.event",
+    });
+
+    const conversation = await store.recordDesignerCodexConversation({
+      conversationId: "designer-codex-019dec01",
+      provider: "codex",
+      providerSessionId: "019dec01-6eaa-7650-986f-f41ab49a59fd",
+      threadId: "remote-codex-thread-1",
+      workspaceId: "designer-workspace-rubiks",
+      workspaceKey: "rubiks-cube",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      workspaceRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      model: "gpt-5.5",
+      status: "running",
+      transcriptObjectRefId: transcriptObject.object_ref_id,
+      latestEventSequence: 1,
+      metadataJson: {
+        remoteCwd: "/Users/nikitavoloboev/work/codex-launch-rsync-fa10aa66",
+      },
+    });
+    await store.recordDesignerCodexTurn({
+      turnId: "designer-codex-019dec01:1",
+      conversationId: conversation.conversation_id,
+      sequence: 1,
+      turnKind: "user",
+      role: "user",
+      actorKind: "human",
+      actorId: "alice",
+      summaryText: "Make a Rubik's Cube collaboratively.",
+      payloadObjectRefId: turnPayloadObject.object_ref_id,
+      status: "completed",
+      tokenCountsJson: { input: 42 },
+    });
+    await store.recordDesignerTelemetryEvent({
+      telemetryEventId: "usage-event-1",
+      sessionId: "designer-session-1",
+      workspaceId: "designer-workspace-rubiks",
+      conversationId: conversation.conversation_id,
+      eventType: "designer.agent_prompt_sent",
+      pane: "chat",
+      sequence: 1,
+      summaryText: "prompt sent",
+      payloadObjectRefId: telemetryPayloadObject.object_ref_id,
+      propertiesJson: {
+        upload_receipts: [
+          {
+            backend: "s3",
+            uri: "s3://designer-telemetry/events/usage/0001.json",
+          },
+        ],
+      },
+    });
+
+    const turns = await store.listDesignerCodexTurns({
+      conversationId: conversation.conversation_id,
+    });
+    const telemetry = await store.listDesignerTelemetryEvents({
+      conversationId: conversation.conversation_id,
+    });
+    const summary = await store.getDesignerCodexConversationSummary(
+      conversation.conversation_id,
+    );
+
+    expect(turns.map((turn) => turn.payload_object_ref_id)).toEqual([
+      "obj-turn-1",
+    ]);
+    expect(telemetry.map((event) => event.payload_object_ref_id)).toEqual([
+      "obj-telemetry-1",
+    ]);
+    expect(summary?.transcriptObject.uri).toBe(
+      "oci://designer-codex/conversations/019dec01/transcript.jsonl",
+    );
+    expect(summary?.turns[0]?.summary_text).toContain("Rubik");
+    expect(summary?.telemetryEvents[0]?.event_type).toBe(
+      "designer.agent_prompt_sent",
+    );
+  });
+
   it("guards Designer CAD stream replay and relation consistency", async () => {
     await store.recordDesignerCadWorkspace({
       workspaceId: "workspace-a",

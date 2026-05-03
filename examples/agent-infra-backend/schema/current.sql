@@ -248,6 +248,83 @@ CREATE TABLE task_records (
     updated_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE designer_object_refs (
+    object_ref_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    bucket TEXT,
+    key TEXT,
+    region TEXT,
+    digest_sha256 TEXT,
+    byte_size INTEGER,
+    content_type TEXT,
+    object_kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE designer_codex_conversations (
+    conversation_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_session_id TEXT NOT NULL,
+    thread_id TEXT,
+    workspace_id TEXT,
+    workspace_key TEXT,
+    repo_root TEXT,
+    workspace_root TEXT,
+    branch TEXT,
+    model TEXT,
+    status TEXT NOT NULL,
+    transcript_object_ref_id TEXT NOT NULL,
+    transcript_object_row_id UUID REFERENCES designer_object_refs NOT NULL,
+    latest_event_sequence INTEGER,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    ended_at TIMESTAMP
+);
+
+CREATE TABLE designer_codex_turns (
+    turn_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_row_id UUID REFERENCES designer_codex_conversations NOT NULL,
+    sequence INTEGER NOT NULL,
+    turn_kind TEXT NOT NULL,
+    role TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_id TEXT,
+    summary_text TEXT,
+    payload_object_ref_id TEXT NOT NULL,
+    payload_object_row_id UUID REFERENCES designer_object_refs NOT NULL,
+    prompt_object_ref_id TEXT,
+    prompt_object_row_id UUID REFERENCES designer_object_refs,
+    response_object_ref_id TEXT,
+    response_object_row_id UUID REFERENCES designer_object_refs,
+    token_counts_json JSON,
+    status TEXT NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE designer_telemetry_events (
+    telemetry_event_id TEXT NOT NULL,
+    session_id TEXT,
+    workspace_id TEXT,
+    conversation_id TEXT,
+    conversation_row_id UUID REFERENCES designer_codex_conversations,
+    event_type TEXT NOT NULL,
+    pane TEXT,
+    sequence INTEGER,
+    summary_text TEXT,
+    payload_object_ref_id TEXT NOT NULL,
+    payload_object_row_id UUID REFERENCES designer_object_refs NOT NULL,
+    properties_json JSON,
+    occurred_at TIMESTAMP NOT NULL,
+    ingested_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE designer_cad_workspaces (
     workspace_id TEXT NOT NULL,
     workspace_key TEXT NOT NULL,

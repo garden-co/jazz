@@ -40,6 +40,10 @@ import {
   type DesignerCadToolSession,
   type DesignerCadWidget,
   type DesignerCadWorkspace,
+  type DesignerCodexConversation,
+  type DesignerCodexTurn,
+  type DesignerObjectRef,
+  type DesignerTelemetryEvent,
   type JsonValue,
   type MemoryLink,
   type MemoryLinkInit,
@@ -250,6 +254,100 @@ export interface RecordSourceFileInput {
   runId?: string;
   checksum?: string;
   createdAt?: TimestampInput;
+}
+
+export interface RecordDesignerObjectRefInput {
+  objectRefId?: string;
+  provider: string;
+  uri: string;
+  bucket?: string;
+  key?: string;
+  region?: string;
+  digestSha256?: string;
+  byteSize?: number;
+  contentType?: string;
+  objectKind: string;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCodexConversationInput {
+  conversationId?: string;
+  provider: string;
+  providerSessionId: string;
+  threadId?: string;
+  workspaceId?: string;
+  workspaceKey?: string;
+  repoRoot?: string;
+  workspaceRoot?: string;
+  branch?: string;
+  model?: string;
+  status?: string;
+  transcriptObjectRefId: string;
+  latestEventSequence?: number;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  endedAt?: TimestampInput;
+}
+
+export interface RecordDesignerCodexTurnInput {
+  turnId?: string;
+  conversationId: string;
+  sequence: number;
+  turnKind: string;
+  role: string;
+  actorKind: string;
+  actorId?: string;
+  summaryText?: string;
+  payloadObjectRefId: string;
+  promptObjectRefId?: string;
+  responseObjectRefId?: string;
+  tokenCountsJson?: JsonValue;
+  status?: string;
+  startedAt?: TimestampInput;
+  completedAt?: TimestampInput;
+}
+
+export interface RecordDesignerTelemetryEventInput {
+  telemetryEventId?: string;
+  sessionId?: string;
+  workspaceId?: string;
+  conversationId?: string;
+  eventType: string;
+  pane?: string;
+  sequence?: number;
+  summaryText?: string;
+  payloadObjectRefId: string;
+  propertiesJson?: JsonValue;
+  occurredAt?: TimestampInput;
+  ingestedAt?: TimestampInput;
+}
+
+export interface ListDesignerCodexTurnsInput {
+  conversationId?: string;
+  role?: string;
+  status?: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface ListDesignerTelemetryEventsInput {
+  conversationId?: string;
+  sessionId?: string;
+  workspaceId?: string;
+  eventType?: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface DesignerCodexConversationSummary {
+  conversation: DesignerCodexConversation;
+  transcriptObject: DesignerObjectRef;
+  turns: DesignerCodexTurn[];
+  telemetryEvents: DesignerTelemetryEvent[];
 }
 
 export interface RecordDesignerCadWorkspaceInput {
@@ -1850,6 +1948,382 @@ export class AgentDataStore {
       },
       { tier: this.writeTier },
     );
+  }
+
+  async recordDesignerObjectRef(
+    input: RecordDesignerObjectRefInput,
+    session?: Session,
+  ): Promise<DesignerObjectRef> {
+    const db = this.getDb(session);
+    const objectRefId = input.objectRefId ?? input.digestSha256 ?? input.uri;
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerObjectRefByExternalId(
+      db,
+      objectRefId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_object_refs, existing.id, {
+        provider: input.provider,
+        uri: input.uri,
+        bucket: input.bucket,
+        key: input.key,
+        region: input.region,
+        digest_sha256: input.digestSha256,
+        byte_size: input.byteSize,
+        content_type: input.contentType,
+        object_kind: input.objectKind,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireDesignerObjectRefByExternalId(db, objectRefId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_object_refs,
+      {
+        object_ref_id: objectRefId,
+        provider: input.provider,
+        uri: input.uri,
+        bucket: input.bucket,
+        key: input.key,
+        region: input.region,
+        digest_sha256: input.digestSha256,
+        byte_size: input.byteSize,
+        content_type: input.contentType,
+        object_kind: input.objectKind,
+        status: input.status ?? "available",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCodexConversation(
+    input: RecordDesignerCodexConversationInput,
+    session?: Session,
+  ): Promise<DesignerCodexConversation> {
+    const db = this.getDb(session);
+    const transcriptObject = await this.requireDesignerObjectRefByExternalId(
+      db,
+      input.transcriptObjectRefId,
+    );
+    const conversationId =
+      input.conversationId ?? `${input.provider}:${input.providerSessionId}`;
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerCodexConversationByExternalId(
+      db,
+      conversationId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_codex_conversations, existing.id, {
+        provider: input.provider,
+        provider_session_id: input.providerSessionId,
+        thread_id: input.threadId,
+        workspace_id: input.workspaceId,
+        workspace_key: input.workspaceKey,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        branch: input.branch,
+        model: input.model,
+        status: input.status ?? existing.status,
+        transcript_object_ref_id: input.transcriptObjectRefId,
+        transcript_object_row_id: transcriptObject.id,
+        latest_event_sequence: input.latestEventSequence,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+        ended_at: input.endedAt ? asDate(input.endedAt) : undefined,
+      });
+      return this.requireDesignerCodexConversationByExternalId(
+        db,
+        conversationId,
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_codex_conversations,
+      {
+        conversation_id: conversationId,
+        provider: input.provider,
+        provider_session_id: input.providerSessionId,
+        thread_id: input.threadId,
+        workspace_id: input.workspaceId,
+        workspace_key: input.workspaceKey,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        branch: input.branch,
+        model: input.model,
+        status: input.status ?? "running",
+        transcript_object_ref_id: input.transcriptObjectRefId,
+        transcript_object_row_id: transcriptObject.id,
+        latest_event_sequence: input.latestEventSequence,
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+        ended_at: input.endedAt ? asDate(input.endedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerCodexTurn(
+    input: RecordDesignerCodexTurnInput,
+    session?: Session,
+  ): Promise<DesignerCodexTurn> {
+    const db = this.getDb(session);
+    const conversation = await this.requireDesignerCodexConversationByExternalId(
+      db,
+      input.conversationId,
+    );
+    const payloadObject = await this.requireDesignerObjectRefByExternalId(
+      db,
+      input.payloadObjectRefId,
+    );
+    const promptObject = input.promptObjectRefId
+      ? await this.requireDesignerObjectRefByExternalId(
+          db,
+          input.promptObjectRefId,
+        )
+      : null;
+    const responseObject = input.responseObjectRefId
+      ? await this.requireDesignerObjectRefByExternalId(
+          db,
+          input.responseObjectRefId,
+        )
+      : null;
+    const turnId = input.turnId ?? `${input.conversationId}:${input.sequence}`;
+    const existing = await db.one(
+      app.designer_codex_turns.where({ turn_id: turnId }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_codex_turns, existing.id, {
+        conversation_id: input.conversationId,
+        conversation_row_id: conversation.id,
+        sequence: input.sequence,
+        turn_kind: input.turnKind,
+        role: input.role,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        summary_text: input.summaryText,
+        payload_object_ref_id: input.payloadObjectRefId,
+        payload_object_row_id: payloadObject.id,
+        prompt_object_ref_id: input.promptObjectRefId,
+        prompt_object_row_id: promptObject?.id,
+        response_object_ref_id: input.responseObjectRefId,
+        response_object_row_id: responseObject?.id,
+        token_counts_json: input.tokenCountsJson,
+        status: input.status ?? existing.status,
+        started_at: input.startedAt ? asDate(input.startedAt) : undefined,
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_codex_turns.where({ turn_id: turnId }),
+        "designer codex turn",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_codex_turns,
+      {
+        turn_id: turnId,
+        conversation_id: input.conversationId,
+        conversation_row_id: conversation.id,
+        sequence: input.sequence,
+        turn_kind: input.turnKind,
+        role: input.role,
+        actor_kind: input.actorKind,
+        actor_id: input.actorId,
+        summary_text: input.summaryText,
+        payload_object_ref_id: input.payloadObjectRefId,
+        payload_object_row_id: payloadObject.id,
+        prompt_object_ref_id: input.promptObjectRefId,
+        prompt_object_row_id: promptObject?.id,
+        response_object_ref_id: input.responseObjectRefId,
+        response_object_row_id: responseObject?.id,
+        token_counts_json: input.tokenCountsJson,
+        status: input.status ?? "completed",
+        started_at: asDate(input.startedAt),
+        completed_at: input.completedAt ? asDate(input.completedAt) : undefined,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerTelemetryEvent(
+    input: RecordDesignerTelemetryEventInput,
+    session?: Session,
+  ): Promise<DesignerTelemetryEvent> {
+    const db = this.getDb(session);
+    const conversation = input.conversationId
+      ? await this.requireDesignerCodexConversationByExternalId(
+          db,
+          input.conversationId,
+        )
+      : null;
+    const payloadObject = await this.requireDesignerObjectRefByExternalId(
+      db,
+      input.payloadObjectRefId,
+    );
+    const telemetryEventId = input.telemetryEventId ?? randomUUID();
+    const existing = await db.one(
+      app.designer_telemetry_events.where({
+        telemetry_event_id: telemetryEventId,
+      }),
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_telemetry_events, existing.id, {
+        session_id: input.sessionId,
+        workspace_id: input.workspaceId,
+        conversation_id: input.conversationId,
+        conversation_row_id: conversation?.id,
+        event_type: input.eventType,
+        pane: input.pane,
+        sequence: input.sequence,
+        summary_text: input.summaryText,
+        payload_object_ref_id: input.payloadObjectRefId,
+        payload_object_row_id: payloadObject.id,
+        properties_json: input.propertiesJson,
+        occurred_at: input.occurredAt
+          ? asDate(input.occurredAt)
+          : undefined,
+        ingested_at: input.ingestedAt ? asDate(input.ingestedAt) : undefined,
+      });
+      return this.requireByQuery(
+        db,
+        app.designer_telemetry_events.where({
+          telemetry_event_id: telemetryEventId,
+        }),
+        "designer telemetry event",
+      );
+    }
+
+    return (db as any).insertDurable(
+      app.designer_telemetry_events,
+      {
+        telemetry_event_id: telemetryEventId,
+        session_id: input.sessionId,
+        workspace_id: input.workspaceId,
+        conversation_id: input.conversationId,
+        conversation_row_id: conversation?.id,
+        event_type: input.eventType,
+        pane: input.pane,
+        sequence: input.sequence,
+        summary_text: input.summaryText,
+        payload_object_ref_id: input.payloadObjectRefId,
+        payload_object_row_id: payloadObject.id,
+        properties_json: input.propertiesJson,
+        occurred_at: asDate(input.occurredAt),
+        ingested_at: asDate(input.ingestedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async listDesignerCodexTurns(
+    input: ListDesignerCodexTurnsInput = {},
+    session?: Session,
+  ): Promise<DesignerCodexTurn[]> {
+    const db = this.getDb(session);
+    const rows = input.conversationId
+      ? await db.all(
+          app.designer_codex_turns
+            .where({ conversation_id: input.conversationId })
+            .orderBy("sequence", "asc"),
+        )
+      : await db.all(
+          app.designer_codex_turns
+            .orderBy("sequence", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((turn) => {
+        if (input.conversationId && turn.conversation_id !== input.conversationId)
+          return false;
+        if (input.role && turn.role !== input.role) return false;
+        if (input.status && turn.status !== input.status) return false;
+        if (
+          input.afterSequence !== undefined &&
+          turn.sequence <= input.afterSequence
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async listDesignerTelemetryEvents(
+    input: ListDesignerTelemetryEventsInput = {},
+    session?: Session,
+  ): Promise<DesignerTelemetryEvent[]> {
+    const db = this.getDb(session);
+    const rows = input.conversationId
+      ? await db.all(
+          app.designer_telemetry_events
+            .where({ conversation_id: input.conversationId })
+            .orderBy("ingested_at", "asc"),
+        )
+      : await db.all(
+          app.designer_telemetry_events
+            .orderBy("ingested_at", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((event) => {
+        if (input.conversationId && event.conversation_id !== input.conversationId)
+          return false;
+        if (input.sessionId && event.session_id !== input.sessionId)
+          return false;
+        if (input.workspaceId && event.workspace_id !== input.workspaceId)
+          return false;
+        if (input.eventType && event.event_type !== input.eventType)
+          return false;
+        if (
+          input.afterSequence !== undefined &&
+          (event.sequence ?? 0) <= input.afterSequence
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async getDesignerCodexConversationSummary(
+    conversationId: string,
+    session?: Session,
+  ): Promise<DesignerCodexConversationSummary | null> {
+    const db = this.getDb(session);
+    const conversation = await this.getDesignerCodexConversationByExternalId(
+      db,
+      conversationId,
+    );
+    if (!conversation) return null;
+
+    const [transcriptObject, turns, telemetryEvents] = await Promise.all([
+      this.requireDesignerObjectRefByExternalId(
+        db,
+        conversation.transcript_object_ref_id,
+      ),
+      this.listDesignerCodexTurns({ conversationId }, session),
+      this.listDesignerTelemetryEvents({ conversationId }, session),
+    ]);
+
+    return {
+      conversation,
+      transcriptObject,
+      turns,
+      telemetryEvents,
+    };
   }
 
   async recordDesignerCadWorkspace(
@@ -4454,6 +4928,54 @@ export class AgentDataStore {
     chunkId: string,
   ): Promise<DaemonLogChunk | null> {
     return db.one(app.daemon_log_chunks.where({ chunk_id: chunkId }));
+  }
+
+  private async getDesignerObjectRefByExternalId(
+    db: Db,
+    objectRefId: string,
+  ): Promise<DesignerObjectRef | null> {
+    return db.one(
+      app.designer_object_refs.where({ object_ref_id: objectRefId }),
+    );
+  }
+
+  private async requireDesignerObjectRefByExternalId(
+    db: Db,
+    objectRefId: string,
+  ): Promise<DesignerObjectRef> {
+    const objectRef = await this.getDesignerObjectRefByExternalId(
+      db,
+      objectRefId,
+    );
+    if (!objectRef) {
+      throw new Error(`designer object ref ${objectRefId} not found`);
+    }
+    return objectRef;
+  }
+
+  private async getDesignerCodexConversationByExternalId(
+    db: Db,
+    conversationId: string,
+  ): Promise<DesignerCodexConversation | null> {
+    return db.one(
+      app.designer_codex_conversations.where({
+        conversation_id: conversationId,
+      }),
+    );
+  }
+
+  private async requireDesignerCodexConversationByExternalId(
+    db: Db,
+    conversationId: string,
+  ): Promise<DesignerCodexConversation> {
+    const conversation = await this.getDesignerCodexConversationByExternalId(
+      db,
+      conversationId,
+    );
+    if (!conversation) {
+      throw new Error(`designer codex conversation ${conversationId} not found`);
+    }
+    return conversation;
   }
 
   private async getDesignerCadWorkspaceByExternalId(

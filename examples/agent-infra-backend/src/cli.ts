@@ -42,6 +42,11 @@ import {
   type DesignerCadToolSession,
   type DesignerCadWidget,
   type DesignerCadWorkspace,
+  type DesignerCodexConversation,
+  type DesignerCodexConversationSummary,
+  type DesignerCodexTurn,
+  type DesignerObjectRef,
+  type DesignerTelemetryEvent,
   type ListAgentClaimsInput,
   type ListBranchFileReviewStatesInput,
   type ListCommitTurnOperationsInput,
@@ -50,10 +55,14 @@ import {
   type ListDaemonLogEventsInput,
   type ListDaemonLogSourcesInput,
   type ListDaemonLogSummariesInput,
+  type ListDesignerCodexTurnsInput,
   type ListDesignerCadEventsInput,
   type ListDesignerCadOperationsInput,
+  type ListDesignerTelemetryEventsInput,
   type ListJobsInput,
   type ListTaskRecordsInput,
+  type RecordDesignerCodexConversationInput,
+  type RecordDesignerCodexTurnInput,
   type RecordDesignerCadDocumentInput,
   type RecordDesignerCadEventInput,
   type RecordDesignerCadOperationInput,
@@ -65,6 +74,8 @@ import {
   type RecordDesignerCadToolSessionInput,
   type RecordDesignerCadWidgetInput,
   type RecordDesignerCadWorkspaceInput,
+  type RecordDesignerObjectRefInput,
+  type RecordDesignerTelemetryEventInput,
   type RecordAgentClaimInput,
   type RecordBranchFileReviewStateInput,
   type RecordCommitTurnOperationInput,
@@ -832,6 +843,99 @@ function serializeTaskRecord(record: TaskRecord): SerializedTaskRecord {
 
 function serializeNullableDate(value: Date | undefined): string | null {
   return value ? value.toISOString() : null;
+}
+
+function serializeDesignerObjectRef(record: DesignerObjectRef) {
+  return {
+    objectRefId: record.object_ref_id,
+    provider: record.provider,
+    uri: record.uri,
+    bucket: record.bucket ?? null,
+    key: record.key ?? null,
+    region: record.region ?? null,
+    digestSha256: record.digest_sha256 ?? null,
+    byteSize: record.byte_size ?? null,
+    contentType: record.content_type ?? null,
+    objectKind: record.object_kind,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerCodexConversation(
+  record: DesignerCodexConversation,
+) {
+  return {
+    conversationId: record.conversation_id,
+    provider: record.provider,
+    providerSessionId: record.provider_session_id,
+    threadId: record.thread_id ?? null,
+    workspaceId: record.workspace_id ?? null,
+    workspaceKey: record.workspace_key ?? null,
+    repoRoot: record.repo_root ?? null,
+    workspaceRoot: record.workspace_root ?? null,
+    branch: record.branch ?? null,
+    model: record.model ?? null,
+    status: record.status,
+    transcriptObjectRefId: record.transcript_object_ref_id,
+    latestEventSequence: record.latest_event_sequence ?? null,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+    endedAt: serializeNullableDate(record.ended_at),
+  };
+}
+
+function serializeDesignerCodexTurn(record: DesignerCodexTurn) {
+  return {
+    turnId: record.turn_id,
+    conversationId: record.conversation_id,
+    sequence: record.sequence,
+    turnKind: record.turn_kind,
+    role: record.role,
+    actorKind: record.actor_kind,
+    actorId: record.actor_id ?? null,
+    summaryText: record.summary_text ?? null,
+    payloadObjectRefId: record.payload_object_ref_id,
+    promptObjectRefId: record.prompt_object_ref_id ?? null,
+    responseObjectRefId: record.response_object_ref_id ?? null,
+    tokenCountsJson: record.token_counts_json ?? null,
+    status: record.status,
+    startedAt: record.started_at.toISOString(),
+    completedAt: serializeNullableDate(record.completed_at),
+  };
+}
+
+function serializeDesignerTelemetryEvent(record: DesignerTelemetryEvent) {
+  return {
+    telemetryEventId: record.telemetry_event_id,
+    sessionId: record.session_id ?? null,
+    workspaceId: record.workspace_id ?? null,
+    conversationId: record.conversation_id ?? null,
+    eventType: record.event_type,
+    pane: record.pane ?? null,
+    sequence: record.sequence ?? null,
+    summaryText: record.summary_text ?? null,
+    payloadObjectRefId: record.payload_object_ref_id,
+    propertiesJson: record.properties_json ?? null,
+    occurredAt: record.occurred_at.toISOString(),
+    ingestedAt: record.ingested_at.toISOString(),
+  };
+}
+
+function serializeDesignerCodexConversationSummary(
+  summary: DesignerCodexConversationSummary,
+) {
+  return {
+    conversation: serializeDesignerCodexConversation(summary.conversation),
+    transcriptObject: serializeDesignerObjectRef(summary.transcriptObject),
+    turns: summary.turns.map(serializeDesignerCodexTurn),
+    telemetryEvents: summary.telemetryEvents.map(
+      serializeDesignerTelemetryEvent,
+    ),
+  };
 }
 
 function serializeDesignerCadWorkspace(record: DesignerCadWorkspace) {
@@ -1884,6 +1988,81 @@ async function main(): Promise<void> {
           throw new Error(`run ${runId} not found`);
         }
         renderJson(serializeRunSummary(summary));
+        break;
+      }
+      case "record-designer-object-ref": {
+        const input = readJsonInput<RecordDesignerObjectRefInput>(
+          "record-designer-object-ref",
+        );
+        const objectRef = await store.recordDesignerObjectRef(input);
+        renderJson(serializeDesignerObjectRef(objectRef));
+        break;
+      }
+      case "record-designer-codex-conversation": {
+        const input = readJsonInput<RecordDesignerCodexConversationInput>(
+          "record-designer-codex-conversation",
+        );
+        const conversation =
+          await store.recordDesignerCodexConversation(input);
+        renderJson(serializeDesignerCodexConversation(conversation));
+        break;
+      }
+      case "record-designer-codex-turn": {
+        const input = readJsonInput<RecordDesignerCodexTurnInput>(
+          "record-designer-codex-turn",
+        );
+        const turn = await store.recordDesignerCodexTurn(input);
+        renderJson(serializeDesignerCodexTurn(turn));
+        break;
+      }
+      case "record-designer-telemetry-event": {
+        const input = readJsonInput<RecordDesignerTelemetryEventInput>(
+          "record-designer-telemetry-event",
+        );
+        const event = await store.recordDesignerTelemetryEvent(input);
+        renderJson(serializeDesignerTelemetryEvent(event));
+        break;
+      }
+      case "list-designer-codex-turns": {
+        const query: ListDesignerCodexTurnsInput = {
+          conversationId: readFlag("--conversation-id"),
+          role: readFlag("--role"),
+          status: readFlag("--status"),
+          afterSequence: readIntegerFlag("--after-sequence"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const turns = await store.listDesignerCodexTurns(query);
+        renderJson(turns.map(serializeDesignerCodexTurn));
+        break;
+      }
+      case "list-designer-telemetry-events": {
+        const query: ListDesignerTelemetryEventsInput = {
+          conversationId: readFlag("--conversation-id"),
+          sessionId: readFlag("--session-id"),
+          workspaceId: readFlag("--workspace-id"),
+          eventType: readFlag("--event-type"),
+          afterSequence: readIntegerFlag("--after-sequence"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const events = await store.listDesignerTelemetryEvents(query);
+        renderJson(events.map(serializeDesignerTelemetryEvent));
+        break;
+      }
+      case "get-designer-codex-conversation-summary": {
+        const conversationId = readFlag("--conversation-id");
+        if (!conversationId) {
+          throw new Error(
+            "get-designer-codex-conversation-summary requires --conversation-id",
+          );
+        }
+        const summary =
+          await store.getDesignerCodexConversationSummary(conversationId);
+        if (!summary) {
+          throw new Error(
+            `designer codex conversation ${conversationId} not found`,
+          );
+        }
+        renderJson(serializeDesignerCodexConversationSummary(summary));
         break;
       }
       case "record-designer-cad-workspace": {

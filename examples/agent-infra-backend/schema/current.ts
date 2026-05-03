@@ -250,6 +250,83 @@ table("task_records", {
   updated_at: col.timestamp(),
 });
 
+table("designer_object_refs", {
+  object_ref_id: col.string(),
+  provider: col.string(),
+  uri: col.string(),
+  bucket: col.string().optional(),
+  key: col.string().optional(),
+  region: col.string().optional(),
+  digest_sha256: col.string().optional(),
+  byte_size: col.int().optional(),
+  content_type: col.string().optional(),
+  object_kind: col.string(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_codex_conversations", {
+  conversation_id: col.string(),
+  provider: col.string(),
+  provider_session_id: col.string(),
+  thread_id: col.string().optional(),
+  workspace_id: col.string().optional(),
+  workspace_key: col.string().optional(),
+  repo_root: col.string().optional(),
+  workspace_root: col.string().optional(),
+  branch: col.string().optional(),
+  model: col.string().optional(),
+  status: col.string(),
+  transcript_object_ref_id: col.string(),
+  transcript_object_row_id: col.ref("designer_object_refs"),
+  latest_event_sequence: col.int().optional(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  ended_at: col.timestamp().optional(),
+});
+
+table("designer_codex_turns", {
+  turn_id: col.string(),
+  conversation_id: col.string(),
+  conversation_row_id: col.ref("designer_codex_conversations"),
+  sequence: col.int(),
+  turn_kind: col.string(),
+  role: col.string(),
+  actor_kind: col.string(),
+  actor_id: col.string().optional(),
+  summary_text: col.string().optional(),
+  payload_object_ref_id: col.string(),
+  payload_object_row_id: col.ref("designer_object_refs"),
+  prompt_object_ref_id: col.string().optional(),
+  prompt_object_row_id: col.ref("designer_object_refs").optional(),
+  response_object_ref_id: col.string().optional(),
+  response_object_row_id: col.ref("designer_object_refs").optional(),
+  token_counts_json: col.json().optional(),
+  status: col.string(),
+  started_at: col.timestamp(),
+  completed_at: col.timestamp().optional(),
+});
+
+table("designer_telemetry_events", {
+  telemetry_event_id: col.string(),
+  session_id: col.string().optional(),
+  workspace_id: col.string().optional(),
+  conversation_id: col.string().optional(),
+  conversation_row_id: col.ref("designer_codex_conversations").optional(),
+  event_type: col.string(),
+  pane: col.string().optional(),
+  sequence: col.int().optional(),
+  summary_text: col.string().optional(),
+  payload_object_ref_id: col.string(),
+  payload_object_row_id: col.ref("designer_object_refs"),
+  properties_json: col.json().optional(),
+  occurred_at: col.timestamp(),
+  ingested_at: col.timestamp(),
+});
+
 table("designer_cad_workspaces", {
   workspace_id: col.string(),
   workspace_key: col.string(),

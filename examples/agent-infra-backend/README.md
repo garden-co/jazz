@@ -170,6 +170,69 @@ All commands accept:
 When `--server-url` is set, backend-owned store operations use
 backend-authenticated sync through `backendSecret`.
 
+## Designer State And Object Storage
+
+Designer stores authoritative state in Jazz rows and stores every large,
+immutable, or replayable payload in object storage. Jazz rows keep typed IDs,
+causal sequence fields, summary text, status, timestamps, and object references.
+Object storage keeps Codex transcripts, turn payloads, prompts, responses,
+usage telemetry payloads, indexer replay payloads, CAD source snapshots, preview
+artifacts, and any future Designer-produced binary or JSON artifact.
+
+The first shared surface for Prom Designer and remote Codex is object-backed
+conversation capture:
+
+```sh
+node examples/agent-infra-backend/dist/src/cli.js record-designer-object-ref \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"objectRefId":"obj-transcript-019dec01","provider":"oci","uri":"oci://designer-codex/conversations/019dec01/transcript.jsonl","objectKind":"codex.transcript","contentType":"application/jsonl"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-codex-conversation \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"conversationId":"designer-codex-019dec01","provider":"codex","providerSessionId":"019dec01-6eaa-7650-986f-f41ab49a59fd","workspaceKey":"rubiks-cube","workspaceRoot":"~/code/prom/ide/designer","transcriptObjectRefId":"obj-transcript-019dec01"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-object-ref \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"objectRefId":"obj-turn-019dec01-0001","provider":"oci","uri":"oci://designer-codex/conversations/019dec01/turns/0001.json","objectKind":"codex.turn","contentType":"application/json"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-codex-turn \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"conversationId":"designer-codex-019dec01","sequence":1,"turnKind":"assistant","role":"assistant","actorKind":"agent","payloadObjectRefId":"obj-turn-019dec01-0001","summaryText":"Object-backed response payload."}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-object-ref \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"objectRefId":"obj-telemetry-019dec01-0001","provider":"oci","uri":"oci://designer-telemetry/events/019dec01/0001.json","objectKind":"designer.telemetry.event","contentType":"application/json"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-telemetry-event \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"conversationId":"designer-codex-019dec01","eventType":"designer.agent_prompt_completed","pane":"chat","sequence":1,"payloadObjectRefId":"obj-telemetry-019dec01-0001"}'
+
+node examples/agent-infra-backend/dist/src/cli.js get-designer-codex-conversation-summary \
+  --data-path ~/.jazz2/agent-infra.db \
+  --conversation-id designer-codex-019dec01
+```
+
+The Designer telemetry branch maps into this shape directly:
+
+- `UsageTelemetryEvent` becomes `designer_telemetry_events`.
+- Live trace events keep their compact row shape, with full payloads stored as
+  `designer_object_refs`.
+- Indexer upload receipts map to `designer_object_refs.metadata_json` and the
+  object URI fields.
+- Codex/app-server thread tails map to `designer_codex_conversations` and
+  `designer_codex_turns`, with transcript and turn bodies always stored behind
+  object refs.
+
+Related commands:
+
+- `record-designer-object-ref`
+- `record-designer-codex-conversation`
+- `record-designer-codex-turn`
+- `record-designer-telemetry-event`
+- `list-designer-codex-turns`
+- `list-designer-telemetry-events`
+- `get-designer-codex-conversation-summary`
+
 ## Designer CAD Commands
 
 The Designer CAD surface stores collaborative `.build123d.py` work as a

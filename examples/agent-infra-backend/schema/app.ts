@@ -279,6 +279,87 @@ export interface TaskRecord {
   updated_at: Date;
 }
 
+export interface DesignerObjectRef {
+  id: string;
+  object_ref_id: string;
+  provider: string;
+  uri: string;
+  bucket?: string;
+  key?: string;
+  region?: string;
+  digest_sha256?: string;
+  byte_size?: number;
+  content_type?: string;
+  object_kind: string;
+  status: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCodexConversation {
+  id: string;
+  conversation_id: string;
+  provider: string;
+  provider_session_id: string;
+  thread_id?: string;
+  workspace_id?: string;
+  workspace_key?: string;
+  repo_root?: string;
+  workspace_root?: string;
+  branch?: string;
+  model?: string;
+  status: string;
+  transcript_object_ref_id: string;
+  transcript_object_row_id: string;
+  latest_event_sequence?: number;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+  ended_at?: Date;
+}
+
+export interface DesignerCodexTurn {
+  id: string;
+  turn_id: string;
+  conversation_id: string;
+  conversation_row_id: string;
+  sequence: number;
+  turn_kind: string;
+  role: string;
+  actor_kind: string;
+  actor_id?: string;
+  summary_text?: string;
+  payload_object_ref_id: string;
+  payload_object_row_id: string;
+  prompt_object_ref_id?: string;
+  prompt_object_row_id?: string;
+  response_object_ref_id?: string;
+  response_object_row_id?: string;
+  token_counts_json?: JsonValue;
+  status: string;
+  started_at: Date;
+  completed_at?: Date;
+}
+
+export interface DesignerTelemetryEvent {
+  id: string;
+  telemetry_event_id: string;
+  session_id?: string;
+  workspace_id?: string;
+  conversation_id?: string;
+  conversation_row_id?: string;
+  event_type: string;
+  pane?: string;
+  sequence?: number;
+  summary_text?: string;
+  payload_object_ref_id: string;
+  payload_object_row_id: string;
+  properties_json?: JsonValue;
+  occurred_at: Date;
+  ingested_at: Date;
+}
+
 export interface DesignerCadWorkspace {
   id: string;
   workspace_id: string;
@@ -744,6 +825,83 @@ export interface TaskRecordInit {
   metadata_json?: JsonValue | null;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface DesignerObjectRefInit {
+  object_ref_id: string;
+  provider: string;
+  uri: string;
+  bucket?: string | null;
+  key?: string | null;
+  region?: string | null;
+  digest_sha256?: string | null;
+  byte_size?: number | null;
+  content_type?: string | null;
+  object_kind: string;
+  status: string;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface DesignerCodexConversationInit {
+  conversation_id: string;
+  provider: string;
+  provider_session_id: string;
+  thread_id?: string | null;
+  workspace_id?: string | null;
+  workspace_key?: string | null;
+  repo_root?: string | null;
+  workspace_root?: string | null;
+  branch?: string | null;
+  model?: string | null;
+  status: string;
+  transcript_object_ref_id: string;
+  transcript_object_row_id: string;
+  latest_event_sequence?: number | null;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+  ended_at?: Date | null;
+}
+
+export interface DesignerCodexTurnInit {
+  turn_id: string;
+  conversation_id: string;
+  conversation_row_id: string;
+  sequence: number;
+  turn_kind: string;
+  role: string;
+  actor_kind: string;
+  actor_id?: string | null;
+  summary_text?: string | null;
+  payload_object_ref_id: string;
+  payload_object_row_id: string;
+  prompt_object_ref_id?: string | null;
+  prompt_object_row_id?: string | null;
+  response_object_ref_id?: string | null;
+  response_object_row_id?: string | null;
+  token_counts_json?: JsonValue | null;
+  status: string;
+  started_at: Date;
+  completed_at?: Date | null;
+}
+
+export interface DesignerTelemetryEventInit {
+  telemetry_event_id: string;
+  session_id?: string | null;
+  workspace_id?: string | null;
+  conversation_id?: string | null;
+  conversation_row_id?: string | null;
+  event_type: string;
+  pane?: string | null;
+  sequence?: number | null;
+  summary_text?: string | null;
+  payload_object_ref_id: string;
+  payload_object_row_id: string;
+  properties_json?: JsonValue | null;
+  occurred_at: Date;
+  ingested_at: Date;
 }
 
 export interface DesignerCadWorkspaceInit {
@@ -1264,6 +1422,99 @@ export interface TaskRecordWhereInput {
   $canDelete?: boolean;
 }
 
+export interface DesignerObjectRefWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  provider?: string | { eq?: string; ne?: string; contains?: string };
+  uri?: string | { eq?: string; ne?: string; contains?: string };
+  bucket?: string | { eq?: string; ne?: string; contains?: string };
+  key?: string | { eq?: string; ne?: string; contains?: string };
+  region?: string | { eq?: string; ne?: string; contains?: string };
+  digest_sha256?: string | { eq?: string; ne?: string; contains?: string };
+  byte_size?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  content_type?: string | { eq?: string; ne?: string; contains?: string };
+  object_kind?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCodexConversationWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  conversation_id?: string | { eq?: string; ne?: string; contains?: string };
+  provider?: string | { eq?: string; ne?: string; contains?: string };
+  provider_session_id?: string | { eq?: string; ne?: string; contains?: string };
+  thread_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_key?: string | { eq?: string; ne?: string; contains?: string };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_root?: string | { eq?: string; ne?: string; contains?: string };
+  branch?: string | { eq?: string; ne?: string; contains?: string };
+  model?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  transcript_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  transcript_object_row_id?: string | { eq?: string; ne?: string };
+  latest_event_sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  ended_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerCodexTurnWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  turn_id?: string | { eq?: string; ne?: string; contains?: string };
+  conversation_id?: string | { eq?: string; ne?: string; contains?: string };
+  conversation_row_id?: string | { eq?: string; ne?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  turn_kind?: string | { eq?: string; ne?: string; contains?: string };
+  role?: string | { eq?: string; ne?: string; contains?: string };
+  actor_kind?: string | { eq?: string; ne?: string; contains?: string };
+  actor_id?: string | { eq?: string; ne?: string; contains?: string };
+  summary_text?: string | { eq?: string; ne?: string; contains?: string };
+  payload_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  payload_object_row_id?: string | { eq?: string; ne?: string };
+  prompt_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  prompt_object_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  response_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  response_object_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  token_counts_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  started_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  completed_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
+export interface DesignerTelemetryEventWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  telemetry_event_id?: string | { eq?: string; ne?: string; contains?: string };
+  session_id?: string | { eq?: string; ne?: string; contains?: string };
+  workspace_id?: string | { eq?: string; ne?: string; contains?: string };
+  conversation_id?: string | { eq?: string; ne?: string; contains?: string };
+  conversation_row_id?: string | { eq?: string; ne?: string; isNull?: boolean };
+  event_type?: string | { eq?: string; ne?: string; contains?: string };
+  pane?: string | { eq?: string; ne?: string; contains?: string };
+  sequence?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  summary_text?: string | { eq?: string; ne?: string; contains?: string };
+  payload_object_ref_id?: string | { eq?: string; ne?: string; contains?: string };
+  payload_object_row_id?: string | { eq?: string; ne?: string };
+  properties_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  occurred_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  ingested_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 export interface DesignerCadWorkspaceWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   workspace_id?: string | { eq?: string; ne?: string; contains?: string };
@@ -1536,6 +1787,10 @@ type AnyDaemonLogEventQueryBuilder<T = any> = { readonly _table: "daemon_log_eve
 type AnyDaemonLogCheckpointQueryBuilder<T = any> = { readonly _table: "daemon_log_checkpoints" } & QueryBuilder<T>;
 type AnyDaemonLogSummaryQueryBuilder<T = any> = { readonly _table: "daemon_log_summaries" } & QueryBuilder<T>;
 type AnyTaskRecordQueryBuilder<T = any> = { readonly _table: "task_records" } & QueryBuilder<T>;
+type AnyDesignerObjectRefQueryBuilder<T = any> = { readonly _table: "designer_object_refs" } & QueryBuilder<T>;
+type AnyDesignerCodexConversationQueryBuilder<T = any> = { readonly _table: "designer_codex_conversations" } & QueryBuilder<T>;
+type AnyDesignerCodexTurnQueryBuilder<T = any> = { readonly _table: "designer_codex_turns" } & QueryBuilder<T>;
+type AnyDesignerTelemetryEventQueryBuilder<T = any> = { readonly _table: "designer_telemetry_events" } & QueryBuilder<T>;
 type AnyDesignerCadWorkspaceQueryBuilder<T = any> = { readonly _table: "designer_cad_workspaces" } & QueryBuilder<T>;
 type AnyDesignerCadDocumentQueryBuilder<T = any> = { readonly _table: "designer_cad_documents" } & QueryBuilder<T>;
 type AnyDesignerCadSessionQueryBuilder<T = any> = { readonly _table: "designer_cad_sessions" } & QueryBuilder<T>;
@@ -1625,6 +1880,32 @@ export interface DaemonLogCheckpointInclude {
 
 export interface DaemonLogSummaryInclude {
   source_row?: true | DaemonLogSourceInclude | AnyDaemonLogSourceQueryBuilder<any>;
+}
+
+export interface DesignerObjectRefInclude {
+  designer_codex_conversationsViaTranscript_object_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
+  designer_codex_turnsViaPayload_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
+  designer_codex_turnsViaPrompt_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
+  designer_codex_turnsViaResponse_object_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
+  designer_telemetry_eventsViaPayload_object_row?: true | DesignerTelemetryEventInclude | AnyDesignerTelemetryEventQueryBuilder<any>;
+}
+
+export interface DesignerCodexConversationInclude {
+  transcript_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+  designer_codex_turnsViaConversation_row?: true | DesignerCodexTurnInclude | AnyDesignerCodexTurnQueryBuilder<any>;
+  designer_telemetry_eventsViaConversation_row?: true | DesignerTelemetryEventInclude | AnyDesignerTelemetryEventQueryBuilder<any>;
+}
+
+export interface DesignerCodexTurnInclude {
+  conversation_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
+  payload_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+  prompt_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+  response_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
+}
+
+export interface DesignerTelemetryEventInclude {
+  conversation_row?: true | DesignerCodexConversationInclude | AnyDesignerCodexConversationQueryBuilder<any>;
+  payload_object_row?: true | DesignerObjectRefInclude | AnyDesignerObjectRefQueryBuilder<any>;
 }
 
 export interface DesignerCadWorkspaceInclude {
@@ -2094,6 +2375,166 @@ export type DaemonLogSummaryIncludedRelations<I extends DaemonLogSummaryInclude 
             ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends DaemonLogSourceInclude
               ? R extends true ? DaemonLogSourceWithIncludes<RelationInclude, false> : DaemonLogSourceWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerObjectRefIncludedRelations<I extends DesignerObjectRefInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "designer_codex_conversationsViaTranscript_object_row"
+      ? NonNullable<I["designer_codex_conversationsViaTranscript_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexConversation[]
+          : RelationInclude extends AnyDesignerCodexConversationQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCodexConversationInclude
+              ? DesignerCodexConversationWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_codex_turnsViaPayload_object_row"
+      ? NonNullable<I["designer_codex_turnsViaPayload_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexTurn[]
+          : RelationInclude extends AnyDesignerCodexTurnQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCodexTurnInclude
+              ? DesignerCodexTurnWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_codex_turnsViaPrompt_object_row"
+      ? NonNullable<I["designer_codex_turnsViaPrompt_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexTurn[]
+          : RelationInclude extends AnyDesignerCodexTurnQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCodexTurnInclude
+              ? DesignerCodexTurnWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_codex_turnsViaResponse_object_row"
+      ? NonNullable<I["designer_codex_turnsViaResponse_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexTurn[]
+          : RelationInclude extends AnyDesignerCodexTurnQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCodexTurnInclude
+              ? DesignerCodexTurnWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_telemetry_eventsViaPayload_object_row"
+      ? NonNullable<I["designer_telemetry_eventsViaPayload_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerTelemetryEvent[]
+          : RelationInclude extends AnyDesignerTelemetryEventQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerTelemetryEventInclude
+              ? DesignerTelemetryEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCodexConversationIncludedRelations<I extends DesignerCodexConversationInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "transcript_object_row"
+      ? NonNullable<I["transcript_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerObjectRef : DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? R extends true ? DesignerObjectRefWithIncludes<RelationInclude, false> : DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "designer_codex_turnsViaConversation_row"
+      ? NonNullable<I["designer_codex_turnsViaConversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexTurn[]
+          : RelationInclude extends AnyDesignerCodexTurnQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerCodexTurnInclude
+              ? DesignerCodexTurnWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : K extends "designer_telemetry_eventsViaConversation_row"
+      ? NonNullable<I["designer_telemetry_eventsViaConversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerTelemetryEvent[]
+          : RelationInclude extends AnyDesignerTelemetryEventQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends DesignerTelemetryEventInclude
+              ? DesignerTelemetryEventWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type DesignerCodexTurnIncludedRelations<I extends DesignerCodexTurnInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "conversation_row"
+      ? NonNullable<I["conversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerCodexConversation : DesignerCodexConversation | undefined
+          : RelationInclude extends AnyDesignerCodexConversationQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerCodexConversationInclude
+              ? R extends true ? DesignerCodexConversationWithIncludes<RelationInclude, false> : DesignerCodexConversationWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "payload_object_row"
+      ? NonNullable<I["payload_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerObjectRef : DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? R extends true ? DesignerObjectRefWithIncludes<RelationInclude, false> : DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "prompt_object_row"
+      ? NonNullable<I["prompt_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "response_object_row"
+      ? NonNullable<I["response_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
+
+export type DesignerTelemetryEventIncludedRelations<I extends DesignerTelemetryEventInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "conversation_row"
+      ? NonNullable<I["conversation_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? DesignerCodexConversation | undefined
+          : RelationInclude extends AnyDesignerCodexConversationQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends DesignerCodexConversationInclude
+              ? DesignerCodexConversationWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "payload_object_row"
+      ? NonNullable<I["payload_object_row"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? DesignerObjectRef : DesignerObjectRef | undefined
+          : RelationInclude extends AnyDesignerObjectRefQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends DesignerObjectRefInclude
+              ? R extends true ? DesignerObjectRefWithIncludes<RelationInclude, false> : DesignerObjectRefWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
@@ -2621,6 +3062,32 @@ export interface DaemonLogSummaryRelations {
   source_row: DaemonLogSource | undefined;
 }
 
+export interface DesignerObjectRefRelations {
+  designer_codex_conversationsViaTranscript_object_row: DesignerCodexConversation[];
+  designer_codex_turnsViaPayload_object_row: DesignerCodexTurn[];
+  designer_codex_turnsViaPrompt_object_row: DesignerCodexTurn[];
+  designer_codex_turnsViaResponse_object_row: DesignerCodexTurn[];
+  designer_telemetry_eventsViaPayload_object_row: DesignerTelemetryEvent[];
+}
+
+export interface DesignerCodexConversationRelations {
+  transcript_object_row: DesignerObjectRef | undefined;
+  designer_codex_turnsViaConversation_row: DesignerCodexTurn[];
+  designer_telemetry_eventsViaConversation_row: DesignerTelemetryEvent[];
+}
+
+export interface DesignerCodexTurnRelations {
+  conversation_row: DesignerCodexConversation | undefined;
+  payload_object_row: DesignerObjectRef | undefined;
+  prompt_object_row: DesignerObjectRef | undefined;
+  response_object_row: DesignerObjectRef | undefined;
+}
+
+export interface DesignerTelemetryEventRelations {
+  conversation_row: DesignerCodexConversation | undefined;
+  payload_object_row: DesignerObjectRef | undefined;
+}
+
 export interface DesignerCadWorkspaceRelations {
   designer_cad_documentsViaWorkspace_row: DesignerCadDocument[];
   designer_cad_sessionsViaWorkspace_row: DesignerCadSession[];
@@ -2727,6 +3194,14 @@ export type DaemonLogEventWithIncludes<I extends DaemonLogEventInclude = {}, R e
 export type DaemonLogCheckpointWithIncludes<I extends DaemonLogCheckpointInclude = {}, R extends boolean = false> = DaemonLogCheckpoint & DaemonLogCheckpointIncludedRelations<I, R>;
 
 export type DaemonLogSummaryWithIncludes<I extends DaemonLogSummaryInclude = {}, R extends boolean = false> = DaemonLogSummary & DaemonLogSummaryIncludedRelations<I, R>;
+
+export type DesignerObjectRefWithIncludes<I extends DesignerObjectRefInclude = {}, R extends boolean = false> = DesignerObjectRef & DesignerObjectRefIncludedRelations<I, R>;
+
+export type DesignerCodexConversationWithIncludes<I extends DesignerCodexConversationInclude = {}, R extends boolean = false> = DesignerCodexConversation & DesignerCodexConversationIncludedRelations<I, R>;
+
+export type DesignerCodexTurnWithIncludes<I extends DesignerCodexTurnInclude = {}, R extends boolean = false> = DesignerCodexTurn & DesignerCodexTurnIncludedRelations<I, R>;
+
+export type DesignerTelemetryEventWithIncludes<I extends DesignerTelemetryEventInclude = {}, R extends boolean = false> = DesignerTelemetryEvent & DesignerTelemetryEventIncludedRelations<I, R>;
 
 export type DesignerCadWorkspaceWithIncludes<I extends DesignerCadWorkspaceInclude = {}, R extends boolean = false> = DesignerCadWorkspace & DesignerCadWorkspaceIncludedRelations<I, R>;
 
@@ -2863,6 +3338,34 @@ export type TaskRecordSelectableColumn = keyof TaskRecord | PermissionIntrospect
 export type TaskRecordOrderableColumn = keyof TaskRecord | PermissionIntrospectionColumn;
 
 export type TaskRecordSelected<S extends TaskRecordSelectableColumn = keyof TaskRecord> = ("*" extends S ? TaskRecord : Pick<TaskRecord, Extract<S | "id", keyof TaskRecord>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerObjectRefSelectableColumn = keyof DesignerObjectRef | PermissionIntrospectionColumn | "*";
+export type DesignerObjectRefOrderableColumn = keyof DesignerObjectRef | PermissionIntrospectionColumn;
+
+export type DesignerObjectRefSelected<S extends DesignerObjectRefSelectableColumn = keyof DesignerObjectRef> = ("*" extends S ? DesignerObjectRef : Pick<DesignerObjectRef, Extract<S | "id", keyof DesignerObjectRef>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerObjectRefSelectedWithIncludes<I extends DesignerObjectRefInclude = {}, S extends DesignerObjectRefSelectableColumn = keyof DesignerObjectRef, R extends boolean = false> = DesignerObjectRefSelected<S> & DesignerObjectRefIncludedRelations<I, R>;
+
+export type DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation | PermissionIntrospectionColumn | "*";
+export type DesignerCodexConversationOrderableColumn = keyof DesignerCodexConversation | PermissionIntrospectionColumn;
+
+export type DesignerCodexConversationSelected<S extends DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation> = ("*" extends S ? DesignerCodexConversation : Pick<DesignerCodexConversation, Extract<S | "id", keyof DesignerCodexConversation>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCodexConversationSelectedWithIncludes<I extends DesignerCodexConversationInclude = {}, S extends DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation, R extends boolean = false> = DesignerCodexConversationSelected<S> & DesignerCodexConversationIncludedRelations<I, R>;
+
+export type DesignerCodexTurnSelectableColumn = keyof DesignerCodexTurn | PermissionIntrospectionColumn | "*";
+export type DesignerCodexTurnOrderableColumn = keyof DesignerCodexTurn | PermissionIntrospectionColumn;
+
+export type DesignerCodexTurnSelected<S extends DesignerCodexTurnSelectableColumn = keyof DesignerCodexTurn> = ("*" extends S ? DesignerCodexTurn : Pick<DesignerCodexTurn, Extract<S | "id", keyof DesignerCodexTurn>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerCodexTurnSelectedWithIncludes<I extends DesignerCodexTurnInclude = {}, S extends DesignerCodexTurnSelectableColumn = keyof DesignerCodexTurn, R extends boolean = false> = DesignerCodexTurnSelected<S> & DesignerCodexTurnIncludedRelations<I, R>;
+
+export type DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent | PermissionIntrospectionColumn | "*";
+export type DesignerTelemetryEventOrderableColumn = keyof DesignerTelemetryEvent | PermissionIntrospectionColumn;
+
+export type DesignerTelemetryEventSelected<S extends DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent> = ("*" extends S ? DesignerTelemetryEvent : Pick<DesignerTelemetryEvent, Extract<S | "id", keyof DesignerTelemetryEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type DesignerTelemetryEventSelectedWithIncludes<I extends DesignerTelemetryEventInclude = {}, S extends DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent, R extends boolean = false> = DesignerTelemetryEventSelected<S> & DesignerTelemetryEventIncludedRelations<I, R>;
 
 export type DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn | "*";
 export type DesignerCadWorkspaceOrderableColumn = keyof DesignerCadWorkspace | PermissionIntrospectionColumn;
@@ -4443,6 +4946,484 @@ export const wasmSchema: WasmSchema = {
       },
       {
         "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_object_refs": {
+    "columns": [
+      {
+        "name": "object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "provider",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "uri",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "bucket",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "key",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "region",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "digest_sha256",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "byte_size",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "content_type",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "object_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ]
+  },
+  "designer_codex_conversations": {
+    "columns": [
+      {
+        "name": "conversation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "provider",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "provider_session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "thread_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_key",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "branch",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "model",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "transcript_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "transcript_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "latest_event_sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "ended_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_codex_turns": {
+    "columns": [
+      {
+        "name": "turn_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "conversation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "conversation_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_codex_conversations"
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": false
+      },
+      {
+        "name": "turn_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "role",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "actor_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "summary_text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "payload_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "payload_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "prompt_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "prompt_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "response_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "response_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "token_counts_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "started_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "completed_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      }
+    ]
+  },
+  "designer_telemetry_events": {
+    "columns": [
+      {
+        "name": "telemetry_event_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "workspace_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "conversation_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "conversation_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "designer_codex_conversations"
+      },
+      {
+        "name": "event_type",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "pane",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "sequence",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "summary_text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "payload_object_ref_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "payload_object_row_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "designer_object_refs"
+      },
+      {
+        "name": "properties_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "occurred_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "ingested_at",
         "column_type": {
           "type": "Timestamp"
         },
@@ -8860,6 +9841,806 @@ export class TaskRecordQueryBuilder<I extends Record<string, never> = {}, S exte
   }
 }
 
+export class DesignerObjectRefQueryBuilder<I extends DesignerObjectRefInclude = {}, S extends DesignerObjectRefSelectableColumn = keyof DesignerObjectRef, R extends boolean = false> implements QueryBuilder<DesignerObjectRefSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_object_refs";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerObjectRefSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerObjectRefInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerObjectRefInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerObjectRefWhereInput): DesignerObjectRefQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerObjectRefSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerObjectRefQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerObjectRefInclude>(relations: NewI): DesignerObjectRefQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerObjectRefQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerObjectRefOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerObjectRefQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerObjectRefQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerObjectRefQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "designer_codex_conversationsViaTranscript_object_row" | "designer_codex_turnsViaPayload_object_row" | "designer_codex_turnsViaPrompt_object_row" | "designer_codex_turnsViaResponse_object_row" | "designer_telemetry_eventsViaPayload_object_row"): DesignerObjectRefQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerObjectRefWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerObjectRefQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerObjectRefInclude = I, CloneS extends DesignerObjectRefSelectableColumn = S, CloneR extends boolean = R>(): DesignerObjectRefQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerObjectRefQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCodexConversationQueryBuilder<I extends DesignerCodexConversationInclude = {}, S extends DesignerCodexConversationSelectableColumn = keyof DesignerCodexConversation, R extends boolean = false> implements QueryBuilder<DesignerCodexConversationSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_codex_conversations";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCodexConversationSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCodexConversationInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCodexConversationInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCodexConversationWhereInput): DesignerCodexConversationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCodexConversationSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCodexConversationQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCodexConversationInclude>(relations: NewI): DesignerCodexConversationQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCodexConversationQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCodexConversationOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCodexConversationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCodexConversationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCodexConversationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "transcript_object_row" | "designer_codex_turnsViaConversation_row" | "designer_telemetry_eventsViaConversation_row"): DesignerCodexConversationQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCodexConversationWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCodexConversationQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCodexConversationInclude = I, CloneS extends DesignerCodexConversationSelectableColumn = S, CloneR extends boolean = R>(): DesignerCodexConversationQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCodexConversationQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerCodexTurnQueryBuilder<I extends DesignerCodexTurnInclude = {}, S extends DesignerCodexTurnSelectableColumn = keyof DesignerCodexTurn, R extends boolean = false> implements QueryBuilder<DesignerCodexTurnSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_codex_turns";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerCodexTurnSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerCodexTurnInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerCodexTurnInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerCodexTurnWhereInput): DesignerCodexTurnQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerCodexTurnSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerCodexTurnQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerCodexTurnInclude>(relations: NewI): DesignerCodexTurnQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerCodexTurnQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerCodexTurnOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerCodexTurnQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerCodexTurnQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerCodexTurnQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "conversation_row" | "payload_object_row" | "prompt_object_row" | "response_object_row"): DesignerCodexTurnQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerCodexTurnWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerCodexTurnQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerCodexTurnInclude = I, CloneS extends DesignerCodexTurnSelectableColumn = S, CloneR extends boolean = R>(): DesignerCodexTurnQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerCodexTurnQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
+export class DesignerTelemetryEventQueryBuilder<I extends DesignerTelemetryEventInclude = {}, S extends DesignerTelemetryEventSelectableColumn = keyof DesignerTelemetryEvent, R extends boolean = false> implements QueryBuilder<DesignerTelemetryEventSelectedWithIncludes<I, S, R>> {
+  readonly _table = "designer_telemetry_events";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: DesignerTelemetryEventSelectedWithIncludes<I, S, R>;
+  readonly _initType!: DesignerTelemetryEventInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<DesignerTelemetryEventInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: DesignerTelemetryEventWhereInput): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends DesignerTelemetryEventSelectableColumn>(...columns: [NewS, ...NewS[]]): DesignerTelemetryEventQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends DesignerTelemetryEventInclude>(relations: NewI): DesignerTelemetryEventQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): DesignerTelemetryEventQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: DesignerTelemetryEventOrderableColumn, direction: "asc" | "desc" = "asc"): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "conversation_row" | "payload_object_row"): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: DesignerTelemetryEventWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): DesignerTelemetryEventQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends DesignerTelemetryEventInclude = I, CloneS extends DesignerTelemetryEventSelectableColumn = S, CloneR extends boolean = R>(): DesignerTelemetryEventQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new DesignerTelemetryEventQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export class DesignerCadWorkspaceQueryBuilder<I extends DesignerCadWorkspaceInclude = {}, S extends DesignerCadWorkspaceSelectableColumn = keyof DesignerCadWorkspace, R extends boolean = false> implements QueryBuilder<DesignerCadWorkspaceSelectedWithIncludes<I, S, R>> {
   readonly _table = "designer_cad_workspaces";
   readonly _schema: WasmSchema = wasmSchema;
@@ -11477,6 +13258,10 @@ export interface GeneratedApp {
   daemon_log_checkpoints: DaemonLogCheckpointQueryBuilder;
   daemon_log_summaries: DaemonLogSummaryQueryBuilder;
   task_records: TaskRecordQueryBuilder;
+  designer_object_refs: DesignerObjectRefQueryBuilder;
+  designer_codex_conversations: DesignerCodexConversationQueryBuilder;
+  designer_codex_turns: DesignerCodexTurnQueryBuilder;
+  designer_telemetry_events: DesignerTelemetryEventQueryBuilder;
   designer_cad_workspaces: DesignerCadWorkspaceQueryBuilder;
   designer_cad_documents: DesignerCadDocumentQueryBuilder;
   designer_cad_sessions: DesignerCadSessionQueryBuilder;
@@ -11510,6 +13295,10 @@ export const app: GeneratedApp = {
   daemon_log_checkpoints: new DaemonLogCheckpointQueryBuilder(),
   daemon_log_summaries: new DaemonLogSummaryQueryBuilder(),
   task_records: new TaskRecordQueryBuilder(),
+  designer_object_refs: new DesignerObjectRefQueryBuilder(),
+  designer_codex_conversations: new DesignerCodexConversationQueryBuilder(),
+  designer_codex_turns: new DesignerCodexTurnQueryBuilder(),
+  designer_telemetry_events: new DesignerTelemetryEventQueryBuilder(),
   designer_cad_workspaces: new DesignerCadWorkspaceQueryBuilder(),
   designer_cad_documents: new DesignerCadDocumentQueryBuilder(),
   designer_cad_sessions: new DesignerCadSessionQueryBuilder(),
