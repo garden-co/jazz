@@ -267,6 +267,51 @@ table("designer_object_refs", {
   updated_at: col.timestamp(),
 });
 
+table("designer_agents", {
+  agent_id: col.string(),
+  agent_kind: col.string(),
+  provider: col.string(),
+  display_name: col.string(),
+  model: col.string().optional(),
+  default_context_json: col.json().optional(),
+  tool_contract_json: col.json().optional(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_agent_tools", {
+  tool_id: col.string(),
+  agent_id: col.string(),
+  agent_row_id: col.ref("designer_agents"),
+  tool_name: col.string(),
+  tool_kind: col.string(),
+  input_schema_json: col.json().optional(),
+  output_schema_json: col.json().optional(),
+  scope_json: col.json().optional(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
+table("designer_agent_contexts", {
+  context_id: col.string(),
+  agent_id: col.string(),
+  agent_row_id: col.ref("designer_agents"),
+  context_kind: col.string(),
+  source_kind: col.string(),
+  object_ref_id: col.string().optional(),
+  object_ref_row_id: col.ref("designer_object_refs").optional(),
+  inline_context_json: col.json().optional(),
+  priority: col.int(),
+  status: col.string(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+});
+
 table("designer_codex_conversations", {
   conversation_id: col.string(),
   provider: col.string(),
@@ -324,6 +369,43 @@ table("designer_telemetry_events", {
   payload_object_row_id: col.ref("designer_object_refs"),
   properties_json: col.json().optional(),
   occurred_at: col.timestamp(),
+  ingested_at: col.timestamp(),
+});
+
+table("designer_live_commits", {
+  commit_id: col.string(),
+  repo_root: col.string(),
+  workspace_root: col.string().optional(),
+  branch: col.string(),
+  bookmark: col.string().optional(),
+  live_ref: col.string().optional(),
+  tree_id: col.string().optional(),
+  parent_commit_ids_json: col.json().optional(),
+  subject: col.string(),
+  body: col.string().optional(),
+  author_name: col.string().optional(),
+  author_email: col.string().optional(),
+  committer_name: col.string().optional(),
+  committer_email: col.string().optional(),
+  trace_ref: col.string().optional(),
+  source_session_id: col.string().optional(),
+  source_turn_ordinal: col.int().optional(),
+  source_conversation_id: col.string().optional(),
+  source_conversation_row_id: col.ref("designer_codex_conversations").optional(),
+  source_turn_id: col.string().optional(),
+  source_turn_row_id: col.ref("designer_codex_turns").optional(),
+  agent_id: col.string().optional(),
+  agent_row_id: col.ref("designer_agents").optional(),
+  courier_run_id: col.string().optional(),
+  live_snapshot_ref: col.string().optional(),
+  changed_paths_json: col.json().optional(),
+  patch_object_ref_id: col.string().optional(),
+  patch_object_row_id: col.ref("designer_object_refs").optional(),
+  manifest_object_ref_id: col.string().optional(),
+  manifest_object_row_id: col.ref("designer_object_refs").optional(),
+  status: col.string(),
+  committed_at: col.timestamp().optional(),
+  reflected_at: col.timestamp().optional(),
   ingested_at: col.timestamp(),
 });
 

@@ -27,6 +27,9 @@ import {
   type DaemonLogSourceInit,
   type DaemonLogSummary,
   type DaemonLogSummaryInit,
+  type DesignerAgent,
+  type DesignerAgentContext,
+  type DesignerAgentTool,
   type DesignerCadDocument,
   type DesignerCadEvent,
   type DesignerCadOperation,
@@ -42,6 +45,7 @@ import {
   type DesignerCadWorkspace,
   type DesignerCodexConversation,
   type DesignerCodexTurn,
+  type DesignerLiveCommit,
   type DesignerObjectRef,
   type DesignerTelemetryEvent,
   type JsonValue,
@@ -326,6 +330,80 @@ export interface RecordDesignerTelemetryEventInput {
   ingestedAt?: TimestampInput;
 }
 
+export interface RecordDesignerAgentInput {
+  agentId: string;
+  agentKind: string;
+  provider: string;
+  displayName: string;
+  model?: string;
+  defaultContextJson?: JsonValue;
+  toolContractJson?: JsonValue;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerAgentToolInput {
+  toolId?: string;
+  agentId: string;
+  toolName: string;
+  toolKind: string;
+  inputSchemaJson?: JsonValue;
+  outputSchemaJson?: JsonValue;
+  scopeJson?: JsonValue;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerAgentContextInput {
+  contextId?: string;
+  agentId: string;
+  contextKind: string;
+  sourceKind: string;
+  objectRefId?: string;
+  inlineContextJson?: JsonValue;
+  priority?: number;
+  status?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+}
+
+export interface RecordDesignerLiveCommitInput {
+  commitId: string;
+  repoRoot: string;
+  workspaceRoot?: string;
+  branch: string;
+  bookmark?: string;
+  liveRef?: string;
+  treeId?: string;
+  parentCommitIdsJson?: JsonValue;
+  subject: string;
+  body?: string;
+  authorName?: string;
+  authorEmail?: string;
+  committerName?: string;
+  committerEmail?: string;
+  traceRef?: string;
+  sourceSessionId?: string;
+  sourceTurnOrdinal?: number;
+  sourceConversationId?: string;
+  sourceTurnId?: string;
+  agentId?: string;
+  courierRunId?: string;
+  liveSnapshotRef?: string;
+  changedPathsJson?: JsonValue;
+  patchObjectRefId?: string;
+  manifestObjectRefId?: string;
+  status?: string;
+  committedAt?: TimestampInput;
+  reflectedAt?: TimestampInput;
+  ingestedAt?: TimestampInput;
+}
+
 export interface ListDesignerCodexTurnsInput {
   conversationId?: string;
   role?: string;
@@ -343,11 +421,44 @@ export interface ListDesignerTelemetryEventsInput {
   limit?: number;
 }
 
+export interface ListDesignerAgentToolsInput {
+  agentId?: string;
+  toolKind?: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface ListDesignerAgentContextsInput {
+  agentId?: string;
+  contextKind?: string;
+  sourceKind?: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface ListDesignerLiveCommitsInput {
+  repoRoot?: string;
+  branch?: string;
+  sourceSessionId?: string;
+  agentId?: string;
+  status?: string;
+  limit?: number;
+}
+
 export interface DesignerCodexConversationSummary {
   conversation: DesignerCodexConversation;
   transcriptObject: DesignerObjectRef;
   turns: DesignerCodexTurn[];
   telemetryEvents: DesignerTelemetryEvent[];
+}
+
+export interface DesignerLiveCommitSummary {
+  commit: DesignerLiveCommit;
+  agent?: DesignerAgent;
+  patchObject?: DesignerObjectRef;
+  manifestObject?: DesignerObjectRef;
+  sourceConversation?: DesignerCodexConversation;
+  sourceTurn?: DesignerCodexTurn;
 }
 
 export interface RecordDesignerCadWorkspaceInput {
@@ -2226,6 +2337,284 @@ export class AgentDataStore {
     );
   }
 
+  async recordDesignerAgent(
+    input: RecordDesignerAgentInput,
+    session?: Session,
+  ): Promise<DesignerAgent> {
+    const db = this.getDb(session);
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerAgentByExternalId(
+      db,
+      input.agentId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_agents, existing.id, {
+        agent_kind: input.agentKind,
+        provider: input.provider,
+        display_name: input.displayName,
+        model: input.model,
+        default_context_json: input.defaultContextJson,
+        tool_contract_json: input.toolContractJson,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireDesignerAgentByExternalId(db, input.agentId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_agents,
+      {
+        agent_id: input.agentId,
+        agent_kind: input.agentKind,
+        provider: input.provider,
+        display_name: input.displayName,
+        model: input.model,
+        default_context_json: input.defaultContextJson,
+        tool_contract_json: input.toolContractJson,
+        status: input.status ?? "active",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerAgentTool(
+    input: RecordDesignerAgentToolInput,
+    session?: Session,
+  ): Promise<DesignerAgentTool> {
+    const db = this.getDb(session);
+    const agent = await this.requireDesignerAgentByExternalId(
+      db,
+      input.agentId,
+    );
+    const toolId = input.toolId ?? `${input.agentId}:tool:${input.toolName}`;
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerAgentToolByExternalId(db, toolId);
+
+    if (existing) {
+      await this.updateRow(db, app.designer_agent_tools, existing.id, {
+        agent_id: input.agentId,
+        agent_row_id: agent.id,
+        tool_name: input.toolName,
+        tool_kind: input.toolKind,
+        input_schema_json: input.inputSchemaJson,
+        output_schema_json: input.outputSchemaJson,
+        scope_json: input.scopeJson,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireDesignerAgentToolByExternalId(db, toolId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_agent_tools,
+      {
+        tool_id: toolId,
+        agent_id: input.agentId,
+        agent_row_id: agent.id,
+        tool_name: input.toolName,
+        tool_kind: input.toolKind,
+        input_schema_json: input.inputSchemaJson,
+        output_schema_json: input.outputSchemaJson,
+        scope_json: input.scopeJson,
+        status: input.status ?? "active",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerAgentContext(
+    input: RecordDesignerAgentContextInput,
+    session?: Session,
+  ): Promise<DesignerAgentContext> {
+    const db = this.getDb(session);
+    const agent = await this.requireDesignerAgentByExternalId(
+      db,
+      input.agentId,
+    );
+    const objectRef = input.objectRefId
+      ? await this.requireDesignerObjectRefByExternalId(db, input.objectRefId)
+      : null;
+    const contextId =
+      input.contextId ??
+      `${input.agentId}:context:${input.contextKind}:${input.sourceKind}`;
+    const now = asDate(input.updatedAt);
+    const existing = await this.getDesignerAgentContextByExternalId(
+      db,
+      contextId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_agent_contexts, existing.id, {
+        agent_id: input.agentId,
+        agent_row_id: agent.id,
+        context_kind: input.contextKind,
+        source_kind: input.sourceKind,
+        object_ref_id: input.objectRefId,
+        object_ref_row_id: objectRef?.id,
+        inline_context_json: input.inlineContextJson,
+        priority: input.priority ?? existing.priority,
+        status: input.status ?? existing.status,
+        metadata_json: input.metadataJson,
+        updated_at: now,
+      });
+      return this.requireDesignerAgentContextByExternalId(db, contextId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_agent_contexts,
+      {
+        context_id: contextId,
+        agent_id: input.agentId,
+        agent_row_id: agent.id,
+        context_kind: input.contextKind,
+        source_kind: input.sourceKind,
+        object_ref_id: input.objectRefId,
+        object_ref_row_id: objectRef?.id,
+        inline_context_json: input.inlineContextJson,
+        priority: input.priority ?? 0,
+        status: input.status ?? "active",
+        metadata_json: input.metadataJson,
+        created_at: asDate(input.createdAt),
+        updated_at: now,
+      },
+      { tier: this.writeTier },
+    );
+  }
+
+  async recordDesignerLiveCommit(
+    input: RecordDesignerLiveCommitInput,
+    session?: Session,
+  ): Promise<DesignerLiveCommit> {
+    const db = this.getDb(session);
+    const sourceConversation = input.sourceConversationId
+      ? await this.requireDesignerCodexConversationByExternalId(
+          db,
+          input.sourceConversationId,
+        )
+      : null;
+    const sourceTurn = await this.resolveDesignerCodexTurn(db, {
+      sourceConversationId: input.sourceConversationId,
+      sourceTurnId: input.sourceTurnId,
+      sourceTurnOrdinal: input.sourceTurnOrdinal,
+    });
+    const agent = input.agentId
+      ? await this.requireDesignerAgentByExternalId(db, input.agentId)
+      : null;
+    const patchObject = input.patchObjectRefId
+      ? await this.requireDesignerObjectRefByExternalId(
+          db,
+          input.patchObjectRefId,
+        )
+      : null;
+    const manifestObject = input.manifestObjectRefId
+      ? await this.requireDesignerObjectRefByExternalId(
+          db,
+          input.manifestObjectRefId,
+        )
+      : null;
+    const existing = await this.getDesignerLiveCommitByExternalId(
+      db,
+      input.commitId,
+    );
+
+    if (existing) {
+      await this.updateRow(db, app.designer_live_commits, existing.id, {
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        branch: input.branch,
+        bookmark: input.bookmark,
+        live_ref: input.liveRef,
+        tree_id: input.treeId,
+        parent_commit_ids_json: input.parentCommitIdsJson,
+        subject: input.subject,
+        body: input.body,
+        author_name: input.authorName,
+        author_email: input.authorEmail,
+        committer_name: input.committerName,
+        committer_email: input.committerEmail,
+        trace_ref: input.traceRef,
+        source_session_id: input.sourceSessionId,
+        source_turn_ordinal: input.sourceTurnOrdinal,
+        source_conversation_id: input.sourceConversationId,
+        source_conversation_row_id: sourceConversation?.id,
+        source_turn_id: input.sourceTurnId,
+        source_turn_row_id: sourceTurn?.id,
+        agent_id: input.agentId,
+        agent_row_id: agent?.id,
+        courier_run_id: input.courierRunId,
+        live_snapshot_ref: input.liveSnapshotRef,
+        changed_paths_json: input.changedPathsJson,
+        patch_object_ref_id: input.patchObjectRefId,
+        patch_object_row_id: patchObject?.id,
+        manifest_object_ref_id: input.manifestObjectRefId,
+        manifest_object_row_id: manifestObject?.id,
+        status: input.status ?? existing.status,
+        committed_at: input.committedAt
+          ? asDate(input.committedAt)
+          : undefined,
+        reflected_at: input.reflectedAt
+          ? asDate(input.reflectedAt)
+          : undefined,
+        ingested_at: input.ingestedAt ? asDate(input.ingestedAt) : undefined,
+      });
+      return this.requireDesignerLiveCommitByExternalId(db, input.commitId);
+    }
+
+    return (db as any).insertDurable(
+      app.designer_live_commits,
+      {
+        commit_id: input.commitId,
+        repo_root: input.repoRoot,
+        workspace_root: input.workspaceRoot,
+        branch: input.branch,
+        bookmark: input.bookmark,
+        live_ref: input.liveRef,
+        tree_id: input.treeId,
+        parent_commit_ids_json: input.parentCommitIdsJson,
+        subject: input.subject,
+        body: input.body,
+        author_name: input.authorName,
+        author_email: input.authorEmail,
+        committer_name: input.committerName,
+        committer_email: input.committerEmail,
+        trace_ref: input.traceRef,
+        source_session_id: input.sourceSessionId,
+        source_turn_ordinal: input.sourceTurnOrdinal,
+        source_conversation_id: input.sourceConversationId,
+        source_conversation_row_id: sourceConversation?.id,
+        source_turn_id: input.sourceTurnId,
+        source_turn_row_id: sourceTurn?.id,
+        agent_id: input.agentId,
+        agent_row_id: agent?.id,
+        courier_run_id: input.courierRunId,
+        live_snapshot_ref: input.liveSnapshotRef,
+        changed_paths_json: input.changedPathsJson,
+        patch_object_ref_id: input.patchObjectRefId,
+        patch_object_row_id: patchObject?.id,
+        manifest_object_ref_id: input.manifestObjectRefId,
+        manifest_object_row_id: manifestObject?.id,
+        status: input.status ?? "reflected",
+        committed_at: input.committedAt
+          ? asDate(input.committedAt)
+          : undefined,
+        reflected_at: input.reflectedAt
+          ? asDate(input.reflectedAt)
+          : undefined,
+        ingested_at: asDate(input.ingestedAt),
+      },
+      { tier: this.writeTier },
+    );
+  }
+
   async listDesignerCodexTurns(
     input: ListDesignerCodexTurnsInput = {},
     session?: Session,
@@ -2298,6 +2687,97 @@ export class AgentDataStore {
       .slice(0, clampLimit(input.limit));
   }
 
+  async listDesignerAgentTools(
+    input: ListDesignerAgentToolsInput = {},
+    session?: Session,
+  ): Promise<DesignerAgentTool[]> {
+    const db = this.getDb(session);
+    const rows = input.agentId
+      ? await db.all(
+          app.designer_agent_tools
+            .where({ agent_id: input.agentId })
+            .orderBy("tool_name", "asc"),
+        )
+      : await db.all(
+          app.designer_agent_tools
+            .orderBy("tool_name", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((tool) => {
+        if (input.agentId && tool.agent_id !== input.agentId) return false;
+        if (input.toolKind && tool.tool_kind !== input.toolKind) return false;
+        if (input.status && tool.status !== input.status) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async listDesignerAgentContexts(
+    input: ListDesignerAgentContextsInput = {},
+    session?: Session,
+  ): Promise<DesignerAgentContext[]> {
+    const db = this.getDb(session);
+    const rows = input.agentId
+      ? await db.all(
+          app.designer_agent_contexts
+            .where({ agent_id: input.agentId })
+            .orderBy("priority", "asc"),
+        )
+      : await db.all(
+          app.designer_agent_contexts
+            .orderBy("priority", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((context) => {
+        if (input.agentId && context.agent_id !== input.agentId) return false;
+        if (input.contextKind && context.context_kind !== input.contextKind)
+          return false;
+        if (input.sourceKind && context.source_kind !== input.sourceKind)
+          return false;
+        if (input.status && context.status !== input.status) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
+  async listDesignerLiveCommits(
+    input: ListDesignerLiveCommitsInput = {},
+    session?: Session,
+  ): Promise<DesignerLiveCommit[]> {
+    const db = this.getDb(session);
+    const rows = input.repoRoot
+      ? await db.all(
+          app.designer_live_commits
+            .where({ repo_root: input.repoRoot })
+            .orderBy("ingested_at", "asc"),
+        )
+      : await db.all(
+          app.designer_live_commits
+            .orderBy("ingested_at", "asc")
+            .limit(Math.max(clampLimit(input.limit), 50) * 8),
+        );
+
+    return rows
+      .filter((commit) => {
+        if (input.repoRoot && commit.repo_root !== input.repoRoot) return false;
+        if (input.branch && commit.branch !== input.branch) return false;
+        if (
+          input.sourceSessionId &&
+          commit.source_session_id !== input.sourceSessionId
+        ) {
+          return false;
+        }
+        if (input.agentId && commit.agent_id !== input.agentId) return false;
+        if (input.status && commit.status !== input.status) return false;
+        return true;
+      })
+      .slice(0, clampLimit(input.limit));
+  }
+
   async getDesignerCodexConversationSummary(
     conversationId: string,
     session?: Session,
@@ -2323,6 +2803,49 @@ export class AgentDataStore {
       transcriptObject,
       turns,
       telemetryEvents,
+    };
+  }
+
+  async getDesignerLiveCommitSummary(
+    commitId: string,
+    session?: Session,
+  ): Promise<DesignerLiveCommitSummary | null> {
+    const db = this.getDb(session);
+    const commit = await this.getDesignerLiveCommitByExternalId(db, commitId);
+    if (!commit) return null;
+
+    const [agent, patchObject, manifestObject, sourceConversation, sourceTurn] =
+      await Promise.all([
+        commit.agent_id
+          ? this.getDesignerAgentByExternalId(db, commit.agent_id)
+          : Promise.resolve(null),
+        commit.patch_object_ref_id
+          ? this.getDesignerObjectRefByExternalId(db, commit.patch_object_ref_id)
+          : Promise.resolve(null),
+        commit.manifest_object_ref_id
+          ? this.getDesignerObjectRefByExternalId(
+              db,
+              commit.manifest_object_ref_id,
+            )
+          : Promise.resolve(null),
+        commit.source_conversation_id
+          ? this.getDesignerCodexConversationByExternalId(
+              db,
+              commit.source_conversation_id,
+            )
+          : Promise.resolve(null),
+        commit.source_turn_id
+          ? this.getDesignerCodexTurnByExternalId(db, commit.source_turn_id)
+          : Promise.resolve(null),
+      ]);
+
+    return {
+      commit,
+      agent: agent ?? undefined,
+      patchObject: patchObject ?? undefined,
+      manifestObject: manifestObject ?? undefined,
+      sourceConversation: sourceConversation ?? undefined,
+      sourceTurn: sourceTurn ?? undefined,
     };
   }
 
@@ -4978,6 +5501,126 @@ export class AgentDataStore {
     return conversation;
   }
 
+  private async getDesignerCodexTurnByExternalId(
+    db: Db,
+    turnId: string,
+  ): Promise<DesignerCodexTurn | null> {
+    return db.one(app.designer_codex_turns.where({ turn_id: turnId }));
+  }
+
+  private async requireDesignerCodexTurnByExternalId(
+    db: Db,
+    turnId: string,
+  ): Promise<DesignerCodexTurn> {
+    const turn = await this.getDesignerCodexTurnByExternalId(db, turnId);
+    if (!turn) {
+      throw new Error(`designer codex turn ${turnId} not found`);
+    }
+    return turn;
+  }
+
+  private async resolveDesignerCodexTurn(
+    db: Db,
+    input: {
+      sourceConversationId?: string;
+      sourceTurnId?: string;
+      sourceTurnOrdinal?: number;
+    },
+  ): Promise<DesignerCodexTurn | null> {
+    if (input.sourceTurnId) {
+      return this.requireDesignerCodexTurnByExternalId(db, input.sourceTurnId);
+    }
+    if (
+      input.sourceConversationId &&
+      input.sourceTurnOrdinal !== undefined
+    ) {
+      return db.one(
+        app.designer_codex_turns.where({
+          conversation_id: input.sourceConversationId,
+          sequence: input.sourceTurnOrdinal,
+        }),
+      );
+    }
+    return null;
+  }
+
+  private async getDesignerAgentByExternalId(
+    db: Db,
+    agentId: string,
+  ): Promise<DesignerAgent | null> {
+    return db.one(app.designer_agents.where({ agent_id: agentId }));
+  }
+
+  private async requireDesignerAgentByExternalId(
+    db: Db,
+    agentId: string,
+  ): Promise<DesignerAgent> {
+    const agent = await this.getDesignerAgentByExternalId(db, agentId);
+    if (!agent) {
+      throw new Error(`designer agent ${agentId} not found`);
+    }
+    return agent;
+  }
+
+  private async getDesignerAgentToolByExternalId(
+    db: Db,
+    toolId: string,
+  ): Promise<DesignerAgentTool | null> {
+    return db.one(app.designer_agent_tools.where({ tool_id: toolId }));
+  }
+
+  private async requireDesignerAgentToolByExternalId(
+    db: Db,
+    toolId: string,
+  ): Promise<DesignerAgentTool> {
+    const tool = await this.getDesignerAgentToolByExternalId(db, toolId);
+    if (!tool) {
+      throw new Error(`designer agent tool ${toolId} not found`);
+    }
+    return tool;
+  }
+
+  private async getDesignerAgentContextByExternalId(
+    db: Db,
+    contextId: string,
+  ): Promise<DesignerAgentContext | null> {
+    return db.one(
+      app.designer_agent_contexts.where({ context_id: contextId }),
+    );
+  }
+
+  private async requireDesignerAgentContextByExternalId(
+    db: Db,
+    contextId: string,
+  ): Promise<DesignerAgentContext> {
+    const context = await this.getDesignerAgentContextByExternalId(
+      db,
+      contextId,
+    );
+    if (!context) {
+      throw new Error(`designer agent context ${contextId} not found`);
+    }
+    return context;
+  }
+
+  private async getDesignerLiveCommitByExternalId(
+    db: Db,
+    commitId: string,
+  ): Promise<DesignerLiveCommit | null> {
+    return db.one(app.designer_live_commits.where({ commit_id: commitId }));
+  }
+
+  private async requireDesignerLiveCommitByExternalId(
+    db: Db,
+    commitId: string,
+  ): Promise<DesignerLiveCommit> {
+    const commit = await this.getDesignerLiveCommitByExternalId(db, commitId);
+    if (!commit) {
+      throw new Error(`designer live commit ${commitId} not found`);
+    }
+    return commit;
+  }
+
   private async getDesignerCadWorkspaceByExternalId(
     db: Db,
     workspaceId: string,
@@ -5838,7 +6481,7 @@ export function createAgentDataStore(
   config: AgentDataStoreConfig,
 ): AgentDataStore {
   const tier = config.tier ?? "edge";
-  const contextOptions = {
+  const context = createJazzContext({
     appId: config.appId ?? DEFAULT_APP_ID,
     app,
     permissions: {},
@@ -5846,11 +6489,9 @@ export function createAgentDataStore(
     env: config.env ?? "dev",
     userBranch: config.userBranch ?? "main",
     serverUrl: config.serverUrl,
-    serverPathPrefix: config.serverPathPrefix,
     backendSecret: config.backendSecret,
     adminSecret: config.adminSecret,
     tier,
-  } as Parameters<typeof createJazzContext>[0] & { serverPathPrefix?: string };
-  const context = createJazzContext(contextOptions);
+  });
   return new AgentDataStore(context, tier, Boolean(config.serverUrl));
 }

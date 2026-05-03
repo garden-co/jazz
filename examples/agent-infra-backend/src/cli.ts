@@ -7,7 +7,6 @@ import readline from "node:readline";
 import {
   type AgentRun,
   type AgentRunSummary,
-  type AgentDataStoreConfig,
   type AgentStateSnapshot,
   type AgentClaimRecord,
   type Artifact,
@@ -26,8 +25,12 @@ import {
   type JobRecord,
   wasmSchema,
   createAgentDataStore,
+  type AgentDataStoreConfig,
   type CancelJobInput,
   type ClaimJobInput,
+  type DesignerAgent,
+  type DesignerAgentContext,
+  type DesignerAgentTool,
   type DesignerCadDocument,
   type DesignerCadEvent,
   type DesignerCadOperation,
@@ -45,6 +48,8 @@ import {
   type DesignerCodexConversation,
   type DesignerCodexConversationSummary,
   type DesignerCodexTurn,
+  type DesignerLiveCommit,
+  type DesignerLiveCommitSummary,
   type DesignerObjectRef,
   type DesignerTelemetryEvent,
   type ListAgentClaimsInput,
@@ -55,12 +60,18 @@ import {
   type ListDaemonLogEventsInput,
   type ListDaemonLogSourcesInput,
   type ListDaemonLogSummariesInput,
+  type ListDesignerAgentContextsInput,
+  type ListDesignerAgentToolsInput,
   type ListDesignerCodexTurnsInput,
   type ListDesignerCadEventsInput,
   type ListDesignerCadOperationsInput,
+  type ListDesignerLiveCommitsInput,
   type ListDesignerTelemetryEventsInput,
   type ListJobsInput,
   type ListTaskRecordsInput,
+  type RecordDesignerAgentContextInput,
+  type RecordDesignerAgentInput,
+  type RecordDesignerAgentToolInput,
   type RecordDesignerCodexConversationInput,
   type RecordDesignerCodexTurnInput,
   type RecordDesignerCadDocumentInput,
@@ -74,6 +85,7 @@ import {
   type RecordDesignerCadToolSessionInput,
   type RecordDesignerCadWidgetInput,
   type RecordDesignerCadWorkspaceInput,
+  type RecordDesignerLiveCommitInput,
   type RecordDesignerObjectRefInput,
   type RecordDesignerTelemetryEventInput,
   type RecordAgentClaimInput,
@@ -113,6 +125,8 @@ import { projectDoDesignerTasks, syncDoDesignerTasks } from "./task_records.js";
 
 const DEFAULT_AGENT_INFRA_APP_ID = "run-agent-infra";
 const DEFAULT_AGENT_INFRA_DATA_PATH = "~/.jazz2/agent-infra.db";
+
+type WriteTier = "local" | "edge" | "global";
 
 type CliStoreConfig = AgentDataStoreConfig & {
   appId: string;
@@ -589,28 +603,8 @@ function hasFlag(flag: string): boolean {
   return process.argv.includes(flag);
 }
 
-function readFlagOrEnv(flag: string, ...envNames: string[]): string | undefined {
-  const flagValue = readFlag(flag);
-  if (flagValue !== undefined) {
-    return flagValue;
-  }
-  for (const envName of envNames) {
-    const value = process.env[envName];
-    if (value !== undefined && value.trim() !== "") {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function readWriteTierFlag(): AgentDataStoreConfig["tier"] | undefined {
-  const tier = readFlagOrEnv(
-    "--tier",
-    "PROM_DB_JAZZ_TIER",
-    "FLOW_AGENT_INFRA_JAZZ_TIER",
-    "J_AGENT_INFRA_JAZZ_TIER",
-    "JAZZ2_AGENT_INFRA_TIER",
-  );
+function readWriteTierFlag(): WriteTier | undefined {
+  const tier = readFlag("--tier");
   if (!tier) {
     return undefined;
   }
@@ -620,26 +614,21 @@ function readWriteTierFlag(): AgentDataStoreConfig["tier"] | undefined {
   throw new Error(`invalid --tier ${tier}; expected local, edge, or global`);
 }
 
+function readFlagOrEnv(flag: string, envName: string): string | undefined {
+  return readFlag(flag) ?? process.env[envName];
+}
+
 function readSecretFlagOrEnv(
   flag: string,
   envFlag: string,
-  ...envNames: string[]
+  defaultEnvName: string,
 ): string | undefined {
   const value = readFlag(flag);
   if (value !== undefined) {
     return value;
   }
-  const selectedEnvName = readFlag(envFlag);
-  if (selectedEnvName) {
-    return process.env[selectedEnvName];
-  }
-  for (const envName of envNames) {
-    const envValue = process.env[envName];
-    if (envValue !== undefined && envValue.trim() !== "") {
-      return envValue;
-    }
-  }
-  return undefined;
+  const selectedEnvName = readFlag(envFlag) ?? defaultEnvName;
+  return process.env[selectedEnvName];
 }
 
 function readIntegerFlag(flag: string): number | undefined {
@@ -647,81 +636,65 @@ function readIntegerFlag(flag: string): number | undefined {
   return value ? Number.parseInt(value, 10) : undefined;
 }
 
-function readStoreConfig(dataPath: string): CliStoreConfig {
+function readCliStoreConfig(
+  dataPath: string,
+  tier: WriteTier | undefined,
+): CliStoreConfig {
   return {
-    dataPath,
     appId:
-      readFlagOrEnv(
-        "--app-id",
-        "PROM_DB_JAZZ_APP_ID",
-        "FLOW_AGENT_INFRA_JAZZ_APP_ID",
-        "J_AGENT_INFRA_JAZZ_APP_ID",
-        "REMOTE_AUTONOMY_AGENT_APP_ID",
-        "JAZZ2_AGENT_INFRA_APP_ID",
-      ) ?? DEFAULT_AGENT_INFRA_APP_ID,
-    env:
-      readFlagOrEnv(
-        "--env",
-        "PROM_DB_JAZZ_ENV",
-        "FLOW_AGENT_INFRA_JAZZ_ENV",
-        "J_AGENT_INFRA_JAZZ_ENV",
-        "REMOTE_AUTONOMY_ENV",
-      ) ?? readFlagOrEnv("--jazz-env", "JAZZ2_AGENT_INFRA_ENV"),
+      readFlagOrEnv("--app-id", "JAZZ2_AGENT_INFRA_APP_ID") ??
+      DEFAULT_AGENT_INFRA_APP_ID,
+    dataPath,
+    env: readFlagOrEnv("--jazz-env", "JAZZ2_AGENT_INFRA_ENV"),
     userBranch: readFlagOrEnv(
       "--user-branch",
-      "PROM_DB_JAZZ_USER_BRANCH",
-      "FLOW_AGENT_INFRA_JAZZ_USER_BRANCH",
-      "J_AGENT_INFRA_JAZZ_USER_BRANCH",
-      "REMOTE_AUTONOMY_USER_BRANCH",
       "JAZZ2_AGENT_INFRA_USER_BRANCH",
     ),
     serverUrl: readFlagOrEnv(
       "--server-url",
-      "PROM_DB_JAZZ_SERVER_URL",
-      "FLOW_AGENT_INFRA_JAZZ_SERVER_URL",
-      "J_AGENT_INFRA_JAZZ_SERVER_URL",
-      "REMOTE_AUTONOMY_SYNC_SERVER_URL",
       "JAZZ2_AGENT_INFRA_SERVER_URL",
-    ),
-    serverPathPrefix: readFlagOrEnv(
-      "--server-path-prefix",
-      "PROM_DB_JAZZ_SERVER_PATH_PREFIX",
-      "FLOW_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX",
-      "J_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX",
-      "REMOTE_AUTONOMY_SYNC_SERVER_PATH_PREFIX",
-      "JAZZ2_AGENT_INFRA_SERVER_PATH_PREFIX",
     ),
     backendSecret: readSecretFlagOrEnv(
       "--backend-secret",
       "--backend-secret-env",
-      "PROM_DB_JAZZ_BACKEND_SECRET",
-      "FLOW_AGENT_INFRA_JAZZ_BACKEND_SECRET",
-      "J_AGENT_INFRA_JAZZ_BACKEND_SECRET",
-      "REMOTE_AUTONOMY_BACKEND_SECRET",
       "JAZZ2_AGENT_INFRA_BACKEND_SECRET",
     ),
     adminSecret: readSecretFlagOrEnv(
       "--admin-secret",
       "--admin-secret-env",
-      "PROM_DB_JAZZ_ADMIN_SECRET",
-      "FLOW_AGENT_INFRA_JAZZ_ADMIN_SECRET",
-      "J_AGENT_INFRA_JAZZ_ADMIN_SECRET",
-      "REMOTE_AUTONOMY_ADMIN_SECRET",
       "JAZZ2_AGENT_INFRA_ADMIN_SECRET",
     ),
-    tier: readWriteTierFlag(),
+    ...(tier ? { tier } : {}),
   };
 }
 
-function storeConfigArgs(config: CliStoreConfig): string[] {
+function serializeStoreConfig(config: CliStoreConfig) {
+  return {
+    appId: config.appId,
+    dataPath: config.dataPath,
+    env: config.env ?? "dev",
+    userBranch: config.userBranch ?? "main",
+    serverUrl: config.serverUrl ?? null,
+    tier: config.tier ?? "edge",
+    backendSecretConfigured: Boolean(config.backendSecret),
+    adminSecretConfigured: Boolean(config.adminSecret),
+  };
+}
+
+function buildStoreForwardArgs(config: CliStoreConfig): string[] {
   const args = ["--data-path", config.dataPath, "--app-id", config.appId];
-  if (config.env) args.push("--env", config.env);
-  if (config.userBranch) args.push("--user-branch", config.userBranch);
-  if (config.serverUrl) args.push("--server-url", config.serverUrl);
-  if (config.serverPathPrefix) {
-    args.push("--server-path-prefix", config.serverPathPrefix);
+  if (config.env) {
+    args.push("--jazz-env", config.env);
   }
-  if (config.tier) args.push("--tier", config.tier);
+  if (config.userBranch) {
+    args.push("--user-branch", config.userBranch);
+  }
+  if (config.serverUrl) {
+    args.push("--server-url", config.serverUrl);
+  }
+  if (config.tier) {
+    args.push("--tier", config.tier);
+  }
   return args;
 }
 
@@ -729,25 +702,11 @@ function buildStoreForwardEnv(config: CliStoreConfig): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ...(config.backendSecret
-      ? { PROM_DB_JAZZ_BACKEND_SECRET: config.backendSecret }
+      ? { JAZZ2_AGENT_INFRA_BACKEND_SECRET: config.backendSecret }
       : {}),
     ...(config.adminSecret
-      ? { PROM_DB_JAZZ_ADMIN_SECRET: config.adminSecret }
+      ? { JAZZ2_AGENT_INFRA_ADMIN_SECRET: config.adminSecret }
       : {}),
-  };
-}
-
-function serializeStoreConfig(config: CliStoreConfig): Record<string, unknown> {
-  return {
-    dataPath: config.dataPath,
-    appId: config.appId,
-    env: config.env ?? "dev",
-    userBranch: config.userBranch ?? "main",
-    serverUrl: config.serverUrl ?? null,
-    serverPathPrefix: config.serverPathPrefix ?? null,
-    hasBackendSecret: Boolean(config.backendSecret),
-    hasAdminSecret: Boolean(config.adminSecret),
-    tier: config.tier ?? "edge",
   };
 }
 
@@ -783,7 +742,7 @@ async function publishAgentInfraSchema(config: CliStoreConfig) {
   }
   if (!config.adminSecret) {
     throw new Error(
-      "publish-schema requires --admin-secret or a configured admin secret",
+      "publish-schema requires --admin-secret or JAZZ2_AGENT_INFRA_ADMIN_SECRET",
     );
   }
 
@@ -917,6 +876,54 @@ function serializeDesignerObjectRef(record: DesignerObjectRef) {
   };
 }
 
+function serializeDesignerAgent(record: DesignerAgent) {
+  return {
+    agentId: record.agent_id,
+    agentKind: record.agent_kind,
+    provider: record.provider,
+    displayName: record.display_name,
+    model: record.model ?? null,
+    defaultContextJson: record.default_context_json ?? null,
+    toolContractJson: record.tool_contract_json ?? null,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerAgentTool(record: DesignerAgentTool) {
+  return {
+    toolId: record.tool_id,
+    agentId: record.agent_id,
+    toolName: record.tool_name,
+    toolKind: record.tool_kind,
+    inputSchemaJson: record.input_schema_json ?? null,
+    outputSchemaJson: record.output_schema_json ?? null,
+    scopeJson: record.scope_json ?? null,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
+function serializeDesignerAgentContext(record: DesignerAgentContext) {
+  return {
+    contextId: record.context_id,
+    agentId: record.agent_id,
+    contextKind: record.context_kind,
+    sourceKind: record.source_kind,
+    objectRefId: record.object_ref_id ?? null,
+    inlineContextJson: record.inline_context_json ?? null,
+    priority: record.priority,
+    status: record.status,
+    metadataJson: record.metadata_json ?? null,
+    createdAt: record.created_at.toISOString(),
+    updatedAt: record.updated_at.toISOString(),
+  };
+}
+
 function serializeDesignerCodexConversation(
   record: DesignerCodexConversation,
 ) {
@@ -978,6 +985,40 @@ function serializeDesignerTelemetryEvent(record: DesignerTelemetryEvent) {
   };
 }
 
+function serializeDesignerLiveCommit(record: DesignerLiveCommit) {
+  return {
+    commitId: record.commit_id,
+    repoRoot: record.repo_root,
+    workspaceRoot: record.workspace_root ?? null,
+    branch: record.branch,
+    bookmark: record.bookmark ?? null,
+    liveRef: record.live_ref ?? null,
+    treeId: record.tree_id ?? null,
+    parentCommitIdsJson: record.parent_commit_ids_json ?? null,
+    subject: record.subject,
+    body: record.body ?? null,
+    authorName: record.author_name ?? null,
+    authorEmail: record.author_email ?? null,
+    committerName: record.committer_name ?? null,
+    committerEmail: record.committer_email ?? null,
+    traceRef: record.trace_ref ?? null,
+    sourceSessionId: record.source_session_id ?? null,
+    sourceTurnOrdinal: record.source_turn_ordinal ?? null,
+    sourceConversationId: record.source_conversation_id ?? null,
+    sourceTurnId: record.source_turn_id ?? null,
+    agentId: record.agent_id ?? null,
+    courierRunId: record.courier_run_id ?? null,
+    liveSnapshotRef: record.live_snapshot_ref ?? null,
+    changedPathsJson: record.changed_paths_json ?? null,
+    patchObjectRefId: record.patch_object_ref_id ?? null,
+    manifestObjectRefId: record.manifest_object_ref_id ?? null,
+    status: record.status,
+    committedAt: serializeNullableDate(record.committed_at),
+    reflectedAt: serializeNullableDate(record.reflected_at),
+    ingestedAt: record.ingested_at.toISOString(),
+  };
+}
+
 function serializeDesignerCodexConversationSummary(
   summary: DesignerCodexConversationSummary,
 ) {
@@ -988,6 +1029,25 @@ function serializeDesignerCodexConversationSummary(
     telemetryEvents: summary.telemetryEvents.map(
       serializeDesignerTelemetryEvent,
     ),
+  };
+}
+
+function serializeDesignerLiveCommitSummary(summary: DesignerLiveCommitSummary) {
+  return {
+    commit: serializeDesignerLiveCommit(summary.commit),
+    agent: summary.agent ? serializeDesignerAgent(summary.agent) : null,
+    patchObject: summary.patchObject
+      ? serializeDesignerObjectRef(summary.patchObject)
+      : null,
+    manifestObject: summary.manifestObject
+      ? serializeDesignerObjectRef(summary.manifestObject)
+      : null,
+    sourceConversation: summary.sourceConversation
+      ? serializeDesignerCodexConversation(summary.sourceConversation)
+      : null,
+    sourceTurn: summary.sourceTurn
+      ? serializeDesignerCodexTurn(summary.sourceTurn)
+      : null,
   };
 }
 
@@ -1703,11 +1763,10 @@ async function runServeJsonCommand(
   const child = spawn(
     process.execPath,
     [
-      ...process.execArgv,
       path.resolve(process.argv[1]),
       command,
       ...args,
-      ...storeConfigArgs(storeConfig),
+      ...buildStoreForwardArgs(storeConfig),
     ],
     {
       cwd: process.cwd(),
@@ -1759,21 +1818,12 @@ async function serveJson(storeConfig: CliStoreConfig): Promise<void> {
 async function main(): Promise<void> {
   const command = requireCommand();
   const dataPath = await resolvePersistentDataPath(
-    readFlagOrEnv(
-      "--data-path",
-      "PROM_DB_DATA_PATH",
-      "FLOW_AGENT_INFRA_JAZZ_DATA_PATH",
-      "J_AGENT_INFRA_JAZZ_DATA_PATH",
-      "JAZZ2_AGENT_INFRA_DATA_PATH",
-    ) ?? DEFAULT_AGENT_INFRA_DATA_PATH,
+    readFlagOrEnv("--data-path", "JAZZ2_AGENT_INFRA_DATA_PATH") ??
+      DEFAULT_AGENT_INFRA_DATA_PATH,
   );
-  const storeConfig = readStoreConfig(dataPath);
+  const tier = readWriteTierFlag();
+  const storeConfig = readCliStoreConfig(dataPath, tier);
   await mkdir(path.dirname(dataPath), { recursive: true });
-
-  if (command === "config") {
-    renderJson(serializeStoreConfig(storeConfig));
-    return;
-  }
 
   if (command === "serve-json") {
     await serveJson(storeConfig);
@@ -2061,6 +2111,30 @@ async function main(): Promise<void> {
         renderJson(serializeDesignerObjectRef(objectRef));
         break;
       }
+      case "record-designer-agent": {
+        const input = readJsonInput<RecordDesignerAgentInput>(
+          "record-designer-agent",
+        );
+        const agent = await store.recordDesignerAgent(input);
+        renderJson(serializeDesignerAgent(agent));
+        break;
+      }
+      case "record-designer-agent-tool": {
+        const input = readJsonInput<RecordDesignerAgentToolInput>(
+          "record-designer-agent-tool",
+        );
+        const tool = await store.recordDesignerAgentTool(input);
+        renderJson(serializeDesignerAgentTool(tool));
+        break;
+      }
+      case "record-designer-agent-context": {
+        const input = readJsonInput<RecordDesignerAgentContextInput>(
+          "record-designer-agent-context",
+        );
+        const context = await store.recordDesignerAgentContext(input);
+        renderJson(serializeDesignerAgentContext(context));
+        break;
+      }
       case "record-designer-codex-conversation": {
         const input = readJsonInput<RecordDesignerCodexConversationInput>(
           "record-designer-codex-conversation",
@@ -2084,6 +2158,14 @@ async function main(): Promise<void> {
         );
         const event = await store.recordDesignerTelemetryEvent(input);
         renderJson(serializeDesignerTelemetryEvent(event));
+        break;
+      }
+      case "record-designer-live-commit": {
+        const input = readJsonInput<RecordDesignerLiveCommitInput>(
+          "record-designer-live-commit",
+        );
+        const commit = await store.recordDesignerLiveCommit(input);
+        renderJson(serializeDesignerLiveCommit(commit));
         break;
       }
       case "list-designer-codex-turns": {
@@ -2111,6 +2193,42 @@ async function main(): Promise<void> {
         renderJson(events.map(serializeDesignerTelemetryEvent));
         break;
       }
+      case "list-designer-agent-tools": {
+        const query: ListDesignerAgentToolsInput = {
+          agentId: readFlag("--agent-id"),
+          toolKind: readFlag("--tool-kind"),
+          status: readFlag("--status"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const tools = await store.listDesignerAgentTools(query);
+        renderJson(tools.map(serializeDesignerAgentTool));
+        break;
+      }
+      case "list-designer-agent-contexts": {
+        const query: ListDesignerAgentContextsInput = {
+          agentId: readFlag("--agent-id"),
+          contextKind: readFlag("--context-kind"),
+          sourceKind: readFlag("--source-kind"),
+          status: readFlag("--status"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const contexts = await store.listDesignerAgentContexts(query);
+        renderJson(contexts.map(serializeDesignerAgentContext));
+        break;
+      }
+      case "list-designer-live-commits": {
+        const query: ListDesignerLiveCommitsInput = {
+          repoRoot: readFlag("--repo-root"),
+          branch: readFlag("--branch"),
+          sourceSessionId: readFlag("--source-session-id"),
+          agentId: readFlag("--agent-id"),
+          status: readFlag("--status"),
+          limit: readIntegerFlag("--limit"),
+        };
+        const commits = await store.listDesignerLiveCommits(query);
+        renderJson(commits.map(serializeDesignerLiveCommit));
+        break;
+      }
       case "get-designer-codex-conversation-summary": {
         const conversationId = readFlag("--conversation-id");
         if (!conversationId) {
@@ -2126,6 +2244,18 @@ async function main(): Promise<void> {
           );
         }
         renderJson(serializeDesignerCodexConversationSummary(summary));
+        break;
+      }
+      case "get-designer-live-commit-summary": {
+        const commitId = readFlag("--commit-id");
+        if (!commitId) {
+          throw new Error("get-designer-live-commit-summary requires --commit-id");
+        }
+        const summary = await store.getDesignerLiveCommitSummary(commitId);
+        if (!summary) {
+          throw new Error(`designer live commit ${commitId} not found`);
+        }
+        renderJson(serializeDesignerLiveCommitSummary(summary));
         break;
       }
       case "record-designer-cad-workspace": {

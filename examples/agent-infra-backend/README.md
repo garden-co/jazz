@@ -212,6 +212,35 @@ node examples/agent-infra-backend/dist/src/cli.js get-designer-codex-conversatio
   --conversation-id designer-codex-019dec01
 ```
 
+Live Prom commits are also Jazz rows. The live-commit courier should record one
+`designer_live_commits` row for every proven live commit, while patch/manifest
+payloads stay in object storage. Designer can subscribe to those rows by
+`repoRoot`, `branch`, `sourceSessionId`, or `agentId` instead of watching the
+filesystem.
+
+```sh
+node examples/agent-infra-backend/dist/src/cli.js record-designer-agent \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"agentId":"agent.remote-codex.designer","agentKind":"codex","provider":"openai-codex","displayName":"Remote Codex Designer","model":"gpt-5.5","defaultContextJson":{"repoRoot":"~/code/prom","workspaceRoot":"~/code/prom/ide/designer"}}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-agent-tool \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"toolId":"agent.remote-codex.designer:tool:apply_patch","agentId":"agent.remote-codex.designer","toolName":"apply_patch","toolKind":"workspace.edit","scopeJson":{"allowedPathPrefixes":["ide/designer"]}}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-object-ref \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"objectRefId":"obj-live-commit-01f4d1e-patch","provider":"oci","uri":"oci://designer-commits/prom/live/01f4d1e.patch","objectKind":"vcs.commit.patch","contentType":"text/x-diff"}'
+
+node examples/agent-infra-backend/dist/src/cli.js record-designer-live-commit \
+  --data-path ~/.jazz2/agent-infra.db \
+  --input-json '{"commitId":"01f4d1ea1cea8f331c1691a3312c6df1043db08b","repoRoot":"~/code/prom","workspaceRoot":"~/code/prom/ide/designer","branch":"live","bookmark":"nikiv-live","subject":"fix(designer): harden remote codex chat replay","traceRef":"codex:1_eyJzIjoiMDE5ZGViMGEtZDE5Yi03ZDkyLTgxZGQtNzY2MTJkMDc2ZDRjIiwidCI6MX0","sourceSessionId":"codex:019deb0a-d19b-7d92-81dd-76612d076d4c","sourceTurnOrdinal":1,"agentId":"agent.remote-codex.designer","patchObjectRefId":"obj-live-commit-01f4d1e-patch","status":"reflected","committedAt":"2026-05-03T22:53:03Z","reflectedAt":"2026-05-03T22:54:34Z"}'
+
+node examples/agent-infra-backend/dist/src/cli.js list-designer-live-commits \
+  --data-path ~/.jazz2/agent-infra.db \
+  --repo-root ~/code/prom \
+  --branch live
+```
+
 The Designer telemetry branch maps into this shape directly:
 
 - `UsageTelemetryEvent` becomes `designer_telemetry_events`.
@@ -226,12 +255,20 @@ The Designer telemetry branch maps into this shape directly:
 Related commands:
 
 - `record-designer-object-ref`
+- `record-designer-agent`
+- `record-designer-agent-tool`
+- `record-designer-agent-context`
 - `record-designer-codex-conversation`
 - `record-designer-codex-turn`
 - `record-designer-telemetry-event`
+- `record-designer-live-commit`
 - `list-designer-codex-turns`
 - `list-designer-telemetry-events`
+- `list-designer-agent-tools`
+- `list-designer-agent-contexts`
+- `list-designer-live-commits`
 - `get-designer-codex-conversation-summary`
+- `get-designer-live-commit-summary`
 
 ## Designer CAD Commands
 
