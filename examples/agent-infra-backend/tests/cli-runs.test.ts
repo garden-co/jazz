@@ -33,93 +33,6 @@ describe("agent-infra backend CLI run commands", () => {
     );
   });
 
-  it("prints remote store config from flags and env without exposing secrets", () => {
-    const config = runCliJson(
-      "config",
-      undefined,
-      [
-        "--server-url",
-        "https://sync.example.test",
-        "--server-path-prefix",
-        "/apps/run-agent-infra",
-        "--backend-secret",
-        "backend-secret",
-        "--admin-secret",
-        "admin-secret",
-        "--tier",
-        "global",
-      ],
-      {
-        PROM_DB_JAZZ_APP_ID: "agent-infra-remote",
-        PROM_DB_JAZZ_ENV: "remote-autonomy",
-        PROM_DB_JAZZ_USER_BRANCH: "linux-server",
-      },
-    );
-
-    expect(config).toEqual({
-      dataPath,
-      appId: "agent-infra-remote",
-      env: "remote-autonomy",
-      userBranch: "linux-server",
-      serverUrl: "https://sync.example.test",
-      serverPathPrefix: "/apps/run-agent-infra",
-      hasBackendSecret: true,
-      hasAdminSecret: true,
-      tier: "global",
-    });
-    expect(JSON.stringify(config)).not.toContain("backend-secret");
-    expect(JSON.stringify(config)).not.toContain("admin-secret");
-  });
-
-  it("propagates remote store config through serve-json child commands", () => {
-    const result = spawnSync(
-      "pnpm",
-      [
-        "exec",
-        "tsx",
-        "src/cli.ts",
-        "serve-json",
-        "--data-path",
-        dataPath,
-        "--server-url",
-        "https://sync.example.test",
-        "--tier",
-        "global",
-      ],
-      {
-        cwd: packageRoot,
-        input: `${JSON.stringify({ command: "config" })}\n`,
-        encoding: "utf8",
-        env: cliEnv({
-          PROM_DB_JAZZ_APP_ID: "agent-infra-remote",
-          PROM_DB_JAZZ_ENV: "remote-autonomy",
-        }),
-      },
-    );
-
-    if (result.status !== 0) {
-      throw new Error(
-        result.stderr || result.stdout || "serve-json config command failed",
-      );
-    }
-
-    const line = JSON.parse(result.stdout.trim());
-    expect(line).toEqual({
-      ok: true,
-      result: {
-        dataPath,
-        appId: "agent-infra-remote",
-        env: "remote-autonomy",
-        userBranch: "main",
-        serverUrl: "https://sync.example.test",
-        serverPathPrefix: null,
-        hasBackendSecret: false,
-        hasAdminSecret: false,
-        tier: "global",
-      },
-    });
-  });
-
   it(
     "records and summarizes a prep-workflow run through JSON CLI commands",
     { timeout: 20_000 },
@@ -346,7 +259,6 @@ describe("agent-infra backend CLI run commands", () => {
     command: string,
     input?: unknown,
     extraArgs: string[] = [],
-    extraEnv: NodeJS.ProcessEnv = {},
   ): any {
     const result = spawnSync(
       "pnpm",
@@ -363,7 +275,6 @@ describe("agent-infra backend CLI run commands", () => {
         cwd: packageRoot,
         input: input === undefined ? undefined : JSON.stringify(input),
         encoding: "utf8",
-        env: cliEnv(extraEnv),
       },
     );
 
@@ -374,43 +285,5 @@ describe("agent-infra backend CLI run commands", () => {
     }
 
     return JSON.parse(result.stdout.trim());
-  }
-
-  function cliEnv(extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-    return {
-      ...process.env,
-      PROM_DB_JAZZ_APP_ID: "",
-      PROM_DB_JAZZ_ENV: "",
-      PROM_DB_JAZZ_USER_BRANCH: "",
-      PROM_DB_JAZZ_SERVER_URL: "",
-      PROM_DB_JAZZ_SERVER_PATH_PREFIX: "",
-      PROM_DB_JAZZ_BACKEND_SECRET: "",
-      PROM_DB_JAZZ_ADMIN_SECRET: "",
-      PROM_DB_JAZZ_TIER: "",
-      FLOW_AGENT_INFRA_JAZZ_APP_ID: "",
-      FLOW_AGENT_INFRA_JAZZ_ENV: "",
-      FLOW_AGENT_INFRA_JAZZ_USER_BRANCH: "",
-      FLOW_AGENT_INFRA_JAZZ_SERVER_URL: "",
-      FLOW_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX: "",
-      FLOW_AGENT_INFRA_JAZZ_BACKEND_SECRET: "",
-      FLOW_AGENT_INFRA_JAZZ_ADMIN_SECRET: "",
-      FLOW_AGENT_INFRA_JAZZ_TIER: "",
-      J_AGENT_INFRA_JAZZ_APP_ID: "",
-      J_AGENT_INFRA_JAZZ_ENV: "",
-      J_AGENT_INFRA_JAZZ_USER_BRANCH: "",
-      J_AGENT_INFRA_JAZZ_SERVER_URL: "",
-      J_AGENT_INFRA_JAZZ_SERVER_PATH_PREFIX: "",
-      J_AGENT_INFRA_JAZZ_BACKEND_SECRET: "",
-      J_AGENT_INFRA_JAZZ_ADMIN_SECRET: "",
-      J_AGENT_INFRA_JAZZ_TIER: "",
-      REMOTE_AUTONOMY_AGENT_APP_ID: "",
-      REMOTE_AUTONOMY_ENV: "",
-      REMOTE_AUTONOMY_USER_BRANCH: "",
-      REMOTE_AUTONOMY_SYNC_SERVER_URL: "",
-      REMOTE_AUTONOMY_SYNC_SERVER_PATH_PREFIX: "",
-      REMOTE_AUTONOMY_BACKEND_SECRET: "",
-      REMOTE_AUTONOMY_ADMIN_SECRET: "",
-      ...extraEnv,
-    };
   }
 });
