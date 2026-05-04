@@ -34,6 +34,8 @@ import {
   type JAgentWait,
   type JAgentWaitInit,
   type JsonValue,
+  type ProjectContextEntry,
+  type ProjectContextEntryInit,
 } from "../schema/app.js";
 
 type DurabilityTier = "edge" | "global" | "local";
@@ -170,6 +172,34 @@ export interface ListCodexStreamEventsOptions {
   afterSequence?: number;
   limit?: number;
   latest?: boolean;
+}
+
+export interface RecordProjectContextInput {
+  contextId?: string;
+  projectRoot: string;
+  provider: string;
+  sessionId: string;
+  turnId?: string;
+  cwd?: string;
+  repoRoot?: string;
+  sourceKind?: string;
+  sourceWatermark?: string;
+  summary: string;
+  body?: string;
+  status?: string;
+  score?: number;
+  confidence?: string;
+  metadataJson?: JsonValue;
+  createdAt?: TimestampInput;
+  updatedAt?: TimestampInput;
+  expiresAt?: TimestampInput;
+}
+
+export interface ListProjectContextEntriesOptions {
+  projectRoot: string;
+  limit?: number;
+  includeExpired?: boolean;
+  includeInactive?: boolean;
 }
 
 export interface CodexCompletionEvent {
@@ -473,6 +503,28 @@ function deterministicStreamEventId(input: {
     .digest("hex")
     .slice(0, 32);
   return `stream:${digest}`;
+}
+
+function deterministicProjectContextEntryId(input: {
+  projectRoot: string;
+  provider: string;
+  sessionId: string;
+  turnId?: string;
+  sourceKind: string;
+  sourceWatermark: string;
+}): string {
+  const digest = createHash("sha256")
+    .update([
+      input.projectRoot,
+      input.provider,
+      input.sessionId,
+      input.turnId ?? "",
+      input.sourceKind,
+      input.sourceWatermark,
+    ].join("\0"))
+    .digest("hex")
+    .slice(0, 32);
+  return `project-context:${digest}`;
 }
 
 function terminalActivityState(input: RecordCodexTerminalPresenceInput): string {
@@ -820,6 +872,87 @@ export class CodexSessionStore {
       .slice(0, limit);
     return (scanLatest ? filtered.reverse() : filtered)
       .map(normalizeRow);
+  }
+
+  async recordProjectContext(
+    input: RecordProjectContextInput,
+    session?: Session,
+  ): Promise<ProjectContextEntry> {
+    return this.withWriteLock(async () => {
+      const db = this.getDb(session);
+      const projectRoot = normalizeRequiredId(input.projectRoot, "projectRoot");
+      const provider = normalizeRequiredId(input.provider, "provider");
+      const sessionId = normalizeRequiredId(input.sessionId, "sessionId");
+      const summary = normalizeRequiredId(input.summary, "summary");
+      const sourceKind = input.sourceKind?.trim() || "turn-summary";
+      const sourceWatermark = input.sourceWatermark?.trim()
+        || [provider, sessionId, input.turnId?.trim()].filter(Boolean).join(":");
+      if (input.score !== undefined && !Number.isFinite(input.score)) {
+        throw new Error("score must be finite");
+      }
+
+      const updatedAt = asDate(input.updatedAt);
+      const payload: ProjectContextEntryInit = {
+        context_id: input.contextId?.trim() || deterministicProjectContextEntryId({
+          projectRoot,
+          provider,
+          sessionId,
+          turnId: input.turnId?.trim() || undefined,
+          sourceKind,
+          sourceWatermark,
+        }),
+        project_root: projectRoot,
+        provider,
+        session_id: sessionId,
+        turn_id: nullable(input.turnId?.trim() || undefined),
+        cwd: nullable(input.cwd?.trim() || undefined),
+        repo_root: nullable(input.repoRoot?.trim() || undefined),
+        source_kind: sourceKind,
+        source_watermark: sourceWatermark,
+        summary,
+        body: nullable(input.body),
+        status: input.status?.trim() || "ready",
+        score: nullable(input.score),
+        confidence: nullable(input.confidence?.trim() || undefined),
+        metadata_json: nullable(input.metadataJson),
+        created_at: input.createdAt ? asDate(input.createdAt) : updatedAt,
+        updated_at: updatedAt,
+        expires_at: nullable(input.expiresAt ? asDate(input.expiresAt) : undefined),
+      };
+
+      const existing = await db.one(app.project_context_entries.where({ context_id: payload.context_id }));
+      if (existing) {
+        await this.updateRow(db, app.project_context_entries, existing.id, payload);
+      } else {
+        await this.insertRow(db, app.project_context_entries, payload);
+      }
+
+      const entry = await db.one(app.project_context_entries.where({ context_id: payload.context_id }));
+      if (!entry) {
+        throw new Error(`project context entry ${payload.context_id} missing after record`);
+      }
+      return normalizeRow(entry);
+    });
+  }
+
+  async listProjectContextEntries(
+    options: ListProjectContextEntriesOptions,
+    session?: Session,
+  ): Promise<ProjectContextEntry[]> {
+    const projectRoot = normalizeRequiredId(options.projectRoot, "projectRoot");
+    const limit = clampLimit(options.limit, 50);
+    const rows = await this.getDb(session).all(
+      app.project_context_entries
+        .where({ project_root: projectRoot })
+        .orderBy("updated_at", "desc")
+        .limit(clampLimit(limit * 4, 200)),
+    );
+    const now = Date.now();
+    return rows
+      .map((row) => normalizeRow(row))
+      .filter((row) => options.includeInactive || row.status === "ready")
+      .filter((row) => options.includeExpired || !row.expires_at || row.expires_at.getTime() > now)
+      .slice(0, limit);
   }
 
   async listSessions(limit?: number, session?: Session): Promise<CodexSession[]> {

@@ -116,6 +116,28 @@ export interface CodexStreamEvent {
   observed_at: Date;
 }
 
+export interface ProjectContextEntry {
+  id: string;
+  context_id: string;
+  project_root: string;
+  provider: string;
+  session_id: string;
+  turn_id?: string;
+  cwd?: string;
+  repo_root?: string;
+  source_kind: string;
+  source_watermark: string;
+  summary: string;
+  body?: string;
+  status: string;
+  score?: number;
+  confidence?: string;
+  metadata_json?: JsonValue;
+  created_at: Date;
+  updated_at: Date;
+  expires_at?: Date;
+}
+
 export interface JAgentDefinition {
   id: string;
   definition_id: string;
@@ -336,6 +358,27 @@ export interface CodexStreamEventInit {
   schema_hash?: string | null;
   created_at: Date;
   observed_at: Date;
+}
+
+export interface ProjectContextEntryInit {
+  context_id: string;
+  project_root: string;
+  provider: string;
+  session_id: string;
+  turn_id?: string | null;
+  cwd?: string | null;
+  repo_root?: string | null;
+  source_kind: string;
+  source_watermark: string;
+  summary: string;
+  body?: string | null;
+  status: string;
+  score?: number | null;
+  confidence?: string | null;
+  metadata_json?: JsonValue | null;
+  created_at: Date;
+  updated_at: Date;
+  expires_at?: Date | null;
 }
 
 export interface JAgentDefinitionInit {
@@ -573,6 +616,31 @@ export interface CodexStreamEventWhereInput {
   $canDelete?: boolean;
 }
 
+export interface ProjectContextEntryWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  context_id?: string | { eq?: string; ne?: string; contains?: string };
+  project_root?: string | { eq?: string; ne?: string; contains?: string };
+  provider?: string | { eq?: string; ne?: string; contains?: string };
+  session_id?: string | { eq?: string; ne?: string; contains?: string };
+  turn_id?: string | { eq?: string; ne?: string; contains?: string };
+  cwd?: string | { eq?: string; ne?: string; contains?: string };
+  repo_root?: string | { eq?: string; ne?: string; contains?: string };
+  source_kind?: string | { eq?: string; ne?: string; contains?: string };
+  source_watermark?: string | { eq?: string; ne?: string; contains?: string };
+  summary?: string | { eq?: string; ne?: string; contains?: string };
+  body?: string | { eq?: string; ne?: string; contains?: string };
+  status?: string | { eq?: string; ne?: string; contains?: string };
+  score?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  confidence?: string | { eq?: string; ne?: string; contains?: string };
+  metadata_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  updated_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  expires_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 export interface JAgentDefinitionWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   definition_id?: string | { eq?: string; ne?: string; contains?: string };
@@ -722,6 +790,7 @@ type AnyCodexTurnQueryBuilder<T = any> = { readonly _table: "codex_turns" } & Qu
 type AnyCodexSessionPresenceQueryBuilder<T = any> = { readonly _table: "codex_session_presence" } & QueryBuilder<T>;
 type AnyCodexSyncStateQueryBuilder<T = any> = { readonly _table: "codex_sync_states" } & QueryBuilder<T>;
 type AnyCodexStreamEventQueryBuilder<T = any> = { readonly _table: "codex_stream_events" } & QueryBuilder<T>;
+type AnyProjectContextEntryQueryBuilder<T = any> = { readonly _table: "project_context_entries" } & QueryBuilder<T>;
 type AnyJAgentDefinitionQueryBuilder<T = any> = { readonly _table: "j_agent_definitions" } & QueryBuilder<T>;
 type AnyJAgentRunQueryBuilder<T = any> = { readonly _table: "j_agent_runs" } & QueryBuilder<T>;
 type AnyJAgentStepQueryBuilder<T = any> = { readonly _table: "j_agent_steps" } & QueryBuilder<T>;
@@ -1410,6 +1479,11 @@ export type CodexStreamEventOrderableColumn = keyof CodexStreamEvent | Permissio
 
 export type CodexStreamEventSelected<S extends CodexStreamEventSelectableColumn = keyof CodexStreamEvent> = ("*" extends S ? CodexStreamEvent : Pick<CodexStreamEvent, Extract<S | "id", keyof CodexStreamEvent>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
+export type ProjectContextEntrySelectableColumn = keyof ProjectContextEntry | PermissionIntrospectionColumn | "*";
+export type ProjectContextEntryOrderableColumn = keyof ProjectContextEntry | PermissionIntrospectionColumn;
+
+export type ProjectContextEntrySelected<S extends ProjectContextEntrySelectableColumn = keyof ProjectContextEntry> = ("*" extends S ? ProjectContextEntry : Pick<ProjectContextEntry, Extract<S | "id", keyof ProjectContextEntry>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
 export type JAgentDefinitionSelectableColumn = keyof JAgentDefinition | PermissionIntrospectionColumn | "*";
 export type JAgentDefinitionOrderableColumn = keyof JAgentDefinition | PermissionIntrospectionColumn;
 
@@ -2069,6 +2143,136 @@ export const wasmSchema: WasmSchema = {
           "type": "Timestamp"
         },
         "nullable": false
+      }
+    ]
+  },
+  "project_context_entries": {
+    "columns": [
+      {
+        "name": "context_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "project_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "provider",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "session_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "turn_id",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "cwd",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "repo_root",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "source_kind",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "source_watermark",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "summary",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "body",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "status",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "score",
+        "column_type": {
+          "type": "Double"
+        },
+        "nullable": true
+      },
+      {
+        "name": "confidence",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "metadata_json",
+        "column_type": {
+          "type": "Json"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updated_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "expires_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
       }
     ]
   },
@@ -3766,6 +3970,188 @@ export class CodexStreamEventQueryBuilder<I extends Record<string, never> = {}, 
   }
 }
 
+export class ProjectContextEntryQueryBuilder<I extends Record<string, never> = {}, S extends ProjectContextEntrySelectableColumn = keyof ProjectContextEntry, R extends boolean = false> implements QueryBuilder<ProjectContextEntrySelected<S>> {
+  readonly _table = "project_context_entries";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: ProjectContextEntrySelected<S>;
+  readonly _initType!: ProjectContextEntryInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<Record<string, never>> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: ProjectContextEntryWhereInput): ProjectContextEntryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends ProjectContextEntrySelectableColumn>(...columns: [NewS, ...NewS[]]): ProjectContextEntryQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  orderBy(column: ProjectContextEntryOrderableColumn, direction: "asc" | "desc" = "asc"): ProjectContextEntryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): ProjectContextEntryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): ProjectContextEntryQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  gather(options: {
+    start: ProjectContextEntryWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): ProjectContextEntryQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<CloneI extends Record<string, never> = I, CloneS extends ProjectContextEntrySelectableColumn = S, CloneR extends boolean = R>(): ProjectContextEntryQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ProjectContextEntryQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export class JAgentDefinitionQueryBuilder<I extends JAgentDefinitionInclude = {}, S extends JAgentDefinitionSelectableColumn = keyof JAgentDefinition, R extends boolean = false> implements QueryBuilder<JAgentDefinitionSelectedWithIncludes<I, S, R>> {
   readonly _table = "j_agent_definitions";
   readonly _schema: WasmSchema = wasmSchema;
@@ -5172,6 +5558,7 @@ export interface GeneratedApp {
   codex_session_presence: CodexSessionPresenceQueryBuilder;
   codex_sync_states: CodexSyncStateQueryBuilder;
   codex_stream_events: CodexStreamEventQueryBuilder;
+  project_context_entries: ProjectContextEntryQueryBuilder;
   j_agent_definitions: JAgentDefinitionQueryBuilder;
   j_agent_runs: JAgentRunQueryBuilder;
   j_agent_steps: JAgentStepQueryBuilder;
@@ -5188,6 +5575,7 @@ export const app: GeneratedApp = {
   codex_session_presence: new CodexSessionPresenceQueryBuilder(),
   codex_sync_states: new CodexSyncStateQueryBuilder(),
   codex_stream_events: new CodexStreamEventQueryBuilder(),
+  project_context_entries: new ProjectContextEntryQueryBuilder(),
   j_agent_definitions: new JAgentDefinitionQueryBuilder(),
   j_agent_runs: new JAgentRunQueryBuilder(),
   j_agent_steps: new JAgentStepQueryBuilder(),
