@@ -23,12 +23,12 @@ use std::sync::{Arc, Mutex, Weak};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
+    align_query_rows_to_declared_schema, client_error_message, current_timestamp_ms,
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
-    subscription_delta_to_json,
+    serialize_write_handle, serialize_write_result, subscription_delta_to_json,
 };
 use jazz_tools::client_core::{
     ClientConfig, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost, WriteBatchContextCore,
@@ -508,15 +508,25 @@ fn build_napi_runtime(
     let (core_arc, declared_schema) = build_napi_core(
         env,
         schema_json,
-        app_id,
-        jazz_env,
-        user_branch,
+        app_id.clone(),
+        jazz_env.clone(),
+        user_branch.clone(),
         storage,
         tier,
     )?;
+    let mut client_config = ClientConfig::memory_for_test(app_id, declared_schema.clone());
+    client_config.env = jazz_env;
+    client_config.user_branch = user_branch;
+    client_config.runtime_flavor = ClientRuntimeFlavor::Node;
+    let client = JazzClientCore::from_runtime_host(
+        client_config,
+        SharedRuntimeHost::new(Arc::clone(&core_arc)),
+    )
+    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
 
     Ok(NapiRuntime {
         core: core_arc,
+        client: Mutex::new(client),
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
@@ -530,6 +540,7 @@ fn build_napi_runtime(
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
+    client: Mutex<NapiJazzClientCore>,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
@@ -557,18 +568,7 @@ fn napi_jazz_client_insert_result_to_json(
     table_name: &TableName,
     result: WriteResultCore,
 ) -> serde_json::Value {
-    let row_values = align_row_values_to_declared_schema(
-        declared_schema,
-        current_schema,
-        table_name,
-        result.row.values,
-    );
-
-    json!({
-        "id": result.row.id.uuid().to_string(),
-        "values": row_values,
-        "batchId": result.handle.batch_id.to_string(),
-    })
+    serialize_write_result(declared_schema, current_schema, table_name, result)
 }
 
 #[napi]
@@ -728,9 +728,7 @@ impl NapiJazzClientBatch {
             .update_in_batch(context, object_id, convert_updates(values.0), None)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
 
-        Ok(json!({
-            "batchId": handle.batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi(js_name = "delete")]
@@ -754,9 +752,7 @@ impl NapiJazzClientBatch {
             .delete_in_batch(context, object_id, None)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
 
-        Ok(json!({
-            "batchId": handle.batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi]
@@ -776,9 +772,7 @@ impl NapiJazzClientBatch {
             .commit_batch_context(context)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
 
-        Ok(json!({
-            "batchId": handle.batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 }
 
@@ -842,25 +836,29 @@ impl NapiRuntime {
     ) -> napi::Result<serde_json::Value> {
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
+        let table_name = TableName::new(table.clone());
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .insert_with_id(&table, values.0, object_id, None)
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
+        let result = client
+            .insert_unsealed(
+                &table,
+                values.0,
+                Some(WriteOptions {
+                    object_id,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))?;
+        let current_schema = client.current_schema();
 
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_result(
+            &self.declared_schema,
+            &current_schema,
+            &table_name,
+            result,
+        ))
     }
 
     #[napi(js_name = "insertWithSession")]
@@ -875,25 +873,30 @@ impl NapiRuntime {
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
-        let mut core = self
-            .core
+        let table_name = TableName::new(table.clone());
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let ((object_id, row_values), batch_id) = core
-            .insert_with_id(&table, values.0, object_id, write_context.as_ref())
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
-        let row_values = align_row_values_to_declared_schema(
-            &self.declared_schema,
-            core.current_schema(),
-            &TableName::new(table.clone()),
-            row_values,
-        );
+        let result = client
+            .insert_unsealed(
+                &table,
+                values.0,
+                Some(WriteOptions {
+                    object_id,
+                    write_context,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))?;
+        let current_schema = client.current_schema();
 
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_result(
+            &self.declared_schema,
+            &current_schema,
+            &table_name,
+            result,
+        ))
     }
 
     #[napi]
@@ -908,17 +911,15 @@ impl NapiRuntime {
 
         let updates = convert_updates(values.0);
 
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .update(oid, updates, None)
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?;
+        let handle = client
+            .update_unsealed(oid, updates, None)
+            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))?;
 
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi(js_name = "updateWithSession")]
@@ -935,17 +936,22 @@ impl NapiRuntime {
 
         let updates = convert_updates(values.0);
 
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .update(oid, updates, write_context.as_ref())
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
+        let handle = client
+            .update_unsealed(
+                oid,
+                updates,
+                Some(WriteOptions {
+                    write_context,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))?;
 
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi(js_name = "delete")]
@@ -954,17 +960,15 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .delete(oid, None)
-            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
+        let handle = client
+            .delete_unsealed(oid, None)
+            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))?;
 
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi(js_name = "deleteWithSession")]
@@ -978,28 +982,32 @@ impl NapiRuntime {
         let oid = ObjectId::from_uuid(uuid);
         let write_context = parse_write_context_json(write_context_json)?;
 
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let batch_id = core
-            .delete(oid, write_context.as_ref())
-            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
+        let handle = client
+            .delete_unsealed(
+                oid,
+                Some(WriteOptions {
+                    write_context,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))?;
 
-        Ok(serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
+        Ok(serialize_write_handle(handle))
     }
 
     #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]
     pub fn load_local_batch_record(&self, batch_id: String) -> napi::Result<serde_json::Value> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let core = self
-            .core
+        let client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let record = core.local_batch_record(batch_id).map_err(|e| {
-            napi::Error::from_reason(format!("Load local batch record failed: {e}"))
+        let record = client.local_batch_record(batch_id).map_err(|error| {
+            napi::Error::from_reason(client_error_message("Load local batch record", &error))
         })?;
 
         Ok(match record {
@@ -1010,12 +1018,12 @@ impl NapiRuntime {
 
     #[napi(js_name = "loadLocalBatchRecords", ts_return_type = "any[]")]
     pub fn load_local_batch_records(&self) -> napi::Result<serde_json::Value> {
-        let core = self
-            .core
+        let client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let records = core.local_batch_records().map_err(|e| {
-            napi::Error::from_reason(format!("Load local batch records failed: {e}"))
+        let records = client.local_batch_records().map_err(|error| {
+            napi::Error::from_reason(client_error_message("Load local batch records", &error))
         })?;
 
         Ok(serialize_local_batch_records(&records))
@@ -1023,11 +1031,11 @@ impl NapiRuntime {
 
     #[napi(js_name = "drainRejectedBatchIds", ts_return_type = "string[]")]
     pub fn drain_rejected_batch_ids(&self) -> napi::Result<Vec<String>> {
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        Ok(core
+        Ok(client
             .drain_rejected_batch_ids()
             .into_iter()
             .map(|batch_id| batch_id.to_string())
@@ -1037,24 +1045,27 @@ impl NapiRuntime {
     #[napi(js_name = "acknowledgeRejectedBatch")]
     pub fn acknowledge_rejected_batch(&self, batch_id: String) -> napi::Result<bool> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.acknowledge_rejected_batch(batch_id).map_err(|e| {
-            napi::Error::from_reason(format!("Acknowledge rejected batch failed: {e}"))
-        })
+        client
+            .acknowledge_rejected_batch(batch_id)
+            .map_err(|error| {
+                napi::Error::from_reason(client_error_message("Acknowledge rejected batch", &error))
+            })
     }
 
     #[napi(js_name = "sealBatch")]
     pub fn seal_batch(&self, batch_id: String) -> napi::Result<()> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
-        let mut core = self
-            .core
+        let mut client = self
+            .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.seal_batch(batch_id)
-            .map_err(|e| napi::Error::from_reason(format!("Seal batch failed: {e}")))
+        client
+            .seal_batch(batch_id)
+            .map_err(|error| napi::Error::from_reason(client_error_message("Seal batch", &error)))
     }
 
     // =========================================================================
