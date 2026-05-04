@@ -89,44 +89,6 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
   });
 
-  it("delegates direct batches to the Rust-owned RN binding when available", () => {
-    const nativeBatch = {
-      insert: vi.fn((_table, _valuesJson) =>
-        JSON.stringify({ id: "row-1", values: [], batchId: "batch-rn-1" }),
-      ),
-      update: vi.fn(() => JSON.stringify({ batchId: "batch-rn-1" })),
-      delete_: vi.fn(() => JSON.stringify({ batchId: "batch-rn-1" })),
-      commit: vi.fn(() => JSON.stringify({ batchId: "batch-rn-1" })),
-    };
-    const binding = createBinding({
-      beginDirectBatch: vi.fn(() => nativeBatch),
-    });
-    const adapter = new JazzRnRuntimeAdapter(binding, {});
-
-    const batch = adapter.beginDirectBatch?.();
-    expect(batch).toBeDefined();
-    const row = batch!.insert("todos", { title: { type: "Text", value: "milk" } });
-    const handle = batch!.commit();
-
-    expect(binding.beginDirectBatch).toHaveBeenCalledTimes(1);
-    expect(nativeBatch.insert).toHaveBeenCalledWith(
-      "todos",
-      JSON.stringify({ title: { type: "Text", value: "milk" } }),
-      undefined,
-    );
-    expect(batch!.update("row-1", { title: { type: "Text", value: "oat milk" } })).toEqual({
-      batchId: "batch-rn-1",
-    });
-    expect(nativeBatch.update).toHaveBeenCalledWith(
-      "row-1",
-      JSON.stringify({ title: { type: "Text", value: "oat milk" } }),
-    );
-    expect(batch!.delete("row-2")).toEqual({ batchId: "batch-rn-1" });
-    expect(nativeBatch.delete_).toHaveBeenCalledWith("row-2");
-    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-rn-1" });
-    expect(handle).toEqual({ batchId: "batch-rn-1" });
-  });
-
   it("encodes Bytea mutations with an explicit FFI transport shape", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});

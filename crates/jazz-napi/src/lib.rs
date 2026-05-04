@@ -24,20 +24,19 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions, acknowledge_rejected_batch_for_binding,
-    binding_write_options, build_runtime_schema_bootstrap, client_error_message, commit_batch_json,
-    current_timestamp_ms, delete_in_batch_json, delete_sealed_json, delete_unsealed_json,
-    drain_rejected_batch_id_strings, generate_id as generate_binding_id, insert_in_batch_json,
-    insert_sealed_json, insert_unsealed_json, local_batch_record_json, local_batch_records_json,
-    parse_batch_id_input, parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
+    binding_write_options, build_runtime_schema_bootstrap, client_error_message,
+    current_timestamp_ms, delete_sealed_json, delete_unsealed_json,
+    drain_rejected_batch_id_strings, generate_id as generate_binding_id, insert_sealed_json,
+    insert_unsealed_json, local_batch_record_json, local_batch_records_json, parse_batch_id_input,
+    parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
     parse_query_execution_options, parse_query_input, parse_session_input,
     parse_subscription_input, parse_write_context_input, query_rows_can_be_schema_aligned,
     record_to_updates, seal_batch_for_binding, serialize_query_rows_json, serialize_write_result,
-    subscription_delta_to_json, update_in_batch_json, update_sealed_json, update_unsealed_json,
-    write_batch_context_json,
+    subscription_delta_to_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
 };
 use jazz_tools::client_core::{
     ClientConfig, ClientError, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost,
-    WriteBatchContextCore, WriteOptions, WriteResultCore,
+    WriteOptions, WriteResultCore,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -493,13 +492,6 @@ pub struct NapiJazzClient {
     declared_schema: Schema,
 }
 
-#[napi]
-pub struct NapiJazzClientBatch {
-    inner: Mutex<NapiJazzClientCore>,
-    declared_schema: Schema,
-    context: Mutex<Option<WriteBatchContextCore>>,
-}
-
 fn napi_jazz_client_insert_result_to_json(
     declared_schema: &Schema,
     current_schema: &Schema,
@@ -544,19 +536,6 @@ impl NapiJazzClient {
         })
     }
 
-    #[napi(js_name = "beginDirectBatch")]
-    pub fn begin_direct_batch(&self) -> napi::Result<NapiJazzClientBatch> {
-        let client = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        Ok(NapiJazzClientBatch {
-            inner: Mutex::new(client.clone()),
-            declared_schema: self.declared_schema.clone(),
-            context: Mutex::new(Some(client.begin_direct_batch_context())),
-        })
-    }
-
     #[napi]
     pub fn insert(
         &self,
@@ -598,105 +577,6 @@ impl NapiJazzClient {
             napi::Error::from_reason(format!("Failed to close storage: {error:?}"))
         })?;
         Ok(())
-    }
-}
-
-#[napi]
-impl NapiJazzClientBatch {
-    #[napi]
-    pub fn insert(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let context = self
-            .context
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let context = context
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("Direct batch has already been committed"))?;
-        let mut client = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        insert_in_batch_json(
-            &mut client,
-            &self.declared_schema,
-            context,
-            &table,
-            values.0,
-            binding_write_options(object_id, None),
-        )
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
-    }
-
-    #[napi]
-    pub fn update(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-    ) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let context = self
-            .context
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let context = context
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("Direct batch has already been committed"))?;
-        let mut client = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        update_in_batch_json(
-            &mut client,
-            context,
-            object_id,
-            record_to_updates(values.0),
-            None,
-        )
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
-    }
-
-    #[napi(js_name = "delete")]
-    pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let context = self
-            .context
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let context = context
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("Direct batch has already been committed"))?;
-        let mut client = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        delete_in_batch_json(&mut client, context, object_id, None)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
-    }
-
-    #[napi]
-    pub fn commit(&self) -> napi::Result<serde_json::Value> {
-        let mut context = self
-            .context
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        let context = context
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("Direct batch has already been committed"))?;
-        let mut client = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        commit_batch_json(&mut client, context)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 }
 

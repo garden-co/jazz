@@ -28,25 +28,6 @@ protected:
   jsi::Value cpp_uniffi_internal_fn_func_ffi__arraybuffer_to_string(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_clone_rndirectbatch(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_free_rndirectbatch(jsi::Runtime &rt,
-                                                      const jsi::Value &thisVal,
-                                                      const jsi::Value *args,
-                                                      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rndirectbatch_commit(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rndirectbatch_delete(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rndirectbatch_insert(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rndirectbatch_update(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_clone_rnruntime(jsi::Runtime &rt,
                                                    const jsi::Value &thisVal,
                                                    const jsi::Value *args,
@@ -68,9 +49,6 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_close(
@@ -195,18 +173,6 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_commit(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_delete(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_insert(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_update(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
   jsi::Value
   cpp_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -218,9 +184,6 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_close(
@@ -340,9 +303,6 @@ protected:
                                                      const jsi::Value &thisVal,
                                                      const jsi::Value *args,
                                                      size_t count);
-  jsi::Value cpp_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
   jsi::Value cpp_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);

@@ -119,21 +119,6 @@ typedef struct UniffiVTableCallbackInterfaceSubscriptionCallback {
   UniffiCallbackInterfaceClone uniffi_clone;
   UniffiCallbackInterfaceSubscriptionCallbackMethod0 on_update;
 } UniffiVTableCallbackInterfaceSubscriptionCallback;
-/*handle*/ uint64_t uniffi_jazz_rn_fn_clone_rndirectbatch(
-    /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
-void uniffi_jazz_rn_fn_free_rndirectbatch(
-    /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
-RustBuffer uniffi_jazz_rn_fn_method_rndirectbatch_commit(
-    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
-RustBuffer uniffi_jazz_rn_fn_method_rndirectbatch_delete(
-    /*handle*/ uint64_t ptr, RustBuffer object_id,
-    RustCallStatus *uniffi_out_err);
-RustBuffer uniffi_jazz_rn_fn_method_rndirectbatch_insert(
-    /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
-    RustBuffer object_id, RustCallStatus *uniffi_out_err);
-RustBuffer uniffi_jazz_rn_fn_method_rndirectbatch_update(
-    /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
-    RustCallStatus *uniffi_out_err);
 /*handle*/ uint64_t uniffi_jazz_rn_fn_clone_rnruntime(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_free_rnruntime(
@@ -150,8 +135,6 @@ RustBuffer uniffi_jazz_rn_fn_method_rnruntime_add_client(
 void uniffi_jazz_rn_fn_method_rnruntime_add_server(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
-    /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
-/*handle*/ uint64_t uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_close(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
@@ -369,15 +352,10 @@ void ffi_jazz_rn_rust_future_complete_void(
 uint16_t uniffi_jazz_rn_checksum_func_current_timestamp_ms();
 uint16_t uniffi_jazz_rn_checksum_func_generate_id();
 uint16_t uniffi_jazz_rn_checksum_func_mint_local_first_token();
-uint16_t uniffi_jazz_rn_checksum_method_rndirectbatch_commit();
-uint16_t uniffi_jazz_rn_checksum_method_rndirectbatch_delete();
-uint16_t uniffi_jazz_rn_checksum_method_rndirectbatch_insert();
-uint16_t uniffi_jazz_rn_checksum_method_rndirectbatch_update();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_add_client();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_add_server();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_batched_tick();
-uint16_t uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_close();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_connect();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_create_subscription();
@@ -2954,72 +2932,6 @@ NativeJazzRn::NativeJazzRn(
             return this->cpp_uniffi_internal_fn_func_ffi__arraybuffer_to_string(
                 rt, thisVal, args, count);
           });
-  props["ubrn_uniffi_jazz_rn_fn_clone_rndirectbatch"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_clone_rndirectbatch"),
-          1,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_clone_rndirectbatch(rt, thisVal,
-                                                                   args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_free_rndirectbatch"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_free_rndirectbatch"),
-          1,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_free_rndirectbatch(rt, thisVal,
-                                                                  args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_commit"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_commit"),
-          1,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_method_rndirectbatch_commit(
-                rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_delete"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_delete"),
-          2,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_method_rndirectbatch_delete(
-                rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_insert"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_insert"),
-          4,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_method_rndirectbatch_insert(
-                rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_update"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_update"),
-          3,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this->cpp_uniffi_jazz_rn_fn_method_rndirectbatch_update(
-                rt, thisVal, args, count);
-          });
   props["ubrn_uniffi_jazz_rn_fn_clone_rnruntime"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3097,18 +3009,6 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
                 rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch"),
-          1,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
-                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_close"] =
       jsi::Function::createFromHostFunction(
@@ -3571,54 +3471,6 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
                     rt, thisVal, args, count);
           });
-  props["ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_commit"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_commit"),
-          0,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_commit(
-                    rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_delete"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_delete"),
-          0,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_delete(
-                    rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_insert"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_insert"),
-          0,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_insert(
-                    rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_update"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(
-              rt, "ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_update"),
-          0,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_update(
-                    rt, thisVal, args, count);
-          });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_"
         "batch"] = jsi::Function::createFromHostFunction(
       rt,
@@ -3665,18 +3517,6 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(
-                    rt, thisVal, args, count);
-          });
-  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
-                                        "rnruntime_begin_direct_batch"),
-          0,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close"] =
@@ -4109,18 +3949,6 @@ NativeJazzRn::NativeJazzRn(
             return this->cpp_ffi_jazz_rn_uniffi_contract_version(rt, thisVal,
                                                                  args, count);
           });
-  props["ubrn_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer"] =
-      jsi::Function::createFromHostFunction(
-          rt,
-          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_internal_fn_method_"
-                                        "rndirectbatch_ffi__bless_pointer"),
-          1,
-          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
-                 const jsi::Value *args, size_t count) -> jsi::Value {
-            return this
-                ->cpp_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer(
-                    rt, thisVal, args, count);
-          });
   props["ubrn_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -4215,21 +4043,6 @@ jsi::Value NativeJazzRn::cpp_uniffi_internal_fn_func_ffi__arraybuffer_to_string(
   return uniffi_jsi::Bridging<std::string>::arraybuffer_to_string(rt, args[0]);
 }
 jsi::Value
-NativeJazzRn::cpp_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto pointer =
-      uniffi_jsi::Bridging<uint64_t>::fromJs(rt, callInvoker, args[0]);
-  auto static destructor = [](uint64_t p) {
-    RustCallStatus status = {0};
-    uniffi_jazz_rn_fn_free_rndirectbatch(p, &status);
-  };
-  auto ptrObj =
-      std::make_shared<uniffi_jsi::DestructibleObject>(pointer, destructor);
-  auto obj = jsi::Object::createFromHostObject(rt, ptrObj);
-  return jsi::Value(rt, obj);
-}
-jsi::Value
 NativeJazzRn::cpp_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4246,97 +4059,6 @@ NativeJazzRn::cpp_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
 }
 
 // Methods calling directly into the uniffi generated C API of the Rust crate.
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_clone_rndirectbatch(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_clone_rndirectbatch(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
-                                                         value);
-}
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_free_rndirectbatch(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  uniffi_jazz_rn_fn_free_rndirectbatch(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return jsi::Value::undefined();
-}
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rndirectbatch_commit(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_method_rndirectbatch_commit(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
-}
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rndirectbatch_delete(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_method_rndirectbatch_delete(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
-}
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rndirectbatch_insert(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_method_rndirectbatch_insert(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
-}
-jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rndirectbatch_update(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_method_rndirectbatch_update(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
-}
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_clone_rnruntime(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4442,22 +4164,6 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_batched_tick(
                                                         args[count - 1]);
 
   return jsi::Value::undefined();
-}
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
-  auto value = uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
-      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
-                                                        args[0]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
-
-  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
-                                                         value);
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_close(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -5056,38 +4762,6 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_commit(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto value = uniffi_jazz_rn_checksum_method_rndirectbatch_commit();
-
-  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
-}
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_delete(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto value = uniffi_jazz_rn_checksum_method_rndirectbatch_delete();
-
-  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
-}
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_insert(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto value = uniffi_jazz_rn_checksum_method_rndirectbatch_insert();
-
-  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
-}
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rndirectbatch_update(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto value = uniffi_jazz_rn_checksum_method_rndirectbatch_update();
-
-  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
-}
 jsi::Value NativeJazzRn::
     cpp_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(
         jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -5118,14 +4792,6 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_batched_tick();
-
-  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
-}
-jsi::Value
-NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch(
-    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-    size_t count) {
-  auto value = uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

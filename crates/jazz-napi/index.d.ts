@@ -13,16 +13,8 @@ export declare class DevServer {
 
 export declare class NapiJazzClient {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string)
-  beginDirectBatch(): NapiJazzClientBatch
   insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
   close(): void
-}
-
-export declare class NapiJazzClientBatch {
-  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
-  update(objectId: string, values: Record<string, unknown>): any
-  delete(objectId: string): any
-  commit(): any
 }
 
 export declare class NapiRuntime {
