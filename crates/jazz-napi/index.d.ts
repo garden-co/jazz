@@ -11,6 +11,12 @@ export declare class DevServer {
   stop(): Promise<void>
 }
 
+export declare class NapiJazzClient {
+  constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string)
+  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
+  close(): void
+}
+
 export declare class NapiRuntime {
   /** Create a new NapiRuntime with SQLite-backed persistent storage. */
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)

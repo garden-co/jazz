@@ -30,6 +30,9 @@ use jazz_tools::binding_support::{
     query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
     subscription_delta_to_json,
 };
+use jazz_tools::client_core::{
+    ClientConfig, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost, WriteOptions,
+};
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::object::ObjectId;
@@ -406,7 +409,7 @@ impl Scheduler for NapiScheduler {
     }
 }
 
-fn build_napi_runtime(
+fn build_napi_core(
     env: Env,
     schema_json: String,
     app_id: String,
@@ -414,7 +417,7 @@ fn build_napi_runtime(
     user_branch: String,
     storage: Box<dyn Storage + Send>,
     tier: Option<String>,
-) -> napi::Result<NapiRuntime> {
+) -> napi::Result<(Arc<Mutex<NapiCoreType>>, Schema)> {
     // Parse schema
     let runtime_schema = parse_runtime_schema_input(&schema_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
@@ -489,6 +492,28 @@ fn build_napi_runtime(
         core_guard.persist_schema();
     }
 
+    Ok((core_arc, declared_schema))
+}
+
+fn build_napi_runtime(
+    env: Env,
+    schema_json: String,
+    app_id: String,
+    jazz_env: String,
+    user_branch: String,
+    storage: Box<dyn Storage + Send>,
+    tier: Option<String>,
+) -> napi::Result<NapiRuntime> {
+    let (core_arc, declared_schema) = build_napi_core(
+        env,
+        schema_json,
+        app_id,
+        jazz_env,
+        user_branch,
+        storage,
+        tier,
+    )?;
+
     Ok(NapiRuntime {
         core: core_arc,
         upstream_server_id: Mutex::new(None),
@@ -507,6 +532,100 @@ pub struct NapiRuntime {
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
+}
+
+type NapiJazzClientCore = JazzClientCore<SharedRuntimeHost<Box<dyn Storage + Send>, NapiScheduler>>;
+
+#[napi]
+pub struct NapiJazzClient {
+    inner: Mutex<NapiJazzClientCore>,
+    core: Arc<Mutex<NapiCoreType>>,
+    declared_schema: Schema,
+}
+
+#[napi]
+impl NapiJazzClient {
+    #[napi(constructor)]
+    pub fn new(
+        env: Env,
+        schema_json: String,
+        app_id: String,
+        jazz_env: String,
+        user_branch: String,
+        data_path: String,
+    ) -> napi::Result<Self> {
+        let (core, declared_schema) = build_napi_core(
+            env,
+            schema_json,
+            app_id.clone(),
+            jazz_env.clone(),
+            user_branch.clone(),
+            Box::new(open_sqlite_storage(&data_path)?),
+            None,
+        )?;
+        let mut config = ClientConfig::memory_for_test(app_id, declared_schema.clone());
+        config.env = jazz_env;
+        config.user_branch = user_branch;
+        config.runtime_flavor = ClientRuntimeFlavor::Node;
+
+        Ok(Self {
+            inner: Mutex::new(
+                JazzClientCore::from_runtime_host(config, SharedRuntimeHost::new(core.clone()))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            core,
+            declared_schema,
+        })
+    }
+
+    #[napi]
+    pub fn insert(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        object_id: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
+        let options = object_id.map(|object_id| WriteOptions {
+            object_id: Some(object_id),
+            ..Default::default()
+        });
+        let table_name = TableName::new(table.clone());
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let result = client
+            .insert(&table, values.0, options)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let current_schema = client.current_schema();
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &current_schema,
+            &table_name,
+            result.row.values,
+        );
+
+        Ok(json!({
+            "id": result.row.id.uuid().to_string(),
+            "values": row_values,
+            "batchId": result.handle.batch_id.to_string(),
+        }))
+    }
+
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.storage().flush();
+        core.storage().close().map_err(|error| {
+            napi::Error::from_reason(format!("Failed to close storage: {error:?}"))
+        })?;
+        Ok(())
+    }
 }
 
 #[napi]
