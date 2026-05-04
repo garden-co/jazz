@@ -10,6 +10,7 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
+use crate::client_core::{ClientError, WriteHandleCore, WriteResultCore};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -337,6 +338,36 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
 
 pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
     JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
+}
+
+pub fn serialize_write_handle(handle: WriteHandleCore) -> JsonValue {
+    json!({
+        "batchId": handle.batch_id.to_string(),
+    })
+}
+
+pub fn serialize_write_result(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    table: &TableName,
+    result: WriteResultCore,
+) -> JsonValue {
+    let values = align_row_values_to_declared_schema(
+        declared_schema,
+        runtime_schema,
+        table,
+        result.row.values,
+    );
+
+    json!({
+        "id": result.row.id.uuid().to_string(),
+        "values": values,
+        "batchId": result.handle.batch_id.to_string(),
+    })
+}
+
+pub fn client_error_message(operation: &str, error: &ClientError) -> String {
+    format!("{operation} failed: {error}")
 }
 
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {

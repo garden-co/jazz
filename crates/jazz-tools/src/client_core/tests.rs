@@ -1,8 +1,10 @@
 use super::*;
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::Value;
 use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema};
+use crate::row_histories::BatchId;
 use crate::runtime_core::{NoopScheduler, RuntimeCore};
 use crate::schema_manager::{AppId, SchemaManager};
 use crate::storage::MemoryStorage;
@@ -133,6 +135,184 @@ fn client_core_insert_seals_standalone_direct_write() {
         record.sealed,
         "standalone direct writes should seal in Rust"
     );
+}
+
+#[test]
+fn client_core_update_and_delete_seal_standalone_direct_writes() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("standalone-mutations-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let user_id = ObjectId::new();
+    client
+        .insert(
+            "users",
+            user_insert_values(user_id, "Alice"),
+            Some(WriteOptions {
+                object_id: Some(user_id),
+                ..Default::default()
+            }),
+        )
+        .expect("insert should create the row");
+
+    let update = client
+        .update(
+            user_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            None,
+        )
+        .expect("update should succeed");
+    let delete = client.delete(user_id, None).expect("delete should succeed");
+
+    let update_record = client
+        .local_batch_record(update.batch_id)
+        .unwrap()
+        .expect("update batch record should exist");
+    let delete_record = client
+        .local_batch_record(delete.batch_id)
+        .unwrap()
+        .expect("delete batch record should exist");
+
+    assert!(update_record.sealed);
+    assert!(delete_record.sealed);
+}
+
+#[test]
+fn client_core_unsealed_writes_leave_batches_open_for_runtime_compatibility() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("unsealed-runtime-write-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let user_id = ObjectId::new();
+    let insert = client
+        .insert_unsealed(
+            "users",
+            user_insert_values(user_id, "Alice"),
+            Some(WriteOptions {
+                object_id: Some(user_id),
+                ..Default::default()
+            }),
+        )
+        .expect("unsealed insert should succeed");
+
+    let insert_record = client
+        .local_batch_record(insert.handle.batch_id)
+        .expect("insert record load should succeed");
+    assert!(
+        insert_record.is_none(),
+        "unsealed runtime writes should not publish a sealed local record yet"
+    );
+
+    client
+        .seal_batch(insert.handle.batch_id)
+        .expect("explicit seal should succeed");
+
+    let update = client
+        .update_unsealed(
+            user_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            None,
+        )
+        .expect("unsealed update should succeed");
+    let delete = client
+        .delete_unsealed(user_id, None)
+        .expect("unsealed delete should succeed");
+
+    let update_record = client
+        .local_batch_record(update.batch_id)
+        .expect("update record load should succeed");
+    let delete_record = client
+        .local_batch_record(delete.batch_id)
+        .expect("delete record load should succeed");
+
+    assert!(update_record.is_none());
+    assert!(delete_record.is_none());
+}
+
+#[test]
+fn client_core_raw_write_context_preserves_legacy_batch_context() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("legacy-write-context-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let user_id = ObjectId::new();
+    let legacy_batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional)
+        .with_batch_id(legacy_batch_id);
+
+    let result = client
+        .insert_unsealed(
+            "users",
+            user_insert_values(user_id, "Alice"),
+            Some(WriteOptions {
+                object_id: Some(user_id),
+                write_context: Some(write_context),
+                ..Default::default()
+            }),
+        )
+        .expect("legacy-context insert should succeed");
+
+    client
+        .seal_batch(result.handle.batch_id)
+        .expect("legacy batch should seal through the core wrapper");
+
+    let record = client
+        .local_batch_record(result.handle.batch_id)
+        .unwrap()
+        .expect("legacy batch record should exist");
+
+    assert_eq!(result.handle.batch_id, legacy_batch_id);
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Transactional);
+    assert!(record.sealed);
+}
+
+#[test]
+fn client_core_local_batch_helpers_wrap_runtime_state() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("local-batch-helper-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let result = client
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .expect("insert should succeed");
+
+    let records = client
+        .local_batch_records()
+        .expect("record list should load");
+    assert!(
+        records
+            .iter()
+            .any(|record| record.batch_id == result.handle.batch_id)
+    );
+
+    assert_eq!(client.drain_rejected_batch_ids(), Vec::<BatchId>::new());
+    assert!(
+        !client
+            .acknowledge_rejected_batch(BatchId::new())
+            .expect("ack should return false for an unknown batch")
+    );
+
+    client
+        .seal_batch(result.handle.batch_id)
+        .expect("seal helper should work");
+    let record = client
+        .local_batch_record(result.handle.batch_id)
+        .unwrap()
+        .expect("record should still exist after seal");
+    assert!(record.sealed);
 }
 
 #[test]

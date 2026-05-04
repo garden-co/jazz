@@ -29,6 +29,7 @@ pub struct WriteResultCore {
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
     pub object_id: Option<ObjectId>,
+    pub write_context: Option<WriteContext>,
     pub session: Option<Session>,
     pub attribution: Option<String>,
     pub updated_at: Option<u64>,
@@ -70,6 +71,7 @@ pub(crate) fn write_context(
     batch_context: Option<&WriteBatchContextCore>,
 ) -> Option<WriteContext> {
     if options.session.is_none()
+        && options.write_context.is_none()
         && options.attribution.is_none()
         && options.updated_at.is_none()
         && batch_context.is_none()
@@ -78,12 +80,25 @@ pub(crate) fn write_context(
     }
 
     let mut context = options
-        .session
+        .write_context
         .clone()
-        .map(WriteContext::from_session)
+        .or_else(|| options.session.clone().map(WriteContext::from_session))
         .unwrap_or_default();
-    context.attribution = options.attribution.clone();
-    context.updated_at = options.updated_at;
+
+    if let Some(session) = options.session.clone() {
+        context.session = Some(session);
+    }
+    if let Some(attribution) = options.attribution.clone() {
+        context.attribution = Some(attribution);
+    }
+    if let Some(updated_at) = options.updated_at {
+        context.updated_at = Some(updated_at);
+    }
+
+    if options.write_context.is_none() {
+        context.attribution = options.attribution.clone();
+        context.updated_at = options.updated_at;
+    }
 
     if let Some(batch) = batch_context {
         context = context
@@ -95,50 +110,25 @@ pub(crate) fn write_context(
     Some(context)
 }
 
-fn tier_rank(tier: DurabilityTier) -> u8 {
-    match tier {
-        DurabilityTier::Local => 0,
-        DurabilityTier::EdgeServer => 1,
-        DurabilityTier::GlobalServer => 2,
-    }
-}
-
-fn settlement_satisfies_tier(
-    settlement: Option<&BatchSettlement>,
-    tier: DurabilityTier,
-) -> BatchWaitOutcome {
-    match settlement {
-        Some(BatchSettlement::Rejected { code, reason, .. }) => BatchWaitOutcome::Rejected {
-            code: code.clone(),
-            reason: reason.clone(),
-        },
-        Some(BatchSettlement::DurableDirect { confirmed_tier, .. })
-        | Some(BatchSettlement::AcceptedTransaction { confirmed_tier, .. })
-            if tier_rank(*confirmed_tier) >= tier_rank(tier) =>
-        {
-            BatchWaitOutcome::Satisfied
-        }
-        Some(_) | None => BatchWaitOutcome::Pending,
-    }
+fn runtime_error(error: impl ToString) -> ClientError {
+    ClientError::new(ClientErrorCode::RuntimeError, error.to_string())
 }
 
 impl<H: ClientRuntimeHost> JazzClientCore<H> {
-    pub fn insert(
+    fn insert_with_batch_context(
         &mut self,
+        batch_context: Option<&WriteBatchContextCore>,
         table: &str,
         values: HashMap<String, Value>,
         options: Option<WriteOptions>,
     ) -> Result<WriteResultCore, ClientError> {
         let options = options.unwrap_or_default();
-        let context = write_context(&options, None);
+        let context = write_context(&options, batch_context);
         let ((id, values), batch_id) = self
             .with_runtime_mut(|runtime| {
                 runtime.insert_with_id(table, values, options.object_id, context.as_ref())
             })
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        self.with_runtime_mut(|runtime| runtime.seal_batch(batch_id))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+            .map_err(runtime_error)?;
 
         Ok(WriteResultCore {
             row: ClientRow { id, values },
@@ -146,12 +136,120 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         })
     }
 
+    fn update_with_batch_context(
+        &mut self,
+        batch_context: Option<&WriteBatchContextCore>,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, batch_context);
+        let batch_id = self
+            .with_runtime_mut(|runtime| runtime.update(object_id, values, context.as_ref()))
+            .map_err(runtime_error)?;
+
+        Ok(WriteHandleCore { batch_id })
+    }
+
+    fn delete_with_batch_context(
+        &mut self,
+        batch_context: Option<&WriteBatchContextCore>,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, batch_context);
+        let batch_id = self
+            .with_runtime_mut(|runtime| runtime.delete(object_id, context.as_ref()))
+            .map_err(runtime_error)?;
+
+        Ok(WriteHandleCore { batch_id })
+    }
+
+    pub fn insert_unsealed(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteResultCore, ClientError> {
+        self.insert_with_batch_context(None, table, values, options)
+    }
+
+    pub fn update_unsealed(
+        &mut self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.update_with_batch_context(None, object_id, values, options)
+    }
+
+    pub fn delete_unsealed(
+        &mut self,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.delete_with_batch_context(None, object_id, options)
+    }
+
+    pub fn insert(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteResultCore, ClientError> {
+        let result = self.insert_unsealed(table, values, options)?;
+        self.seal_batch(result.handle.batch_id)?;
+        Ok(result)
+    }
+
+    pub fn update(
+        &mut self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let handle = self.update_unsealed(object_id, values, options)?;
+        self.seal_batch(handle.batch_id)?;
+        Ok(handle)
+    }
+
+    pub fn delete(
+        &mut self,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let handle = self.delete_unsealed(object_id, options)?;
+        self.seal_batch(handle.batch_id)?;
+        Ok(handle)
+    }
+
     pub fn local_batch_record(
         &self,
         batch_id: BatchId,
     ) -> Result<Option<LocalBatchRecord>, ClientError> {
         self.with_runtime(|runtime| runtime.local_batch_record(batch_id))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))
+            .map_err(runtime_error)
+    }
+
+    pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, ClientError> {
+        self.with_runtime(|runtime| runtime.local_batch_records())
+            .map_err(runtime_error)
+    }
+
+    pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
+        self.with_runtime_mut(|runtime| runtime.drain_rejected_batch_ids())
+    }
+
+    pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, ClientError> {
+        self.with_runtime_mut(|runtime| runtime.acknowledge_rejected_batch(batch_id))
+            .map_err(runtime_error)
+    }
+
+    pub fn seal_batch(&mut self, batch_id: BatchId) -> Result<(), ClientError> {
+        self.with_runtime_mut(|runtime| runtime.seal_batch(batch_id))
+            .map_err(runtime_error)
     }
 
     pub fn begin_direct_batch_context(&self) -> WriteBatchContextCore {
@@ -201,18 +299,7 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         values: HashMap<String, Value>,
         options: Option<WriteOptions>,
     ) -> Result<WriteResultCore, ClientError> {
-        let options = options.unwrap_or_default();
-        let context = write_context(&options, Some(batch_context));
-        let ((id, values), batch_id) = self
-            .with_runtime_mut(|runtime| {
-                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
-            })
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteResultCore {
-            row: ClientRow { id, values },
-            handle: WriteHandleCore { batch_id },
-        })
+        self.insert_with_batch_context(Some(batch_context), table, values, options)
     }
 
     pub fn update_in_batch(
@@ -222,13 +309,7 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         values: Vec<(String, Value)>,
         options: Option<WriteOptions>,
     ) -> Result<WriteHandleCore, ClientError> {
-        let options = options.unwrap_or_default();
-        let context = write_context(&options, Some(batch_context));
-        let batch_id = self
-            .with_runtime_mut(|runtime| runtime.update(object_id, values, context.as_ref()))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteHandleCore { batch_id })
+        self.update_with_batch_context(Some(batch_context), object_id, values, options)
     }
 
     pub fn delete_in_batch(
@@ -237,21 +318,14 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         object_id: ObjectId,
         options: Option<WriteOptions>,
     ) -> Result<WriteHandleCore, ClientError> {
-        let options = options.unwrap_or_default();
-        let context = write_context(&options, Some(batch_context));
-        let batch_id = self
-            .with_runtime_mut(|runtime| runtime.delete(object_id, context.as_ref()))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteHandleCore { batch_id })
+        self.delete_with_batch_context(Some(batch_context), object_id, options)
     }
 
     pub fn commit_batch_context(
         &mut self,
         batch_context: WriteBatchContextCore,
     ) -> Result<WriteHandleCore, ClientError> {
-        self.with_runtime_mut(|runtime| runtime.seal_batch(batch_context.batch_id))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+        self.seal_batch(batch_context.batch_id)?;
 
         Ok(WriteHandleCore {
             batch_id: batch_context.batch_id,
@@ -278,6 +352,33 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
     }
 }
 
+fn tier_rank(tier: DurabilityTier) -> u8 {
+    match tier {
+        DurabilityTier::Local => 0,
+        DurabilityTier::EdgeServer => 1,
+        DurabilityTier::GlobalServer => 2,
+    }
+}
+
+fn settlement_satisfies_tier(
+    settlement: Option<&BatchSettlement>,
+    tier: DurabilityTier,
+) -> BatchWaitOutcome {
+    match settlement {
+        Some(BatchSettlement::Rejected { code, reason, .. }) => BatchWaitOutcome::Rejected {
+            code: code.clone(),
+            reason: reason.clone(),
+        },
+        Some(BatchSettlement::DurableDirect { confirmed_tier, .. })
+        | Some(BatchSettlement::AcceptedTransaction { confirmed_tier, .. })
+            if tier_rank(*confirmed_tier) >= tier_rank(tier) =>
+        {
+            BatchWaitOutcome::Satisfied
+        }
+        Some(_) | None => BatchWaitOutcome::Pending,
+    }
+}
+
 pub struct DirectBatchCore<'a, H: ClientRuntimeHost> {
     client: &'a mut JazzClientCore<H>,
     context: WriteBatchContextCore,
@@ -292,6 +393,25 @@ impl<'a, H: ClientRuntimeHost> DirectBatchCore<'a, H> {
     ) -> Result<WriteResultCore, ClientError> {
         self.client
             .insert_in_batch(&self.context, table, values, options)
+    }
+
+    pub fn update(
+        &mut self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.client
+            .update_in_batch(&self.context, object_id, values, options)
+    }
+
+    pub fn delete(
+        &mut self,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.client
+            .delete_in_batch(&self.context, object_id, options)
     }
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
@@ -313,6 +433,25 @@ impl<'a, H: ClientRuntimeHost> TransactionCore<'a, H> {
     ) -> Result<WriteResultCore, ClientError> {
         self.client
             .insert_in_batch(&self.context, table, values, options)
+    }
+
+    pub fn update(
+        &mut self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.client
+            .update_in_batch(&self.context, object_id, values, options)
+    }
+
+    pub fn delete(
+        &mut self,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.client
+            .delete_in_batch(&self.context, object_id, options)
     }
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
