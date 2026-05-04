@@ -25,8 +25,8 @@ use jazz_tools::binding_support::{
     write_batch_context_json, PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
 };
 use jazz_tools::client_core::{
-    ClientConfig, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore, SharedRuntimeHost,
-    WriteBatchContextCore,
+    ClientConfig, ClientError, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore,
+    SharedRuntimeHost, WriteBatchContextCore,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -331,6 +331,96 @@ impl RnRuntime {
         )
         .map_err(runtime_err)
     }
+
+    fn write_json_string(
+        &self,
+        operation: &str,
+        json_operation: &str,
+        write: impl FnOnce(&mut RnJazzClientCore) -> Result<serde_json::Value, ClientError>,
+    ) -> Result<String, JazzRnError> {
+        let mut client = self.client_core()?;
+        let payload = write(&mut client).map_err(|error| JazzRnError::Runtime {
+            message: client_error_message(operation, &error),
+        })?;
+        rn_json_to_string(json_operation, payload)
+    }
+
+    fn insert_json(
+        &self,
+        boundary: &'static str,
+        table: String,
+        values_json: String,
+        write_context_json: Option<String>,
+        object_id: Option<String>,
+        sealed: bool,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary(boundary, || {
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            self.write_json_string("Insert", "insert", |client| {
+                let options = binding_write_options(object_id, write_context);
+                if sealed {
+                    insert_sealed_json(client, &self.declared_schema, &table, named_values, options)
+                } else {
+                    insert_unsealed_json(
+                        client,
+                        &self.declared_schema,
+                        &table,
+                        named_values,
+                        options,
+                    )
+                }
+            })
+        })
+    }
+
+    fn update_json(
+        &self,
+        boundary: &'static str,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary(boundary, || {
+            let oid = parse_object_id_input(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let updates = convert_updates(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            self.write_json_string("Update", "update", |client| {
+                let options = binding_write_options(None, write_context);
+                if sealed {
+                    update_sealed_json(client, oid, updates, options)
+                } else {
+                    update_unsealed_json(client, oid, updates, options)
+                }
+            })
+        })
+    }
+
+    fn delete_json(
+        &self,
+        boundary: &'static str,
+        object_id: String,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary(boundary, || {
+            let oid = parse_object_id_input(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let write_context = parse_write_context(write_context_json)?;
+            self.write_json_string("Delete", "delete", |client| {
+                let options = binding_write_options(None, write_context);
+                if sealed {
+                    delete_sealed_json(client, oid, options)
+                } else {
+                    delete_unsealed_json(client, oid, options)
+                }
+            })
+        })
+    }
 }
 
 #[uniffi::export]
@@ -464,23 +554,7 @@ impl RnRuntime {
         values_json: String,
         object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("insert", || {
-            let named_values = convert_insert_values(&values_json)?;
-            let object_id = parse_external_object_id(object_id.as_deref())
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
-            let payload = insert_unsealed_json(
-                &mut client,
-                &self.declared_schema,
-                &table,
-                named_values,
-                binding_write_options(object_id, None),
-            )
-            .map_err(|error| JazzRnError::Runtime {
-                message: client_error_message("Insert", &error),
-            })?;
-            rn_json_to_string("insert", payload)
-        })
+        self.insert_json("insert", table, values_json, None, object_id, false)
     }
 
     pub fn insert_with_session(
@@ -490,24 +564,14 @@ impl RnRuntime {
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("insert_with_session", || {
-            let named_values = convert_insert_values(&values_json)?;
-            let write_context = parse_write_context(write_context_json)?;
-            let object_id = parse_external_object_id(object_id.as_deref())
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
-            let payload = insert_unsealed_json(
-                &mut client,
-                &self.declared_schema,
-                &table,
-                named_values,
-                binding_write_options(object_id, write_context),
-            )
-            .map_err(|error| JazzRnError::Runtime {
-                message: client_error_message("Insert", &error),
-            })?;
-            rn_json_to_string("insert", payload)
-        })
+        self.insert_json(
+            "insert_with_session",
+            table,
+            values_json,
+            write_context_json,
+            object_id,
+            false,
+        )
     }
 
     pub fn insert_sealed(
@@ -517,24 +581,14 @@ impl RnRuntime {
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("insert_sealed", || {
-            let named_values = convert_insert_values(&values_json)?;
-            let write_context = parse_write_context(write_context_json)?;
-            let object_id = parse_external_object_id(object_id.as_deref())
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
-            let payload = insert_sealed_json(
-                &mut client,
-                &self.declared_schema,
-                &table,
-                named_values,
-                binding_write_options(object_id, write_context),
-            )
-            .map_err(|error| JazzRnError::Runtime {
-                message: client_error_message("Insert", &error),
-            })?;
-            rn_json_to_string("insert", payload)
-        })
+        self.insert_json(
+            "insert_sealed",
+            table,
+            values_json,
+            write_context_json,
+            object_id,
+            true,
+        )
     }
 
     pub fn create_write_batch_context(&self, mode: String) -> Result<String, JazzRnError> {
@@ -549,19 +603,7 @@ impl RnRuntime {
     }
 
     pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
-        with_panic_boundary("update", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let updates = convert_updates(&values_json)?;
-            let mut client = self.client_core()?;
-            let payload =
-                update_unsealed_json(&mut client, oid, updates, None).map_err(|error| {
-                    JazzRnError::Runtime {
-                        message: client_error_message("Update", &error),
-                    }
-                })?;
-            rn_json_to_string("update", payload)
-        })
+        self.update_json("update", object_id, values_json, None, false)
     }
 
     pub fn update_with_session(
@@ -570,23 +612,13 @@ impl RnRuntime {
         values_json: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("update_with_session", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let updates = convert_updates(&values_json)?;
-            let write_context = parse_write_context(write_context_json)?;
-            let mut client = self.client_core()?;
-            let payload = update_unsealed_json(
-                &mut client,
-                oid,
-                updates,
-                binding_write_options(None, write_context),
-            )
-            .map_err(|error| JazzRnError::Runtime {
-                message: client_error_message("Update", &error),
-            })?;
-            rn_json_to_string("update", payload)
-        })
+        self.update_json(
+            "update_with_session",
+            object_id,
+            values_json,
+            write_context_json,
+            false,
+        )
     }
 
     pub fn update_sealed(
@@ -595,38 +627,18 @@ impl RnRuntime {
         values_json: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("update_sealed", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let updates = convert_updates(&values_json)?;
-            let write_context = parse_write_context(write_context_json)?;
-            let mut client = self.client_core()?;
-            let payload = update_sealed_json(
-                &mut client,
-                oid,
-                updates,
-                binding_write_options(None, write_context),
-            )
-            .map_err(|error| JazzRnError::Runtime {
-                message: client_error_message("Update", &error),
-            })?;
-            rn_json_to_string("update", payload)
-        })
+        self.update_json(
+            "update_sealed",
+            object_id,
+            values_json,
+            write_context_json,
+            true,
+        )
     }
 
     #[uniffi::method(name = "delete")]
     pub fn delete_row(&self, object_id: String) -> Result<String, JazzRnError> {
-        with_panic_boundary("delete", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
-            let payload = delete_unsealed_json(&mut client, oid, None).map_err(|error| {
-                JazzRnError::Runtime {
-                    message: client_error_message("Delete", &error),
-                }
-            })?;
-            rn_json_to_string("delete", payload)
-        })
+        self.delete_json("delete", object_id, None, false)
     }
 
     pub fn delete_sealed(
@@ -634,18 +646,7 @@ impl RnRuntime {
         object_id: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("delete_sealed", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let write_context = parse_write_context(write_context_json)?;
-            let mut client = self.client_core()?;
-            let payload =
-                delete_sealed_json(&mut client, oid, binding_write_options(None, write_context))
-                    .map_err(|error| JazzRnError::Runtime {
-                        message: client_error_message("Delete", &error),
-                    })?;
-            rn_json_to_string("delete", payload)
-        })
+        self.delete_json("delete_sealed", object_id, write_context_json, true)
     }
 
     #[uniffi::method(name = "deleteWithSession")]
@@ -654,18 +655,7 @@ impl RnRuntime {
         object_id: String,
         write_context_json: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("delete_with_session", || {
-            let oid = parse_object_id_input(Some(&object_id))
-                .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let write_context = parse_write_context(write_context_json)?;
-            let mut client = self.client_core()?;
-            let payload =
-                delete_unsealed_json(&mut client, oid, binding_write_options(None, write_context))
-                    .map_err(|error| JazzRnError::Runtime {
-                        message: client_error_message("Delete", &error),
-                    })?;
-            rn_json_to_string("delete", payload)
-        })
+        self.delete_json("delete_with_session", object_id, write_context_json, false)
     }
 
     // =========================================================================

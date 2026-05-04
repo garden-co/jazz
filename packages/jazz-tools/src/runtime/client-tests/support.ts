@@ -79,17 +79,6 @@ export function makeClient() {
   const runtime: Runtime = {
     ...runtimeBatchRecordStubs,
     ...runtimeSealedWriteStubs,
-    insert: () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-      batchId: "plain-insert-batch",
-    }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -162,17 +151,6 @@ export function makeClientWithContext(context: AppContext): JazzClient {
   const runtime: Runtime = {
     ...runtimeBatchRecordStubs,
     ...runtimeSealedWriteStubs,
-    insert: () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-      batchId: "plain-insert-batch",
-    }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
     query: async () => [],
     subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,

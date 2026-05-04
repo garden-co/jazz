@@ -73,7 +73,7 @@ use jazz_tools::binding_support::{
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::client_core::ClientStorageMode;
 use jazz_tools::client_core::{
-    ClientConfig, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost,
+    ClientConfig, ClientError, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -513,6 +513,84 @@ pub struct WasmRuntime {
     tier_label: &'static str,
 }
 
+impl WasmRuntime {
+    fn write_json_to_js(
+        &self,
+        operation: &str,
+        write: impl FnOnce(&mut WasmRuntimeClientCore) -> Result<serde_json::Value, ClientError>,
+    ) -> Result<JsValue, JsError> {
+        let mut client = self.client.borrow_mut();
+        let payload = write(&mut client)
+            .map_err(|error| JsError::new(&client_error_message(operation, &error)))?;
+        serialize_json_to_js(payload)
+    }
+
+    fn insert_json(
+        &self,
+        table: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+        object_id: Option<String>,
+        sealed: bool,
+    ) -> Result<JsValue, JsError> {
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
+
+        self.write_json_to_js("Insert", |client| {
+            let declared_schema = client.config().schema.clone();
+            let options = binding_write_options(object_id, write_context);
+            if sealed {
+                insert_sealed_json(client, &declared_schema, table, named_values, options)
+            } else {
+                insert_unsealed_json(client, &declared_schema, table, named_values, options)
+            }
+        })
+    }
+
+    fn update_json(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> Result<JsValue, JsError> {
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+
+        self.write_json_to_js("Update", |client| {
+            let updates = record_to_updates(partial_values);
+            let options = binding_write_options(None, write_context);
+            if sealed {
+                update_sealed_json(client, oid, updates, options)
+            } else {
+                update_unsealed_json(client, oid, updates, options)
+            }
+        })
+    }
+
+    fn delete_json(
+        &self,
+        object_id: &str,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> Result<JsValue, JsError> {
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        self.write_json_to_js("Delete", |client| {
+            let options = binding_write_options(None, write_context);
+            if sealed {
+                delete_sealed_json(client, oid, options)
+            } else {
+                delete_unsealed_json(client, oid, options)
+            }
+        })
+    }
+}
+
 #[wasm_bindgen]
 impl WasmRuntime {
     /// Create a new WasmRuntime.
@@ -734,22 +812,9 @@ impl WasmRuntime {
         object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
-
-        let mut client = self.client.borrow_mut();
-        let declared_schema = client.config().schema.clone();
-        let payload = insert_unsealed_json(
-            &mut client,
-            &declared_schema,
-            table,
-            named_values,
-            binding_write_options(object_id, None),
-        )
-        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
+        let payload = self.insert_json(table, values, None, object_id, false)?;
         tracing::debug!("inserted");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     /// Insert a row into a table as an explicit session principal.
@@ -762,23 +827,9 @@ impl WasmRuntime {
         object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
-        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
-
-        let mut client = self.client.borrow_mut();
-        let declared_schema = client.config().schema.clone();
-        let payload = insert_unsealed_json(
-            &mut client,
-            &declared_schema,
-            table,
-            named_values,
-            binding_write_options(object_id, write_context),
-        )
-        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
+        let payload = self.insert_json(table, values, write_context_json, object_id, false)?;
         tracing::debug!("inserted_with_session");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     #[wasm_bindgen(js_name = insertSealed)]
@@ -790,22 +841,7 @@ impl WasmRuntime {
         object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insertSealed", tier = self.tier_label, table).entered();
-        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id = parse_external_object_id(object_id.as_deref())
-            .map_err(|message| JsError::new(&message))?;
-
-        let mut client = self.client.borrow_mut();
-        let declared_schema = client.config().schema.clone();
-        let payload = insert_sealed_json(
-            &mut client,
-            &declared_schema,
-            table,
-            named_values,
-            binding_write_options(object_id, write_context),
-        )
-        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
-        serialize_json_to_js(payload)
+        self.insert_json(table, values, write_context_json, object_id, true)
     }
 
     #[wasm_bindgen(js_name = createWriteBatchContext)]
@@ -884,17 +920,9 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-
-        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-
-        let mut client = self.client.borrow_mut();
-        let payload =
-            update_unsealed_json(&mut client, oid, record_to_updates(partial_values), None)
-                .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
-
+        let payload = self.update_json(object_id, values, None, false)?;
         tracing::debug!(object_id, "updated");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     /// Update a row by ObjectId as an explicit session principal.
@@ -912,22 +940,9 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-
-        let mut client = self.client.borrow_mut();
-        let payload = update_unsealed_json(
-            &mut client,
-            oid,
-            record_to_updates(partial_values),
-            binding_write_options(None, write_context),
-        )
-        .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
-
+        let payload = self.update_json(object_id, values, write_context_json, false)?;
         tracing::debug!(object_id, "updated_with_session");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     #[wasm_bindgen(js_name = updateSealed)]
@@ -938,33 +953,16 @@ impl WasmRuntime {
         write_context_json: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::updateSealed", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-        let write_context = parse_write_context_json(write_context_json)?;
-        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-
-        let mut client = self.client.borrow_mut();
-        let payload = update_sealed_json(
-            &mut client,
-            oid,
-            record_to_updates(partial_values),
-            binding_write_options(None, write_context),
-        )
-        .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
-        serialize_json_to_js(payload)
+        self.update_json(object_id, values, write_context_json, true)
     }
 
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-
-        let mut client = self.client.borrow_mut();
-        let payload = delete_unsealed_json(&mut client, oid, None)
-            .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
-
+        let payload = self.delete_json(object_id, None, false)?;
         tracing::debug!(object_id, "deleted");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     /// Delete a row by ObjectId as an explicit session principal.
@@ -976,16 +974,9 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self.client.borrow_mut();
-        let payload =
-            delete_unsealed_json(&mut client, oid, binding_write_options(None, write_context))
-                .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
-
+        let payload = self.delete_json(object_id, write_context_json, false)?;
         tracing::debug!(object_id, "deleted_with_session");
-        serialize_json_to_js(payload)
+        Ok(payload)
     }
 
     #[wasm_bindgen(js_name = deleteSealed)]
@@ -995,14 +986,7 @@ impl WasmRuntime {
         write_context_json: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::deleteSealed", tier = self.tier_label, object_id).entered();
-        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self.client.borrow_mut();
-        let payload =
-            delete_sealed_json(&mut client, oid, binding_write_options(None, write_context))
-                .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
-        serialize_json_to_js(payload)
+        self.delete_json(object_id, write_context_json, true)
     }
 
     // =========================================================================

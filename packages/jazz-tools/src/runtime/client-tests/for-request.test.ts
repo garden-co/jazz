@@ -296,14 +296,11 @@ describe("JazzClient.forRequest", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
       insertWithSession: (_table, _values, contextJson) => {
         writeContextJson = contextJson;
         return mockRow("00000000-0000-0000-0000-000000000001");
       },
-      update: () => mockMutation(),
       updateWithSession: () => mockMutation(),
-      delete: () => mockMutation(),
       deleteWithSession: () => mockMutation(),
       query: async (
         queryJson: string,
