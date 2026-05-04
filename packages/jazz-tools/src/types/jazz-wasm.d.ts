@@ -103,4 +103,13 @@ declare module "jazz-wasm" {
     /** Get the Ed25519 public key as base64url from a base64url-encoded seed. */
     static getPublicKeyBase64url(seedB64: string): string;
   }
+
+  export class WasmJazzClient {
+    constructor(schemaJson: string, appId: string, env: string, userBranch: string);
+    insert(
+      table: string,
+      values: InsertValues,
+      objectId?: string | null,
+    ): { id: string; values: any[]; batchId: string };
+  }
 }
