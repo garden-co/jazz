@@ -384,6 +384,17 @@ pub fn parse_batch_id_input(batch_id: &str) -> Result<BatchId, String> {
         .map_err(|err: String| format!("Invalid BatchId: {err}"))
 }
 
+pub fn parse_batch_mode_input(mode: &str) -> Result<BatchMode, String> {
+    match mode {
+        "direct" => Ok(BatchMode::Direct),
+        "transactional" => Ok(BatchMode::Transactional),
+        _ => Err(format!(
+            "Invalid batch mode '{}'. Must be 'direct' or 'transactional'.",
+            mode
+        )),
+    }
+}
+
 pub fn serialize_durability_tier(tier: DurabilityTier) -> &'static str {
     match tier {
         DurabilityTier::Local => "local",
@@ -514,6 +525,54 @@ pub fn parse_object_id_input(object_id: Option<&str>) -> Result<ObjectId, String
     parse_external_object_id(object_id)?.ok_or_else(|| "Object id is required".to_string())
 }
 
+pub fn write_batch_context_json<H: ClientRuntimeHost>(
+    client: &JazzClientCore<H>,
+    mode: BatchMode,
+) -> JsonValue {
+    let context = client.begin_write_batch_context(mode);
+    json!({
+        "batchMode": serialize_batch_mode(context.mode()),
+        "batchId": context.batch_id().to_string(),
+        "targetBranchName": context.target_branch_name(),
+    })
+}
+
+pub fn insert_sealed_json<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+    declared_schema: &Schema,
+    table: &str,
+    values: HashMap<String, Value>,
+    options: Option<WriteOptions>,
+) -> Result<JsonValue, ClientError> {
+    let result = client.insert(table, values, options)?;
+    let current_schema = client.current_schema();
+    Ok(serialize_write_result(
+        declared_schema,
+        &current_schema,
+        &TableName::new(table),
+        result,
+    ))
+}
+
+pub fn update_sealed_json<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+    object_id: ObjectId,
+    updates: Vec<(String, Value)>,
+    options: Option<WriteOptions>,
+) -> Result<JsonValue, ClientError> {
+    let handle = client.update(object_id, updates, options)?;
+    Ok(serialize_write_handle(handle))
+}
+
+pub fn delete_sealed_json<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+    object_id: ObjectId,
+    options: Option<WriteOptions>,
+) -> Result<JsonValue, ClientError> {
+    let handle = client.delete(object_id, options)?;
+    Ok(serialize_write_handle(handle))
+}
+
 pub fn insert_unsealed_json<H: ClientRuntimeHost>(
     client: &mut JazzClientCore<H>,
     declared_schema: &Schema,
@@ -595,6 +654,48 @@ pub fn commit_batch_json<H: ClientRuntimeHost>(
 ) -> Result<JsonValue, ClientError> {
     let handle = client.commit_batch_context(batch_context)?;
     Ok(serialize_write_handle(handle))
+}
+
+pub fn local_batch_record_json<H: ClientRuntimeHost>(
+    client: &JazzClientCore<H>,
+    batch_id: BatchId,
+) -> Result<JsonValue, ClientError> {
+    let record = client.local_batch_record(batch_id)?;
+    Ok(record
+        .as_ref()
+        .map(serialize_local_batch_record)
+        .unwrap_or(JsonValue::Null))
+}
+
+pub fn local_batch_records_json<H: ClientRuntimeHost>(
+    client: &JazzClientCore<H>,
+) -> Result<JsonValue, ClientError> {
+    let records = client.local_batch_records()?;
+    Ok(serialize_local_batch_records(&records))
+}
+
+pub fn drain_rejected_batch_id_strings<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+) -> Vec<String> {
+    client
+        .drain_rejected_batch_ids()
+        .into_iter()
+        .map(|batch_id| batch_id.to_string())
+        .collect()
+}
+
+pub fn acknowledge_rejected_batch_for_binding<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+    batch_id: BatchId,
+) -> Result<bool, ClientError> {
+    client.acknowledge_rejected_batch(batch_id)
+}
+
+pub fn seal_batch_for_binding<H: ClientRuntimeHost>(
+    client: &mut JazzClientCore<H>,
+    batch_id: BatchId,
+) -> Result<(), ClientError> {
+    client.seal_batch(batch_id)
 }
 
 pub fn client_error_message(operation: &str, error: &ClientError) -> String {
@@ -778,13 +879,17 @@ pub fn current_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions, align_query_rows_to_declared_schema,
+        PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
+        acknowledge_rejected_batch_for_binding, align_query_rows_to_declared_schema,
         align_values_to_declared_schema, binding_write_options, build_runtime_schema_bootstrap,
-        commit_batch_json, delete_in_batch_json, delete_unsealed_json, insert_in_batch_json,
-        insert_unsealed_json, parse_object_id_input, parse_query_execution_options,
-        parse_read_durability_options, parse_runtime_schema_input, parse_subscription_input,
-        parse_write_context_input, query_rows_can_be_schema_aligned, record_to_updates,
-        serialize_query_rows_json, update_in_batch_json, update_unsealed_json,
+        commit_batch_json, delete_in_batch_json, delete_sealed_json, delete_unsealed_json,
+        drain_rejected_batch_id_strings, insert_in_batch_json, insert_sealed_json,
+        insert_unsealed_json, local_batch_record_json, local_batch_records_json,
+        parse_object_id_input, parse_query_execution_options, parse_read_durability_options,
+        parse_runtime_schema_input, parse_subscription_input, parse_write_context_input,
+        query_rows_can_be_schema_aligned, record_to_updates, seal_batch_for_binding,
+        serialize_query_rows_json, update_in_batch_json, update_sealed_json, update_unsealed_json,
+        write_batch_context_json,
     };
     use crate::batch_fate::BatchMode;
     use crate::client_core::{ClientConfig, JazzClientCore};
@@ -794,6 +899,7 @@ mod tests {
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
         Value,
     };
+    use crate::row_histories::BatchId;
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::{AppId, SchemaManager};
     use crate::storage::MemoryStorage;
@@ -975,6 +1081,83 @@ mod tests {
     }
 
     #[test]
+    fn binding_support_sealed_json_writes_seal_batches() {
+        let declared_schema = declared_todo_schema();
+        let mut client = binding_support_test_client();
+        let insert_id = ObjectId::new();
+        let update_id = ObjectId::new();
+        let delete_id = ObjectId::new();
+
+        let inserted = insert_sealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("inserted", false, "sealed"),
+            binding_write_options(Some(insert_id), None),
+        )
+        .expect("sealed insert json");
+        insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("update seed", false, "sealed"),
+            binding_write_options(Some(update_id), None),
+        )
+        .expect("seed update row");
+        insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("delete seed", false, "sealed"),
+            binding_write_options(Some(delete_id), None),
+        )
+        .expect("seed delete row");
+
+        let updated = update_sealed_json(
+            &mut client,
+            update_id,
+            record_to_updates(HashMap::from([("done".to_string(), Value::Boolean(true))])),
+            None,
+        )
+        .expect("sealed update json");
+        let deleted = delete_sealed_json(&mut client, delete_id, None).expect("sealed delete json");
+
+        for payload in [inserted, updated, deleted] {
+            let batch_id = payload["batchId"]
+                .as_str()
+                .expect("batch id string")
+                .parse()
+                .expect("parse batch id");
+            let record = client
+                .local_batch_record(batch_id)
+                .expect("load local batch")
+                .expect("local batch record");
+            assert!(record.sealed);
+        }
+    }
+
+    #[test]
+    fn binding_support_write_batch_context_json_serializes_direct_and_transactional_contexts() {
+        let client = binding_support_test_client();
+
+        let direct = write_batch_context_json(&client, BatchMode::Direct);
+        let transactional = write_batch_context_json(&client, BatchMode::Transactional);
+
+        assert_eq!(direct["batchMode"], "direct");
+        assert!(direct["batchId"].as_str().is_some());
+        assert_eq!(
+            direct["targetBranchName"]
+                .as_str()
+                .expect("direct target branch")
+                .starts_with("dev-"),
+            true
+        );
+        assert_eq!(transactional["batchMode"], "transactional");
+        assert!(transactional["batchId"].as_str().is_some());
+        assert_ne!(direct["batchId"], transactional["batchId"]);
+    }
+
+    #[test]
     fn binding_support_direct_batch_json_shares_batch_id_and_commit_seals() {
         let declared_schema = declared_todo_schema();
         let mut client = binding_support_test_client();
@@ -1016,6 +1199,107 @@ mod tests {
             .expect("load batch record")
             .expect("batch record");
         assert!(record.sealed);
+    }
+
+    #[test]
+    fn binding_support_local_batch_record_json_serializes_existing_shape() {
+        let declared_schema = declared_todo_schema();
+        let mut client = binding_support_test_client();
+        let object_id = ObjectId::new();
+        let inserted = insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("draft", false, "local batch"),
+            binding_write_options(Some(object_id), None),
+        )
+        .expect("insert json");
+        let batch_id = inserted["batchId"]
+            .as_str()
+            .expect("batch id string")
+            .parse()
+            .expect("parse batch id");
+        seal_batch_for_binding(&mut client, batch_id).expect("seal batch");
+
+        let payload = local_batch_record_json(&client, batch_id).expect("record json");
+
+        assert_eq!(payload["batchId"], inserted["batchId"]);
+        assert_eq!(payload["mode"], "direct");
+        assert_eq!(payload["sealed"], true);
+        assert_eq!(payload["latestSettlement"]["kind"], "durableDirect");
+        assert_eq!(payload["latestSettlement"]["batchId"], inserted["batchId"]);
+    }
+
+    #[test]
+    fn binding_support_missing_local_batch_record_json_returns_null() {
+        let client = binding_support_test_client();
+
+        let payload = local_batch_record_json(&client, BatchId::new()).expect("record json");
+
+        assert_eq!(payload, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn binding_support_local_batch_records_json_returns_array() {
+        let declared_schema = declared_todo_schema();
+        let mut client = binding_support_test_client();
+        let inserted = insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("draft", false, "local batches"),
+            None,
+        )
+        .expect("insert json");
+        let batch_id = inserted["batchId"]
+            .as_str()
+            .expect("batch id string")
+            .parse()
+            .expect("parse batch id");
+        seal_batch_for_binding(&mut client, batch_id).expect("seal batch");
+
+        let payload = local_batch_records_json(&client).expect("records json");
+
+        assert_eq!(payload.as_array().expect("records array").len(), 1);
+        assert_eq!(payload[0]["batchId"], inserted["batchId"]);
+    }
+
+    #[test]
+    fn binding_support_rejected_batch_helpers_return_binding_values() {
+        let mut client = binding_support_test_client();
+
+        assert_eq!(
+            drain_rejected_batch_id_strings(&mut client),
+            Vec::<String>::new()
+        );
+        assert!(
+            !acknowledge_rejected_batch_for_binding(&mut client, BatchId::new())
+                .expect("acknowledge missing rejected batch")
+        );
+    }
+
+    #[test]
+    fn binding_support_seal_batch_helper_marks_record_sealed() {
+        let declared_schema = declared_todo_schema();
+        let mut client = binding_support_test_client();
+        let inserted = insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            "todos",
+            todo_values("draft", false, "seal helper"),
+            None,
+        )
+        .expect("insert json");
+        let batch_id = inserted["batchId"]
+            .as_str()
+            .expect("batch id string")
+            .parse()
+            .expect("parse batch id");
+
+        seal_batch_for_binding(&mut client, batch_id).expect("seal batch");
+        let payload = local_batch_record_json(&client, batch_id).expect("record json");
+
+        assert_eq!(payload["sealed"], true);
     }
 
     #[test]

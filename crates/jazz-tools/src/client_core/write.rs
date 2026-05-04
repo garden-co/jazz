@@ -64,6 +64,14 @@ impl WriteBatchContextCore {
     pub fn batch_id(&self) -> BatchId {
         self.batch_id
     }
+
+    pub fn mode(&self) -> BatchMode {
+        self.mode
+    }
+
+    pub fn target_branch_name(&self) -> &str {
+        &self.target_branch_name
+    }
 }
 
 pub(crate) fn write_context(
@@ -252,15 +260,23 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
             .map_err(runtime_error)
     }
 
-    pub fn begin_direct_batch_context(&self) -> WriteBatchContextCore {
+    pub fn begin_write_batch_context(&self, mode: BatchMode) -> WriteBatchContextCore {
         let schema = self.current_schema();
         let schema_hash = SchemaHash::compute(&schema);
         WriteBatchContextCore::new(
-            BatchMode::Direct,
+            mode,
             &self.config().env,
             schema_hash,
             &self.config().user_branch,
         )
+    }
+
+    pub fn begin_direct_batch_context(&self) -> WriteBatchContextCore {
+        self.begin_write_batch_context(BatchMode::Direct)
+    }
+
+    pub fn begin_transaction_batch_context(&self) -> WriteBatchContextCore {
+        self.begin_write_batch_context(BatchMode::Transactional)
     }
 
     pub fn insert_in_batch(

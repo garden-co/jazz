@@ -61,11 +61,14 @@ use base64::Engine;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::binding_support::parse_subscription_input;
 use jazz_tools::binding_support::{
-    binding_write_options, build_runtime_schema_bootstrap, client_error_message,
-    delete_unsealed_json, insert_unsealed_json, parse_batch_id_input, parse_external_object_id,
-    parse_object_id_input, parse_query_execution_options, parse_query_input, record_to_updates,
-    serialize_local_batch_record, serialize_local_batch_records, serialize_query_rows_json,
-    update_unsealed_json, PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
+    acknowledge_rejected_batch_for_binding, binding_write_options, build_runtime_schema_bootstrap,
+    client_error_message, delete_sealed_json, delete_unsealed_json,
+    drain_rejected_batch_id_strings, insert_sealed_json, insert_unsealed_json,
+    local_batch_record_json, local_batch_records_json, parse_batch_id_input,
+    parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
+    parse_query_execution_options, parse_query_input, record_to_updates, seal_batch_for_binding,
+    serialize_query_rows_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
+    PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
 };
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::client_core::ClientStorageMode;
@@ -778,6 +781,40 @@ impl WasmRuntime {
         serialize_json_to_js(payload)
     }
 
+    #[wasm_bindgen(js_name = insertSealed)]
+    pub fn insert_sealed(
+        &self,
+        table: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+        object_id: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::insertSealed", tier = self.tier_label, table).entered();
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
+
+        let mut client = self.client.borrow_mut();
+        let declared_schema = client.config().schema.clone();
+        let payload = insert_sealed_json(
+            &mut client,
+            &declared_schema,
+            table,
+            named_values,
+            binding_write_options(object_id, write_context),
+        )
+        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
+        serialize_json_to_js(payload)
+    }
+
+    #[wasm_bindgen(js_name = createWriteBatchContext)]
+    pub fn create_write_batch_context(&self, mode: &str) -> Result<JsValue, JsError> {
+        let mode = parse_batch_mode_input(mode).map_err(|message| JsError::new(&message))?;
+        let client = self.client.borrow();
+        serialize_json_to_js(write_batch_context_json(&client, mode))
+    }
+
     /// Execute a query and return results as a Promise.
     ///
     /// Optional durability tier controls remote settlement behavior.
@@ -893,6 +930,29 @@ impl WasmRuntime {
         serialize_json_to_js(payload)
     }
 
+    #[wasm_bindgen(js_name = updateSealed)]
+    pub fn update_sealed(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::updateSealed", tier = self.tier_label, object_id).entered();
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+
+        let mut client = self.client.borrow_mut();
+        let payload = update_sealed_json(
+            &mut client,
+            oid,
+            record_to_updates(partial_values),
+            binding_write_options(None, write_context),
+        )
+        .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
+        serialize_json_to_js(payload)
+    }
+
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<JsValue, JsError> {
@@ -925,6 +985,23 @@ impl WasmRuntime {
                 .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
 
         tracing::debug!(object_id, "deleted_with_session");
+        serialize_json_to_js(payload)
+    }
+
+    #[wasm_bindgen(js_name = deleteSealed)]
+    pub fn delete_sealed(
+        &self,
+        object_id: &str,
+        write_context_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::deleteSealed", tier = self.tier_label, object_id).entered();
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut client = self.client.borrow_mut();
+        let payload =
+            delete_sealed_json(&mut client, oid, binding_write_options(None, write_context))
+                .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
         serialize_json_to_js(payload)
     }
 
@@ -1121,32 +1198,25 @@ impl WasmRuntime {
     pub fn load_local_batch_record(&self, batch_id: &str) -> Result<JsValue, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let client = self.client.borrow();
-        let record = client.local_batch_record(batch_id).map_err(|error| {
+        let payload = local_batch_record_json(&client, batch_id).map_err(|error| {
             JsError::new(&client_error_message("Load local batch record", &error))
         })?;
-        match record {
-            Some(record) => serialize_json_to_js(serialize_local_batch_record(&record)),
-            None => Ok(JsValue::null()),
-        }
+        serialize_json_to_js(payload)
     }
 
     #[wasm_bindgen(js_name = loadLocalBatchRecords)]
     pub fn load_local_batch_records(&self) -> Result<JsValue, JsError> {
         let client = self.client.borrow();
-        let records = client.local_batch_records().map_err(|error| {
+        let payload = local_batch_records_json(&client).map_err(|error| {
             JsError::new(&client_error_message("Load local batch records", &error))
         })?;
-        serialize_json_to_js(serialize_local_batch_records(&records))
+        serialize_json_to_js(payload)
     }
 
     #[wasm_bindgen(js_name = drainRejectedBatchIds)]
     pub fn drain_rejected_batch_ids(&self) -> Result<JsValue, JsError> {
         let mut client = self.client.borrow_mut();
-        let batch_ids = client
-            .drain_rejected_batch_ids()
-            .into_iter()
-            .map(|batch_id| batch_id.to_string())
-            .collect::<Vec<_>>();
+        let batch_ids = drain_rejected_batch_id_strings(&mut client);
         serde_wasm_bindgen::to_value(&batch_ids)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1155,19 +1225,16 @@ impl WasmRuntime {
     pub fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut client = self.client.borrow_mut();
-        client
-            .acknowledge_rejected_batch(batch_id)
-            .map_err(|error| {
-                JsError::new(&client_error_message("Acknowledge rejected batch", &error))
-            })
+        acknowledge_rejected_batch_for_binding(&mut client, batch_id).map_err(|error| {
+            JsError::new(&client_error_message("Acknowledge rejected batch", &error))
+        })
     }
 
     #[wasm_bindgen(js_name = sealBatch)]
     pub fn seal_batch(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let mut client = self.client.borrow_mut();
-        client
-            .seal_batch(batch_id)
+        seal_batch_for_binding(&mut client, batch_id)
             .map_err(|error| JsError::new(&client_error_message("Seal batch", &error)))
     }
 

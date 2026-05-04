@@ -25,7 +25,6 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
 import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 /**
@@ -39,6 +38,14 @@ export interface RequestLike {
   headers?: Headers | Record<string, string | string[] | undefined>;
 }
 
+export type BatchMode = "direct" | "transactional";
+
+export interface BatchWriteContext {
+  batchMode: BatchMode;
+  batchId: string;
+  targetBranchName: string;
+}
+
 /**
  * Common interface for WASM and NAPI runtimes.
  *
@@ -47,6 +54,12 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
+  insertSealed(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): DirectInsertResult;
   insertWithSession?(
     table: string,
     values: InsertValues,
@@ -54,13 +67,20 @@ export interface Runtime {
     object_id?: string | null,
   ): DirectInsertResult;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
+  updateSealed(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
+  deleteSealed(object_id: string, write_context_json?: string | null): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
+  createWriteBatchContext(mode: BatchMode): BatchWriteContext;
   beginDirectBatch?(): NativeWriteBatch;
   beginTransaction?(): NativeWriteBatch;
   insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
@@ -213,8 +233,6 @@ type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
-
-export type BatchMode = "direct" | "transactional";
 
 export interface VisibleBatchMember {
   objectId: string;
@@ -672,45 +690,6 @@ export function sessionFromRequest(request: RequestLike): Session {
 function shouldFallbackToUpsertUpdate(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
-}
-
-type BatchWriteContext = {
-  batchMode: BatchMode;
-  batchId: string;
-  targetBranchName: string;
-};
-
-function composeTargetBranchName(schemaContext: {
-  env: string;
-  schema_hash: string;
-  user_branch: string;
-}): string {
-  return `${schemaContext.env}-${schemaContext.schema_hash.slice(0, 12)}-${schemaContext.user_branch}`;
-}
-
-function generateBatchId(): string {
-  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
-  const bytes = new Uint8Array(16);
-
-  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
-    cryptoObj.getRandomValues(bytes);
-  } else {
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-  }
-
-  const timestamp = Date.now();
-  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
-  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
-  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
-  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
-  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
-  bytes[5] = timestamp & 0xff;
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function normalizeUpdatedAt(updatedAt?: number): number | undefined {
@@ -1585,11 +1564,7 @@ export class JazzClient {
   }
 
   private createBatchContext(batchMode: BatchMode): BatchWriteContext {
-    return {
-      batchMode,
-      batchId: generateBatchId(),
-      targetBranchName: composeTargetBranchName(this.getSchemaContext()),
-    };
+    return this.runtime.createWriteBatchContext(batchMode);
   }
 
   beginTransactionInternal(session?: Session, attribution?: string): Transaction {
@@ -1972,10 +1947,9 @@ export class JazzClient {
     options?: CreateOptions,
     batchContext?: BatchWriteContext,
   ): WriteResult<Row> {
-    const row = this.createInternal(table, values, session, attribution, options, batchContext);
-    if (!batchContext) {
-      this.sealBatch(row.batchId);
-    }
+    const row = batchContext
+      ? this.createInternal(table, values, session, attribution, options, batchContext)
+      : this.createSealedInternal(table, values, session, attribution, options);
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -2019,6 +1993,27 @@ export class JazzClient {
 
   /**
    * Insert a new row into a table with an optional session for policy checks.
+   * @internal
+   */
+  createSealedInternal(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+    options?: CreateOptions,
+  ): DirectInsertResult {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const row = this.runtime.insertSealed(
+      table,
+      values,
+      this.encodeWriteContext(effectiveSession, attribution, undefined, options?.updatedAt),
+      options?.id,
+    );
+    return this.normalizeDirectInsertResult(table, row);
+  }
+
+  /**
+   * Insert a new unsealed row into a table with an optional session for policy checks.
    * @internal
    */
   createInternal(
@@ -2174,22 +2169,33 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
     updatedAt?: number,
   ): WriteHandle {
-    const result = this.updateInternal(
-      objectId,
-      updates,
-      session,
-      attribution,
-      batchContext,
-      updatedAt,
-    );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
+    const result = batchContext
+      ? this.updateInternal(objectId, updates, session, attribution, batchContext, updatedAt)
+      : this.updateSealedInternal(objectId, updates, session, attribution, updatedAt);
     return new WriteHandle(result.batchId, this);
   }
 
   /**
    * Update a row by ID without waiting for durability, optionally scoped to a session.
+   * @internal
+   */
+  updateSealedInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    attribution?: string,
+    updatedAt?: number,
+  ): DirectMutationResult {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    return this.runtime.updateSealed(
+      objectId,
+      updates,
+      this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
+    );
+  }
+
+  /**
+   * Update a row by ID without sealing the resulting batch.
    * @internal
    */
   updateInternal(
@@ -2225,15 +2231,31 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
     updatedAt?: number,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
+    const result = batchContext
+      ? this.deleteInternal(objectId, session, attribution, batchContext, updatedAt)
+      : this.deleteSealedInternal(objectId, session, attribution, updatedAt);
     return new WriteHandle(result.batchId, this);
   }
 
   /**
    * Delete a row by ID without waiting for durability, optionally scoped to a session.
+   * @internal
+   */
+  deleteSealedInternal(
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    updatedAt?: number,
+  ): DirectMutationResult {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    return this.runtime.deleteSealed(
+      objectId,
+      this.encodeWriteContext(effectiveSession, attribution, undefined, updatedAt),
+    );
+  }
+
+  /**
+   * Delete a row by ID without sealing the resulting batch.
    * @internal
    */
   deleteInternal(

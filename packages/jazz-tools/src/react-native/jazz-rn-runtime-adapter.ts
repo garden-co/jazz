@@ -31,16 +31,24 @@ export interface JazzRnRuntimeBinding {
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
   delete_(objectId: string): string;
+  deleteSealed?(objectId: string, writeContextJson: string | undefined): string;
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
   insert(table: string, valuesJson: string, objectId: string | undefined): string;
+  insertSealed?(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+    objectId: string | undefined,
+  ): string;
   insertWithSession?(
     table: string,
     valuesJson: string,
     writeContextJson: string | undefined,
     objectId: string | undefined,
   ): string;
+  createWriteBatchContext?(mode: "direct" | "transactional"): string;
   loadLocalBatchRecord?(batchId: string): string | null;
   loadLocalBatchRecords?(): string;
   drainRejectedBatchIds?(): string[];
@@ -70,6 +78,7 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): string;
+  updateSealed?(objectId: string, valuesJson: string, writeContextJson: string | undefined): string;
   updateWithSession?(
     objectId: string,
     valuesJson: string,
@@ -174,7 +183,13 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   private requireWriteContextMethod<
-    T extends "insertWithSession" | "updateWithSession" | "deleteWithSession",
+    T extends
+      | "insertWithSession"
+      | "updateWithSession"
+      | "deleteWithSession"
+      | "insertSealed"
+      | "updateSealed"
+      | "deleteSealed",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
     const runtimeMethod = this.binding[method];
     if (!runtimeMethod) {
@@ -230,6 +245,25 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  insertSealed(
+    table: string,
+    values: InsertValues,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): DirectInsertResult {
+    try {
+      const rowJson = this.requireWriteContextMethod("insertSealed")(
+        table,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+        object_id ?? undefined,
+      );
+      return JSON.parse(rowJson) as DirectInsertResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   update(object_id: string, values: Record<string, Value>): DirectMutationResult {
     try {
       const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
@@ -256,6 +290,23 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  updateSealed(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json?: string | null,
+  ): DirectMutationResult {
+    try {
+      const resultJson = this.requireWriteContextMethod("updateSealed")(
+        object_id,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+      );
+      return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   delete(object_id: string): DirectMutationResult {
     try {
       const resultJson = this.binding.delete_(object_id);
@@ -272,6 +323,30 @@ export class JazzRnRuntimeAdapter implements Runtime {
         write_context_json ?? undefined,
       );
       return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  deleteSealed(object_id: string, write_context_json?: string | null): DirectMutationResult {
+    try {
+      const resultJson = this.requireWriteContextMethod("deleteSealed")(
+        object_id,
+        write_context_json ?? undefined,
+      );
+      return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  createWriteBatchContext(mode: "direct" | "transactional") {
+    try {
+      const contextJson = this.binding.createWriteBatchContext?.(mode);
+      if (!contextJson) {
+        throw new Error("createWriteBatchContext is not supported by this RN runtime binding");
+      }
+      return JSON.parse(contextJson) as ReturnType<Runtime["createWriteBatchContext"]>;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

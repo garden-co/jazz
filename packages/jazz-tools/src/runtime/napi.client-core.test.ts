@@ -91,3 +91,48 @@ describe("NapiJazzClient", () => {
     client.close();
   });
 });
+
+describe("NapiRuntime sealed write helpers", () => {
+  it("exposes Rust-sealed writes and Rust-generated batch contexts", async () => {
+    const { NapiRuntime } = await loadNapiModule();
+    dataDir = await mkdtemp(join(tmpdir(), "jazz-napi-runtime-sealed-"));
+    const dataPath = join(dataDir, "runtime.db");
+    const runtime = new NapiRuntime(
+      serializeRuntimeSchema(schema),
+      "napi-runtime-sealed-write-test",
+      "dev",
+      "main",
+      dataPath,
+      undefined,
+    );
+    const aliceId = "00000000-0000-7000-8000-000000000011";
+
+    const context = runtime.createWriteBatchContext("transactional");
+    expect(context.batchMode).toBe("transactional");
+    expect(context.batchId).toEqual(expect.any(String));
+    expect(context.targetBranchName).toContain("dev-");
+
+    const inserted = runtime.insertSealed(
+      "users",
+      {
+        id: { type: "Uuid", value: aliceId },
+        name: { type: "Text", value: "Alice" },
+      },
+      undefined,
+      aliceId,
+    );
+    const updated = runtime.updateSealed(
+      aliceId,
+      {
+        name: { type: "Text", value: "Alicia" },
+      },
+      undefined,
+    );
+    const deleted = runtime.deleteSealed(aliceId, undefined);
+
+    expect(inserted.batchId).toEqual(expect.any(String));
+    expect(updated.batchId).toEqual(expect.any(String));
+    expect(deleted.batchId).toEqual(expect.any(String));
+    runtime.close();
+  });
+});
