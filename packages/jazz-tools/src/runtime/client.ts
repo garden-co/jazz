@@ -53,7 +53,6 @@ export interface BatchWriteContext {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
   insertSealed(
     table: string,
     values: InsertValues,
@@ -66,7 +65,6 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateSealed(
     object_id: string,
     values: Record<string, Value>,
@@ -77,7 +75,6 @@ export interface Runtime {
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  delete(object_id: string): DirectMutationResult;
   deleteSealed(object_id: string, write_context_json?: string | null): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
   createWriteBatchContext(mode: BatchMode): BatchWriteContext;
@@ -898,7 +895,7 @@ export class Transaction {
       this.session,
       this.attribution,
       options,
-      this.batchContext ?? undefined,
+      this.batchContext,
     );
     this.markTouchedRow(row.id);
     return row;
@@ -913,7 +910,7 @@ export class Transaction {
       this.session,
       this.attribution,
       options.updatedAt,
-      this.batchContext ?? undefined,
+      this.batchContext,
     );
     this.markTouchedRow(options.id);
   }
@@ -925,19 +922,14 @@ export class Transaction {
       updates,
       this.session,
       this.attribution,
-      this.batchContext ?? undefined,
+      this.batchContext,
     );
     this.markTouchedRow(objectId);
   }
 
   delete(objectId: string): void {
     this.ensureActive();
-    this.client.deleteInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      this.batchContext ?? undefined,
-    );
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
     this.markTouchedRow(objectId);
   }
 
@@ -1012,6 +1004,13 @@ export class DirectBatch {
     }
   }
 
+  private rustBatchContext(): BatchWriteContext {
+    if (!this.batchContext) {
+      throw new Error("Rust direct batch context is missing");
+    }
+    return this.batchContext;
+  }
+
   commit(): WriteHandle {
     if (this.committedHandle) {
       return this.committedHandle;
@@ -1042,7 +1041,7 @@ export class DirectBatch {
       this.session,
       this.attribution,
       options,
-      this.batchContext ?? undefined,
+      this.rustBatchContext(),
     );
   }
 
@@ -1070,7 +1069,7 @@ export class DirectBatch {
       this.session,
       this.attribution,
       options.updatedAt,
-      this.batchContext ?? undefined,
+      this.rustBatchContext(),
     );
   }
 
@@ -1086,7 +1085,7 @@ export class DirectBatch {
       updates,
       this.session,
       this.attribution,
-      this.batchContext ?? undefined,
+      this.rustBatchContext(),
     );
   }
 
@@ -1097,12 +1096,7 @@ export class DirectBatch {
       this.rememberNativeBatchId(result.batchId);
       return;
     }
-    this.client.deleteInternal(
-      objectId,
-      this.session,
-      this.attribution,
-      this.batchContext ?? undefined,
-    );
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.rustBatchContext());
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -1976,18 +1970,9 @@ export class JazzClient {
     updatedAt?: number,
     batchContext?: BatchWriteContext,
   ): WriteHandle {
-    const result = this.upsertInternal(
-      table,
-      values,
-      objectId,
-      session,
-      attribution,
-      updatedAt,
-      batchContext,
-    );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
+    const result = batchContext
+      ? this.upsertInternal(table, values, objectId, session, attribution, updatedAt, batchContext)
+      : this.upsertSealedInternal(table, values, objectId, session, attribution, updatedAt);
     return new WriteHandle(result.batchId, this);
   }
 
@@ -2019,42 +2004,21 @@ export class JazzClient {
   createInternal(
     table: string,
     values: InsertValues,
-    session?: Session,
-    attribution?: string,
-    options?: CreateOptions,
-    batchContext?: BatchWriteContext,
+    session: Session | undefined,
+    attribution: string | undefined,
+    options: CreateOptions | undefined,
+    batchContext: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const row =
-      effectiveSession ||
-      attribution !== undefined ||
-      batchContext ||
-      options?.updatedAt !== undefined
-        ? options?.id
-          ? this.requireSessionWriteMethod("insertWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options.updatedAt,
-              ),
-              options.id,
-            )
-          : this.requireSessionWriteMethod("insertWithSession")(
-              table,
-              values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options?.updatedAt,
-              ),
-            )
-        : options?.id
-          ? this.runtime.insert(table, values, options.id)
-          : this.runtime.insert(table, values);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      options?.updatedAt,
+    );
+    const row = options?.id
+      ? this.requireSessionWriteMethod("insertWithSession")(table, values, writeContext, options.id)
+      : this.requireSessionWriteMethod("insertWithSession")(table, values, writeContext);
     return this.normalizeDirectInsertResult(table, row);
   }
 
@@ -2077,10 +2041,10 @@ export class JazzClient {
     table: string,
     values: InsertValues,
     objectId: string,
-    session?: Session,
-    attribution?: string,
-    updatedAt?: number,
-    batchContext?: BatchWriteContext,
+    session: Session | undefined,
+    attribution: string | undefined,
+    updatedAt: number | undefined,
+    batchContext: BatchWriteContext,
   ): DirectMutationResult {
     try {
       const created = this.createInternal(
@@ -2107,6 +2071,39 @@ export class JazzClient {
       session,
       attribution,
       batchContext,
+      updatedAt,
+    );
+  }
+
+  /**
+   * Create or update a row with a caller-supplied id through sealed runtime writes.
+   * @internal
+   */
+  upsertSealedInternal(
+    table: string,
+    values: InsertValues,
+    objectId: string,
+    session?: Session,
+    attribution?: string,
+    updatedAt?: number,
+  ): DirectMutationResult {
+    try {
+      const created = this.createSealedInternal(table, values, session, attribution, {
+        id: objectId,
+        updatedAt,
+      });
+      return { batchId: created.batchId };
+    } catch (error) {
+      if (!shouldFallbackToUpsertUpdate(error)) {
+        throw error;
+      }
+    }
+
+    return this.updateSealedInternal(
+      objectId,
+      values as Record<string, Value>,
+      session,
+      attribution,
       updatedAt,
     );
   }
@@ -2201,20 +2198,17 @@ export class JazzClient {
   updateInternal(
     objectId: string,
     updates: Record<string, Value>,
-    session?: Session,
-    attribution?: string,
-    batchContext?: BatchWriteContext,
+    session: Session | undefined,
+    attribution: string | undefined,
+    batchContext: BatchWriteContext,
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      return this.requireSessionWriteMethod("updateWithSession")(
-        objectId,
-        updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-      );
-    }
-    return this.runtime.update(objectId, updates);
+    return this.requireSessionWriteMethod("updateWithSession")(
+      objectId,
+      updates,
+      this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+    );
   }
 
   /**
@@ -2260,19 +2254,16 @@ export class JazzClient {
    */
   deleteInternal(
     objectId: string,
-    session?: Session,
-    attribution?: string,
-    batchContext?: BatchWriteContext,
+    session: Session | undefined,
+    attribution: string | undefined,
+    batchContext: BatchWriteContext,
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      return this.requireSessionWriteMethod("deleteWithSession")(
-        objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
-      );
-    }
-    return this.runtime.delete(objectId);
+    return this.requireSessionWriteMethod("deleteWithSession")(
+      objectId,
+      this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+    );
   }
 
   /**

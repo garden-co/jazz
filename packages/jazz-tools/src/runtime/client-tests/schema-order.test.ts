@@ -14,14 +14,7 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
       insertSealed,
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 0,
@@ -100,26 +93,12 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => ({
-        id: "todo-1",
-        values: [
-          { type: "Text", value: "Buy milk" },
-          { type: "Boolean", value: false },
-        ],
-        batchId: "batch-id",
-      }),
       insertSealed: () => ({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-id",
-      }),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
         batchId: "batch-id",
       }),
       query: async () => [],
@@ -173,13 +152,6 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [
         {
           id: "todo-1",
@@ -259,13 +231,6 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [
         {
           id: "todo-1",
@@ -369,13 +334,6 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [
         {
           id: "todo-1",
@@ -519,13 +477,6 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [
         {
           id: "todo-1",
@@ -672,13 +623,6 @@ describe("JazzClient schema order", () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
       ...runtimeSealedWriteStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 1,

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -36,8 +36,8 @@ use jazz_tools::binding_support::{
     write_batch_context_json,
 };
 use jazz_tools::client_core::{
-    ClientConfig, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost, WriteBatchContextCore,
-    WriteOptions, WriteResultCore,
+    ClientConfig, ClientError, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost,
+    WriteBatchContextCore, WriteOptions, WriteResultCore,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -406,6 +406,86 @@ pub struct NapiRuntime {
 
 type NapiJazzClientCore = JazzClientCore<SharedRuntimeHost<Box<dyn Storage + Send>, NapiScheduler>>;
 
+impl NapiRuntime {
+    fn client_lock(&self) -> napi::Result<MutexGuard<'_, NapiJazzClientCore>> {
+        self.client
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))
+    }
+
+    fn write_json(
+        &self,
+        operation: &str,
+        write: impl FnOnce(&mut NapiJazzClientCore) -> std::result::Result<JsonValue, ClientError>,
+    ) -> napi::Result<JsonValue> {
+        let mut client = self.client_lock()?;
+        write(&mut client)
+            .map_err(|error| napi::Error::from_reason(client_error_message(operation, &error)))
+    }
+
+    fn insert_json(
+        &self,
+        table: String,
+        values: FfiRecordArg,
+        write_context_json: Option<String>,
+        object_id: Option<String>,
+        sealed: bool,
+    ) -> napi::Result<JsonValue> {
+        let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
+
+        self.write_json("Insert", |client| {
+            let options = binding_write_options(object_id, write_context);
+            if sealed {
+                insert_sealed_json(client, &self.declared_schema, &table, values.0, options)
+            } else {
+                insert_unsealed_json(client, &self.declared_schema, &table, values.0, options)
+            }
+        })
+    }
+
+    fn update_json(
+        &self,
+        object_id: String,
+        values: FfiRecordArg,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> napi::Result<JsonValue> {
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        self.write_json("Update", |client| {
+            let updates = record_to_updates(values.0);
+            let options = binding_write_options(None, write_context);
+            if sealed {
+                update_sealed_json(client, oid, updates, options)
+            } else {
+                update_unsealed_json(client, oid, updates, options)
+            }
+        })
+    }
+
+    fn delete_json(
+        &self,
+        object_id: String,
+        write_context_json: Option<String>,
+        sealed: bool,
+    ) -> napi::Result<JsonValue> {
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        self.write_json("Delete", |client| {
+            let options = binding_write_options(None, write_context);
+            if sealed {
+                delete_sealed_json(client, oid, options)
+            } else {
+                delete_unsealed_json(client, oid, options)
+            }
+        })
+    }
+}
+
 #[napi]
 pub struct NapiJazzClient {
     inner: Mutex<NapiJazzClientCore>,
@@ -678,20 +758,7 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
         object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        insert_unsealed_json(
-            &mut client,
-            &self.declared_schema,
-            &table,
-            values.0,
-            binding_write_options(object_id, None),
-        )
-        .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))
+        self.insert_json(table, values, None, object_id, false)
     }
 
     #[napi(js_name = "insertWithSession")]
@@ -702,22 +769,7 @@ impl NapiRuntime {
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        insert_unsealed_json(
-            &mut client,
-            &self.declared_schema,
-            &table,
-            values.0,
-            binding_write_options(object_id, write_context),
-        )
-        .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))
+        self.insert_json(table, values, write_context_json, object_id, false)
     }
 
     #[napi(js_name = "insertSealed")]
@@ -728,22 +780,7 @@ impl NapiRuntime {
         write_context_json: Option<String>,
         object_id: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        insert_sealed_json(
-            &mut client,
-            &self.declared_schema,
-            &table,
-            values.0,
-            binding_write_options(object_id, write_context),
-        )
-        .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))
+        self.insert_json(table, values, write_context_json, object_id, true)
     }
 
     #[napi(js_name = "createWriteBatchContext")]
@@ -762,14 +799,7 @@ impl NapiRuntime {
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
     ) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        update_unsealed_json(&mut client, oid, record_to_updates(values.0), None)
-            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))
+        self.update_json(object_id, values, None, false)
     }
 
     #[napi(js_name = "updateWithSession")]
@@ -779,20 +809,7 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        update_unsealed_json(
-            &mut client,
-            oid,
-            record_to_updates(values.0),
-            binding_write_options(None, write_context),
-        )
-        .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))
+        self.update_json(object_id, values, write_context_json, false)
     }
 
     #[napi(js_name = "updateSealed")]
@@ -802,32 +819,12 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        update_sealed_json(
-            &mut client,
-            oid,
-            record_to_updates(values.0),
-            binding_write_options(None, write_context),
-        )
-        .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))
+        self.update_json(object_id, values, write_context_json, true)
     }
 
     #[napi(js_name = "delete")]
     pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        delete_unsealed_json(&mut client, oid, None)
-            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))
+        self.delete_json(object_id, None, false)
     }
 
     #[napi(js_name = "deleteWithSession")]
@@ -836,15 +833,7 @@ impl NapiRuntime {
         object_id: String,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        delete_unsealed_json(&mut client, oid, binding_write_options(None, write_context))
-            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))
+        self.delete_json(object_id, write_context_json, false)
     }
 
     #[napi(js_name = "deleteSealed")]
@@ -853,15 +842,7 @@ impl NapiRuntime {
         object_id: String,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let mut client = self
-            .client
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        delete_sealed_json(&mut client, oid, binding_write_options(None, write_context))
-            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))
+        self.delete_json(object_id, write_context_json, true)
     }
 
     #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]

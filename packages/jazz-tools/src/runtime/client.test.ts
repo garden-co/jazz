@@ -15,15 +15,12 @@ function makeFakeRuntime() {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
-    insert: vi.fn(),
     insertSealed: vi.fn().mockReturnValue({
       id: "row-1",
       values: [],
       batchId: "sealed-insert-batch-id",
     }),
-    update: vi.fn(),
     updateSealed: vi.fn().mockReturnValue({ batchId: "sealed-update-batch-id" }),
-    delete: vi.fn(),
     deleteSealed: vi.fn().mockReturnValue({ batchId: "sealed-delete-batch-id" }),
     createWriteBatchContext: vi.fn((batchMode: "direct" | "transactional") => ({
       batchMode,
