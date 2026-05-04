@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
+use std::{cmp::Ordering, ops::Bound};
 
 use crate::object::BranchName;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, RowDescriptor, RowPolicyMode,
-    Schema, SchemaHash, TableName, TupleDescriptor,
+    Schema, SchemaHash, TableName, TupleDescriptor, Value,
 };
 use crate::schema_manager::{
     SchemaContext, translate_column_for_index, translate_table_name_to_schema,
@@ -578,7 +578,7 @@ impl QueryGraph {
         // For multi-branch queries, we create scans for each branch and union them
         // Column names are translated for old schema branches
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
-        let mut index_columns: Vec<String> = Vec::new();
+        let scan_plans: Vec<_> = plan.disjuncts.iter().map(index_scan_plan).collect();
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
@@ -592,17 +592,19 @@ impl QueryGraph {
                 continue;
             };
 
-            for disjunct in &plan.disjuncts {
-                // Find best index condition for this disjunct
-                let (scan_column, scan_condition) =
-                    if let Some(cond) = best_available_index_condition(disjunct, table_schema) {
-                        let column = cond.column().to_string();
-                        let scan_cond = condition_to_scan(cond);
-                        (column, scan_cond)
-                    } else {
-                        // No index condition, use "_id" for full scan
-                        ("_id".to_string(), ScanCondition::All)
-                    };
+//             for disjunct in &plan.disjuncts {
+//                 // Find best index condition for this disjunct
+//                 let (scan_column, scan_condition) =
+//                     if let Some(cond) = best_available_index_condition(disjunct, table_schema) {
+//                         let column = cond.column().to_string();
+//                         let scan_cond = condition_to_scan(cond);
+//                         (column, scan_cond)
+//                     } else {
+//                         // No index condition, use "_id" for full scan
+//                         ("_id".to_string(), ScanCondition::All)
+//                     };
+            for scan_plan in &scan_plans {
+                let scan_column = &scan_plan.column;
 
                 // Translate column name for old schema branches
                 let translated_column = if let Some(target_hash) = branch_schema_hash {
@@ -611,7 +613,7 @@ impl QueryGraph {
                         translate_column_for_index(
                             schema_context,
                             table_str,
-                            &scan_column,
+                            scan_column,
                             &target_hash,
                         )
                         .unwrap_or_else(|| scan_column.clone())
@@ -622,14 +624,13 @@ impl QueryGraph {
                     scan_column.clone()
                 };
 
-                index_columns.push(scan_column.clone());
                 let scan_column_name = ColumnName::new(&translated_column);
 
                 let scan_node = IndexScanNode::new_with_branch(
                     scan_table_name,
                     scan_column_name,
                     branch,
-                    scan_condition,
+                    scan_plan.condition.clone(),
                     descriptor.clone(),
                 );
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
@@ -799,7 +800,7 @@ impl QueryGraph {
         // Phase 2: Filter node (only if there are remaining conditions not covered by index)
         let predicate = build_remaining_predicate_from_disjuncts(
             &plan.disjuncts,
-            &index_columns,
+            &scan_plans,
             &current_tuple_descriptor,
         );
         if !matches!(predicate, Predicate::True) {
@@ -2048,36 +2049,314 @@ fn sort_keys_from_order_by(
 
 fn build_remaining_predicate_from_disjuncts(
     disjuncts: &[Conjunction],
-    index_columns: &[String],
+    scan_plans: &[IndexScanPlan],
     tuple_descriptor: &TupleDescriptor,
 ) -> Predicate {
-    // Check if all disjuncts are fully covered by their respective index scans
-    let all_fully_covered = disjuncts
-        .iter()
-        .zip(index_columns.iter())
-        .all(|(disjunct, index_col)| disjunct.is_fully_covered_by_index(index_col));
+    let all_fully_covered = disjuncts.len() == scan_plans.len()
+        && scan_plans.iter().all(|scan_plan| scan_plan.fully_covers);
 
     if all_fully_covered {
         return Predicate::True;
     }
 
-    // Build remaining predicates for each disjunct
-    let remaining_predicates: Vec<Predicate> = disjuncts
-        .iter()
-        .zip(index_columns.iter())
-        .map(|(disjunct, index_col)| {
-            disjunct.remaining_tuple_predicate(index_col, tuple_descriptor)
-        })
-        .filter(|p| !matches!(p, Predicate::True))
-        .collect();
+    // Fall back to the full predicate for partial coverage cases. Applying the full predicate
+    // after the union keeps mixed disjuncts correct: rows produced by fully-covered scans still
+    // satisfy the OR, while rows from partial scans get their residual conditions checked.
+    disjuncts_to_predicate(disjuncts, tuple_descriptor)
+}
 
-    // If any disjunct needs filtering, we must use the full predicate for correctness
-    // (because we can't tell which disjunct a row came from after union)
-    if remaining_predicates.is_empty() {
-        Predicate::True
-    } else {
-        // Fall back to full predicate for partial coverage cases
-        disjuncts_to_predicate(disjuncts, tuple_descriptor)
+#[derive(Debug, Clone)]
+struct IndexScanPlan {
+    column: String,
+    condition: ScanCondition,
+    fully_covers: bool,
+}
+
+#[derive(Debug)]
+struct ColumnScanPlan {
+    column: String,
+    condition: ScanCondition,
+    exact: bool,
+}
+
+#[derive(Debug)]
+struct ScanIntersection {
+    eq: Option<Value>,
+    min: Bound<Value>,
+    max: Bound<Value>,
+    empty: bool,
+}
+
+impl Default for ScanIntersection {
+    fn default() -> Self {
+        Self {
+            eq: None,
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+            empty: false,
+        }
+    }
+}
+
+fn index_scan_plan(disjunct: &Conjunction) -> IndexScanPlan {
+    if disjunct.conditions.is_empty() {
+        return IndexScanPlan {
+            column: "_id".to_string(),
+            condition: ScanCondition::All,
+            fully_covers: true,
+        };
+    }
+
+    let mut column_plans = Vec::new();
+    for condition in disjunct
+        .conditions
+        .iter()
+        .filter(|c| c.is_index_scannable())
+    {
+        if !column_plans
+            .iter()
+            .any(|plan: &ColumnScanPlan| plan.column == condition.column())
+        {
+            column_plans.push(column_scan_plan(disjunct, condition.column()));
+        }
+    }
+
+    if let Some(empty_plan) = column_plans
+        .iter()
+        .find(|plan| plan.exact && matches!(plan.condition, ScanCondition::Empty))
+    {
+        return IndexScanPlan {
+            column: empty_plan.column.clone(),
+            condition: ScanCondition::Empty,
+            fully_covers: true,
+        };
+    }
+
+    let Some(selected) = column_plans
+        .iter()
+        .find(|plan| matches!(plan.condition, ScanCondition::Eq(_)))
+        .or_else(|| column_plans.first())
+    else {
+        return IndexScanPlan {
+            column: "_id".to_string(),
+            condition: ScanCondition::All,
+            fully_covers: false,
+        };
+    };
+
+    let fully_covers = selected.exact
+        && disjunct.conditions.iter().all(|condition| {
+            condition.column() == selected.column && condition.is_index_scannable()
+        });
+
+    IndexScanPlan {
+        column: selected.column.clone(),
+        condition: selected.condition.clone(),
+        fully_covers,
+    }
+}
+
+fn column_scan_plan(disjunct: &Conjunction, column: &str) -> ColumnScanPlan {
+    let mut intersection = ScanIntersection::default();
+    let mut first_scan = None;
+
+    for condition in disjunct
+        .conditions
+        .iter()
+        .filter(|c| c.column() == column && c.is_index_scannable())
+    {
+        first_scan.get_or_insert_with(|| condition_to_scan(condition));
+        if !intersection.add(condition) {
+            return ColumnScanPlan {
+                column: column.to_string(),
+                condition: first_scan.unwrap_or(ScanCondition::All),
+                exact: false,
+            };
+        }
+    }
+
+    match intersection.into_scan_condition() {
+        Some(condition) => ColumnScanPlan {
+            column: column.to_string(),
+            condition,
+            exact: true,
+        },
+        None => ColumnScanPlan {
+            column: column.to_string(),
+            condition: first_scan.unwrap_or(ScanCondition::All),
+            exact: false,
+        },
+    }
+}
+
+impl ScanIntersection {
+    fn add(&mut self, condition: &Condition) -> bool {
+        match condition {
+            Condition::Eq { value, .. } => {
+                if self.eq.as_ref().is_some_and(|existing| existing != value) {
+                    self.empty = true;
+                } else {
+                    self.eq = Some(value.clone());
+                }
+                true
+            }
+            Condition::Lt { value, .. } => self.tighten_upper(Bound::Excluded(value.clone())),
+            Condition::Le { value, .. } => self.tighten_upper(Bound::Included(value.clone())),
+            Condition::Gt { value, .. } => self.tighten_lower(Bound::Excluded(value.clone())),
+            Condition::Ge { value, .. } => self.tighten_lower(Bound::Included(value.clone())),
+            Condition::Between {
+                min: lower,
+                max: upper,
+                ..
+            } => {
+                self.tighten_lower(Bound::Included(lower.clone()))
+                    && self.tighten_upper(Bound::Included(upper.clone()))
+            }
+            _ => true,
+        }
+    }
+
+    fn tighten_lower(&mut self, candidate: Bound<Value>) -> bool {
+        let Some(bound) = stricter_lower_bound(&self.min, &candidate) else {
+            return false;
+        };
+        self.min = bound;
+        true
+    }
+
+    fn tighten_upper(&mut self, candidate: Bound<Value>) -> bool {
+        let Some(bound) = stricter_upper_bound(&self.max, &candidate) else {
+            return false;
+        };
+        self.max = bound;
+        true
+    }
+
+    fn into_scan_condition(self) -> Option<ScanCondition> {
+        if self.empty {
+            return Some(ScanCondition::Empty);
+        }
+
+        if let Some(value) = self.eq {
+            return value_satisfies_bounds(&value, &self.min, &self.max).map(|matches| {
+                if matches {
+                    ScanCondition::Eq(value)
+                } else {
+                    ScanCondition::Empty
+                }
+            });
+        }
+
+        scan_condition_from_bounds(self.min, self.max)
+    }
+}
+
+fn stricter_lower_bound(current: &Bound<Value>, candidate: &Bound<Value>) -> Option<Bound<Value>> {
+    match (current, candidate) {
+        (Bound::Unbounded, _) => Some(candidate.clone()),
+        (_, Bound::Unbounded) => Some(current.clone()),
+        (
+            Bound::Included(current_value) | Bound::Excluded(current_value),
+            Bound::Included(candidate_value) | Bound::Excluded(candidate_value),
+        ) => match compare_index_values(current_value, candidate_value)? {
+            Ordering::Less => Some(candidate.clone()),
+            Ordering::Greater => Some(current.clone()),
+            Ordering::Equal => Some(
+                if matches!(current, Bound::Excluded(_)) || matches!(candidate, Bound::Excluded(_))
+                {
+                    Bound::Excluded(current_value.clone())
+                } else {
+                    Bound::Included(current_value.clone())
+                },
+            ),
+        },
+    }
+}
+
+fn stricter_upper_bound(current: &Bound<Value>, candidate: &Bound<Value>) -> Option<Bound<Value>> {
+    match (current, candidate) {
+        (Bound::Unbounded, _) => Some(candidate.clone()),
+        (_, Bound::Unbounded) => Some(current.clone()),
+        (
+            Bound::Included(current_value) | Bound::Excluded(current_value),
+            Bound::Included(candidate_value) | Bound::Excluded(candidate_value),
+        ) => match compare_index_values(current_value, candidate_value)? {
+            Ordering::Less => Some(current.clone()),
+            Ordering::Greater => Some(candidate.clone()),
+            Ordering::Equal => Some(
+                if matches!(current, Bound::Excluded(_)) || matches!(candidate, Bound::Excluded(_))
+                {
+                    Bound::Excluded(current_value.clone())
+                } else {
+                    Bound::Included(current_value.clone())
+                },
+            ),
+        },
+    }
+}
+
+fn value_satisfies_bounds(value: &Value, min: &Bound<Value>, max: &Bound<Value>) -> Option<bool> {
+    Some(value_satisfies_lower_bound(value, min)? && value_satisfies_upper_bound(value, max)?)
+}
+
+fn value_satisfies_lower_bound(value: &Value, min: &Bound<Value>) -> Option<bool> {
+    match min {
+        Bound::Unbounded => Some(true),
+        Bound::Included(bound) => Some(matches!(
+            compare_index_values(value, bound)?,
+            Ordering::Equal | Ordering::Greater
+        )),
+        Bound::Excluded(bound) => Some(compare_index_values(value, bound)? == Ordering::Greater),
+    }
+}
+
+fn value_satisfies_upper_bound(value: &Value, max: &Bound<Value>) -> Option<bool> {
+    match max {
+        Bound::Unbounded => Some(true),
+        Bound::Included(bound) => Some(matches!(
+            compare_index_values(value, bound)?,
+            Ordering::Less | Ordering::Equal
+        )),
+        Bound::Excluded(bound) => Some(compare_index_values(value, bound)? == Ordering::Less),
+    }
+}
+
+fn scan_condition_from_bounds(min: Bound<Value>, max: Bound<Value>) -> Option<ScanCondition> {
+    match (&min, &max) {
+        (Bound::Unbounded, Bound::Unbounded) => Some(ScanCondition::All),
+        (
+            Bound::Included(lower) | Bound::Excluded(lower),
+            Bound::Included(upper) | Bound::Excluded(upper),
+        ) => match compare_index_values(lower, upper)? {
+            Ordering::Greater => Some(ScanCondition::Empty),
+            Ordering::Equal => {
+                if matches!(min, Bound::Included(_)) && matches!(max, Bound::Included(_)) {
+                    Some(ScanCondition::Eq(lower.clone()))
+                } else {
+                    Some(ScanCondition::Empty)
+                }
+            }
+            Ordering::Less => Some(ScanCondition::Range { min, max }),
+        },
+        _ => Some(ScanCondition::Range { min, max }),
+    }
+}
+
+fn compare_index_values(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => Some(left.cmp(right)),
+        (Value::BigInt(left), Value::BigInt(right)) => Some(left.cmp(right)),
+        (Value::Double(left), Value::Double(right)) => Some(left.total_cmp(right)),
+        (Value::Boolean(left), Value::Boolean(right)) => Some(left.cmp(right)),
+        (Value::Text(left), Value::Text(right)) => Some(left.cmp(right)),
+        (Value::Timestamp(left), Value::Timestamp(right)) => Some(left.cmp(right)),
+        (Value::Uuid(left), Value::Uuid(right)) => Some(left.cmp(right)),
+        (Value::BatchId(left), Value::BatchId(right)) => Some(left.cmp(right)),
+        (Value::Bytea(left), Value::Bytea(right)) => Some(left.cmp(right)),
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
+        (Value::Null, _) => Some(Ordering::Less),
+        (_, Value::Null) => Some(Ordering::Greater),
+        _ => None,
     }
 }
 

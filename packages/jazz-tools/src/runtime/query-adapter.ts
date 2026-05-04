@@ -152,8 +152,13 @@ function toWasmValue(value: unknown, columnType: ColumnType, columnName?: string
     if (columnType?.type === "Timestamp") {
       return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
     }
-    // Use Integer for all numbers - WASM will handle type coercion
-    return { type: "Integer", value };
+    if (
+      columnType.type === "Double" ||
+      columnType.type === "BigInt" ||
+      columnType.type === "Integer"
+    ) {
+      return { type: columnType.type, value };
+    }
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {
