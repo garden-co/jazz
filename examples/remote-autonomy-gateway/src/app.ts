@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { Elysia, type AnyElysia } from "elysia";
 import {
   createAgentDataStore,
@@ -39,6 +39,11 @@ export interface RemoteAutonomyGatewayOptions {
   syncServerUrl?: string;
   syncServerAppId?: string;
   syncServerPathPrefix?: string;
+  localSpacesRoot?: string;
+  remoteSpacesRoot?: string;
+  objectStorageRegion?: string;
+  objectStorageBucket?: string;
+  designerSpacesPrefix?: string;
   backendSecret?: string;
   adminSecret?: string;
   hostId?: string;
@@ -66,9 +71,23 @@ class GatewayError extends Error {
 
 const SERVICE_NAME = "remote-autonomy-gateway";
 const CONTROL_RUN_ID = "remote-autonomy-gateway:control";
-const DEFAULT_SYNC_SERVER_URL =
-  "https://nikitavoloboev-jazz2-sync-ingress.tailbf2c6c.ts.net";
+const DEFAULT_SYNC_SERVER_URL = "https://nikitavoloboev-jazz2-sync-ingress.tailbf2c6c.ts.net";
 const DEFAULT_SYNC_SERVER_APP_ID = "313aa802-8598-5165-bb91-dab72dcb9d46";
+const DEFAULT_REMOTE_HOME = "/users/nikiv";
+const DEFAULT_OBJECT_STORAGE_REGION = "us-dallas-1";
+const DEFAULT_OBJECT_STORAGE_BUCKET = "reactron-updates-dev";
+const DEFAULT_DESIGNER_SPACES_PREFIX = "x/nikiv/designer/spaces";
+const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
+
+type DesignerSpaceRecord = {
+  slug: string;
+  title: string;
+  localPath: string;
+  remotePath: string;
+  objectStoragePrefix: string;
+  objectStorageUri: string;
+  syncKind: typeof SPACE_SYNC_JOB_KIND;
+};
 
 export function createRemoteAutonomyGateway(
   options: RemoteAutonomyGatewayOptions = {},
@@ -173,14 +192,16 @@ export function createRemoteAutonomyGateway(
         syncJobs: "/v1/sync/jobs",
         syncReceipts: "/v1/sync/receipts",
         claims: "/v1/claims",
+        spaces: "/v1/spaces",
       },
     }))
     .get("/v1/state", async ({ query }) => {
       const limit = intQuery(query.limit, 20);
-      const [sessions, jobs, claims] = await Promise.all([
+      const [sessions, jobs, claims, spaces] = await Promise.all([
         codexStore.listActiveSessionSummaries({ limit }),
         agentStore.listJobs({ includeFinished: false, limit }),
         agentStore.listAgentClaims({ limit }),
+        listSpaceRecords(agentStore, limit),
       ]);
       return {
         ok: true,
@@ -192,6 +213,7 @@ export function createRemoteAutonomyGateway(
         sessions: sessions.map(serializePresenceSummary),
         jobs: serialize(jobs),
         claims: serialize(claims),
+        spaces,
       };
     })
     .post("/v1/codex/presence", async ({ body }) => {
@@ -436,23 +458,67 @@ export function createRemoteAutonomyGateway(
         limit: intQuery(query.limit, 20),
       });
       return { ok: true, claims: claims.map(serializeClaim) };
+    })
+    .get("/v1/spaces", async ({ query }) => {
+      return {
+        ok: true,
+        spaces: await listSpaceRecords(agentStore, intQuery(query.limit, 20)),
+      };
+    })
+    .post("/v1/spaces", async ({ body }) => {
+      const payload = objectBody(body);
+      const space = resolveDesignerSpace(payload, resolved);
+      const ownerSession = optionalString(payload, "ownerSession");
+      const owner = optionalString(payload, "owner") ?? resolved.hostId;
+      const job = await agentStore.recordJob({
+        kind: SPACE_SYNC_JOB_KIND,
+        repoRoot: space.remotePath,
+        workspaceRoot: space.remotePath,
+        sourceSession: ownerSession,
+        dedupeKey: spaceJobDedupeKey(space.slug),
+        payloadJson: {
+          sourcePath: space.remotePath,
+          targetPath: space.localPath,
+          transport: "rsync",
+          space,
+        } as AgentJsonValue,
+        note: `mirror Designer space ${space.slug}`,
+      });
+      const claim = await agentStore.recordAgentClaim({
+        claimId: spaceClaimId(space.slug),
+        scope: `space:${space.slug}`,
+        owner,
+        ownerSession,
+        mode: "sync-owner",
+        repoRoot: space.remotePath,
+        workspaceRoot: space.remotePath,
+        note: `Designer space ${space.slug} mirrors ${space.remotePath} to ${space.localPath}`,
+      });
+      await recordGatewayEvent("designer_space_registered", "Designer space registered", {
+        slug: space.slug,
+        localPath: space.localPath,
+        remotePath: space.remotePath,
+        objectStoragePrefix: space.objectStoragePrefix,
+        jobId: job.jobId,
+        claimId: claim.claimId,
+      });
+      return {
+        ok: true,
+        space,
+        job: serializeJob(job),
+        claim: serializeClaim(claim),
+      };
     });
 
   return {
     app,
     close: async () => {
-      await Promise.allSettled([
-        agentStore.shutdown(),
-        codexStore.shutdown(),
-      ]);
+      await Promise.allSettled([agentStore.shutdown(), codexStore.shutdown()]);
     },
   };
 }
 
-async function checkStores(
-  agentStore: AgentDataStore,
-  codexStore: CodexSessionStore,
-) {
+async function checkStores(agentStore: AgentDataStore, codexStore: CodexSessionStore) {
   const [agentInfra, codexSessions] = await Promise.all([
     checkStore(async () => {
       await agentStore.listJobs({ limit: 1 });
@@ -481,69 +547,73 @@ async function checkStore(probe: () => Promise<void>) {
 function resolveOptions(options: RemoteAutonomyGatewayOptions) {
   const root = join(homedir(), ".jazz2", "remote-autonomy");
   const syncServerUrl = stripTrailingSlash(
-    options.syncServerUrl
-      ?? process.env.REMOTE_AUTONOMY_SYNC_SERVER_URL
-      ?? DEFAULT_SYNC_SERVER_URL,
+    options.syncServerUrl ?? process.env.REMOTE_AUTONOMY_SYNC_SERVER_URL ?? DEFAULT_SYNC_SERVER_URL,
   );
-  const connectStoresToSyncServer = options.connectStoresToSyncServer
-    ?? truthy(process.env.REMOTE_AUTONOMY_CONNECT_SYNC ?? "1");
+  const connectStoresToSyncServer =
+    options.connectStoresToSyncServer ?? truthy(process.env.REMOTE_AUTONOMY_CONNECT_SYNC ?? "1");
   return {
     agentDataPath:
-      options.agentDataPath
-      ?? process.env.REMOTE_AUTONOMY_AGENT_DATA_PATH
-      ?? join(root, "agent-infra.db"),
+      options.agentDataPath ??
+      process.env.REMOTE_AUTONOMY_AGENT_DATA_PATH ??
+      join(root, "agent-infra.db"),
     codexDataPath:
-      options.codexDataPath
-      ?? process.env.REMOTE_AUTONOMY_CODEX_DATA_PATH
-      ?? join(root, "codex-sessions.db"),
-    agentAppId:
-      options.agentAppId
-      ?? process.env.REMOTE_AUTONOMY_AGENT_APP_ID
-      ?? "run-agent-infra",
-    codexAppId:
-      options.codexAppId
-      ?? process.env.REMOTE_AUTONOMY_CODEX_APP_ID
-      ?? "codex-sessions",
+      options.codexDataPath ??
+      process.env.REMOTE_AUTONOMY_CODEX_DATA_PATH ??
+      join(root, "codex-sessions.db"),
+    agentAppId: options.agentAppId ?? process.env.REMOTE_AUTONOMY_AGENT_APP_ID ?? "run-agent-infra",
+    codexAppId: options.codexAppId ?? process.env.REMOTE_AUTONOMY_CODEX_APP_ID ?? "codex-sessions",
     syncServerUrl,
     syncServerAppId:
-      options.syncServerAppId
-      ?? process.env.REMOTE_AUTONOMY_SYNC_SERVER_APP_ID
-      ?? DEFAULT_SYNC_SERVER_APP_ID,
+      options.syncServerAppId ??
+      process.env.REMOTE_AUTONOMY_SYNC_SERVER_APP_ID ??
+      DEFAULT_SYNC_SERVER_APP_ID,
     syncServerPathPrefix:
-      options.syncServerPathPrefix
-      ?? process.env.REMOTE_AUTONOMY_SYNC_SERVER_PATH_PREFIX,
-    backendSecret:
-      options.backendSecret ?? process.env.REMOTE_AUTONOMY_BACKEND_SECRET,
-    adminSecret:
-      options.adminSecret ?? process.env.REMOTE_AUTONOMY_ADMIN_SECRET,
+      options.syncServerPathPrefix ?? process.env.REMOTE_AUTONOMY_SYNC_SERVER_PATH_PREFIX,
+    localSpacesRoot: stripTrailingSlash(
+      options.localSpacesRoot ??
+        process.env.REMOTE_AUTONOMY_LOCAL_SPACES_ROOT ??
+        join(homedir(), "spaces"),
+    ),
+    remoteSpacesRoot: stripTrailingSlash(
+      options.remoteSpacesRoot ??
+        process.env.REMOTE_AUTONOMY_REMOTE_SPACES_ROOT ??
+        posix.join(DEFAULT_REMOTE_HOME, "spaces"),
+    ),
+    objectStorageRegion:
+      options.objectStorageRegion ??
+      process.env.REMOTE_AUTONOMY_OBJECT_STORAGE_REGION ??
+      DEFAULT_OBJECT_STORAGE_REGION,
+    objectStorageBucket:
+      options.objectStorageBucket ??
+      process.env.REMOTE_AUTONOMY_OBJECT_STORAGE_BUCKET ??
+      DEFAULT_OBJECT_STORAGE_BUCKET,
+    designerSpacesPrefix: storageKey(
+      options.designerSpacesPrefix ??
+        process.env.REMOTE_AUTONOMY_DESIGNER_SPACES_PREFIX ??
+        DEFAULT_DESIGNER_SPACES_PREFIX,
+    ),
+    backendSecret: options.backendSecret ?? process.env.REMOTE_AUTONOMY_BACKEND_SECRET,
+    adminSecret: options.adminSecret ?? process.env.REMOTE_AUTONOMY_ADMIN_SECRET,
     hostId:
-      options.hostId
-      ?? process.env.REMOTE_AUTONOMY_HOST_ID
-      ?? process.env.HOST
-      ?? "unknown-host",
+      options.hostId ?? process.env.REMOTE_AUTONOMY_HOST_ID ?? process.env.HOST ?? "unknown-host",
     env: options.env ?? process.env.REMOTE_AUTONOMY_ENV ?? "remote-autonomy",
-    userBranch:
-      options.userBranch
-      ?? process.env.REMOTE_AUTONOMY_USER_BRANCH
-      ?? "main",
+    userBranch: options.userBranch ?? process.env.REMOTE_AUTONOMY_USER_BRANCH ?? "main",
     port:
-      options.port
-      ?? (process.env.REMOTE_AUTONOMY_PORT
-        ? Number(process.env.REMOTE_AUTONOMY_PORT)
-        : 7474),
+      options.port ??
+      (process.env.REMOTE_AUTONOMY_PORT ? Number(process.env.REMOTE_AUTONOMY_PORT) : 7474),
     connectStoresToSyncServer,
     syncServerProbeTimeoutMs:
-      options.syncServerProbeTimeoutMs
-      ?? (process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS
+      options.syncServerProbeTimeoutMs ??
+      (process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS
         ? Number(process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS)
         : 3_000),
     syncServerProbe:
-      options.syncServerProbe
-      ?? (() =>
+      options.syncServerProbe ??
+      (() =>
         probeSyncServer(
           syncServerUrl,
-          options.syncServerProbeTimeoutMs
-            ?? (process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS
+          options.syncServerProbeTimeoutMs ??
+            (process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS
               ? Number(process.env.REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS)
               : 3_000),
         )),
@@ -551,6 +621,100 @@ function resolveOptions(options: RemoteAutonomyGatewayOptions) {
 }
 
 type ResolvedOptions = ReturnType<typeof resolveOptions>;
+
+async function listSpaceRecords(
+  agentStore: AgentDataStore,
+  limit: number,
+): Promise<DesignerSpaceRecord[]> {
+  const resultLimit = Math.max(0, Math.floor(limit));
+  const jobs = await agentStore.listJobs({
+    kind: SPACE_SYNC_JOB_KIND,
+    includeFinished: true,
+    limit: Math.max(resultLimit * 4, 50),
+  });
+  const spaces = new Map<string, DesignerSpaceRecord>();
+  for (const job of jobs) {
+    const space = spaceRecordFromJob(job);
+    if (!space || spaces.has(space.slug)) {
+      continue;
+    }
+    spaces.set(space.slug, space);
+  }
+  return [...spaces.values()].slice(0, resultLimit);
+}
+
+function spaceRecordFromJob(job: JobRecord): DesignerSpaceRecord | null {
+  const payload = jsonObject(job.payloadJson);
+  const space = jsonObject(payload?.space);
+  if (
+    !space ||
+    typeof space.slug !== "string" ||
+    typeof space.title !== "string" ||
+    typeof space.localPath !== "string" ||
+    typeof space.remotePath !== "string" ||
+    typeof space.objectStoragePrefix !== "string" ||
+    typeof space.objectStorageUri !== "string"
+  ) {
+    return null;
+  }
+  return {
+    slug: space.slug,
+    title: space.title,
+    localPath: space.localPath,
+    remotePath: space.remotePath,
+    objectStoragePrefix: space.objectStoragePrefix,
+    objectStorageUri: space.objectStorageUri,
+    syncKind: SPACE_SYNC_JOB_KIND,
+  };
+}
+
+function resolveDesignerSpace(payload: JsonObject, options: ResolvedOptions): DesignerSpaceRecord {
+  const slug = spaceSlug(requiredString(payload, "slug"));
+  const title = optionalString(payload, "title") ?? slug;
+  const localPath = stripTrailingSlash(
+    optionalString(payload, "localPath") ?? join(options.localSpacesRoot, slug),
+  );
+  const remotePath = stripTrailingSlash(
+    optionalString(payload, "remotePath") ?? posix.join(options.remoteSpacesRoot, slug),
+  );
+  const objectStoragePrefix = storageKey(options.designerSpacesPrefix, slug);
+  return {
+    slug,
+    title,
+    localPath,
+    remotePath,
+    objectStoragePrefix,
+    objectStorageUri: `oci://${options.objectStorageRegion}/${options.objectStorageBucket}/${objectStoragePrefix}/`,
+    syncKind: SPACE_SYNC_JOB_KIND,
+  };
+}
+
+function spaceJobDedupeKey(slug: string): string {
+  return `${SPACE_SYNC_JOB_KIND}:${slug}`;
+}
+
+function spaceClaimId(slug: string): string {
+  return `designer-space:${slug}`;
+}
+
+function spaceSlug(value: string): string {
+  const slug = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug)) {
+    throw new GatewayError(400, `invalid Designer space slug ${value}`);
+  }
+  return slug;
+}
+
+function storageKey(...segments: string[]): string {
+  return segments
+    .map((segment) => segment.trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
+}
+
+function jsonObject(value: unknown): JsonObject | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : null;
+}
 
 function agentStoreConfig(options: ResolvedOptions): AgentDataStoreConfig {
   return storeConfig({
@@ -568,22 +732,18 @@ function codexStoreConfig(options: ResolvedOptions): CodexSessionStoreConfig {
   });
 }
 
-function storeConfig<T extends AgentDataStoreConfig | CodexSessionStoreConfig>(
-  input: {
-    dataPath: string;
-    appId: string;
-    options: ResolvedOptions;
-  },
-): T {
+function storeConfig<T extends AgentDataStoreConfig | CodexSessionStoreConfig>(input: {
+  dataPath: string;
+  appId: string;
+  options: ResolvedOptions;
+}): T {
   mkdirSync(dirname(input.dataPath), { recursive: true });
   return {
     dataPath: input.dataPath,
     appId: input.appId,
     env: input.options.env,
     userBranch: input.options.userBranch,
-    serverUrl: input.options.connectStoresToSyncServer
-      ? input.options.syncServerUrl
-      : undefined,
+    serverUrl: input.options.connectStoresToSyncServer ? input.options.syncServerUrl : undefined,
     serverPathPrefix: input.options.syncServerPathPrefix,
     backendSecret: input.options.backendSecret,
     adminSecret: input.options.adminSecret,
@@ -591,10 +751,7 @@ function storeConfig<T extends AgentDataStoreConfig | CodexSessionStoreConfig>(
   } as T;
 }
 
-async function probeSyncServer(
-  syncServerUrl: string,
-  timeoutMs: number,
-): Promise<SyncProbeResult> {
+async function probeSyncServer(syncServerUrl: string, timeoutMs: number): Promise<SyncProbeResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
@@ -741,17 +898,10 @@ function optionalBoolean(body: JsonObject, key: string): boolean | undefined {
   return value;
 }
 
-function optionalTimestamp(
-  body: JsonObject,
-  key: string,
-): Date | string | number | undefined {
+function optionalTimestamp(body: JsonObject, key: string): Date | string | number | undefined {
   const value = body[key];
   if (value === undefined || value === null || value === "") return undefined;
-  if (
-    value instanceof Date
-    || typeof value === "string"
-    || typeof value === "number"
-  ) {
+  if (value instanceof Date || typeof value === "string" || typeof value === "number") {
     return value;
   }
   throw new GatewayError(400, `field ${key} must be a timestamp`);

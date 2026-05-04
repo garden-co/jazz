@@ -2,10 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  createRemoteAutonomyGateway,
-  type RemoteAutonomyGateway,
-} from "../src/app.js";
+import { createRemoteAutonomyGateway, type RemoteAutonomyGateway } from "../src/app.js";
 
 describe("remote autonomy gateway", () => {
   let tempDir: string;
@@ -19,6 +16,8 @@ describe("remote autonomy gateway", () => {
       syncServerUrl: "https://jazz2.example.test",
       syncServerAppId: "test-app-id",
       hostId: "mac-test",
+      localSpacesRoot: join(tempDir, "spaces"),
+      remoteSpacesRoot: "/users/nikiv/spaces",
       connectStoresToSyncServer: false,
       syncServerProbe: async () => ({
         ok: true,
@@ -57,6 +56,7 @@ describe("remote autonomy gateway", () => {
         codexPresence: "/v1/codex/presence",
         codexStreamEvents: "/v1/codex/stream-events",
         syncJobs: "/v1/sync/jobs",
+        spaces: "/v1/spaces",
       },
       syncServer: {
         url: "https://jazz2.example.test",
@@ -111,7 +111,7 @@ describe("remote autonomy gateway", () => {
       sourcePath: "/srv/.codex/session.jsonl",
       textDelta: "live from linux",
       payloadJson: { delta: "live from linux" },
-      rawJson: "{\"type\":\"event_msg\"}",
+      rawJson: '{"type":"event_msg"}',
       schemaHash: "schema-hash-test",
       createdAt: "2026-05-02T20:00:00.000Z",
       observedAt: "2026-05-02T20:00:00.010Z",
@@ -165,13 +165,9 @@ describe("remote autonomy gateway", () => {
     expect(created.job.status).toBe("queued");
     expect(duplicate.job.jobId).toBe(created.job.jobId);
 
-    const claimed = await requestJson(
-      "POST",
-      `/v1/sync/jobs/${created.job.jobId}/claim`,
-      {
-        claimedBy: "server-worker-gpu-a",
-      },
-    );
+    const claimed = await requestJson("POST", `/v1/sync/jobs/${created.job.jobId}/claim`, {
+      claimedBy: "server-worker-gpu-a",
+    });
     expect(claimed.job).toMatchObject({
       jobId: created.job.jobId,
       status: "claimed",
@@ -232,17 +228,265 @@ describe("remote autonomy gateway", () => {
     });
   });
 
+  it("registers Designer spaces with local mirrors, remote roots, and object storage prefixes", async () => {
+    const registered = await requestJson("POST", "/v1/spaces", {
+      slug: "designer-starter-project",
+      title: "Designer Starter Project",
+      localPath: "/Users/nikitavoloboev/code/prom/ide/designer/starter-project",
+      remotePath: "/users/nikiv/code/prom/ide/designer/starter-project",
+      ownerSession: "codex-session-1",
+    });
+
+    expect(registered).toMatchObject({
+      ok: true,
+      space: {
+        slug: "designer-starter-project",
+        title: "Designer Starter Project",
+        localPath: "/Users/nikitavoloboev/code/prom/ide/designer/starter-project",
+        remotePath: "/users/nikiv/code/prom/ide/designer/starter-project",
+        objectStoragePrefix: "x/nikiv/designer/spaces/designer-starter-project",
+        objectStorageUri:
+          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+      },
+      job: {
+        kind: "space-rsync-mirror",
+        status: "queued",
+        workspaceRoot: "/users/nikiv/code/prom/ide/designer/starter-project",
+        dedupeKey: "space-rsync-mirror:designer-starter-project",
+        payloadJson: {
+          sourcePath: "/users/nikiv/code/prom/ide/designer/starter-project",
+          targetPath: "/Users/nikitavoloboev/code/prom/ide/designer/starter-project",
+          transport: "rsync",
+        },
+      },
+      claim: {
+        claimId: "designer-space:designer-starter-project",
+        scope: "space:designer-starter-project",
+        ownerSession: "codex-session-1",
+        workspaceRoot: "/users/nikiv/code/prom/ide/designer/starter-project",
+      },
+    });
+
+    const listed = await requestJson("GET", "/v1/spaces");
+    expect(listed.spaces).toEqual([
+      expect.objectContaining({
+        slug: "designer-starter-project",
+        objectStorageUri:
+          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+      }),
+    ]);
+  });
+
+  it("defaults Designer space paths from configured roots", async () => {
+    const registered = await requestJson("POST", "/v1/spaces", {
+      slug: "bay-bridge-clock",
+    });
+
+    expect(registered).toMatchObject({
+      ok: true,
+      space: {
+        slug: "bay-bridge-clock",
+        title: "bay-bridge-clock",
+        localPath: join(tempDir, "spaces", "bay-bridge-clock"),
+        remotePath: "/users/nikiv/spaces/bay-bridge-clock",
+        objectStoragePrefix: "x/nikiv/designer/spaces/bay-bridge-clock",
+        objectStorageUri:
+          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/bay-bridge-clock/",
+        syncKind: "space-rsync-mirror",
+      },
+      job: {
+        repoRoot: "/users/nikiv/spaces/bay-bridge-clock",
+        workspaceRoot: "/users/nikiv/spaces/bay-bridge-clock",
+        payloadJson: {
+          sourcePath: "/users/nikiv/spaces/bay-bridge-clock",
+          targetPath: join(tempDir, "spaces", "bay-bridge-clock"),
+          transport: "rsync",
+        },
+      },
+      claim: {
+        scope: "space:bay-bridge-clock",
+        mode: "sync-owner",
+        owner: "mac-test",
+      },
+    });
+  });
+
+  it("uses configured Designer object storage settings", async () => {
+    await gateway.close();
+    gateway = createRemoteAutonomyGateway({
+      agentDataPath: join(tempDir, "custom-agent-infra.db"),
+      codexDataPath: join(tempDir, "custom-codex-sessions.db"),
+      syncServerUrl: "https://jazz2.example.test",
+      syncServerAppId: "test-app-id",
+      hostId: "mac-test",
+      localSpacesRoot: join(tempDir, "spaces"),
+      remoteSpacesRoot: "/users/nikiv/spaces",
+      objectStorageRegion: "us-ashburn-1",
+      objectStorageBucket: "designer-spaces-test",
+      designerSpacesPrefix: "/custom/designer/spaces/",
+      connectStoresToSyncServer: false,
+      syncServerProbe: async () => ({
+        ok: true,
+        status: "healthy",
+        latencyMs: 3,
+      }),
+    });
+
+    const registered = await requestJson("POST", "/v1/spaces", {
+      slug: "custom-space",
+    });
+
+    expect(registered.space).toMatchObject({
+      objectStoragePrefix: "custom/designer/spaces/custom-space",
+      objectStorageUri:
+        "oci://us-ashburn-1/designer-spaces-test/custom/designer/spaces/custom-space/",
+    });
+  });
+
+  it("rejects invalid Designer space slugs before recording jobs", async () => {
+    const rejected = await requestJsonWithStatus("POST", "/v1/spaces", 400, {
+      slug: "../not-a-space",
+    });
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: "invalid Designer space slug ../not-a-space",
+    });
+
+    const jobs = await requestJson("GET", "/v1/sync/jobs?kind=space-rsync-mirror");
+    expect(jobs.jobs).toHaveLength(0);
+  });
+
+  it("keeps Designer space registration idempotent by slug", async () => {
+    const first = await requestJson("POST", "/v1/spaces", {
+      slug: "shared-space",
+      ownerSession: "codex-session-1",
+    });
+    const second = await requestJson("POST", "/v1/spaces", {
+      slug: "shared-space",
+      ownerSession: "codex-session-1",
+    });
+
+    expect(second.job.jobId).toBe(first.job.jobId);
+    expect(second.claim.claimId).toBe(first.claim.claimId);
+
+    const state = await requestJson("GET", "/v1/state");
+    expect(state.spaces).toEqual([
+      expect.objectContaining({
+        slug: "shared-space",
+      }),
+    ]);
+    expect(state.claims).toEqual([
+      expect.objectContaining({
+        claimId: "designer-space:shared-space",
+        scope: "space:shared-space",
+      }),
+    ]);
+
+    const limited = await requestJson("GET", "/v1/spaces?limit=1");
+    expect(limited.spaces).toHaveLength(1);
+
+    const negativeLimit = await requestJson("GET", "/v1/spaces?limit=-1");
+    expect(negativeLimit.spaces).toEqual([]);
+  });
+
+  it("keeps the Designer space visible after a worker claims and completes its rsync job", async () => {
+    const registered = await requestJson("POST", "/v1/spaces", {
+      slug: "remote-cad-space",
+      ownerSession: "codex-session-1",
+    });
+
+    const claimed = await requestJson("POST", `/v1/sync/jobs/${registered.job.jobId}/claim`, {
+      claimedBy: "op1-rsync-worker",
+    });
+    expect(claimed.job).toMatchObject({
+      jobId: registered.job.jobId,
+      status: "claimed",
+      claimedBy: "op1-rsync-worker",
+      kind: "space-rsync-mirror",
+    });
+
+    const receipt = await requestJson("POST", "/v1/sync/receipts", {
+      jobId: registered.job.jobId,
+      status: "completed",
+      transport: "rsync",
+      sourcePath: registered.space.remotePath,
+      targetPath: registered.space.localPath,
+      checksum: "sha256:space",
+      bytes: 4096,
+      payloadJson: {
+        slug: registered.space.slug,
+      },
+    });
+    expect(receipt).toMatchObject({
+      ok: true,
+      receipt: {
+        jobId: registered.job.jobId,
+        status: "completed",
+        transport: "rsync",
+        sourcePath: "/users/nikiv/spaces/remote-cad-space",
+        targetPath: join(tempDir, "spaces", "remote-cad-space"),
+      },
+      job: {
+        status: "completed",
+        resultJson: {
+          status: "completed",
+          transport: "rsync",
+        },
+      },
+    });
+
+    const listed = await requestJson("GET", "/v1/spaces");
+    expect(listed.spaces).toEqual([
+      expect.objectContaining({
+        slug: "remote-cad-space",
+        localPath: join(tempDir, "spaces", "remote-cad-space"),
+        remotePath: "/users/nikiv/spaces/remote-cad-space",
+      }),
+    ]);
+  });
+
+  it("ignores malformed legacy space jobs when listing spaces", async () => {
+    await requestJson("POST", "/v1/sync/jobs", {
+      kind: "space-rsync-mirror",
+      payloadJson: {
+        sourcePath: "/users/nikiv/spaces/missing-space-payload",
+        targetPath: join(tempDir, "spaces", "missing-space-payload"),
+        transport: "rsync",
+      },
+    });
+
+    const listed = await requestJson("GET", "/v1/spaces");
+    expect(listed.spaces).toEqual([]);
+  });
+
   async function requestJson(method: string, path: string, body?: unknown) {
-    const response = await gateway.app.handle(
+    const response = await request(method, path, body);
+    const json = await response.json();
+    expect(response.status).toBeGreaterThanOrEqual(200);
+    expect(response.status).toBeLessThan(300);
+    return json;
+  }
+
+  async function requestJsonWithStatus(
+    method: string,
+    path: string,
+    status: number,
+    body?: unknown,
+  ) {
+    const response = await request(method, path, body);
+    const json = await response.json();
+    expect(response.status).toBe(status);
+    return json;
+  }
+
+  async function request(method: string, path: string, body?: unknown) {
+    return gateway.app.handle(
       new Request(`http://remote-autonomy.test${path}`, {
         method,
         headers: body === undefined ? undefined : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
       }),
     );
-    const json = await response.json();
-    expect(response.status).toBeGreaterThanOrEqual(200);
-    expect(response.status).toBeLessThan(300);
-    return json;
   }
 });
