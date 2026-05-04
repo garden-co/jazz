@@ -1041,6 +1041,7 @@ export class Db {
    * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
    */
   private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
+  private readonly pendingWorkerMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -1289,15 +1290,17 @@ export class Db {
           onAuthFailure: (reason) => {
             this.markUnauthenticated(reason);
           },
+          onRejectedBatchAcknowledged: (batchId) => {
+            this.workerBridge?.acknowledgeRejectedBatch(batchId);
+          },
         },
       );
 
+      this.attachMutationErrorHandler(client);
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
       }
-
-      this.attachMutationErrorHandler(client);
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
       if (!this.worker && this.config.serverUrl) {
@@ -1306,8 +1309,6 @@ export class Db {
           admin_secret: this.config.adminSecret,
         });
       }
-
-      this.attachMutationErrorHandler(client);
       this.clients.set(key, client);
     }
 
@@ -1331,6 +1332,7 @@ export class Db {
         for (const listener of this.mutationErrorListeners) {
           listener(event);
         }
+        this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
       }),
     );
   }
@@ -1345,15 +1347,32 @@ export class Db {
     }
   }
 
-  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+  protected async ensureQueryReady(options?: QueryOptions, client?: JazzClient): Promise<void> {
     await this.ensureBridgeReady();
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
     if (!options?.tier || options.tier === "local") {
+      if (client?.hasPendingHydratedBatchReconciliation("edge")) {
+        await this.workerBridge.waitForUpstreamServerConnection();
+        await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
+      }
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
+  private async waitForHydratedWorkerBatchReconciliation(
+    client: JazzClient,
+    tier: DurabilityTier,
+  ): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (client.hasPendingHydratedBatchReconciliation(tier)) {
+      if (Date.now() >= deadline) {
+        return;
+      }
+      await sleep(20);
+    }
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -1369,6 +1388,35 @@ export class Db {
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
+    });
+    bridge.onLocalBatchRecordsSync((batches) => {
+      client.hydrateLocalBatchRecords(batches);
+    });
+    bridge.onMutationErrorReplay((batch) => {
+      const existingRecord = client.localBatchRecord(batch.batchId);
+      const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
+      client.replayRejectedBatchRecord(batch);
+      if (existingRecord && !replayableFromWorker) {
+        return;
+      }
+      client.markReplayedRejectedBatchDelivered(batch.batchId);
+      const settlement = batch.latestSettlement;
+      if (!settlement || settlement.kind !== "rejected") {
+        return;
+      }
+      const event: MutationErrorEvent = {
+        code: settlement.code,
+        reason: settlement.reason,
+        batch,
+      };
+      if (this.mutationErrorListeners.size === 0) {
+        this.pendingWorkerMutationErrorEvents.push(event);
+        return;
+      }
+      for (const listener of this.mutationErrorListeners) {
+        listener(event);
+      }
+      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -2304,6 +2352,14 @@ export class Db {
     for (const client of this.clients.values()) {
       this.attachMutationErrorHandler(client);
     }
+    while (this.pendingWorkerMutationErrorEvents.length > 0) {
+      const event = this.pendingWorkerMutationErrorEvents.shift()!;
+      listener(event);
+      for (const client of this.clients.values()) {
+        client.markReplayedRejectedBatchDelivered(event.batch.batchId);
+      }
+      this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
+    }
     return () => {
       this.mutationErrorListeners.delete(listener);
       if (this.mutationErrorListeners.size > 0) {
@@ -2555,7 +2611,7 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
+    await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const rows = await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
@@ -3025,7 +3081,7 @@ class ClientBackedDb extends Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
+    await this.ensureQueryReady(queryOptions, this.runtimeClient);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,

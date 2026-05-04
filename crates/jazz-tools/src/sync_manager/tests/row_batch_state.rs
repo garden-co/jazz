@@ -365,6 +365,57 @@ fn batch_settlement_from_server_relays_to_row_batch_interested_writer() {
 }
 
 #[test]
+fn rejected_batch_settlement_from_server_relays_to_row_batch_interested_writer() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let batch_id = row.batch_id;
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    add_server(&mut sm, &io, server_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+    sm.take_outbox();
+
+    let settlement = BatchSettlement::Rejected {
+        batch_id,
+        code: "permission_denied".to_string(),
+        reason: "write rejected by policy".to_string(),
+    };
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchSettlement {
+            settlement: settlement.clone(),
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement: relayed },
+        } if id == client_id && relayed == settlement
+    )));
+}
+
+#[test]
 fn row_batch_state_changed_relays_accepted_transaction_settlement_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
