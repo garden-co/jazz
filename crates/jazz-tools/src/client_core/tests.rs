@@ -259,11 +259,31 @@ fn client_core_subscribe_and_unsubscribe_owns_runtime_handle() {
     client
         .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
         .expect("insert should trigger subscription");
-    client.runtime_mut().batched_tick();
+    client.with_runtime_mut(|runtime| runtime.batched_tick());
 
     assert!(!seen.lock().unwrap().is_empty());
 
     client
         .unsubscribe(handle)
         .expect("unsubscribe should remove runtime subscription");
+}
+
+#[test]
+fn client_core_can_wrap_a_shared_runtime_handle() {
+    let schema = users_schema();
+    let runtime = Arc::new(Mutex::new(test_runtime(schema.clone())));
+    let mut client = JazzClientCore::from_runtime_host(
+        ClientConfig::memory_for_test("shared-runtime-test", schema),
+        SharedRuntimeHost::new(runtime),
+    )
+    .expect("shared host should construct");
+
+    let result = client
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .expect("insert should work through shared runtime host");
+
+    assert_eq!(
+        client.check_batch_wait(result.handle.batch_id, DurabilityTier::Local),
+        BatchWaitOutcome::Satisfied
+    );
 }

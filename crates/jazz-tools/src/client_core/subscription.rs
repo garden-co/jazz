@@ -1,15 +1,12 @@
 use crate::query_manager::query::Query;
-use crate::runtime_core::{
-    ReadDurabilityOptions, Scheduler, SubscriptionDelta, SubscriptionHandle,
-};
-use crate::storage::Storage;
+use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta, SubscriptionHandle};
 
-use super::{ClientError, ClientErrorCode, ClientQueryOptions, JazzClientCore};
+use super::{ClientError, ClientErrorCode, ClientQueryOptions, ClientRuntimeHost, JazzClientCore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionCoreHandle(pub u64);
 
-impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
+impl<H: ClientRuntimeHost> JazzClientCore<H> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn subscribe<F>(
         &mut self,
@@ -48,17 +45,18 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     {
         let options = self.resolve_query_options(options);
         let handle = self
-            .runtime_mut()
-            .subscribe_with_durability_and_propagation(
-                query,
-                callback,
-                options.session,
-                ReadDurabilityOptions {
-                    tier: Some(options.tier),
-                    local_updates: options.local_updates,
-                },
-                options.propagation,
-            )
+            .with_runtime_mut(|runtime| {
+                runtime.subscribe_with_durability_and_propagation(
+                    query,
+                    callback,
+                    options.session,
+                    ReadDurabilityOptions {
+                        tier: Some(options.tier),
+                        local_updates: options.local_updates,
+                    },
+                    options.propagation,
+                )
+            })
             .map_err(|error| {
                 ClientError::new(ClientErrorCode::InvalidQuery, format!("{error:?}"))
             })?;
@@ -78,17 +76,18 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     {
         let options = self.resolve_query_options(options);
         let handle = self
-            .runtime_mut()
-            .subscribe_with_durability_and_propagation(
-                query,
-                callback,
-                options.session,
-                ReadDurabilityOptions {
-                    tier: Some(options.tier),
-                    local_updates: options.local_updates,
-                },
-                options.propagation,
-            )
+            .with_runtime_mut(|runtime| {
+                runtime.subscribe_with_durability_and_propagation(
+                    query,
+                    callback,
+                    options.session,
+                    ReadDurabilityOptions {
+                        tier: Some(options.tier),
+                        local_updates: options.local_updates,
+                    },
+                    options.propagation,
+                )
+            })
             .map_err(|error| {
                 ClientError::new(ClientErrorCode::InvalidQuery, format!("{error:?}"))
             })?;
@@ -97,7 +96,7 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     }
 
     pub fn unsubscribe(&mut self, handle: SubscriptionCoreHandle) -> Result<(), ClientError> {
-        self.runtime_mut().unsubscribe(SubscriptionHandle(handle.0));
+        self.with_runtime_mut(|runtime| runtime.unsubscribe(SubscriptionHandle(handle.0)));
         Ok(())
     }
 }

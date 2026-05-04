@@ -5,11 +5,9 @@ use crate::object::ObjectId;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{ComposedBranchName, SchemaHash, Value};
 use crate::row_histories::BatchId;
-use crate::runtime_core::Scheduler;
-use crate::storage::Storage;
 use crate::sync_manager::DurabilityTier;
 
-use super::{ClientError, ClientErrorCode, JazzClientCore};
+use super::{ClientError, ClientErrorCode, ClientRuntimeHost, JazzClientCore};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientRow {
@@ -120,7 +118,7 @@ fn settlement_satisfies_tier(
     }
 }
 
-impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
+impl<H: ClientRuntimeHost> JazzClientCore<H> {
     pub fn insert(
         &mut self,
         table: &str,
@@ -130,12 +128,12 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
         let options = options.unwrap_or_default();
         let context = write_context(&options, None);
         let ((id, values), batch_id) = self
-            .runtime_mut()
-            .insert_with_id(table, values, options.object_id, context.as_ref())
+            .with_runtime_mut(|runtime| {
+                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
+            })
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
-        self.runtime_mut()
-            .seal_batch(batch_id)
+        self.with_runtime_mut(|runtime| runtime.seal_batch(batch_id))
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
         Ok(WriteResultCore {
@@ -148,13 +146,13 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
         &self,
         batch_id: BatchId,
     ) -> Result<Option<LocalBatchRecord>, ClientError> {
-        self.runtime()
-            .local_batch_record(batch_id)
+        self.with_runtime(|runtime| runtime.local_batch_record(batch_id))
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))
     }
 
-    pub fn begin_direct_batch(&mut self) -> DirectBatchCore<'_, S, Sch> {
-        let schema_hash = SchemaHash::compute(self.current_schema());
+    pub fn begin_direct_batch(&mut self) -> DirectBatchCore<'_, H> {
+        let schema = self.current_schema();
+        let schema_hash = SchemaHash::compute(&schema);
         let context = BatchContext::new(
             BatchMode::Direct,
             &self.config().env,
@@ -168,8 +166,9 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
         }
     }
 
-    pub fn begin_transaction(&mut self) -> TransactionCore<'_, S, Sch> {
-        let schema_hash = SchemaHash::compute(self.current_schema());
+    pub fn begin_transaction(&mut self) -> TransactionCore<'_, H> {
+        let schema = self.current_schema();
+        let schema_hash = SchemaHash::compute(&schema);
         let context = BatchContext::new(
             BatchMode::Transactional,
             &self.config().env,
@@ -184,7 +183,7 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     }
 
     pub fn check_batch_wait(&self, batch_id: BatchId, tier: DurabilityTier) -> BatchWaitOutcome {
-        let record = match self.runtime().local_batch_record(batch_id) {
+        let record = match self.with_runtime(|runtime| runtime.local_batch_record(batch_id)) {
             Ok(Some(record)) => record,
             Ok(None) => return BatchWaitOutcome::Missing,
             Err(error) => {
@@ -203,12 +202,12 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     }
 }
 
-pub struct DirectBatchCore<'a, S: Storage, Sch: Scheduler> {
-    client: &'a mut JazzClientCore<S, Sch>,
+pub struct DirectBatchCore<'a, H: ClientRuntimeHost> {
+    client: &'a mut JazzClientCore<H>,
     context: BatchContext,
 }
 
-impl<'a, S: Storage, Sch: Scheduler> DirectBatchCore<'a, S, Sch> {
+impl<'a, H: ClientRuntimeHost> DirectBatchCore<'a, H> {
     pub fn insert(
         &mut self,
         table: &str,
@@ -219,8 +218,9 @@ impl<'a, S: Storage, Sch: Scheduler> DirectBatchCore<'a, S, Sch> {
         let context = write_context(&options, Some(&self.context));
         let ((id, values), batch_id) = self
             .client
-            .runtime_mut()
-            .insert_with_id(table, values, options.object_id, context.as_ref())
+            .with_runtime_mut(|runtime| {
+                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
+            })
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
         Ok(WriteResultCore {
@@ -231,8 +231,7 @@ impl<'a, S: Storage, Sch: Scheduler> DirectBatchCore<'a, S, Sch> {
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
         self.client
-            .runtime_mut()
-            .seal_batch(self.context.batch_id)
+            .with_runtime_mut(|runtime| runtime.seal_batch(self.context.batch_id))
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
         Ok(WriteHandleCore {
@@ -241,12 +240,12 @@ impl<'a, S: Storage, Sch: Scheduler> DirectBatchCore<'a, S, Sch> {
     }
 }
 
-pub struct TransactionCore<'a, S: Storage, Sch: Scheduler> {
-    client: &'a mut JazzClientCore<S, Sch>,
+pub struct TransactionCore<'a, H: ClientRuntimeHost> {
+    client: &'a mut JazzClientCore<H>,
     context: BatchContext,
 }
 
-impl<'a, S: Storage, Sch: Scheduler> TransactionCore<'a, S, Sch> {
+impl<'a, H: ClientRuntimeHost> TransactionCore<'a, H> {
     pub fn insert(
         &mut self,
         table: &str,
@@ -257,8 +256,9 @@ impl<'a, S: Storage, Sch: Scheduler> TransactionCore<'a, S, Sch> {
         let context = write_context(&options, Some(&self.context));
         let ((id, values), batch_id) = self
             .client
-            .runtime_mut()
-            .insert_with_id(table, values, options.object_id, context.as_ref())
+            .with_runtime_mut(|runtime| {
+                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
+            })
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
         Ok(WriteResultCore {
@@ -269,8 +269,7 @@ impl<'a, S: Storage, Sch: Scheduler> TransactionCore<'a, S, Sch> {
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
         self.client
-            .runtime_mut()
-            .seal_batch(self.context.batch_id)
+            .with_runtime_mut(|runtime| runtime.seal_batch(self.context.batch_id))
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
 
         Ok(WriteHandleCore {
