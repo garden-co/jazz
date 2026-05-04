@@ -12,15 +12,17 @@ use futures::executor::block_on;
 use serde::Deserialize;
 
 use jazz_tools::binding_support::{
-    binding_write_options, build_runtime_schema_bootstrap, client_error_message, commit_batch_json,
-    current_timestamp_ms as binding_current_timestamp_ms, delete_in_batch_json,
-    delete_unsealed_json, generate_id as generate_binding_id, insert_in_batch_json,
-    insert_unsealed_json, parse_batch_id_input, parse_external_object_id, parse_object_id_input,
+    acknowledge_rejected_batch_for_binding, binding_write_options, build_runtime_schema_bootstrap,
+    client_error_message, commit_batch_json, current_timestamp_ms as binding_current_timestamp_ms,
+    delete_in_batch_json, delete_sealed_json, delete_unsealed_json,
+    drain_rejected_batch_id_strings, generate_id as generate_binding_id, insert_in_batch_json,
+    insert_sealed_json, insert_unsealed_json, local_batch_record_json, local_batch_records_json,
+    parse_batch_id_input, parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
     parse_query_execution_options, parse_query_input, parse_session_input,
     parse_subscription_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    record_to_updates, serialize_local_batch_record, serialize_local_batch_records,
-    serialize_query_rows_json, subscription_delta_to_json, update_in_batch_json,
-    update_unsealed_json, PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
+    record_to_updates, seal_batch_for_binding, serialize_query_rows_json,
+    subscription_delta_to_json, update_in_batch_json, update_sealed_json, update_unsealed_json,
+    write_batch_context_json, PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
 };
 use jazz_tools::client_core::{
     ClientConfig, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore, SharedRuntimeHost,
@@ -508,6 +510,44 @@ impl RnRuntime {
         })
     }
 
+    pub fn insert_sealed(
+        &self,
+        table: String,
+        values_json: String,
+        write_context_json: Option<String>,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("insert_sealed", || {
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut client = self.client_core()?;
+            let payload = insert_sealed_json(
+                &mut client,
+                &self.declared_schema,
+                &table,
+                named_values,
+                binding_write_options(object_id, write_context),
+            )
+            .map_err(|error| JazzRnError::Runtime {
+                message: client_error_message("Insert", &error),
+            })?;
+            rn_json_to_string("insert", payload)
+        })
+    }
+
+    pub fn create_write_batch_context(&self, mode: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("create_write_batch_context", || {
+            let mode = parse_batch_mode_input(&mode).map_err(binding_parse_error)?;
+            let client = self.client_core()?;
+            rn_json_to_string(
+                "create_write_batch_context",
+                write_batch_context_json(&client, mode),
+            )
+        })
+    }
+
     pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
         with_panic_boundary("update", || {
             let oid = parse_object_id_input(Some(&object_id))
@@ -549,6 +589,31 @@ impl RnRuntime {
         })
     }
 
+    pub fn update_sealed(
+        &self,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("update_sealed", || {
+            let oid = parse_object_id_input(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let updates = convert_updates(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let mut client = self.client_core()?;
+            let payload = update_sealed_json(
+                &mut client,
+                oid,
+                updates,
+                binding_write_options(None, write_context),
+            )
+            .map_err(|error| JazzRnError::Runtime {
+                message: client_error_message("Update", &error),
+            })?;
+            rn_json_to_string("update", payload)
+        })
+    }
+
     #[uniffi::method(name = "delete")]
     pub fn delete_row(&self, object_id: String) -> Result<String, JazzRnError> {
         with_panic_boundary("delete", || {
@@ -560,6 +625,25 @@ impl RnRuntime {
                     message: client_error_message("Delete", &error),
                 }
             })?;
+            rn_json_to_string("delete", payload)
+        })
+    }
+
+    pub fn delete_sealed(
+        &self,
+        object_id: String,
+        write_context_json: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("delete_sealed", || {
+            let oid = parse_object_id_input(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let write_context = parse_write_context(write_context_json)?;
+            let mut client = self.client_core()?;
+            let payload =
+                delete_sealed_json(&mut client, oid, binding_write_options(None, write_context))
+                    .map_err(|error| JazzRnError::Runtime {
+                        message: client_error_message("Delete", &error),
+                    })?;
             rn_json_to_string("delete", payload)
         })
     }
@@ -923,38 +1007,33 @@ impl RnRuntime {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let client = self.client_core()?;
-            let record =
-                client
-                    .local_batch_record(batch_id)
-                    .map_err(|error| JazzRnError::Runtime {
-                        message: client_error_message("Load local batch record", &error),
-                    })?;
-            record
-                .map(|record| {
-                    serde_json::to_string(&serialize_local_batch_record(&record)).map_err(|error| {
-                        JazzRnError::Internal {
-                            message: format!(
-                                "load_local_batch_record serialization failed: {error}"
-                            ),
-                        }
-                    })
+            let payload = local_batch_record_json(&client, batch_id).map_err(|error| {
+                JazzRnError::Runtime {
+                    message: client_error_message("Load local batch record", &error),
+                }
+            })?;
+
+            if payload.is_null() {
+                return Ok(None);
+            }
+
+            serde_json::to_string(&payload)
+                .map(Some)
+                .map_err(|error| JazzRnError::Internal {
+                    message: format!("load_local_batch_record serialization failed: {error}"),
                 })
-                .transpose()
         })
     }
 
     pub fn load_local_batch_records(&self) -> Result<String, JazzRnError> {
         with_panic_boundary("load_local_batch_records", || {
             let client = self.client_core()?;
-            let records = client
-                .local_batch_records()
-                .map_err(|error| JazzRnError::Runtime {
+            let payload =
+                local_batch_records_json(&client).map_err(|error| JazzRnError::Runtime {
                     message: client_error_message("Load local batch records", &error),
                 })?;
-            serde_json::to_string(&serialize_local_batch_records(&records)).map_err(|error| {
-                JazzRnError::Internal {
-                    message: format!("load_local_batch_records serialization failed: {error}"),
-                }
+            serde_json::to_string(&payload).map_err(|error| JazzRnError::Internal {
+                message: format!("load_local_batch_records serialization failed: {error}"),
             })
         })
     }
@@ -962,11 +1041,7 @@ impl RnRuntime {
     pub fn drain_rejected_batch_ids(&self) -> Result<Vec<String>, JazzRnError> {
         with_panic_boundary("drain_rejected_batch_ids", || {
             let mut client = self.client_core()?;
-            Ok(client
-                .drain_rejected_batch_ids()
-                .into_iter()
-                .map(|batch_id| batch_id.to_string())
-                .collect())
+            Ok(drain_rejected_batch_id_strings(&mut client))
         })
     }
 
@@ -975,11 +1050,11 @@ impl RnRuntime {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut client = self.client_core()?;
-            client
-                .acknowledge_rejected_batch(batch_id)
-                .map_err(|error| JazzRnError::Runtime {
+            acknowledge_rejected_batch_for_binding(&mut client, batch_id).map_err(|error| {
+                JazzRnError::Runtime {
                     message: client_error_message("Acknowledge rejected batch", &error),
-                })
+                }
+            })
         })
     }
 
@@ -988,11 +1063,9 @@ impl RnRuntime {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
             let mut client = self.client_core()?;
-            client
-                .seal_batch(batch_id)
-                .map_err(|error| JazzRnError::Runtime {
-                    message: client_error_message("Seal batch", &error),
-                })
+            seal_batch_for_binding(&mut client, batch_id).map_err(|error| JazzRnError::Runtime {
+                message: client_error_message("Seal batch", &error),
+            })
         })
     }
 

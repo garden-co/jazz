@@ -59,3 +59,43 @@ describe("WasmJazzClient binding shape", () => {
     expect(alice.batchId).toEqual(handle.batchId);
   });
 });
+
+describe("WasmRuntime sealed write helpers", () => {
+  it("exposes Rust-sealed writes and Rust-generated batch contexts", async () => {
+    const { WasmRuntime } = await loadWasmModule();
+    const runtime = new WasmRuntime(
+      serializeRuntimeSchema(schema),
+      "wasm-runtime-sealed-write-test",
+      "dev",
+      "main",
+    );
+    const aliceId = "00000000-0000-7000-8000-000000000011";
+
+    const context = runtime.createWriteBatchContext("transactional");
+    expect(context.batchMode).toBe("transactional");
+    expect(context.batchId).toEqual(expect.any(String));
+    expect(context.targetBranchName).toContain("dev-");
+
+    const inserted = runtime.insertSealed(
+      "users",
+      {
+        id: { type: "Uuid", value: aliceId },
+        name: { type: "Text", value: "Alice" },
+      },
+      undefined,
+      aliceId,
+    );
+    const updated = runtime.updateSealed(
+      aliceId,
+      {
+        name: { type: "Text", value: "Alicia" },
+      },
+      undefined,
+    );
+    const deleted = runtime.deleteSealed(aliceId, undefined);
+
+    expect(inserted.batchId).toEqual(expect.any(String));
+    expect(updated.batchId).toEqual(expect.any(String));
+    expect(deleted.batchId).toEqual(expect.any(String));
+  });
+});

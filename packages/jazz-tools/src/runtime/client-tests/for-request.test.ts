@@ -8,6 +8,7 @@ import {
   mockMutation,
   mockRow,
   runtimeBatchRecordStubs,
+  runtimeSealedWriteStubs,
   schemaWithTodos,
   type AppContext,
   type Runtime,
@@ -294,6 +295,7 @@ describe("JazzClient.forRequest", () => {
 
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
+      ...runtimeSealedWriteStubs,
       insert: () => mockRow("00000000-0000-0000-0000-000000000001"),
       insertWithSession: (_table, _values, contextJson) => {
         writeContextJson = contextJson;

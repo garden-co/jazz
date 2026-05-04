@@ -45,14 +45,31 @@ declare module "jazz-wasm" {
       sessionJson?: string | null,
       objectId?: string | null,
     ): { id: string; values: any[]; batchId: string };
+    insertSealed(
+      table: string,
+      values: InsertValues,
+      writeContextJson?: string | null,
+      objectId?: string | null,
+    ): { id: string; values: any[]; batchId: string };
     update(objectId: string, values: unknown): { batchId: string };
     updateWithSession(
       objectId: string,
       values: unknown,
       sessionJson?: string | null,
     ): { batchId: string };
+    updateSealed(
+      objectId: string,
+      values: unknown,
+      writeContextJson?: string | null,
+    ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    deleteSealed(objectId: string, writeContextJson?: string | null): { batchId: string };
+    createWriteBatchContext(mode: "direct" | "transactional"): {
+      batchMode: "direct" | "transactional";
+      batchId: string;
+      targetBranchName: string;
+    };
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     loadLocalBatchRecords(): LocalBatchRecord[];
     drainRejectedBatchIds(): string[];
