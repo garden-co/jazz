@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use crate::batch_fate::{BatchMode, LocalBatchRecord};
+use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord};
 use crate::object::ObjectId;
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{ComposedBranchName, SchemaHash, Value};
 use crate::row_histories::BatchId;
 use crate::runtime_core::Scheduler;
 use crate::storage::Storage;
+use crate::sync_manager::DurabilityTier;
 
 use super::{ClientError, ClientErrorCode, JazzClientCore};
 
@@ -33,6 +34,14 @@ pub struct WriteOptions {
     pub session: Option<Session>,
     pub attribution: Option<String>,
     pub updated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchWaitOutcome {
+    Pending,
+    Satisfied,
+    Rejected { code: String, reason: String },
+    Missing,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +93,33 @@ pub(crate) fn write_context(
     Some(context)
 }
 
+fn tier_rank(tier: DurabilityTier) -> u8 {
+    match tier {
+        DurabilityTier::Local => 0,
+        DurabilityTier::EdgeServer => 1,
+        DurabilityTier::GlobalServer => 2,
+    }
+}
+
+fn settlement_satisfies_tier(
+    settlement: Option<&BatchSettlement>,
+    tier: DurabilityTier,
+) -> BatchWaitOutcome {
+    match settlement {
+        Some(BatchSettlement::Rejected { code, reason, .. }) => BatchWaitOutcome::Rejected {
+            code: code.clone(),
+            reason: reason.clone(),
+        },
+        Some(BatchSettlement::DurableDirect { confirmed_tier, .. })
+        | Some(BatchSettlement::AcceptedTransaction { confirmed_tier, .. })
+            if tier_rank(*confirmed_tier) >= tier_rank(tier) =>
+        {
+            BatchWaitOutcome::Satisfied
+        }
+        Some(_) | None => BatchWaitOutcome::Pending,
+    }
+}
+
 impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
     pub fn insert(
         &mut self,
@@ -131,6 +167,40 @@ impl<S: Storage, Sch: Scheduler> JazzClientCore<S, Sch> {
             context,
         }
     }
+
+    pub fn begin_transaction(&mut self) -> TransactionCore<'_, S, Sch> {
+        let schema_hash = SchemaHash::compute(self.current_schema());
+        let context = BatchContext::new(
+            BatchMode::Transactional,
+            &self.config().env,
+            schema_hash,
+            &self.config().user_branch,
+        );
+
+        TransactionCore {
+            client: self,
+            context,
+        }
+    }
+
+    pub fn check_batch_wait(&self, batch_id: BatchId, tier: DurabilityTier) -> BatchWaitOutcome {
+        let record = match self.runtime().local_batch_record(batch_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return BatchWaitOutcome::Missing,
+            Err(error) => {
+                return BatchWaitOutcome::Rejected {
+                    code: "storage_error".to_string(),
+                    reason: error.to_string(),
+                };
+            }
+        };
+
+        if tier == DurabilityTier::Local && record.sealed {
+            return BatchWaitOutcome::Satisfied;
+        }
+
+        settlement_satisfies_tier(record.latest_settlement.as_ref(), tier)
+    }
 }
 
 pub struct DirectBatchCore<'a, S: Storage, Sch: Scheduler> {
@@ -139,6 +209,44 @@ pub struct DirectBatchCore<'a, S: Storage, Sch: Scheduler> {
 }
 
 impl<'a, S: Storage, Sch: Scheduler> DirectBatchCore<'a, S, Sch> {
+    pub fn insert(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteResultCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, Some(&self.context));
+        let ((id, values), batch_id) = self
+            .client
+            .runtime_mut()
+            .insert_with_id(table, values, options.object_id, context.as_ref())
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteResultCore {
+            row: ClientRow { id, values },
+            handle: WriteHandleCore { batch_id },
+        })
+    }
+
+    pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
+        self.client
+            .runtime_mut()
+            .seal_batch(self.context.batch_id)
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteHandleCore {
+            batch_id: self.context.batch_id,
+        })
+    }
+}
+
+pub struct TransactionCore<'a, S: Storage, Sch: Scheduler> {
+    client: &'a mut JazzClientCore<S, Sch>,
+    context: BatchContext,
+}
+
+impl<'a, S: Storage, Sch: Scheduler> TransactionCore<'a, S, Sch> {
     pub fn insert(
         &mut self,
         table: &str,

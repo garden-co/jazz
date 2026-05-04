@@ -154,3 +154,48 @@ fn direct_batch_uses_one_rust_generated_batch_id() {
     assert_eq!(alice.handle.batch_id, bob.handle.batch_id);
     assert_eq!(alice.handle.batch_id, handle.batch_id);
 }
+
+#[test]
+fn transaction_commit_returns_transactional_batch_handle() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("transaction-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let mut transaction = client.begin_transaction();
+    let inserted = transaction
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .expect("transaction insert should succeed");
+    let handle = transaction
+        .commit()
+        .expect("transaction commit should seal");
+
+    assert_eq!(inserted.handle.batch_id, handle.batch_id);
+    let record = client
+        .local_batch_record(handle.batch_id)
+        .unwrap()
+        .expect("transaction record should exist");
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Transactional);
+    assert!(record.sealed);
+}
+
+#[test]
+fn local_wait_check_succeeds_after_direct_batch_commit() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("local-wait-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let result = client
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    assert_eq!(
+        client.check_batch_wait(result.handle.batch_id, DurabilityTier::Local),
+        BatchWaitOutcome::Satisfied
+    );
+}
