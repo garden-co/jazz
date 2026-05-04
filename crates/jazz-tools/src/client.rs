@@ -7,10 +7,7 @@ use std::time::Duration;
 use crate::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
 };
-use crate::client_core::{
-    ClientConfig, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore, SharedRuntimeHost,
-    WriteOptions,
-};
+use crate::client_core::{ClientConfig, JazzClientCore, SharedRuntimeHost, WriteOptions};
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime, TokioScheduler};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
@@ -182,21 +179,9 @@ impl JazzClient {
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         let has_server = !context.server_url.is_empty();
-        let mut client_core_config =
-            ClientConfig::memory_for_test(context.app_id.to_string(), declared_schema.clone());
-        client_core_config.env = "client".to_string();
-        client_core_config.user_branch = "main".to_string();
-        client_core_config.storage_mode = match context.storage {
-            ClientStorage::Persistent => ClientStorageMode::Persistent,
-            ClientStorage::Memory => ClientStorageMode::Memory,
-        };
-        client_core_config.server_url = has_server.then(|| context.server_url.clone());
-        client_core_config.runtime_flavor = ClientRuntimeFlavor::Rust;
+        let client_core_config = ClientConfig::new("client", "main");
         let client_core =
-            JazzClientCore::from_runtime_host(client_core_config, runtime.shared_runtime_host())
-                .map_err(|e| {
-                    JazzError::Connection(format!("failed to create JazzClientCore: {e}"))
-                })?;
+            JazzClientCore::from_runtime_host(client_core_config, runtime.shared_runtime_host());
 
         if has_server {
             let ws_url = http_url_to_ws(&context.server_url, context.app_id)?;
@@ -335,7 +320,7 @@ impl JazzClient {
     ) -> Result<(ObjectId, Vec<Value>)> {
         let table_name = TableName::new(table);
         let mut core = self.client_core_mut()?;
-        let result = core
+        let ((row_id, row_values), _batch_id) = core
             .insert(
                 table,
                 values,
@@ -350,9 +335,9 @@ impl JazzClient {
             &self.declared_schema,
             &runtime_schema,
             &table_name,
-            result.row.values,
+            row_values,
         );
-        Ok((result.row.id, row_values))
+        Ok((row_id, row_values))
     }
 
     /// Create a new row and wait until it reaches the requested durability tier.
@@ -555,7 +540,7 @@ impl<'a> SessionClient<'a> {
     ) -> Result<(ObjectId, Vec<Value>)> {
         let table_name = TableName::new(table);
         let mut core = self.client.client_core_mut()?;
-        let result = core
+        let ((row_id, row_values), _batch_id) = core
             .insert(
                 table,
                 values,
@@ -571,9 +556,9 @@ impl<'a> SessionClient<'a> {
             &self.client.declared_schema,
             &runtime_schema,
             &table_name,
-            result.row.values,
+            row_values,
         );
-        Ok((result.row.id, row_values))
+        Ok((row_id, row_values))
     }
 
     pub async fn create_persisted(
@@ -766,8 +751,11 @@ async fn wait_for_persisted_write(
 mod tests {
     use super::*;
     use crate::binding_support::query_rows_can_be_schema_aligned;
+    #[cfg(feature = "rocksdb")]
     use crate::query_manager::policy::PolicyExpr;
+    #[cfg(feature = "rocksdb")]
     use crate::query_manager::types::{SchemaHash, TablePolicies};
+    #[cfg(feature = "rocksdb")]
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
@@ -796,6 +784,7 @@ mod tests {
             .build()
     }
 
+    #[cfg(feature = "rocksdb")]
     fn learned_runtime_todo_schema() -> Schema {
         SchemaBuilder::new()
             .table(
@@ -1046,7 +1035,7 @@ mod tests {
             .client_core
             .lock()
             .expect("client core lock")
-            .local_batch_records()
+            .with_runtime(|runtime| runtime.local_batch_records())
             .expect("load local batch records");
         assert_eq!(records.len(), 3);
         assert!(
@@ -1099,7 +1088,7 @@ mod tests {
             .client_core
             .lock()
             .expect("client core lock")
-            .local_batch_records()
+            .with_runtime(|runtime| runtime.local_batch_records())
             .expect("load local batch records");
         assert_eq!(records.len(), 3);
         assert!(

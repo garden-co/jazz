@@ -5,11 +5,9 @@ pub mod write;
 #[cfg(test)]
 mod tests;
 
-pub use config::{ClientConfig, ClientRuntimeFlavor, ClientStorageMode};
-pub use error::{ClientError, ClientErrorCode};
-pub use write::{
-    BatchWaitOutcome, WriteBatchContextCore, WriteHandleCore, WriteOptions, WriteResultCore,
-};
+pub use config::ClientConfig;
+pub use error::ClientError;
+pub use write::WriteOptions;
 
 use crate::query_manager::types::Schema;
 use crate::runtime_core::{RuntimeCore, Scheduler};
@@ -31,29 +29,6 @@ pub trait ClientRuntimeHost {
         &mut self,
         f: impl FnOnce(&mut RuntimeCore<Self::Storage, Self::Scheduler>) -> T,
     ) -> T;
-}
-
-pub struct OwnedRuntimeHost<S: Storage, Sch: Scheduler> {
-    runtime: RuntimeCore<S, Sch>,
-}
-
-impl<S: Storage, Sch: Scheduler> OwnedRuntimeHost<S, Sch> {
-    pub fn new(runtime: RuntimeCore<S, Sch>) -> Self {
-        Self { runtime }
-    }
-}
-
-impl<S: Storage, Sch: Scheduler> ClientRuntimeHost for OwnedRuntimeHost<S, Sch> {
-    type Storage = S;
-    type Scheduler = Sch;
-
-    fn with_runtime<T>(&self, f: impl FnOnce(&RuntimeCore<S, Sch>) -> T) -> T {
-        f(&self.runtime)
-    }
-
-    fn with_runtime_mut<T>(&mut self, f: impl FnOnce(&mut RuntimeCore<S, Sch>) -> T) -> T {
-        f(&mut self.runtime)
-    }
 }
 
 pub struct SharedRuntimeHost<S: Storage, Sch: Scheduler> {
@@ -136,36 +111,23 @@ impl<H: ClientRuntimeHost + Clone> Clone for JazzClientCore<H> {
     }
 }
 
-impl<S: Storage, Sch: Scheduler> JazzClientCore<OwnedRuntimeHost<S, Sch>> {
-    pub fn from_runtime_parts(
-        config: ClientConfig,
-        runtime: RuntimeCore<S, Sch>,
-    ) -> Result<Self, ClientError> {
-        Self::from_runtime_host(config, OwnedRuntimeHost::new(runtime))
-    }
-}
-
 impl<H: ClientRuntimeHost> JazzClientCore<H> {
-    pub fn from_runtime_host(config: ClientConfig, host: H) -> Result<Self, ClientError> {
-        Ok(Self { config, host })
+    pub fn from_runtime_host(config: ClientConfig, host: H) -> Self {
+        Self { config, host }
     }
 
-    pub fn current_schema(&self) -> Schema {
+    pub(crate) fn current_schema(&self) -> Schema {
         self.with_runtime(|runtime| runtime.current_schema().clone())
     }
 
-    pub fn config(&self) -> &ClientConfig {
-        &self.config
-    }
-
-    pub fn with_runtime<T>(
+    pub(crate) fn with_runtime<T>(
         &self,
         f: impl FnOnce(&RuntimeCore<H::Storage, H::Scheduler>) -> T,
     ) -> T {
         self.host.with_runtime(f)
     }
 
-    pub fn with_runtime_mut<T>(
+    pub(crate) fn with_runtime_mut<T>(
         &mut self,
         f: impl FnOnce(&mut RuntimeCore<H::Storage, H::Scheduler>) -> T,
     ) -> T {

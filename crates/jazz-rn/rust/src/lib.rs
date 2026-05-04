@@ -23,10 +23,7 @@ use jazz_tools::binding_support::{
     subscription_delta_to_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
     PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
 };
-use jazz_tools::client_core::{
-    ClientConfig, ClientError, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore,
-    SharedRuntimeHost,
-};
+use jazz_tools::client_core::{ClientConfig, ClientError, JazzClientCore, SharedRuntimeHost};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
@@ -316,12 +313,11 @@ fn rn_json_to_string(operation: &str, value: serde_json::Value) -> Result<String
 }
 
 impl RnRuntime {
-    fn client_core(&self) -> Result<RnJazzClientCore, JazzRnError> {
+    fn client_core(&self) -> RnJazzClientCore {
         JazzClientCore::from_runtime_host(
             self.client_config.clone(),
             SharedRuntimeHost::new(Arc::clone(&self.core)),
         )
-        .map_err(runtime_err)
     }
 
     fn write_json_string(
@@ -330,7 +326,7 @@ impl RnRuntime {
         json_operation: &str,
         write: impl FnOnce(&mut RnJazzClientCore) -> Result<serde_json::Value, ClientError>,
     ) -> Result<String, JazzRnError> {
-        let mut client = self.client_core()?;
+        let mut client = self.client_core();
         let payload = write(&mut client).map_err(|error| JazzRnError::Runtime {
             message: client_error_message(operation, &error),
         })?;
@@ -437,14 +433,8 @@ impl RnRuntime {
             })
             .map_err(|message| JazzRnError::Schema { message })?;
             let declared_schema = bootstrap.declared_schema.clone();
-            let persistence_tier = bootstrap.default_durability_tier;
 
-            let mut client_config = ClientConfig::memory_for_test(&app_id, declared_schema.clone());
-            client_config.env = jazz_env.clone();
-            client_config.user_branch = user_branch.clone();
-            client_config.runtime_flavor = ClientRuntimeFlavor::ReactNative;
-            client_config.storage_mode = ClientStorageMode::Persistent;
-            client_config.default_durability_tier = persistence_tier;
+            let client_config = ClientConfig::new(jazz_env.clone(), user_branch.clone());
 
             let resolved_data_path = data_path.unwrap_or_else(|| {
                 let sanitized_app_id: String = app_id
@@ -574,7 +564,7 @@ impl RnRuntime {
     pub fn create_write_batch_context(&self, mode: String) -> Result<String, JazzRnError> {
         with_panic_boundary("create_write_batch_context", || {
             let mode = parse_batch_mode_input(&mode).map_err(binding_parse_error)?;
-            let client = self.client_core()?;
+            let client = self.client_core();
             rn_json_to_string(
                 "create_write_batch_context",
                 write_batch_context_json(&client, mode),
@@ -976,7 +966,7 @@ impl RnRuntime {
         with_panic_boundary("load_local_batch_record", || {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let client = self.client_core()?;
+            let client = self.client_core();
             let payload = local_batch_record_json(&client, batch_id).map_err(|error| {
                 JazzRnError::Runtime {
                     message: client_error_message("Load local batch record", &error),
@@ -997,7 +987,7 @@ impl RnRuntime {
 
     pub fn load_local_batch_records(&self) -> Result<String, JazzRnError> {
         with_panic_boundary("load_local_batch_records", || {
-            let client = self.client_core()?;
+            let client = self.client_core();
             let payload =
                 local_batch_records_json(&client).map_err(|error| JazzRnError::Runtime {
                     message: client_error_message("Load local batch records", &error),
@@ -1010,7 +1000,7 @@ impl RnRuntime {
 
     pub fn drain_rejected_batch_ids(&self) -> Result<Vec<String>, JazzRnError> {
         with_panic_boundary("drain_rejected_batch_ids", || {
-            let mut client = self.client_core()?;
+            let mut client = self.client_core();
             Ok(drain_rejected_batch_id_strings(&mut client))
         })
     }
@@ -1019,7 +1009,7 @@ impl RnRuntime {
         with_panic_boundary("acknowledge_rejected_batch", || {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
+            let mut client = self.client_core();
             acknowledge_rejected_batch_for_binding(&mut client, batch_id).map_err(|error| {
                 JazzRnError::Runtime {
                     message: client_error_message("Acknowledge rejected batch", &error),
@@ -1032,7 +1022,7 @@ impl RnRuntime {
         with_panic_boundary("seal_batch", || {
             let batch_id = parse_batch_id_input(&batch_id)
                 .map_err(|message| JazzRnError::InvalidUuid { message })?;
-            let mut client = self.client_core()?;
+            let mut client = self.client_core();
             seal_batch_for_binding(&mut client, batch_id).map_err(|error| JazzRnError::Runtime {
                 message: client_error_message("Seal batch", &error),
             })

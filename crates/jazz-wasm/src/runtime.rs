@@ -70,17 +70,12 @@ use jazz_tools::binding_support::{
     serialize_query_rows_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
     PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
 };
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::client_core::ClientStorageMode;
-use jazz_tools::client_core::{
-    ClientConfig, ClientError, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost,
-};
+use jazz_tools::client_core::{ClientConfig, ClientError, JazzClientCore, LocalRuntimeHost};
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::session::WriteContext;
-#[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::Schema;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
@@ -256,10 +251,8 @@ fn assemble_wasm_runtime(
     schema_manager: SchemaManager,
     declared_schema: Schema,
     storage: Box<dyn Storage>,
-    app_id: &str,
     env: &str,
     user_branch: &str,
-    storage_mode: ClientStorageMode,
     tier_label: &'static str,
     use_binary_encoding: bool,
 ) -> WasmRuntime {
@@ -276,20 +269,16 @@ fn assemble_wasm_runtime(
             .set_core_ref(Rc::downgrade(&core_rc));
     }
     core_rc.borrow_mut().persist_schema();
-    let mut client_config = ClientConfig::memory_for_test(app_id, declared_schema);
-    client_config.env = env.to_string();
-    client_config.user_branch = user_branch.to_string();
-    client_config.storage_mode = storage_mode;
-    client_config.runtime_flavor = ClientRuntimeFlavor::BrowserMainThread;
+    let client_config = ClientConfig::new(env, user_branch);
     let client = JazzClientCore::from_runtime_host(
         client_config,
         LocalRuntimeHost::new(Rc::clone(&core_rc)),
-    )
-    .expect("WasmRuntime client should wrap the existing runtime");
+    );
 
     WasmRuntime {
         core: core_rc,
         client: RefCell::new(client),
+        declared_schema,
         sync_sender,
         upstream_server_id: RefCell::new(None),
         tier_label,
@@ -502,6 +491,7 @@ impl SyncSender for JsSyncSender {
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
     client: RefCell<WasmRuntimeClientCore>,
+    declared_schema: Schema,
     /// JS callback holder for outbound sync messages (worker-bridge path only).
     ///
     /// `on_sync_message_to_send` installs the JS-side callback here. The worker
@@ -538,8 +528,8 @@ impl WasmRuntime {
         let object_id = parse_external_object_id(object_id.as_deref())
             .map_err(|message| JsError::new(&message))?;
 
+        let declared_schema = self.declared_schema.clone();
         self.write_json_to_js("Insert", |client| {
-            let declared_schema = client.config().schema.clone();
             let options = binding_write_options(object_id, write_context);
             if sealed {
                 insert_sealed_json(client, &declared_schema, table, named_values, options)
@@ -630,7 +620,6 @@ impl WasmRuntime {
         .entered();
         info!("creating in-memory runtime");
 
-        let app_id_input = app_id.to_string();
         let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
             schema_json,
             app_id,
@@ -666,20 +655,17 @@ impl WasmRuntime {
 
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
-        let mut client_config =
-            ClientConfig::memory_for_test(app_id_input, bootstrap.declared_schema);
-        client_config.env = env.to_string();
-        client_config.user_branch = user_branch.to_string();
-        client_config.runtime_flavor = ClientRuntimeFlavor::BrowserMainThread;
+        let declared_schema = bootstrap.declared_schema;
+        let client_config = ClientConfig::new(env, user_branch);
         let client = JazzClientCore::from_runtime_host(
             client_config,
             LocalRuntimeHost::new(Rc::clone(&core_rc)),
-        )
-        .map_err(|error| JsError::new(&error.to_string()))?;
+        );
 
         Ok(WasmRuntime {
             core: core_rc,
             client: RefCell::new(client),
+            declared_schema,
             sync_sender,
             upstream_server_id: RefCell::new(None),
             tier_label,
@@ -893,7 +879,7 @@ impl WasmRuntime {
                 core.current_schema().clone(),
             )
         };
-        let declared_schema = self.client.borrow().config().schema.clone();
+        let declared_schema = self.declared_schema.clone();
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let results = future
@@ -1572,7 +1558,6 @@ impl WasmRuntime {
         .entered();
         info!("opening persistent OPFS runtime");
 
-        let app_id_string = app_id.to_string();
         let (mut schema_manager, declared_schema, app_id) =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())
                 .map_err(JsValue::from)?;
@@ -1605,10 +1590,8 @@ impl WasmRuntime {
             schema_manager,
             declared_schema,
             storage,
-            &app_id_string,
             env,
             user_branch,
-            ClientStorageMode::Persistent,
             tier_label,
             use_binary_encoding,
         ))
@@ -1645,7 +1628,6 @@ impl WasmRuntime {
         .entered();
         info!("opening ephemeral in-memory runtime (OPFS unavailable)");
 
-        let app_id_string = app_id.to_string();
         let (schema_manager, declared_schema, _app_id) =
             build_schema_manager(schema_json, app_id, env, user_branch, tier.as_deref())?;
 
@@ -1655,10 +1637,8 @@ impl WasmRuntime {
             schema_manager,
             declared_schema,
             storage,
-            &app_id_string,
             env,
             user_branch,
-            ClientStorageMode::Memory,
             tier_label,
             use_binary_encoding,
         ))
