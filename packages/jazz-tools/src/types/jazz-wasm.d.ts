@@ -19,6 +19,7 @@ declare module "jazz-wasm" {
       ];
   type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
+  type PermissionDecision = true | false | "unknown";
 
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
@@ -53,6 +54,18 @@ declare module "jazz-wasm" {
     ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    canInsert(table: string, values: InsertValues): PermissionDecision;
+    canInsertWithSession(
+      table: string,
+      values: InsertValues,
+      sessionJson?: string | null,
+    ): PermissionDecision;
+    canUpdate(objectId: string, values: unknown): PermissionDecision;
+    canUpdateWithSession(
+      objectId: string,
+      values: unknown,
+      sessionJson?: string | null,
+    ): PermissionDecision;
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     loadLocalBatchRecords(): LocalBatchRecord[];
     drainRejectedBatchIds(): string[];
