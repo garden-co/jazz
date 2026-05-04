@@ -1,14 +1,21 @@
 //! JazzClient implementation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use crate::binding_support::{
+    align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
+};
+use crate::client_core::{
+    ClientConfig, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore, SharedRuntimeHost,
+    WriteOptions,
+};
+use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime, TokioScheduler};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_catalogue};
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
@@ -30,6 +37,7 @@ use crate::{
 
 type DynStorage = Box<dyn Storage + Send>;
 type ClientRuntime = TokioRuntime<DynStorage>;
+type ClientCore = JazzClientCore<SharedRuntimeHost<DynStorage, TokioScheduler<DynStorage>>>;
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -48,6 +56,8 @@ pub struct JazzClient {
     default_session: Option<Session>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
+    /// Shared runtime-backed core used by Rust client writes and native bindings.
+    client_core: Mutex<ClientCore>,
     /// Whether a server URL was provided at construction time.
     has_server: bool,
     /// Active subscriptions (metadata).
@@ -172,6 +182,21 @@ impl JazzClient {
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         let has_server = !context.server_url.is_empty();
+        let mut client_core_config =
+            ClientConfig::memory_for_test(context.app_id.to_string(), declared_schema.clone());
+        client_core_config.env = "client".to_string();
+        client_core_config.user_branch = "main".to_string();
+        client_core_config.storage_mode = match context.storage {
+            ClientStorage::Persistent => ClientStorageMode::Persistent,
+            ClientStorage::Memory => ClientStorageMode::Memory,
+        };
+        client_core_config.server_url = has_server.then(|| context.server_url.clone());
+        client_core_config.runtime_flavor = ClientRuntimeFlavor::Rust;
+        let client_core =
+            JazzClientCore::from_runtime_host(client_core_config, runtime.shared_runtime_host())
+                .map_err(|e| {
+                    JazzError::Connection(format!("failed to create JazzClientCore: {e}"))
+                })?;
 
         if has_server {
             let ws_url = http_url_to_ws(&context.server_url, context.app_id)?;
@@ -203,10 +228,17 @@ impl JazzClient {
             declared_schema,
             default_session,
             runtime,
+            client_core: Mutex::new(client_core),
             has_server,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
         })
+    }
+
+    fn client_core_mut(&self) -> Result<MutexGuard<'_, ClientCore>> {
+        self.client_core
+            .lock()
+            .map_err(|_| JazzError::Write("JazzClientCore lock poisoned".to_string()))
     }
 
     /// Subscribe to a query.
@@ -301,25 +333,26 @@ impl JazzClient {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .runtime
-            .insert_with_id(
+        let table_name = TableName::new(table);
+        let mut core = self.client_core_mut()?;
+        let result = core
+            .insert(
                 table,
                 values,
-                object_id.into().map(ObjectId::from_uuid),
-                None,
+                Some(WriteOptions {
+                    object_id: object_id.into().map(ObjectId::from_uuid),
+                    ..WriteOptions::default()
+                }),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
+        let runtime_schema = core.current_schema();
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            &runtime_schema,
+            &table_name,
+            result.row.values,
+        );
+        Ok((result.row.id, row_values))
     }
 
     /// Create a new row and wait until it reaches the requested durability tier.
@@ -393,7 +426,7 @@ impl JazzClient {
 
     /// Update a row.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
-        self.runtime
+        self.client_core_mut()?
             .update(object_id, updates, None)
             .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
@@ -415,7 +448,7 @@ impl JazzClient {
 
     /// Delete a row.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
-        self.runtime
+        self.client_core_mut()?
             .delete(object_id, None)
             .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
@@ -489,28 +522,12 @@ impl JazzClient {
         query: &Query,
         rows: Vec<(ObjectId, Vec<Value>)>,
     ) -> Vec<(ObjectId, Vec<Value>)> {
-        if !query_rows_can_be_schema_aligned(query) {
-            return rows;
-        }
-
         let runtime_schema = match self.runtime.current_schema() {
             Ok(schema) => schema,
             Err(_) => return rows,
         };
 
-        rows.into_iter()
-            .map(|(id, values)| {
-                (
-                    id,
-                    align_row_values_to_declared_schema(
-                        &self.declared_schema,
-                        &runtime_schema,
-                        &query.table,
-                        values,
-                    ),
-                )
-            })
-            .collect()
+        align_query_rows_to_declared_schema(&self.declared_schema, &runtime_schema, query, rows)
     }
 }
 
@@ -536,26 +553,27 @@ impl<'a> SessionClient<'a> {
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>)> {
-        let (object_id, row_values, _batch_id) = self
-            .client
-            .runtime
-            .insert_with_id(
+        let table_name = TableName::new(table);
+        let mut core = self.client.client_core_mut()?;
+        let result = core
+            .insert(
                 table,
                 values,
-                object_id.into().map(ObjectId::from_uuid),
-                Some(&self.session),
+                Some(WriteOptions {
+                    object_id: object_id.into().map(ObjectId::from_uuid),
+                    session: Some(self.session.clone()),
+                    ..WriteOptions::default()
+                }),
             )
             .map_err(|e| JazzError::Write(e.to_string()))?;
-        let row_values = match self.client.runtime.current_schema() {
-            Ok(schema) => align_row_values_to_declared_schema(
-                &self.client.declared_schema,
-                &schema,
-                &TableName::new(table),
-                row_values,
-            ),
-            Err(_) => row_values,
-        };
-        Ok((object_id, row_values))
+        let runtime_schema = core.current_schema();
+        let row_values = align_row_values_to_declared_schema(
+            &self.client.declared_schema,
+            &runtime_schema,
+            &table_name,
+            result.row.values,
+        );
+        Ok((result.row.id, row_values))
     }
 
     pub async fn create_persisted(
@@ -639,8 +657,15 @@ impl<'a> SessionClient<'a> {
 
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
-            .runtime
-            .update(object_id, updates, Some(&self.session))
+            .client_core_mut()?
+            .update(
+                object_id,
+                updates,
+                Some(WriteOptions {
+                    session: Some(self.session.clone()),
+                    ..WriteOptions::default()
+                }),
+            )
             .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
@@ -661,8 +686,14 @@ impl<'a> SessionClient<'a> {
 
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
-            .runtime
-            .delete(object_id, Some(&self.session))
+            .client_core_mut()?
+            .delete(
+                object_id,
+                Some(WriteOptions {
+                    session: Some(self.session.clone()),
+                    ..WriteOptions::default()
+                }),
+            )
             .map(|_| ())
             .map_err(|e| JazzError::Write(e.to_string()))
     }
@@ -710,14 +741,6 @@ impl<'a> SessionClient<'a> {
     }
 }
 
-fn query_rows_can_be_schema_aligned(query: &Query) -> bool {
-    query.joins.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.recursive.is_none()
-        && query.select_columns.is_none()
-        && query.result_element_index.is_none()
-}
-
 async fn wait_for_persisted_write(
     receiver: futures::channel::oneshot::Receiver<crate::runtime_core::PersistedWriteAck>,
     operation: &str,
@@ -739,57 +762,17 @@ async fn wait_for_persisted_write(
     Ok(())
 }
 
-fn align_row_values_to_declared_schema(
-    declared_schema: &Schema,
-    runtime_schema: &Schema,
-    table: &TableName,
-    values: Vec<Value>,
-) -> Vec<Value> {
-    let Some(declared_table) = declared_schema.get(table) else {
-        return values;
-    };
-    let Some(runtime_table) = runtime_schema.get(table) else {
-        return values;
-    };
-
-    reorder_values_by_column_name(&runtime_table.columns, &declared_table.columns, &values)
-        .unwrap_or(values)
-}
-
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binding_support::query_rows_can_be_schema_aligned;
     use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::AppId;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
-    use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
+    use crate::{ColumnType, ObjectId, QueryBuilder, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -841,6 +824,20 @@ mod tests {
             admin_secret: None,
             sync_tracer: None,
         }
+    }
+
+    fn make_memory_context(app_id: AppId, schema: Schema) -> AppContext {
+        let mut context =
+            make_offline_context(app_id, TempDir::new().expect("tempdir").keep(), schema);
+        context.storage = ClientStorage::Memory;
+        context
+    }
+
+    fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
+        HashMap::from([
+            ("title".to_string(), Value::Text(title.to_string())),
+            ("completed".to_string(), Value::Boolean(completed)),
+        ])
     }
 
     fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
@@ -1011,6 +1008,156 @@ mod tests {
             aligned,
             vec![Value::Text("done".to_string()), Value::Boolean(true)]
         );
+    }
+
+    #[tokio::test]
+    async fn public_client_writes_use_core_and_seal_direct_batches() {
+        let context = make_memory_context(
+            AppId::from_name("client-core-public-writes"),
+            declared_todo_schema(),
+        );
+        let client = JazzClient::connect(context).await.expect("connect client");
+        let todo_id = ObjectId::new();
+
+        let (created_id, created_values) = client
+            .create_with_id(
+                "todos",
+                Some(*todo_id.uuid()),
+                todo_values("ship core", false),
+            )
+            .await
+            .expect("create row");
+        assert_eq!(created_id, todo_id);
+        assert_eq!(
+            created_values,
+            vec![Value::Text("ship core".to_string()), Value::Boolean(false)]
+        );
+
+        client
+            .update(
+                todo_id,
+                vec![("completed".to_string(), Value::Boolean(true))],
+            )
+            .await
+            .expect("update row");
+        client.delete(todo_id).await.expect("delete row");
+
+        let records = client
+            .client_core
+            .lock()
+            .expect("client core lock")
+            .local_batch_records()
+            .expect("load local batch records");
+        assert_eq!(records.len(), 3);
+        assert!(
+            records.iter().all(|record| record.sealed),
+            "public Rust client writes should seal direct batches through JazzClientCore"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_client_writes_use_core_and_seal_direct_batches() {
+        let context = make_memory_context(
+            AppId::from_name("client-core-session-writes"),
+            declared_todo_schema(),
+        );
+        let client = JazzClient::connect(context).await.expect("connect client");
+        let session = Session::new("alice");
+        let todo_id = ObjectId::new();
+
+        let session_client = client.for_session(session);
+        let (created_id, created_values) = session_client
+            .create_with_id(
+                "todos",
+                Some(*todo_id.uuid()),
+                todo_values("session write", false),
+            )
+            .await
+            .expect("session create row");
+        assert_eq!(created_id, todo_id);
+        assert_eq!(
+            created_values,
+            vec![
+                Value::Text("session write".to_string()),
+                Value::Boolean(false)
+            ]
+        );
+
+        session_client
+            .update(
+                todo_id,
+                vec![("completed".to_string(), Value::Boolean(true))],
+            )
+            .await
+            .expect("session update row");
+        session_client
+            .delete(todo_id)
+            .await
+            .expect("session delete row");
+
+        let records = client
+            .client_core
+            .lock()
+            .expect("client core lock")
+            .local_batch_records()
+            .expect("load local batch records");
+        assert_eq!(records.len(), 3);
+        assert!(
+            records.iter().all(|record| record.sealed),
+            "session-scoped writes should seal direct batches through JazzClientCore"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_client_writes_record_explicit_session_provenance() {
+        let context = make_memory_context(
+            AppId::from_name("client-core-session-provenance"),
+            declared_todo_schema(),
+        );
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let alice = client.for_session(Session::new("alice"));
+        let (todo_id, _) = alice
+            .create("todos", todo_values("session provenance", false))
+            .await
+            .expect("alice creates todo");
+
+        let bob = client.for_session(Session::new("bob"));
+        bob.update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .await
+        .expect("bob updates todo");
+
+        let rows = client
+            .query(
+                QueryBuilder::new("todos")
+                    .select(&["title", "completed", "$createdBy", "$updatedBy"])
+                    .build(),
+                None,
+            )
+            .await
+            .expect("query provenance");
+        assert_eq!(
+            rows,
+            vec![(
+                todo_id,
+                vec![
+                    Value::Text("session provenance".to_string()),
+                    Value::Boolean(true),
+                    Value::Text("alice".to_string()),
+                    Value::Text("bob".to_string()),
+                ],
+            )]
+        );
+
+        bob.delete(todo_id).await.expect("bob deletes todo");
+        let rows = client
+            .query(QueryBuilder::new("todos").build(), None)
+            .await
+            .expect("query after delete");
+        assert!(rows.is_empty());
     }
 
     #[test]
