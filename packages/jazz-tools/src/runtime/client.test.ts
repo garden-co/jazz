@@ -326,6 +326,35 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
+  it("delegates explicit direct batch creation to native runtime when available", () => {
+    const runtime = makeFakeRuntime() as unknown as Runtime & {
+      beginDirectBatch: ReturnType<typeof vi.fn>;
+    };
+    const insert = vi.fn(() => ({
+      id: "row-1",
+      values: [],
+      batchId: "native-batch-id",
+    }));
+    const commit = vi.fn(() => ({ batchId: "native-batch-id" }));
+    runtime.beginDirectBatch = vi.fn(() => ({
+      insert,
+      update: vi.fn(() => ({ batchId: "native-batch-id" })),
+      delete: vi.fn(() => ({ batchId: "native-batch-id" })),
+      commit,
+    }));
+
+    const client = JazzClient.connectWithRuntime(runtime, makeContext());
+    const batch = client.beginBatch();
+    batch.create("todos", {});
+    const handle = batch.commit();
+
+    expect(handle.batchId).toBe("native-batch-id");
+    expect(runtime.beginDirectBatch).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledWith("todos", {}, undefined);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+  });
+
   it("commits a sync callback transaction and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
