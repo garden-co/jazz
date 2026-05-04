@@ -31,6 +31,21 @@ impl ClientError {
             object_id: None,
         }
     }
+
+    pub fn with_batch_id(mut self, batch_id: impl Into<String>) -> Self {
+        self.batch_id = Some(batch_id.into());
+        self
+    }
+
+    pub fn with_table(mut self, table: impl Into<String>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+
+    pub fn with_object_id(mut self, object_id: impl Into<String>) -> Self {
+        self.object_id = Some(object_id.into());
+        self
+    }
 }
 
 impl std::fmt::Display for ClientError {

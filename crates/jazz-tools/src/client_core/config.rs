@@ -41,4 +41,20 @@ impl ClientConfig {
             runtime_flavor: ClientRuntimeFlavor::Rust,
         }
     }
+
+    pub fn resolved_default_durability_tier(&self) -> DurabilityTier {
+        if let Some(tier) = self.default_durability_tier {
+            return tier;
+        }
+
+        if self.runtime_flavor == ClientRuntimeFlavor::BrowserMainThread {
+            return DurabilityTier::Local;
+        }
+
+        if self.server_url.is_some() {
+            return DurabilityTier::EdgeServer;
+        }
+
+        DurabilityTier::Local
+    }
 }
