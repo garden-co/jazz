@@ -314,6 +314,11 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Per-batch durability bookkeeping: ack watchers + rejection set.
     pub(crate) durability: DurabilityTracker,
 
+    /// Recently mutated local batch records. Large direct batches append one
+    /// member per write, so reloading the record from storage on every insert
+    /// means repeatedly decoding the full accumulated member array.
+    local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
+
     /// Label for tracing (e.g. "local", "edge", "client").
     tier_label: &'static str,
 
@@ -363,6 +368,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             durability: DurabilityTracker::with_initial_rejections(rejected_batch_ids.clone()),
+            local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,
             auth_failure_callback: None,

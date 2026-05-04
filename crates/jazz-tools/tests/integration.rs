@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
 use jazz_tools::sync_manager::ClientId;
-use jazz_tools::transport_manager::{AuthConfig, AuthHandshake, ConnectedResponse};
+use jazz_tools::transport_manager::{
+    AuthConfig, AuthHandshake, ConnectedResponse, SYNC_PROTOCOL_VERSION,
+};
 use reqwest::Client;
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -60,6 +62,7 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
         .map_err(|e| format!("ws connect failed: {e}"))?;
 
     let handshake = AuthHandshake {
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
         client_id: ClientId::new().to_string(),
         auth: AuthConfig {
             jwt_token: Some(jwt_token.to_string()),
@@ -358,6 +361,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
     let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
 
     let handshake = AuthHandshake {
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
         client_id: ClientId::new().to_string(),
         auth: AuthConfig {
             jwt_token: Some(token),

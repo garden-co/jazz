@@ -53,40 +53,14 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): DirectInsertResult;
-  insertDurable(
-    table: string,
-    values: InsertValues,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
-  insertDurableWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-    object_id?: string | null,
-  ): Promise<Row>;
   update(object_id: string, values: Record<string, Value>): DirectMutationResult;
   updateWithSession?(
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): DirectMutationResult;
-  updateDurable(object_id: string, values: Record<string, Value>, tier: string): Promise<void>;
-  updateDurableWithSession?(
-    object_id: string,
-    values: Record<string, Value>,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  deleteDurable(object_id: string, tier: string): Promise<void>;
-  deleteDurableWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): Promise<void>;
   canInsert?(table: string, values: InsertValues): MaybePromise<PermissionDecision>;
   canInsertWithSession?(
     table: string,
@@ -700,7 +674,7 @@ export function sessionFromRequest(request: RequestLike): Session {
   return { user_id: typedPayload.sub, claims, authMode };
 }
 
-function isObjectAlreadyExistsError(error: unknown): boolean {
+function shouldFallbackToUpsertUpdate(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("object already exists") || message.includes("Create failed: Conflict");
 }
@@ -949,18 +923,32 @@ export class Transaction {
     return handle;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
     this.ensureActive();
     const row = this.client.createInternal(
       table,
       values,
       this.session,
       this.attribution,
-      undefined,
+      options,
       this.batchContext,
     );
     this.markTouchedRow(row.id);
     return row;
+  }
+
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.ensureActive();
+    this.client.upsertInternal(
+      table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
+      this.batchContext,
+    );
+    this.markTouchedRow(options.id);
   }
 
   update(objectId: string, updates: Record<string, Value>): void {
@@ -1033,14 +1021,27 @@ export class DirectBatch {
     return handle;
   }
 
-  create(table: string, values: InsertValues): Row {
+  create(table: string, values: InsertValues, options?: CreateOptions): Row {
     this.ensureActive();
     return this.client.createInternal(
       table,
       values,
       this.session,
       this.attribution,
-      undefined,
+      options,
+      this.batchContext,
+    );
+  }
+
+  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
+    this.ensureActive();
+    this.client.upsertInternal(
+      table,
+      values,
+      options.id,
+      this.session,
+      this.attribution,
+      options.updatedAt,
       this.batchContext,
     );
   }
@@ -1133,7 +1134,7 @@ export class SessionClient {
       await this.create(table, values, options);
       return;
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!shouldFallbackToUpsertUpdate(error)) {
         throw error;
       }
     }
@@ -1947,9 +1948,20 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
+    batchContext?: BatchWriteContext,
   ): WriteHandle {
-    const result = this.upsertInternal(table, values, objectId, session, attribution, updatedAt);
-    this.sealBatch(result.batchId);
+    const result = this.upsertInternal(
+      table,
+      values,
+      objectId,
+      session,
+      attribution,
+      updatedAt,
+      batchContext,
+    );
+    if (!batchContext) {
+      this.sealBatch(result.batchId);
+    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -1998,7 +2010,11 @@ export class JazzClient {
           : this.runtime.insert(table, values);
     return {
       ...row,
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[]),
+      values: this.alignRowValuesToDeclaredSchema(
+        table,
+        row.values as Value[],
+        this.context.schema,
+      ),
     };
   }
 
@@ -2013,15 +2029,23 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     updatedAt?: number,
+    batchContext?: BatchWriteContext,
   ): DirectMutationResult {
     try {
-      const created = this.createInternal(table, values, session, attribution, {
-        id: objectId,
-        updatedAt,
-      });
+      const created = this.createInternal(
+        table,
+        values,
+        session,
+        attribution,
+        {
+          id: objectId,
+          updatedAt,
+        },
+        batchContext,
+      );
       return { batchId: created.batchId };
     } catch (error) {
-      if (!isObjectAlreadyExistsError(error)) {
+      if (!shouldFallbackToUpsertUpdate(error)) {
         throw error;
       }
     }
@@ -2031,7 +2055,7 @@ export class JazzClient {
       values as Record<string, Value>,
       session,
       attribution,
-      undefined,
+      batchContext,
       updatedAt,
     );
   }
@@ -2230,7 +2254,13 @@ export class JazzClient {
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
   ): number {
-    return this.subscribeInternal(query, callback, this.resolvedSession ?? undefined, options);
+    return this.subscribeInternal(
+      query,
+      callback,
+      this.resolvedSession ?? undefined,
+      options,
+      undefined,
+    );
   }
 
   /**

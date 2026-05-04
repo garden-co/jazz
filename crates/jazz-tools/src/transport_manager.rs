@@ -7,6 +7,8 @@ use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
 use futures::channel::mpsc;
 
+pub const SYNC_PROTOCOL_VERSION: u32 = 2;
+
 pub trait TickNotifier: 'static {
     fn notify(&self);
 }
@@ -169,10 +171,16 @@ impl std::fmt::Debug for AuthConfig {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AuthHandshake {
+    #[serde(default = "default_sync_protocol_version")]
+    pub sync_protocol_version: u32,
     pub client_id: String,
     pub auth: AuthConfig,
     pub catalogue_state_hash: Option<String>,
     pub declared_schema_hash: Option<String>,
+}
+
+fn default_sync_protocol_version() -> u32 {
+    0
 }
 
 impl AuthHandshake {
@@ -193,6 +201,7 @@ mod handshake_tests {
         let declared_hash = SchemaHash::from_bytes([7; 32]);
         let catalogue_hash = "ab".repeat(32);
         let handshake = AuthHandshake {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
             client_id: "client-1".to_string(),
             auth: AuthConfig::default(),
             catalogue_state_hash: Some(catalogue_hash.clone()),
@@ -202,6 +211,7 @@ mod handshake_tests {
         assert_eq!(handshake.declared_schema_hash(), Some(declared_hash));
 
         let handshake_without_declared_hash = AuthHandshake {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
             client_id: "client-1".to_string(),
             auth: AuthConfig::default(),
             catalogue_state_hash: Some(catalogue_hash),
@@ -210,10 +220,38 @@ mod handshake_tests {
 
         assert_eq!(handshake_without_declared_hash.declared_schema_hash(), None);
     }
+
+    #[test]
+    fn auth_handshake_defaults_missing_sync_protocol_version_to_zero() {
+        let handshake: AuthHandshake = serde_json::from_value(serde_json::json!({
+            "client_id": "client-1",
+            "auth": {},
+            "catalogue_state_hash": null,
+            "declared_schema_hash": null
+        }))
+        .expect("pre-versioned handshake should deserialize");
+
+        assert_eq!(handshake.sync_protocol_version, 0);
+    }
+
+    #[test]
+    fn connected_response_defaults_missing_sync_protocol_version_to_zero() {
+        let response: ConnectedResponse = serde_json::from_value(serde_json::json!({
+            "connection_id": "conn-1",
+            "client_id": "client-1",
+            "next_sync_seq": null,
+            "catalogue_state_hash": null
+        }))
+        .expect("pre-versioned connected response should deserialize");
+
+        assert_eq!(response.sync_protocol_version, 0);
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectedResponse {
+    #[serde(default = "default_sync_protocol_version")]
+    pub sync_protocol_version: u32,
     pub connection_id: String,
     pub client_id: String,
     pub next_sync_seq: Option<u64>,
@@ -379,6 +417,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             .ok()
             .and_then(|g| g.clone());
         let handshake = AuthHandshake {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
             client_id: self.client_id.to_string(),
             auth: self.auth.clone(),
             catalogue_state_hash,
@@ -414,6 +453,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 
         // First try to parse as the success path.
         if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(resp_payload) {
+            if resp.sync_protocol_version != SYNC_PROTOCOL_VERSION {
+                return HandshakeResult::NetworkError(format!(
+                    "incompatible Jazz sync protocol: server sent {}, client requires {}. Please update Jazz.",
+                    resp.sync_protocol_version, SYNC_PROTOCOL_VERSION
+                ));
+            }
             return HandshakeResult::Connected(resp);
         }
 
@@ -878,6 +923,7 @@ mod tests {
         async fn connect(_url: &str) -> Result<Self, Self::Error> {
             // Pre-load a valid ConnectedResponse frame so the handshake succeeds.
             let resp = ConnectedResponse {
+                sync_protocol_version: SYNC_PROTOCOL_VERSION,
                 connection_id: "conn-1".into(),
                 client_id: "client-1".into(),
                 next_sync_seq: Some(0),
@@ -982,6 +1028,7 @@ mod tests {
 
     fn make_handshake_response_frame() -> Vec<u8> {
         let resp = ConnectedResponse {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
             connection_id: "conn-1".into(),
             client_id: "client-1".into(),
             next_sync_seq: Some(0),

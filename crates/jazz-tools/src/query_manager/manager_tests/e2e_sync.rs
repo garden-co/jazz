@@ -149,6 +149,98 @@ fn e2e_client_receives_paginated_server_data_on_cold_offset_subscription() {
 }
 
 #[test]
+fn e2e_authorized_paginated_server_scope_counts_only_visible_prefix() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut structural_schema = Schema::new();
+    structural_schema.insert(
+        TableName::new("documents"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ])),
+    );
+
+    let mut authorization_schema = Schema::new();
+    authorization_schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("score", ColumnType::Integer),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+
+    let server_sync = SyncManager::new();
+    let (mut server, mut server_io) = create_query_manager(server_sync, structural_schema.clone());
+    server.set_authorization_schema(authorization_schema.clone());
+
+    for (title, score, owner_id) in [
+        ("Bob private", 1, "bob"),
+        ("Alice first", 2, "alice"),
+        ("Alice second", 3, "alice"),
+    ] {
+        server
+            .insert(
+                &mut server_io,
+                "documents",
+                &[
+                    Value::Text(title.into()),
+                    Value::Integer(score),
+                    Value::Text(owner_id.into()),
+                ],
+            )
+            .unwrap();
+    }
+    server.process(&mut server_io);
+
+    let client_sync = SyncManager::new();
+    let (mut client, mut client_io) = create_query_manager(client_sync, authorization_schema);
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    connect_server(&mut client, &client_io, server_id);
+    connect_client(&mut server, &server_io, client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let query = client
+        .query("documents")
+        .order_by("score")
+        .offset(1)
+        .limit(1)
+        .build();
+
+    let sub_id = client
+        .subscribe_with_sync(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "authorized pagination should replay offset over visible rows"
+    );
+    assert_eq!(results[0].1[0], Value::Text("Alice second".into()));
+    assert_eq!(results[0].1[1], Value::Integer(3));
+}
+
+#[test]
 fn e2e_client_receives_paginated_server_data_on_cold_offset_only_subscription() {
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;

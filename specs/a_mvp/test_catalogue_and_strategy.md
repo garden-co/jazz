@@ -15,9 +15,9 @@ This catalogue was built from test/spec filenames and test declarations across t
 | Examples and starters                           |    72 |           199 | Todo/chat/game/example flows, starter app e2e smoke tests, docs examples, walkthrough screenshots                          |
 | Dev tools, MCP, Better Auth, CLI, orchestration |    33 |           393 | Package-side utilities, CLI, dev server plugins, MCP backends/server, Better Auth adapter, subscription orchestration      |
 | Benchmarks and stress                           |     4 |            12 | Realistic performance scenarios and stress-test config                                                                     |
-| Docs and root utilities                         |     4 |            16 | Presentation deck helper and root SVG plotter tests                                                                        |
+| Docs and root utilities                         |     1 |             6 | Presentation deck helper tests                                                                                             |
 
-Total: 237 test/spec files, about 2,066 declared tests.
+Total: 234 test/spec files, about 2,056 declared tests.
 
 ## Current Test Shapes
 
@@ -90,7 +90,7 @@ Primary clusters:
 - Starter Playwright e2e suites under `starters/*/e2e`
 - Example app browser and e2e tests under `examples/*`
 - Docs example tests under `examples/docs/*`
-- Benchmarks under `benchmarks/realistic`
+- Benchmarks under `dev/benchmarks/realistic`
 - Root/document helper tests under `tests/` and `docs/lib`
 
 These tests are currently doing three jobs: validating examples, validating starter templates, and providing end-to-end product confidence. That is too much for an undifferentiated bucket. They should become explicit smoke/canary suites with a small shared matrix, while deeper behavior moves into core/runtime tests.
@@ -266,10 +266,10 @@ Do this file-by-file and require a short reason in the pruning PR.
 
 Known gaps from current repo notes:
 
-- Multi-server sync coverage is tracked in `todo/issues/test_multi-server-sync.md`.
-- WebSocket transport integration coverage is tracked in `todo/issues/test_websocket-transport-integration.md`.
-- Expo Android websocket e2e is tracked in `todo/issues/expo-android-maestro-e2e-ws-unverified.md`.
-- Sync protocol reliability appears as an MVP idea in `todo/ideas/1_mvp/sync-protocol-reliability.md`.
+- Multi-server sync coverage is tracked in `specs/todo/issues/test_multi-server-sync.md`.
+- WebSocket transport integration coverage is tracked in `specs/todo/issues/test_websocket-transport-integration.md`.
+- Expo Android websocket e2e is tracked in `specs/todo/issues/expo-android-maestro-e2e-ws-unverified.md`.
+- Sync protocol reliability appears as an MVP idea in `specs/todo/ideas/1_mvp/sync-protocol-reliability.md`.
 
 Turn those into contract rows before adding more ad hoc tests.
 
@@ -385,7 +385,7 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `crates/jazz-tools/src/test_row_history.rs`
 - `crates/jazz-tools/tests/auth_test.rs`
 - `crates/jazz-tools/tests/test_server.rs`
-- `vendor/librocksdb-sys/src/test.rs`
+- `dev/vendor/librocksdb-sys/src/test.rs`
 
 ### TypeScript runtime
 
@@ -546,9 +546,9 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 
 ### Examples, starters, docs, benchmarks, and root utilities
 
-- `benchmarks/realistic/ci_benchmarks.test.mjs`
-- `benchmarks/realistic/ci_scenarios.test.mjs`
-- `benchmarks/realistic/update_history.test.mjs`
+- `dev/benchmarks/realistic/ci_benchmarks.test.mjs`
+- `dev/benchmarks/realistic/ci_scenarios.test.mjs`
+- `dev/benchmarks/realistic/update_history.test.mjs`
 - `docs/lib/presentation-deck.test.ts`
 - `examples/auth-betterauth-chat/e2e/chat-auth.spec.ts`
 - `examples/auth-betterauth-chat/vitest.config.ts`
@@ -622,7 +622,4 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `starters/sveltekit-hybrid/e2e/todo-flow.spec.ts`
 - `starters/sveltekit-localfirst/e2e/auth-backup.spec.ts`
 - `starters/sveltekit-localfirst/e2e/todo-flow.spec.ts`
-- `stress-tests/todo-react/vitest.config.browser.ts`
-- `tests/svg-plotter-geometry.test.ts`
-- `tests/svg-plotter-render.test.ts`
-- `tests/svg-plotter-style.test.ts`
+- `dev/stress-tests/todo-react/vitest.config.browser.ts`

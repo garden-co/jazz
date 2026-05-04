@@ -70,6 +70,19 @@ pub struct CurrentPermissionsSummary {
     pub permissions: HashMap<TableName, TablePolicies>,
 }
 
+#[derive(Clone, Debug)]
+struct InsertAlignmentColumn {
+    name: String,
+    nullable: bool,
+    default: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct InsertAlignmentPlan {
+    columns: Vec<InsertAlignmentColumn>,
+    positions_by_name: HashMap<String, usize>,
+}
+
 /// SchemaManager coordinates schema evolution with query execution.
 ///
 /// It manages:
@@ -128,6 +141,7 @@ pub struct SchemaManager {
     known_schemas: Arc<HashMap<SchemaHash, Schema>>,
     known_schemas_dirty: bool,
     persisted_current_schema_in_storage: HashSet<(usize, SchemaHash)>,
+    insert_alignment_cache: HashMap<(SchemaHash, TableName), Arc<InsertAlignmentPlan>>,
 }
 
 impl SchemaManager {
@@ -200,6 +214,7 @@ impl SchemaManager {
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
             persisted_current_schema_in_storage: HashSet::new(),
+            insert_alignment_cache: HashMap::new(),
         })
     }
 
@@ -235,6 +250,7 @@ impl SchemaManager {
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
             persisted_current_schema_in_storage: HashSet::new(),
+            insert_alignment_cache: HashMap::new(),
         }
     }
 
@@ -318,10 +334,17 @@ impl SchemaManager {
     }
 
     fn schema_for_hash(&self, schema_hash: SchemaHash) -> Option<&Schema> {
-        if schema_hash == self.context.current_hash {
-            return Some(&self.context.current_schema);
+        Self::schema_for_hash_in_context(&self.context, schema_hash)
+    }
+
+    fn schema_for_hash_in_context(
+        context: &SchemaContext,
+        schema_hash: SchemaHash,
+    ) -> Option<&Schema> {
+        if schema_hash == context.current_hash {
+            return Some(&context.current_schema);
         }
-        self.context.live_schemas.get(&schema_hash)
+        context.live_schemas.get(&schema_hash)
     }
 
     fn resolve_target_branch(
@@ -401,26 +424,59 @@ impl SchemaManager {
         Ok(temp_context)
     }
 
-    fn get_insert_values_with_defaults_for_schema(
-        table: &str,
+    fn insert_alignment_plan_for_schema(
+        cache: &mut HashMap<(SchemaHash, TableName), Arc<InsertAlignmentPlan>>,
+        schema_hash: SchemaHash,
+        table_name: TableName,
         schema: &Schema,
-        mut values_by_column: HashMap<String, Value>,
-    ) -> Result<Vec<Value>, QueryError> {
-        let table_name = TableName::new(table);
+    ) -> Result<Arc<InsertAlignmentPlan>, QueryError> {
+        let cache_key = (schema_hash, table_name);
+        if let Some(plan) = cache.get(&cache_key) {
+            return Ok(plan.clone());
+        }
+
         let table_schema = schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
+        let mut positions_by_name = HashMap::with_capacity(table_schema.columns.columns.len());
+        let columns = table_schema
+            .columns
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let name = column.name.as_str().to_string();
+                positions_by_name.insert(name.clone(), index);
+                InsertAlignmentColumn {
+                    name,
+                    nullable: column.nullable,
+                    default: column.default.clone(),
+                }
+            })
+            .collect();
+        let plan = Arc::new(InsertAlignmentPlan {
+            columns,
+            positions_by_name,
+        });
+        cache.insert(cache_key, plan.clone());
+        Ok(plan)
+    }
 
+    fn align_insert_values_with_plan(
+        table: &str,
+        plan: &InsertAlignmentPlan,
+        mut values_by_column: HashMap<String, Value>,
+    ) -> Result<Vec<Value>, QueryError> {
         for column in values_by_column.keys() {
-            if table_schema.columns.column(column.as_str()).is_none() {
+            if !plan.positions_by_name.contains_key(column.as_str()) {
                 return Err(QueryError::EncodingError(format!(
                     "unknown column `{column}` on table `{table}`"
                 )));
             }
         }
 
-        let mut aligned_values = Vec::with_capacity(table_schema.columns.columns.len());
-        for column in &table_schema.columns.columns {
+        let mut aligned_values = Vec::with_capacity(plan.columns.len());
+        for column in &plan.columns {
             if let Some(value) = values_by_column.remove(column.name.as_str()) {
                 if value == Value::Null && !column.nullable {
                     return Err(QueryError::EncodingError(format!(
@@ -1620,22 +1676,29 @@ impl SchemaManager {
     ) -> Result<InsertResult, QueryError> {
         let _ = self.ensure_current_schema_persisted(storage);
         let (target_branch, target_hash) = self.resolve_target_branch(write_context)?;
-        let target_schema = self
-            .schema_for_hash(target_hash)
-            .ok_or(QueryError::UnknownSchema(target_hash))?
-            .clone();
-        let aligned_values =
-            Self::get_insert_values_with_defaults_for_schema(table, &target_schema, values)?;
-        self.query_manager
-            .insert_on_branch_with_schema_and_write_context_and_id(
-                storage,
-                table,
-                &target_branch,
-                &aligned_values,
-                object_id,
-                &target_schema,
-                write_context,
-            )
+        let table_name = TableName::new(table);
+
+        let context = &self.context;
+        let insert_alignment_cache = &mut self.insert_alignment_cache;
+        let query_manager = &mut self.query_manager;
+        let target_schema = Self::schema_for_hash_in_context(context, target_hash)
+            .ok_or(QueryError::UnknownSchema(target_hash))?;
+        let plan = Self::insert_alignment_plan_for_schema(
+            insert_alignment_cache,
+            target_hash,
+            table_name,
+            target_schema,
+        )?;
+        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
+        query_manager.insert_on_branch_with_schema_and_write_context_and_id(
+            storage,
+            table,
+            &target_branch,
+            &aligned_values,
+            object_id,
+            target_schema,
+            write_context,
+        )
     }
 
     pub fn insert_with_session<H: Storage>(
@@ -1663,22 +1726,30 @@ impl SchemaManager {
             }
             Err(error) => return Err(error),
         };
-        let Some(target_schema) = self.schema_for_hash(target_hash).cloned() else {
+        let table_name = TableName::new(table);
+        let context = &self.context;
+        let insert_alignment_cache = &mut self.insert_alignment_cache;
+        let query_manager = &mut self.query_manager;
+        let Some(target_schema) = Self::schema_for_hash_in_context(context, target_hash) else {
             return Ok(PermissionPreflightDecision::Unknown);
         };
-        let aligned_values =
-            Self::get_insert_values_with_defaults_for_schema(table, &target_schema, values)?;
-        self.query_manager
-            .can_insert_on_branch_with_schema_and_write_context(
-                storage,
-                crate::query_manager::writes::RowBranchInsert {
-                    table,
-                    branch: &target_branch,
-                    values: &aligned_values,
-                },
-                &target_schema,
-                write_context,
-            )
+        let plan = Self::insert_alignment_plan_for_schema(
+            insert_alignment_cache,
+            target_hash,
+            table_name,
+            target_schema,
+        )?;
+        let aligned_values = Self::align_insert_values_with_plan(table, &plan, values)?;
+        query_manager.can_insert_on_branch_with_schema_and_write_context(
+            storage,
+            crate::query_manager::writes::RowBranchInsert {
+                table,
+                branch: &target_branch,
+                values: &aligned_values,
+            },
+            target_schema,
+            write_context,
+        )
     }
 
     pub fn can_insert_with_session<H: Storage>(
@@ -3178,6 +3249,33 @@ mod tests {
         assert_eq!(stored[title_idx], Value::Text("ship default".into()));
         assert_eq!(stored[done_idx], Value::Boolean(false));
         assert_eq!(stored[note_idx], Value::Text("from default".into()));
+    }
+
+    #[test]
+    fn schema_manager_insert_reuses_prepared_alignment_for_same_table() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Text("first".into()))]),
+            )
+            .unwrap();
+        manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Text("second".into()))]),
+            )
+            .unwrap();
+
+        assert_eq!(manager.insert_alignment_cache.len(), 1);
     }
 
     #[test]
