@@ -578,6 +578,7 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.DevServer = nativeBinding.DevServer
 module.exports.NapiJazzClient = nativeBinding.NapiJazzClient
+module.exports.NapiJazzClientBatch = nativeBinding.NapiJazzClientBatch
 module.exports.NapiRuntime = nativeBinding.NapiRuntime
 module.exports.TestingServer = nativeBinding.TestingServer
 module.exports.currentTimestamp = nativeBinding.currentTimestamp

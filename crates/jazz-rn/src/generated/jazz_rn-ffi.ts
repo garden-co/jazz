@@ -27,6 +27,36 @@ interface NativeModuleInterface {
     buffer: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): string;
+  ubrn_uniffi_jazz_rn_fn_clone_rndirectbatch(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_free_rndirectbatch(
+    handle: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_commit(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_delete(
+    ptr: bigint,
+    objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_insert(
+    ptr: bigint,
+    table: Uint8Array,
+    valuesJson: Uint8Array,
+    objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_update(
+    ptr: bigint,
+    objectId: Uint8Array,
+    valuesJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_clone_rnruntime(
     handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -61,6 +91,10 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_close(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -233,10 +267,15 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms(): number;
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_commit(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_insert(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_update(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_server(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_batched_tick(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_close(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
@@ -269,6 +308,10 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick(): number;
   ubrn_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update(): number;
   ubrn_ffi_jazz_rn_uniffi_contract_version(): number;
+  ubrn_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer(
+    pointer: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): UniffiGcObject;
   ubrn_uniffi_internal_fn_method_rnruntime_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus

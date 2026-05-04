@@ -12,8 +12,8 @@ pub use error::{ClientError, ClientErrorCode};
 pub use query::{ClientQueryOptions, QueryRowCore};
 pub use subscription::SubscriptionCoreHandle;
 pub use write::{
-    BatchWaitOutcome, DirectBatchCore, TransactionCore, WriteHandleCore, WriteOptions,
-    WriteResultCore,
+    BatchWaitOutcome, DirectBatchCore, TransactionCore, WriteBatchContextCore, WriteHandleCore,
+    WriteOptions, WriteResultCore,
 };
 
 use crate::query_manager::types::Schema;
@@ -65,6 +65,14 @@ pub struct SharedRuntimeHost<S: Storage, Sch: Scheduler> {
     runtime: Arc<Mutex<RuntimeCore<S, Sch>>>,
 }
 
+impl<S: Storage, Sch: Scheduler> Clone for SharedRuntimeHost<S, Sch> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: Arc::clone(&self.runtime),
+        }
+    }
+}
+
 impl<S: Storage, Sch: Scheduler> SharedRuntimeHost<S, Sch> {
     pub fn new(runtime: Arc<Mutex<RuntimeCore<S, Sch>>>) -> Self {
         Self { runtime }
@@ -88,6 +96,14 @@ impl<S: Storage, Sch: Scheduler> ClientRuntimeHost for SharedRuntimeHost<S, Sch>
 
 pub struct LocalRuntimeHost<S: Storage, Sch: Scheduler> {
     runtime: Rc<RefCell<RuntimeCore<S, Sch>>>,
+}
+
+impl<S: Storage, Sch: Scheduler> Clone for LocalRuntimeHost<S, Sch> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: Rc::clone(&self.runtime),
+        }
+    }
 }
 
 impl<S: Storage, Sch: Scheduler> LocalRuntimeHost<S, Sch> {
@@ -114,6 +130,15 @@ impl<S: Storage, Sch: Scheduler> ClientRuntimeHost for LocalRuntimeHost<S, Sch> 
 pub struct JazzClientCore<H: ClientRuntimeHost> {
     config: ClientConfig,
     host: H,
+}
+
+impl<H: ClientRuntimeHost + Clone> Clone for JazzClientCore<H> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            host: self.host.clone(),
+        }
+    }
 }
 
 impl<S: Storage, Sch: Scheduler> JazzClientCore<OwnedRuntimeHost<S, Sch>> {

@@ -20,6 +20,10 @@ use jazz_tools::binding_support::{
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
     serialize_local_batch_record, serialize_local_batch_records, subscription_delta_to_json,
 };
+use jazz_tools::client_core::{
+    ClientConfig, ClientRuntimeFlavor, ClientStorageMode, JazzClientCore, SharedRuntimeHost,
+    WriteBatchContextCore, WriteOptions, WriteResultCore,
+};
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
@@ -296,13 +300,55 @@ impl Scheduler for RnScheduler {
 // ============================================================================
 
 type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
+type RnJazzClientCore = JazzClientCore<SharedRuntimeHost<SqliteStorage, RnScheduler>>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
-    core: Mutex<RnCoreType>,
+    core: Arc<Mutex<RnCoreType>>,
+    client_config: ClientConfig,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
+}
+
+#[derive(uniffi::Object)]
+pub struct RnDirectBatch {
+    client: Mutex<RnJazzClientCore>,
+    declared_schema: Schema,
+    context: Mutex<Option<WriteBatchContextCore>>,
+}
+
+fn rn_insert_result_to_json(
+    declared_schema: &Schema,
+    current_schema: &Schema,
+    table_name: &TableName,
+    result: WriteResultCore,
+) -> Result<String, JazzRnError> {
+    let row_values = align_row_values_to_declared_schema(
+        declared_schema,
+        current_schema,
+        table_name,
+        result.row.values,
+    );
+
+    serde_json::to_string(&serde_json::json!({
+        "id": result.row.id.uuid().to_string(),
+        "values": row_values,
+        "batchId": result.handle.batch_id.to_string(),
+    }))
+    .map_err(|e| JazzRnError::Internal {
+        message: format!("insert serialization failed: {e}"),
+    })
+}
+
+impl RnRuntime {
+    fn client_core(&self) -> Result<RnJazzClientCore, JazzRnError> {
+        JazzClientCore::from_runtime_host(
+            self.client_config.clone(),
+            SharedRuntimeHost::new(Arc::clone(&self.core)),
+        )
+        .map_err(runtime_err)
+    }
 }
 
 #[uniffi::export]
@@ -321,6 +367,12 @@ impl RnRuntime {
             let declared_schema = schema.clone();
 
             let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+            let mut client_config = ClientConfig::memory_for_test(&app_id, declared_schema.clone());
+            client_config.env = jazz_env.clone();
+            client_config.user_branch = user_branch.clone();
+            client_config.runtime_flavor = ClientRuntimeFlavor::ReactNative;
+            client_config.storage_mode = ClientStorageMode::Persistent;
+            client_config.default_durability_tier = persistence_tier;
 
             let mut sync_manager = SyncManager::new();
             if let Some(t) = persistence_tier {
@@ -375,7 +427,8 @@ impl RnRuntime {
             core.persist_schema();
 
             Ok(Arc::new(Self {
-                core: Mutex::new(core),
+                core: Arc::new(Mutex::new(core)),
+                client_config,
                 upstream_server_id: Mutex::new(None),
                 declared_schema,
                 subscription_queries: Mutex::new(HashMap::new()),
@@ -412,6 +465,18 @@ impl RnRuntime {
     // =========================================================================
     // CRUD
     // =========================================================================
+
+    pub fn begin_direct_batch(&self) -> Result<Arc<RnDirectBatch>, JazzRnError> {
+        with_panic_boundary("begin_direct_batch", || {
+            let client = self.client_core()?;
+            let context = client.begin_direct_batch_context();
+            Ok(Arc::new(RnDirectBatch {
+                client: Mutex::new(client),
+                declared_schema: self.declared_schema.clone(),
+                context: Mutex::new(Some(context)),
+            }))
+        })
+    }
 
     pub fn insert(
         &self,
@@ -1078,6 +1143,127 @@ impl RnRuntime {
                 callback.on_failure(reason);
             });
             Ok(())
+        })
+    }
+}
+
+#[uniffi::export]
+impl RnDirectBatch {
+    pub fn insert(
+        &self,
+        table: String,
+        values_json: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("direct_batch_insert", || {
+            let named_values = convert_insert_values(&values_json)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let context = self.context.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let context = context.as_ref().ok_or_else(|| JazzRnError::Runtime {
+                message: "Direct batch has already been committed".into(),
+            })?;
+            let table_name = TableName::new(table.clone());
+            let mut client = self.client.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let result = client
+                .insert_in_batch(
+                    context,
+                    &table,
+                    named_values,
+                    Some(WriteOptions {
+                        object_id,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(runtime_err)?;
+            let current_schema = client.current_schema();
+            rn_insert_result_to_json(&self.declared_schema, &current_schema, &table_name, result)
+        })
+    }
+
+    pub fn update(&self, object_id: String, values_json: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("direct_batch_update", || {
+            let object_id = parse_external_object_id(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?
+                .ok_or_else(|| JazzRnError::InvalidUuid {
+                    message: "Object id is required".into(),
+                })?;
+            let updates = convert_updates(&values_json)?;
+            let context = self.context.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let context = context.as_ref().ok_or_else(|| JazzRnError::Runtime {
+                message: "Direct batch has already been committed".into(),
+            })?;
+            let mut client = self.client.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let handle = client
+                .update_in_batch(context, object_id, updates, None)
+                .map_err(runtime_err)?;
+
+            serde_json::to_string(&serde_json::json!({
+                "batchId": handle.batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("update serialization failed: {e}"),
+            })
+        })
+    }
+
+    #[uniffi::method(name = "delete")]
+    pub fn delete_row(&self, object_id: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("direct_batch_delete", || {
+            let object_id = parse_external_object_id(Some(&object_id))
+                .map_err(|message| JazzRnError::InvalidUuid { message })?
+                .ok_or_else(|| JazzRnError::InvalidUuid {
+                    message: "Object id is required".into(),
+                })?;
+            let context = self.context.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let context = context.as_ref().ok_or_else(|| JazzRnError::Runtime {
+                message: "Direct batch has already been committed".into(),
+            })?;
+            let mut client = self.client.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let handle = client
+                .delete_in_batch(context, object_id, None)
+                .map_err(runtime_err)?;
+
+            serde_json::to_string(&serde_json::json!({
+                "batchId": handle.batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("delete serialization failed: {e}"),
+            })
+        })
+    }
+
+    pub fn commit(&self) -> Result<String, JazzRnError> {
+        with_panic_boundary("direct_batch_commit", || {
+            let mut context = self.context.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let context = context.take().ok_or_else(|| JazzRnError::Runtime {
+                message: "Direct batch has already been committed".into(),
+            })?;
+            let mut client = self.client.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let handle = client.commit_batch_context(context).map_err(runtime_err)?;
+
+            serde_json::to_string(&serde_json::json!({
+                "batchId": handle.batch_id.to_string(),
+            }))
+            .map_err(|e| JazzRnError::Internal {
+                message: format!("commit serialization failed: {e}"),
+            })
         })
     }
 }
