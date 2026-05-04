@@ -286,14 +286,64 @@ describe("Db transactions", () => {
     expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-callback", "global");
   });
 
-  it("does not commit a callback transaction when the callback rejects", async () => {
+  it("rolls back a callback transaction when the callback throws", () => {
     const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-callback-thrown",
+      values: [
+        { type: "Text", value: "Thrown callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-callback-thrown",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-callback-thrown"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-callback-thrown").handle),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-callback-thrown") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-callback-thrown")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const error = new Error("callback failed");
+
+    expect(() =>
+      db.transaction((tx) => {
+        tx.insert(table, { title: "Thrown callback transaction", done: false });
+        throw error;
+      }),
+    ).toThrow(error);
+
+    expect(runtimeTransaction.commit).not.toHaveBeenCalled();
+    expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back a callback transaction when the callback rejects", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-callback-rejected",
+      values: [
+        { type: "Text", value: "Rejected callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-callback-rejected",
+    } as Row;
     const runtimeTransaction = {
       batchId: vi.fn(() => "batch-callback-rejected"),
-      create: vi.fn(),
+      create: vi.fn(() => runtimeRow),
       update: vi.fn(),
       delete: vi.fn(),
       commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
+      rollback: vi.fn(),
       localBatchRecord: vi.fn((batchId = "batch-callback-rejected") =>
         makeLocalBatchRecord(batchId),
       ),
@@ -309,9 +359,15 @@ describe("Db transactions", () => {
     const db = new TestDb(client);
     const error = new Error("callback failed");
 
-    await expect(db.transaction(async () => Promise.reject(error))).rejects.toBe(error);
+    await expect(
+      db.transaction(async (tx) => {
+        tx.insert(table, { title: "Rejected callback transaction", done: false });
+        return Promise.reject(error);
+      }),
+    ).rejects.toBe(error);
 
     expect(runtimeTransaction.commit).not.toHaveBeenCalled();
+    expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(1);
   });
 
   it("commits a typed async callback transaction after the callback resolves", async () => {

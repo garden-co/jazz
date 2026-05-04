@@ -861,18 +861,45 @@ type RunAndCommitResult<TResult> =
     ? Promise<WriteResult<Awaited<TResult>>>
     : WriteResult<TResult>;
 
-export function runInBatch<TBatchOrTx extends { commit(): WriteHandle }, TResult>(
+function rollbackIfAvailable(batchOrTx: { rollback?: () => void }): void {
+  try {
+    batchOrTx.rollback?.();
+  } catch {
+    // Preserve the original callback error.
+  }
+}
+
+export function runInBatch<
+  TBatchOrTx extends { commit(): WriteHandle; rollback?: () => void },
+  TResult,
+>(
   batchOrTx: TBatchOrTx,
   callback: (target: TBatchOrTx) => TResult,
   client: JazzClient | (() => JazzClient),
 ): RunAndCommitResult<TResult> {
-  const value = callback(batchOrTx);
+  let value: TResult;
+  try {
+    value = callback(batchOrTx);
+  } catch (error) {
+    rollbackIfAvailable(batchOrTx);
+    throw error;
+  }
   const resultClient = typeof client === "function" ? client : () => client;
   if (isPromiseLike(value)) {
-    return value.then((resolvedValue) => {
-      const committed = batchOrTx.commit();
-      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, resultClient());
-    }) as RunAndCommitResult<TResult>;
+    return value.then(
+      (resolvedValue) => {
+        const committed = batchOrTx.commit();
+        return new WriteResult(
+          resolvedValue as Awaited<TResult>,
+          committed.batchId,
+          resultClient(),
+        );
+      },
+      (error) => {
+        rollbackIfAvailable(batchOrTx);
+        throw error;
+      },
+    ) as RunAndCommitResult<TResult>;
   }
   const committed = batchOrTx.commit();
   return new WriteResult(value, committed.batchId, resultClient()) as RunAndCommitResult<TResult>;
