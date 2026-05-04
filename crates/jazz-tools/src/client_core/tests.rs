@@ -1,5 +1,6 @@
 use super::*;
 use crate::object::ObjectId;
+use crate::query_manager::query::Query;
 use crate::query_manager::types::Value;
 use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema};
 use crate::runtime_core::{NoopScheduler, RuntimeCore};
@@ -198,4 +199,41 @@ fn local_wait_check_succeeds_after_direct_batch_commit() {
         client.check_batch_wait(result.handle.batch_id, DurabilityTier::Local),
         BatchWaitOutcome::Satisfied
     );
+}
+
+#[test]
+fn client_core_query_uses_config_default_tier() {
+    let schema = users_schema();
+    let mut config = ClientConfig::memory_for_test("query-default-test", schema.clone());
+    config.runtime_flavor = ClientRuntimeFlavor::Node;
+    config.server_url = Some("https://example.test".to_string());
+    let client = JazzClientCore::from_runtime_parts(config, test_runtime(schema)).unwrap();
+
+    let options = client.resolve_query_options(None);
+    assert_eq!(options.tier, DurabilityTier::EdgeServer);
+    assert_eq!(
+        options.local_updates,
+        crate::query_manager::manager::LocalUpdates::Immediate
+    );
+}
+
+#[test]
+fn client_core_query_returns_inserted_rows() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("query-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let inserted = client
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let rows = futures::executor::block_on(client.query(Query::new("users"), None))
+        .expect("query should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, inserted.row.id);
+    assert_eq!(rows[0].values, inserted.row.values);
 }
