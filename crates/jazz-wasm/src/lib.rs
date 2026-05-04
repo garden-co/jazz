@@ -48,6 +48,7 @@
 
 #![allow(clippy::new_without_default)]
 
+pub mod client;
 pub mod driver_bridge;
 pub mod query;
 pub mod runtime;
@@ -56,6 +57,7 @@ pub mod types;
 pub mod ws_stream;
 
 // Re-export main types for JavaScript
+pub use client::WasmJazzClient;
 pub use driver_bridge::JsStorageDriver;
 pub use query::WasmQueryBuilder;
 pub use runtime::WasmRuntime;
