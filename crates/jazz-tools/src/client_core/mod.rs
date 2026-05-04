@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod query;
+pub mod subscription;
 pub mod write;
 
 #[cfg(test)]
@@ -9,6 +10,7 @@ mod tests;
 pub use config::{ClientConfig, ClientRuntimeFlavor, ClientStorageMode};
 pub use error::{ClientError, ClientErrorCode};
 pub use query::{ClientQueryOptions, QueryRowCore};
+pub use subscription::SubscriptionCoreHandle;
 pub use write::{
     BatchWaitOutcome, DirectBatchCore, TransactionCore, WriteHandleCore, WriteOptions,
     WriteResultCore,

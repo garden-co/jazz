@@ -8,6 +8,7 @@ use crate::schema_manager::{AppId, SchemaManager};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{DurabilityTier, SyncManager};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 fn users_schema() -> Schema {
     SchemaBuilder::new()
@@ -236,4 +237,33 @@ fn client_core_query_returns_inserted_rows() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, inserted.row.id);
     assert_eq!(rows[0].values, inserted.row.values);
+}
+
+#[test]
+fn client_core_subscribe_and_unsubscribe_owns_runtime_handle() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("subscription-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_for_callback = Arc::clone(&seen);
+    let handle = client
+        .subscribe(Query::new("users"), None, move |delta| {
+            seen_for_callback.lock().unwrap().push(delta);
+        })
+        .expect("subscription should be created");
+
+    client
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .expect("insert should trigger subscription");
+    client.runtime_mut().batched_tick();
+
+    assert!(!seen.lock().unwrap().is_empty());
+
+    client
+        .unsubscribe(handle)
+        .expect("unsubscribe should remove runtime subscription");
 }
