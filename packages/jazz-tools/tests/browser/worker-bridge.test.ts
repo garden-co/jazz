@@ -1466,12 +1466,18 @@ describe("Worker Bridge with OPFS", () => {
       const sharedLocalAuthToken = generateAuthSecret();
       const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
-      const insertResult = await db.insert(todos, { title: "Initial task", done: false });
+      const insertResult = db.insert(todos, { title: "Initial task", done: false });
       const todo = insertResult.value;
+      const insertConfirmed = insertResult.wait({ tier: "edge" });
 
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
-      await insertResult.wait({ tier: "edge" });
-      await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
+      const updateConfirmed = updateResult.wait({ tier: "edge" });
+
+      const todosBeforeRevert = await db.all(allTodos, { tier: "local" });
+      expect(todosBeforeRevert).toEqual([{ ...todo, title: "Updated task" }]);
+
+      await insertConfirmed;
+      await expect(updateConfirmed).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
         batchId: updateResult.batchId,
         code: "permission_denied",
@@ -1490,16 +1496,18 @@ describe("Worker Bridge with OPFS", () => {
       const sharedLocalAuthToken = generateAuthSecret();
       const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
-      const insertResult = await db.insert(todos, { title: "Initial task", done: false });
+      const insertResult = db.insert(todos, { title: "Initial task", done: false });
       const todo = insertResult.value;
+      const insertConfirmed = insertResult.wait({ tier: "edge" });
 
       const deleteResult = db.delete(todos, todo.id);
+      const deleteConfirmed = deleteResult.wait({ tier: "edge" });
 
       const todosBeforeRevert = await db.all(allTodos, { tier: "local" });
       expect(todosBeforeRevert).toEqual([]);
 
-      await insertResult.wait({ tier: "edge" });
-      await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
+      await insertConfirmed;
+      await expect(deleteConfirmed).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
         batchId: deleteResult.batchId,
         code: "permission_denied",
