@@ -61,5 +61,6 @@
 
 ## Projects
 
+- [**cost-based-query-planner**](todo/projects/cost-based-query-planner/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
 - [**relational-row-history-engine**](todo/projects/relational-row-history-engine/)
