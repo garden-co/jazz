@@ -524,7 +524,7 @@ pub fn seal_batch_for_binding<H: ClientRuntimeHost>(
 }
 
 pub fn client_error_message(operation: &str, error: &ClientError) -> String {
-    format!("{operation} failed: {error}")
+    format!("{} failed: {}", operation, error.binding_message())
 }
 
 pub fn subscription_delta_to_json(
@@ -609,12 +609,12 @@ pub fn current_timestamp_ms() -> i64 {
 mod tests {
     use super::{
         acknowledge_rejected_batch_for_binding, align_query_rows_to_declared_schema,
-        align_values_to_declared_schema, binding_write_options, delete_sealed_json,
-        delete_unsealed_json, drain_rejected_batch_id_strings, insert_sealed_json,
-        insert_unsealed_json, local_batch_record_json, local_batch_records_json,
-        parse_object_id_input, parse_runtime_schema_input, parse_write_context_input,
-        query_rows_can_be_schema_aligned, record_to_updates, seal_batch_for_binding,
-        update_sealed_json, update_unsealed_json, write_batch_context_json,
+        align_values_to_declared_schema, binding_write_options, client_error_message,
+        delete_sealed_json, delete_unsealed_json, drain_rejected_batch_id_strings,
+        insert_sealed_json, insert_unsealed_json, local_batch_record_json,
+        local_batch_records_json, parse_object_id_input, parse_runtime_schema_input,
+        parse_write_context_input, query_rows_can_be_schema_aligned, record_to_updates,
+        seal_batch_for_binding, update_sealed_json, update_unsealed_json, write_batch_context_json,
     };
     use crate::batch_fate::BatchMode;
     use crate::client_core::{ClientConfig, JazzClientCore, LocalRuntimeHost};
@@ -972,6 +972,23 @@ mod tests {
         assert!(
             !acknowledge_rejected_batch_for_binding(&mut client, BatchId::new())
                 .expect("acknowledge missing rejected batch")
+        );
+    }
+
+    #[test]
+    fn binding_support_client_error_message_preserves_runtime_debug_shape() {
+        let runtime_error = crate::runtime_core::RuntimeError::WriteError(
+            "policy denied INSERT on table todos".to_string(),
+        );
+        let error = crate::client_core::ClientError::from_runtime(&runtime_error);
+
+        assert_eq!(
+            error.to_string(),
+            "Write error: policy denied INSERT on table todos"
+        );
+        assert_eq!(
+            client_error_message("Insert", &error),
+            r#"Insert failed: WriteError("policy denied INSERT on table todos")"#
         );
     }
 
