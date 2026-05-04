@@ -20,7 +20,7 @@ use std::sync::Once;
 
 use js_sys::Function;
 use js_sys::Uint8Array;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
 use tracing::{debug_span, info, info_span};
@@ -58,40 +58,42 @@ fn wasm_log_level_from_global() -> tracing::Level {
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::binding_support::parse_subscription_input;
 use jazz_tools::binding_support::{
-    acknowledge_rejected_batch_for_binding, binding_write_options, build_runtime_schema_bootstrap,
-    client_error_message, delete_sealed_json, delete_unsealed_json,
+    acknowledge_rejected_batch_for_binding, align_query_rows_to_declared_schema,
+    binding_write_options, client_error_message, delete_sealed_json, delete_unsealed_json,
     drain_rejected_batch_id_strings, insert_sealed_json, insert_unsealed_json,
     local_batch_record_json, local_batch_records_json, parse_batch_id_input,
-    parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
-    parse_query_execution_options, parse_query_input, record_to_updates, seal_batch_for_binding,
-    serialize_query_rows_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
-    PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
+    parse_batch_mode_input, parse_external_object_id, parse_object_id_input, parse_query_input,
+    record_to_updates, seal_batch_for_binding, update_sealed_json, update_unsealed_json,
+    write_batch_context_json,
 };
 use jazz_tools::client_core::{ClientConfig, ClientError, JazzClientCore, LocalRuntimeHost};
 use jazz_tools::identity;
-use jazz_tools::object::ObjectId;
+use jazz_tools::object::{BranchName, ObjectId};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::encoding::decode_row;
-use jazz_tools::query_manager::session::WriteContext;
-use jazz_tools::query_manager::types::Schema;
+use jazz_tools::query_manager::manager::LocalUpdates;
+#[cfg(target_arch = "wasm32")]
+use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
+use jazz_tools::query_manager::types::{RowPolicyMode, Schema};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
-use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{
+    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
+};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
-#[cfg(target_arch = "wasm32")]
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId,
+    Source, SyncManager, SyncPayload,
 };
 
 use crate::types::SubscriptionRow;
@@ -152,6 +154,124 @@ fn serialize_json_to_js(value: serde_json::Value) -> Result<JsValue, JsError> {
     value
         .serialize(&serializer)
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct QueryExecutionOptionsWire {
+    propagation: Option<String>,
+    local_updates: Option<String>,
+    transaction_overlay: Option<QueryTransactionOverlayWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryTransactionOverlayWire {
+    batch_id: String,
+    branch_name: String,
+    row_ids: Vec<String>,
+}
+
+fn parse_session_json(session_json: Option<String>) -> Result<Option<Session>, JsError> {
+    if let Some(json) = session_json {
+        let session = serde_json::from_str::<Session>(&json)
+            .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?;
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_read_durability_options(
+    tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<
+    (
+        ReadDurabilityOptions,
+        QueryPropagation,
+        Option<QueryLocalOverlay>,
+    ),
+    JsError,
+> {
+    let parsed_tier = tier.as_deref().map(parse_tier).transpose()?;
+    let Some(raw) = options_json else {
+        return Ok((
+            ReadDurabilityOptions {
+                tier: parsed_tier,
+                local_updates: LocalUpdates::Immediate,
+            },
+            QueryPropagation::Full,
+            None,
+        ));
+    };
+
+    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
+        .map_err(|e| JsError::new(&format!("Invalid query options JSON: {}", e)))?;
+
+    let propagation = match options.propagation.as_deref() {
+        None | Some("full") => Ok(QueryPropagation::Full),
+        Some("local-only") => Ok(QueryPropagation::LocalOnly),
+        Some(other) => Err(JsError::new(&format!(
+            "Invalid propagation '{}'. Must be 'full' or 'local-only'.",
+            other
+        ))),
+    }?;
+
+    let local_updates = match options.local_updates.as_deref() {
+        None | Some("immediate") => Ok(LocalUpdates::Immediate),
+        Some("deferred") => Ok(LocalUpdates::Deferred),
+        Some(other) => Err(JsError::new(&format!(
+            "Invalid localUpdates '{}'. Must be 'immediate' or 'deferred'.",
+            other
+        ))),
+    }?;
+
+    let transaction_overlay = match options.transaction_overlay {
+        None => None,
+        Some(overlay) => Some(QueryLocalOverlay {
+            batch_id: parse_batch_id_input(&overlay.batch_id)
+                .map_err(|err| JsError::new(&format!("Invalid query batch id: {err}")))?,
+            branch_name: BranchName::new(&overlay.branch_name),
+            row_ids: overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    parse_external_object_id(Some(&row_id))
+                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
+                        .map_err(|err| JsError::new(&format!("Invalid query row id: {err}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+    };
+
+    Ok((
+        ReadDurabilityOptions {
+            tier: parsed_tier,
+            local_updates,
+        },
+        propagation,
+        transaction_overlay,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_subscription_inputs(
+    query_json: &str,
+    session_json: Option<String>,
+    settled_tier: Option<String>,
+    options_json: Option<String>,
+) -> Result<
+    (
+        Query,
+        Option<Session>,
+        ReadDurabilityOptions,
+        QueryPropagation,
+    ),
+    JsError,
+> {
+    let query = parse_query_input(query_json).map_err(|e| JsError::new(&e))?;
+    let session = parse_session_json(session_json)?;
+    let (durability, propagation, _overlay) =
+        parse_read_durability_options(settled_tier, options_json)?;
+    Ok((query, session, durability, propagation))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -227,21 +347,33 @@ fn build_schema_manager(
     user_branch: &str,
     tier: Option<&str>,
 ) -> Result<(SchemaManager, Schema, AppId), JsError> {
-    let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
-        schema_json,
+    let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+        .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+    let declared_schema = runtime_schema.schema.clone();
+    let node_tiers = match tier {
+        Some(raw) => vec![parse_tier(raw)?],
+        None => Vec::new(),
+    };
+    let mut sync_manager = SyncManager::new();
+    if !node_tiers.is_empty() {
+        sync_manager = sync_manager.with_durability_tiers(node_tiers);
+    }
+    let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+    let schema_manager = SchemaManager::new_with_policy_mode(
+        sync_manager,
+        runtime_schema.schema,
         app_id,
         env,
         user_branch,
-        node_tier: tier,
-        plain_schema_policy_mode: PlainSchemaPolicyMode::PermissiveLocal,
-    })
-    .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        if runtime_schema.loaded_policy_bundle {
+            RowPolicyMode::Enforcing
+        } else {
+            RowPolicyMode::PermissiveLocal
+        },
+    )
+    .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-    Ok((
-        bootstrap.schema_manager,
-        bootstrap.declared_schema,
-        bootstrap.app_id,
-    ))
+    Ok((schema_manager, declared_schema, app_id))
 }
 
 /// Wire up scheduler, sync sender, and `RuntimeCore` into a `WasmRuntime`.
@@ -620,15 +752,31 @@ impl WasmRuntime {
         .entered();
         info!("creating in-memory runtime");
 
-        let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
-            schema_json,
+        let runtime_schema = jazz_tools::binding_support::parse_runtime_schema_input(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+        let declared_schema = runtime_schema.schema.clone();
+        let node_tiers = match tier.as_deref() {
+            Some(raw) => vec![parse_tier(raw)?],
+            None => Vec::new(),
+        };
+        let mut sync_manager = SyncManager::new();
+        if !node_tiers.is_empty() {
+            sync_manager = sync_manager.with_durability_tiers(node_tiers);
+        }
+        let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+        let schema_manager = SchemaManager::new_with_policy_mode(
+            sync_manager,
+            runtime_schema.schema,
             app_id,
             env,
             user_branch,
-            node_tier: tier.as_deref(),
-            plain_schema_policy_mode: PlainSchemaPolicyMode::PermissiveLocal,
-        })
-        .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+            if runtime_schema.loaded_policy_bundle {
+                RowPolicyMode::Enforcing
+            } else {
+                RowPolicyMode::PermissiveLocal
+            },
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
@@ -636,7 +784,7 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
-        let mut core = RuntimeCore::new(bootstrap.schema_manager, storage, scheduler);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
         // Install the JS-callback sender so `batched_tick` drains outbox
         // entries to the worker bridge (no transport handle here).
@@ -655,7 +803,6 @@ impl WasmRuntime {
 
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
-        let declared_schema = bootstrap.declared_schema;
         let client_config = ClientConfig::new(env, user_branch);
         let client = JazzClientCore::from_runtime_host(
             client_config,
@@ -851,30 +998,22 @@ impl WasmRuntime {
         let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query_input(query_json).map_err(|e| JsError::new(&e))?;
         let query_for_alignment = query.clone();
-        let session = jazz_tools::binding_support::parse_session_input(session_json.as_deref())
-            .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?;
-
-        let options =
-            parse_query_execution_options(settled_tier.as_deref(), options_json.as_deref())
-                .map_err(|e| JsError::new(&e))?;
+        let session = parse_session_json(session_json)?;
+        let (durability, propagation, transaction_overlay) =
+            parse_read_durability_options(settled_tier, options_json)?;
 
         let (future, runtime_schema) = {
             let mut core = self.core.borrow_mut();
             (
-                match options.transaction_overlay {
+                match transaction_overlay {
                     Some(overlay) => core.query_with_local_overlay(
                         query,
                         session,
-                        options.durability,
-                        options.propagation,
+                        durability,
+                        propagation,
                         overlay,
                     ),
-                    None => core.query_with_propagation(
-                        query,
-                        session,
-                        options.durability,
-                        options.propagation,
-                    ),
+                    None => core.query_with_propagation(query, session, durability, propagation),
                 },
                 core.current_schema().clone(),
             )
@@ -886,11 +1025,22 @@ impl WasmRuntime {
                 .await
                 .map_err(|e| JsValue::from_str(&format!("Query failed: {:?}", e)))?;
 
-            let payload = serialize_query_rows_json(
+            let results = align_query_rows_to_declared_schema(
                 &declared_schema,
                 &runtime_schema,
                 &query_for_alignment,
                 results,
+            );
+            let payload = serde_json::Value::Array(
+                results
+                    .into_iter()
+                    .map(|(id, values)| {
+                        serde_json::json!({
+                            "id": id.uuid().to_string(),
+                            "values": values,
+                        })
+                    })
+                    .collect(),
             );
 
             let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -1233,24 +1383,19 @@ impl WasmRuntime {
         options_json: Option<String>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
-        let input = parse_subscription_input(
-            query_json,
-            session_json.as_deref(),
-            settled_tier.as_deref(),
-            options_json.as_deref(),
-        )
-        .map_err(|e| JsError::new(&e))?;
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
         let callback = make_subscription_callback(on_update);
 
         let handle = self
             .core
             .borrow_mut()
             .subscribe_with_durability_and_propagation(
-                input.query,
+                query,
                 callback,
-                input.session,
-                input.durability,
-                input.propagation,
+                session,
+                durability,
+                propagation,
             )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
@@ -1282,20 +1427,13 @@ impl WasmRuntime {
         options_json: Option<String>,
     ) -> Result<f64, JsError> {
         let _span = debug_span!("wasm::createSubscription", tier = self.tier_label).entered();
-        let input = parse_subscription_input(
-            query_json,
-            session_json.as_deref(),
-            settled_tier.as_deref(),
-            options_json.as_deref(),
-        )
-        .map_err(|e| JsError::new(&e))?;
+        let (query, session, durability, propagation) =
+            parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
 
-        let handle = self.core.borrow_mut().create_subscription(
-            input.query,
-            input.session,
-            input.durability,
-            input.propagation,
-        );
+        let handle =
+            self.core
+                .borrow_mut()
+                .create_subscription(query, session, durability, propagation);
 
         tracing::debug!(handle = handle.0, "subscription created (pending)");
         Ok(handle.0 as f64)
