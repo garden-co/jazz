@@ -3,11 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use jazz_tools::binding_support::parse_external_object_id;
-use jazz_tools::client_core::{
-    ClientConfig, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost, WriteOptions,
-    WriteResultCore,
-};
+use jazz_tools::client_core::{ClientConfig, JazzClientCore, LocalRuntimeHost, WriteOptions};
 use jazz_tools::query_manager::types::{RowPolicyMode, Value};
+use jazz_tools::runtime_core::DirectInsertResult;
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::MemoryStorage;
@@ -25,11 +23,12 @@ struct WasmClientInsertResult {
     batch_id: String,
 }
 
-fn serialize_insert_result(result: WriteResultCore) -> Result<JsValue, JsError> {
+fn serialize_insert_result(result: DirectInsertResult) -> Result<JsValue, JsError> {
+    let ((id, values), batch_id) = result;
     let payload = WasmClientInsertResult {
-        id: result.row.id.uuid().to_string(),
-        values: result.row.values,
-        batch_id: result.handle.batch_id.to_string(),
+        id: id.uuid().to_string(),
+        values,
+        batch_id: batch_id.to_string(),
     };
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     payload
@@ -72,14 +71,10 @@ impl WasmJazzClient {
 
         let runtime = RuntimeCore::new(schema_manager, MemoryStorage::new(), NoopScheduler);
         let host = LocalRuntimeHost::new(Rc::new(RefCell::new(runtime)));
-        let mut config = ClientConfig::memory_for_test(app_id, schema);
-        config.env = env.to_string();
-        config.user_branch = user_branch.to_string();
-        config.runtime_flavor = ClientRuntimeFlavor::BrowserMainThread;
+        let config = ClientConfig::new(env, user_branch);
 
         Ok(Self {
-            inner: JazzClientCore::from_runtime_host(config, host)
-                .map_err(|error| JsError::new(&error.to_string()))?,
+            inner: JazzClientCore::from_runtime_host(config, host),
         })
     }
 

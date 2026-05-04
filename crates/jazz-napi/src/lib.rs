@@ -35,8 +35,7 @@ use jazz_tools::binding_support::{
     subscription_delta_to_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
 };
 use jazz_tools::client_core::{
-    ClientConfig, ClientError, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost,
-    WriteOptions, WriteResultCore,
+    ClientConfig, ClientError, JazzClientCore, SharedRuntimeHost, WriteOptions,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -44,7 +43,9 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
-use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle};
+use jazz_tools::runtime_core::{
+    DirectInsertResult, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+};
 use jazz_tools::schema_manager::AppId;
 use jazz_tools::server::{
     CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
@@ -371,15 +372,11 @@ fn build_napi_runtime(
         storage,
         tier,
     )?;
-    let mut client_config = ClientConfig::memory_for_test(app_id, declared_schema.clone());
-    client_config.env = jazz_env;
-    client_config.user_branch = user_branch;
-    client_config.runtime_flavor = ClientRuntimeFlavor::Node;
+    let client_config = ClientConfig::new(jazz_env, user_branch);
     let client = JazzClientCore::from_runtime_host(
         client_config,
         SharedRuntimeHost::new(Arc::clone(&core_arc)),
-    )
-    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    );
 
     Ok(NapiRuntime {
         core: core_arc,
@@ -496,7 +493,7 @@ fn napi_jazz_client_insert_result_to_json(
     declared_schema: &Schema,
     current_schema: &Schema,
     table_name: &TableName,
-    result: WriteResultCore,
+    result: DirectInsertResult,
 ) -> serde_json::Value {
     serialize_write_result(declared_schema, current_schema, table_name, result)
 }
@@ -521,16 +518,13 @@ impl NapiJazzClient {
             Box::new(open_sqlite_storage(&data_path)?),
             None,
         )?;
-        let mut config = ClientConfig::memory_for_test(app_id, declared_schema.clone());
-        config.env = jazz_env;
-        config.user_branch = user_branch;
-        config.runtime_flavor = ClientRuntimeFlavor::Node;
+        let config = ClientConfig::new(jazz_env, user_branch);
 
         Ok(Self {
-            inner: Mutex::new(
-                JazzClientCore::from_runtime_host(config, SharedRuntimeHost::new(core.clone()))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            inner: Mutex::new(JazzClientCore::from_runtime_host(
+                config,
+                SharedRuntimeHost::new(core.clone()),
+            )),
             core,
             declared_schema,
         })
@@ -557,7 +551,12 @@ impl NapiJazzClient {
         let result = client
             .insert(&table, values.0, options)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let current_schema = client.current_schema();
+        let current_schema = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .current_schema()
+            .clone();
         Ok(napi_jazz_client_insert_result_to_json(
             &self.declared_schema,
             &current_schema,
