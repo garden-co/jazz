@@ -65,6 +65,7 @@ let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init c
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
+let rejectedBatchReplayQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
@@ -73,6 +74,47 @@ let peerTermByPeerId = new Map<string, number>();
 let currentAuth: Record<string, string> = {};
 // Stored after init so reconnect-upstream can re-establish the WS.
 let currentWsUrl: string | null = null;
+
+function syncRetainedLocalBatchRecordsToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batches = runtime.loadLocalBatchRecords?.() ?? [];
+    post({ type: "local-batch-records-sync", batches });
+  } catch (error) {
+    console.warn("[worker] loadLocalBatchRecords failed:", error);
+  }
+}
+
+function replayNewlyRejectedBatchesToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
+    for (const batchId of batchIds) {
+      const batch = runtime.loadLocalBatchRecord?.(batchId);
+      if (batch?.latestSettlement?.kind !== "rejected") {
+        continue;
+      }
+      post({ type: "mutation-error-replay", batch });
+    }
+  } catch (error) {
+    console.warn("[worker] drainRejectedBatchIds failed:", error);
+  }
+}
+
+function queueRejectedBatchReplayToMain(): void {
+  if (rejectedBatchReplayQueued) {
+    return;
+  }
+  rejectedBatchReplayQueued = true;
+  queueMicrotask(() => {
+    rejectedBatchReplayQueued = false;
+    replayNewlyRejectedBatchesToMain();
+  });
+}
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -366,6 +408,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
             enqueueSyncMessageForMain(payload, sequence);
+            queueRejectedBatchReplayToMain();
             return;
           }
 
@@ -423,6 +466,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
     } finally {
       bootstrapCatalogueForwarding = false;
     }
+
+    syncRetainedLocalBatchRecordsToMain();
+    queueRejectedBatchReplayToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 
@@ -575,6 +621,14 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
+      break;
+
+    case "acknowledge-rejected-batch":
+      try {
+        runtime?.acknowledgeRejectedBatch?.(msg.batchId);
+      } catch (error) {
+        console.warn("[worker] acknowledgeRejectedBatch failed:", error);
+      }
       break;
 
     case "simulate-crash":

@@ -5,6 +5,7 @@
  */
 
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
+import type { LocalBatchRecord } from "../runtime/client.js";
 import type { AuthFailureReason } from "../runtime/sync-transport.js";
 
 // ============================================================================
@@ -101,6 +102,12 @@ export interface ShutdownMessage {
   type: "shutdown";
 }
 
+/** Acknowledge that the main thread already handled a replayable rejection. */
+export interface AcknowledgeRejectedBatchMessage {
+  type: "acknowledge-rejected-batch";
+  batchId: string;
+}
+
 /**
  * Simulate a crash: release OPFS handles without flushing snapshot.
  * Used for testing WAL recovery. Worker closes OPFS locks and confirms
@@ -132,6 +139,7 @@ export type MainToWorkerMessage =
   | DisconnectUpstreamMessage
   | ReconnectUpstreamMessage
   | ShutdownMessage
+  | AcknowledgeRejectedBatchMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage
   | DebugSeedLiveSchemaMessage;
@@ -173,6 +181,18 @@ export interface PeerSyncToMainMessage {
   peerId: string;
   term: number;
   payload: Uint8Array[];
+}
+
+/** Replay a persisted rejected batch that was not acknowledged before restart. */
+export interface MutationErrorReplayMessage {
+  type: "mutation-error-replay";
+  batch: LocalBatchRecord;
+}
+
+/** Sync retained local batch records from the worker into the main runtime overlay. */
+export interface LocalBatchRecordsSyncMessage {
+  type: "local-batch-records-sync";
+  batches: LocalBatchRecord[];
 }
 
 /** Worker encountered an error. */
@@ -223,6 +243,8 @@ export type WorkerToMainMessage =
   | UpstreamDisconnectedMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
+  | MutationErrorReplayMessage
+  | LocalBatchRecordsSyncMessage
   | ErrorMessage
   | WorkerAuthFailedMessage
   | ShutdownOkMessage
