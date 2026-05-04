@@ -2,7 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use jazz_tools::binding_support::parse_external_object_id;
+use jazz_tools::binding_support::{
+    binding_write_options, commit_batch_json, delete_in_batch_json, insert_in_batch_json,
+    parse_external_object_id, parse_object_id_input, record_to_updates, update_in_batch_json,
+};
 use jazz_tools::client_core::{
     ClientConfig, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost, WriteBatchContextCore,
     WriteOptions, WriteResultCore,
@@ -25,12 +28,6 @@ struct WasmClientInsertResult {
     batch_id: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WasmClientMutationResult {
-    batch_id: String,
-}
-
 fn serialize_insert_result(result: WriteResultCore) -> Result<JsValue, JsError> {
     let payload = WasmClientInsertResult {
         id: result.row.id.uuid().to_string(),
@@ -39,6 +36,13 @@ fn serialize_insert_result(result: WriteResultCore) -> Result<JsValue, JsError> 
     };
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     payload
+        .serialize(&serializer)
+        .map_err(|error| JsError::new(&format!("Serialization failed: {error:?}")))
+}
+
+fn serialize_json_to_js(value: serde_json::Value) -> Result<JsValue, JsError> {
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    value
         .serialize(&serializer)
         .map_err(|error| JsError::new(&format!("Serialization failed: {error:?}")))
 }
@@ -144,19 +148,17 @@ impl WasmJazzClientBatch {
         let values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let object_id = parse_external_object_id(object_id.as_deref())
             .map_err(|message| JsError::new(&message))?;
-        let result = self
-            .inner
-            .insert_in_batch(
-                context,
-                table,
-                values,
-                Some(WriteOptions {
-                    object_id,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| JsError::new(&error.to_string()))?;
-        serialize_insert_result(result)
+        let declared_schema = self.inner.config().schema.clone();
+        let payload = insert_in_batch_json(
+            &mut self.inner,
+            &declared_schema,
+            context,
+            table,
+            values,
+            binding_write_options(object_id, None),
+        )
+        .map_err(|error| JsError::new(&error.to_string()))?;
+        serialize_json_to_js(payload)
     }
 
     #[wasm_bindgen]
@@ -165,21 +167,18 @@ impl WasmJazzClientBatch {
             .context
             .as_ref()
             .ok_or_else(|| JsError::new("Direct batch has already been committed"))?;
-        let object_id = parse_external_object_id(Some(object_id))
-            .map_err(|message| JsError::new(&message))?
-            .ok_or_else(|| JsError::new("Object id is required"))?;
+        let object_id =
+            parse_object_id_input(Some(object_id)).map_err(|message| JsError::new(&message))?;
         let values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let handle = self
-            .inner
-            .update_in_batch(context, object_id, values.into_iter().collect(), None)
-            .map_err(|error| JsError::new(&error.to_string()))?;
-        let payload = WasmClientMutationResult {
-            batch_id: handle.batch_id.to_string(),
-        };
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        payload
-            .serialize(&serializer)
-            .map_err(|error| JsError::new(&format!("Serialization failed: {error:?}")))
+        let payload = update_in_batch_json(
+            &mut self.inner,
+            context,
+            object_id,
+            record_to_updates(values),
+            None,
+        )
+        .map_err(|error| JsError::new(&error.to_string()))?;
+        serialize_json_to_js(payload)
     }
 
     #[wasm_bindgen(js_name = delete)]
@@ -188,20 +187,11 @@ impl WasmJazzClientBatch {
             .context
             .as_ref()
             .ok_or_else(|| JsError::new("Direct batch has already been committed"))?;
-        let object_id = parse_external_object_id(Some(object_id))
-            .map_err(|message| JsError::new(&message))?
-            .ok_or_else(|| JsError::new("Object id is required"))?;
-        let handle = self
-            .inner
-            .delete_in_batch(context, object_id, None)
+        let object_id =
+            parse_object_id_input(Some(object_id)).map_err(|message| JsError::new(&message))?;
+        let payload = delete_in_batch_json(&mut self.inner, context, object_id, None)
             .map_err(|error| JsError::new(&error.to_string()))?;
-        let payload = WasmClientMutationResult {
-            batch_id: handle.batch_id.to_string(),
-        };
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        payload
-            .serialize(&serializer)
-            .map_err(|error| JsError::new(&format!("Serialization failed: {error:?}")))
+        serialize_json_to_js(payload)
     }
 
     #[wasm_bindgen]
@@ -210,16 +200,8 @@ impl WasmJazzClientBatch {
             .context
             .take()
             .ok_or_else(|| JsError::new("Direct batch has already been committed"))?;
-        let handle = self
-            .inner
-            .commit_batch_context(context)
+        let payload = commit_batch_json(&mut self.inner, context)
             .map_err(|error| JsError::new(&error.to_string()))?;
-        let payload = WasmClientMutationResult {
-            batch_id: handle.batch_id.to_string(),
-        };
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        payload
-            .serialize(&serializer)
-            .map_err(|error| JsError::new(&format!("Serialization failed: {error:?}")))
+        serialize_json_to_js(payload)
     }
 }

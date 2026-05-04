@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use jazz_tools::binding_support::parse_external_object_id;
 use js_sys::Function;
 use js_sys::Uint8Array;
 use serde::Serialize;
@@ -60,13 +59,14 @@ fn wasm_log_level_from_global() -> tracing::Level {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{
-    client_error_message, parse_batch_id_input, serialize_local_batch_record,
-    serialize_local_batch_records, serialize_write_handle, serialize_write_result,
+    binding_write_options, client_error_message, delete_unsealed_json, insert_unsealed_json,
+    parse_batch_id_input, parse_external_object_id, parse_object_id_input, record_to_updates,
+    serialize_local_batch_record, serialize_local_batch_records, update_unsealed_json,
 };
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::client_core::ClientStorageMode;
 use jazz_tools::client_core::{
-    ClientConfig, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost, WriteOptions,
+    ClientConfig, ClientRuntimeFlavor, JazzClientCore, LocalRuntimeHost,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -80,7 +80,7 @@ use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::Schema;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
-use jazz_tools::query_manager::types::{SchemaHash, TableName, Value};
+use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
 };
@@ -891,23 +891,15 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut client = self.client.borrow_mut();
-        let result = client
-            .insert_unsealed(
-                table,
-                named_values,
-                Some(WriteOptions {
-                    object_id,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
-        let current_schema = client.current_schema();
-        let payload = serialize_write_result(
-            &client.config().schema,
-            &current_schema,
-            &TableName::new(table),
-            result,
-        );
+        let declared_schema = client.config().schema.clone();
+        let payload = insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            table,
+            named_values,
+            binding_write_options(object_id, None),
+        )
+        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
         tracing::debug!("inserted");
         serialize_json_to_js(payload)
     }
@@ -928,24 +920,15 @@ impl WasmRuntime {
             .map_err(|message| JsError::new(&message))?;
 
         let mut client = self.client.borrow_mut();
-        let result = client
-            .insert_unsealed(
-                table,
-                named_values,
-                Some(WriteOptions {
-                    object_id,
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
-        let current_schema = client.current_schema();
-        let payload = serialize_write_result(
-            &client.config().schema,
-            &current_schema,
-            &TableName::new(table),
-            result,
-        );
+        let declared_schema = client.config().schema.clone();
+        let payload = insert_unsealed_json(
+            &mut client,
+            &declared_schema,
+            table,
+            named_values,
+            binding_write_options(object_id, write_context),
+        )
+        .map_err(|error| JsError::new(&client_error_message("Insert", &error)))?;
         tracing::debug!("inserted_with_session");
         serialize_json_to_js(payload)
     }
@@ -1007,20 +990,17 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut client = self.client.borrow_mut();
-        let handle = client
-            .update_unsealed(oid, updates, None)
-            .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
+        let payload =
+            update_unsealed_json(&mut client, oid, record_to_updates(partial_values), None)
+                .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
 
         tracing::debug!(object_id, "updated");
-        serialize_json_to_js(serialize_write_handle(handle))
+        serialize_json_to_js(payload)
     }
 
     /// Update a row by ObjectId as an explicit session principal.
@@ -1038,45 +1018,36 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
         let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
-        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut client = self.client.borrow_mut();
-        let handle = client
-            .update_unsealed(
-                oid,
-                updates,
-                Some(WriteOptions {
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
+        let payload = update_unsealed_json(
+            &mut client,
+            oid,
+            record_to_updates(partial_values),
+            binding_write_options(None, write_context),
+        )
+        .map_err(|error| JsError::new(&client_error_message("Update", &error)))?;
 
         tracing::debug!(object_id, "updated_with_session");
-        serialize_json_to_js(serialize_write_handle(handle))
+        serialize_json_to_js(payload)
     }
 
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
 
         let mut client = self.client.borrow_mut();
-        let handle = client
-            .delete_unsealed(oid, None)
+        let payload = delete_unsealed_json(&mut client, oid, None)
             .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
 
         tracing::debug!(object_id, "deleted");
-        serialize_json_to_js(serialize_write_handle(handle))
+        serialize_json_to_js(payload)
     }
 
     /// Delete a row by ObjectId as an explicit session principal.
@@ -1088,24 +1059,16 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let _span =
             debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(object_id)).map_err(|e| JsError::new(&e))?;
         let write_context = parse_write_context_json(write_context_json)?;
 
         let mut client = self.client.borrow_mut();
-        let handle = client
-            .delete_unsealed(
-                oid,
-                Some(WriteOptions {
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
+        let payload =
+            delete_unsealed_json(&mut client, oid, binding_write_options(None, write_context))
+                .map_err(|error| JsError::new(&client_error_message("Delete", &error)))?;
 
         tracing::debug!(object_id, "deleted_with_session");
-        serialize_json_to_js(serialize_write_handle(handle))
+        serialize_json_to_js(payload)
     }
 
     // =========================================================================

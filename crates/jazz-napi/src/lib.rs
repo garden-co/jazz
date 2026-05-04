@@ -23,12 +23,14 @@ use std::sync::{Arc, Mutex, Weak};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, client_error_message, current_timestamp_ms,
-    generate_id as generate_binding_id, parse_batch_id_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
-    serialize_write_handle, serialize_write_result, subscription_delta_to_json,
+    align_query_rows_to_declared_schema, binding_write_options, client_error_message,
+    commit_batch_json, current_timestamp_ms, delete_in_batch_json, delete_unsealed_json,
+    generate_id as generate_binding_id, insert_in_batch_json, insert_unsealed_json,
+    parse_batch_id_input, parse_durability_tier as parse_binding_tier, parse_external_object_id,
+    parse_object_id_input, parse_query_input, parse_runtime_schema_input, parse_session_input,
+    parse_write_context_input, query_rows_can_be_schema_aligned, record_to_updates,
+    serialize_local_batch_record, serialize_local_batch_records, serialize_write_result,
+    subscription_delta_to_json, update_in_batch_json, update_unsealed_json,
 };
 use jazz_tools::client_core::{
     ClientConfig, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost, WriteBatchContextCore,
@@ -54,10 +56,6 @@ use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
-
-fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
-    values.into_iter().collect()
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "value")]
@@ -674,10 +672,6 @@ impl NapiJazzClientBatch {
     ) -> napi::Result<serde_json::Value> {
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let options = object_id.map(|object_id| WriteOptions {
-            object_id: Some(object_id),
-            ..Default::default()
-        });
         let context = self
             .context
             .lock()
@@ -685,22 +679,19 @@ impl NapiJazzClientBatch {
         let context = context
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("Direct batch has already been committed"))?;
-        let table_name = TableName::new(table.clone());
         let mut client = self
             .inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let result = client
-            .insert_in_batch(context, &table, values.0, options)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let current_schema = client.current_schema();
-
-        Ok(napi_jazz_client_insert_result_to_json(
+        insert_in_batch_json(
+            &mut client,
             &self.declared_schema,
-            &current_schema,
-            &table_name,
-            result,
-        ))
+            context,
+            &table,
+            values.0,
+            binding_write_options(object_id, None),
+        )
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi]
@@ -710,9 +701,7 @@ impl NapiJazzClientBatch {
         #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
     ) -> napi::Result<serde_json::Value> {
         let object_id =
-            parse_external_object_id(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let object_id =
-            object_id.ok_or_else(|| napi::Error::from_reason("Object id is required"))?;
+            parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
         let context = self
             .context
             .lock()
@@ -724,19 +713,20 @@ impl NapiJazzClientBatch {
             .inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .update_in_batch(context, object_id, convert_updates(values.0), None)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-
-        Ok(serialize_write_handle(handle))
+        update_in_batch_json(
+            &mut client,
+            context,
+            object_id,
+            record_to_updates(values.0),
+            None,
+        )
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "delete")]
     pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
         let object_id =
-            parse_external_object_id(Some(&object_id)).map_err(napi::Error::from_reason)?;
-        let object_id =
-            object_id.ok_or_else(|| napi::Error::from_reason("Object id is required"))?;
+            parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
         let context = self
             .context
             .lock()
@@ -748,11 +738,8 @@ impl NapiJazzClientBatch {
             .inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .delete_in_batch(context, object_id, None)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-
-        Ok(serialize_write_handle(handle))
+        delete_in_batch_json(&mut client, context, object_id, None)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi]
@@ -768,11 +755,8 @@ impl NapiJazzClientBatch {
             .inner
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .commit_batch_context(context)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-
-        Ok(serialize_write_handle(handle))
+        commit_batch_json(&mut client, context)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 }
 
@@ -836,29 +820,18 @@ impl NapiRuntime {
     ) -> napi::Result<serde_json::Value> {
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-        let table_name = TableName::new(table.clone());
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let result = client
-            .insert_unsealed(
-                &table,
-                values.0,
-                Some(WriteOptions {
-                    object_id,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))?;
-        let current_schema = client.current_schema();
-
-        Ok(serialize_write_result(
+        insert_unsealed_json(
+            &mut client,
             &self.declared_schema,
-            &current_schema,
-            &table_name,
-            result,
-        ))
+            &table,
+            values.0,
+            binding_write_options(object_id, None),
+        )
+        .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))
     }
 
     #[napi(js_name = "insertWithSession")]
@@ -873,30 +846,18 @@ impl NapiRuntime {
         let object_id =
             parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
 
-        let table_name = TableName::new(table.clone());
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let result = client
-            .insert_unsealed(
-                &table,
-                values.0,
-                Some(WriteOptions {
-                    object_id,
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))?;
-        let current_schema = client.current_schema();
-
-        Ok(serialize_write_result(
+        insert_unsealed_json(
+            &mut client,
             &self.declared_schema,
-            &current_schema,
-            &table_name,
-            result,
-        ))
+            &table,
+            values.0,
+            binding_write_options(object_id, write_context),
+        )
+        .map_err(|error| napi::Error::from_reason(client_error_message("Insert", &error)))
     }
 
     #[napi]
@@ -905,21 +866,14 @@ impl NapiRuntime {
         object_id: String,
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
     ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let updates = convert_updates(values.0);
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
 
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .update_unsealed(oid, updates, None)
-            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))?;
-
-        Ok(serialize_write_handle(handle))
+        update_unsealed_json(&mut client, oid, record_to_updates(values.0), None)
+            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))
     }
 
     #[napi(js_name = "updateWithSession")]
@@ -929,46 +883,32 @@ impl NapiRuntime {
         #[napi(ts_arg_type = "any")] values: FfiRecordArg,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
         let write_context = parse_write_context_json(write_context_json)?;
-
-        let updates = convert_updates(values.0);
 
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .update_unsealed(
-                oid,
-                updates,
-                Some(WriteOptions {
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))?;
-
-        Ok(serialize_write_handle(handle))
+        update_unsealed_json(
+            &mut client,
+            oid,
+            record_to_updates(values.0),
+            binding_write_options(None, write_context),
+        )
+        .map_err(|error| napi::Error::from_reason(client_error_message("Update", &error)))
     }
 
     #[napi(js_name = "delete")]
     pub fn delete_row(&self, object_id: String) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
 
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .delete_unsealed(oid, None)
-            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))?;
-
-        Ok(serialize_write_handle(handle))
+        delete_unsealed_json(&mut client, oid, None)
+            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))
     }
 
     #[napi(js_name = "deleteWithSession")]
@@ -977,26 +917,15 @@ impl NapiRuntime {
         object_id: String,
         write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(Some(&object_id)).map_err(napi::Error::from_reason)?;
         let write_context = parse_write_context_json(write_context_json)?;
 
         let mut client = self
             .client
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = client
-            .delete_unsealed(
-                oid,
-                Some(WriteOptions {
-                    write_context,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))?;
-
-        Ok(serialize_write_handle(handle))
+        delete_unsealed_json(&mut client, oid, binding_write_options(None, write_context))
+            .map_err(|error| napi::Error::from_reason(client_error_message("Delete", &error)))
     }
 
     #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]
