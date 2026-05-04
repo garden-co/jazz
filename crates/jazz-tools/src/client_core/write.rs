@@ -93,8 +93,8 @@ pub(crate) fn write_context(
     Some(context)
 }
 
-fn runtime_error(error: impl ToString) -> ClientError {
-    ClientError::new(error.to_string())
+fn runtime_error(error: impl std::fmt::Debug + std::fmt::Display) -> ClientError {
+    ClientError::from_runtime(&error)
 }
 
 impl<H: ClientRuntimeHost> JazzClientCore<H> {
