@@ -158,6 +158,88 @@ fn direct_batch_uses_one_rust_generated_batch_id() {
 }
 
 #[test]
+fn direct_batch_context_is_owned_for_binding_adapters() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("owned-direct-batch-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let batch = client.begin_direct_batch_context();
+    assert!(
+        client
+            .current_schema()
+            .contains_key(&TableName::new("users"))
+    );
+
+    let alice = client
+        .insert_in_batch(
+            &batch,
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+        )
+        .expect("first insert should succeed");
+    let bob = client
+        .insert_in_batch(
+            &batch,
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            None,
+        )
+        .expect("second insert should succeed");
+    let handle = client
+        .commit_batch_context(batch)
+        .expect("batch commit should seal");
+
+    assert_eq!(alice.handle.batch_id, bob.handle.batch_id);
+    assert_eq!(alice.handle.batch_id, handle.batch_id);
+}
+
+#[test]
+fn direct_batch_context_supports_update_and_delete_for_binding_adapters() {
+    let schema = users_schema();
+    let mut client = JazzClientCore::from_runtime_parts(
+        ClientConfig::memory_for_test("owned-direct-batch-mutations-test", schema.clone()),
+        test_runtime(schema),
+    )
+    .unwrap();
+
+    let user_id = ObjectId::new();
+    let batch = client.begin_direct_batch_context();
+    let inserted = client
+        .insert_in_batch(
+            &batch,
+            "users",
+            user_insert_values(user_id, "Alice"),
+            Some(WriteOptions {
+                object_id: Some(user_id),
+                ..Default::default()
+            }),
+        )
+        .expect("insert should succeed");
+    let updated = client
+        .update_in_batch(
+            &batch,
+            user_id,
+            vec![("name".to_string(), Value::Text("Alicia".to_string()))],
+            None,
+        )
+        .expect("update should succeed");
+    let deleted = client
+        .delete_in_batch(&batch, user_id, None)
+        .expect("delete should succeed");
+    let handle = client
+        .commit_batch_context(batch)
+        .expect("batch commit should seal");
+
+    assert_eq!(inserted.handle.batch_id, updated.batch_id);
+    assert_eq!(inserted.handle.batch_id, deleted.batch_id);
+    assert_eq!(inserted.handle.batch_id, handle.batch_id);
+}
+
+#[test]
 fn transaction_commit_returns_transactional_batch_handle() {
     let schema = users_schema();
     let mut client = JazzClientCore::from_runtime_parts(

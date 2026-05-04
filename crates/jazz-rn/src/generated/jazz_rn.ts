@@ -682,6 +682,197 @@ const FfiConverterTypeJazzRnError = (() => {
   return new FFIConverter();
 })();
 
+export interface RnDirectBatchInterface {
+  commit() /*throws*/ : string;
+  delete_(objectId: string) /*throws*/ : string;
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ) /*throws*/ : string;
+  update(objectId: string, valuesJson: string) /*throws*/ : string;
+}
+
+export class RnDirectBatch
+  extends UniffiAbstractObject
+  implements RnDirectBatchInterface
+{
+  readonly [uniffiTypeNameSymbol] = 'RnDirectBatch';
+  readonly [destructorGuardSymbol]: UniffiGcObject;
+  readonly [pointerLiteralSymbol]: UniffiHandle;
+  // No primary constructor declared for this class.
+  private constructor(pointer: UniffiHandle) {
+    super();
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] =
+      uniffiTypeRnDirectBatchObjectFactory.bless(pointer);
+  }
+
+  commit(): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_commit(
+            uniffiTypeRnDirectBatchObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  delete_(objectId: string): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_delete(
+            uniffiTypeRnDirectBatchObjectFactory.clonePointer(this),
+            FfiConverterString.lower(objectId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  insert(
+    table: string,
+    valuesJson: string,
+    objectId: string | undefined
+  ): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_insert(
+            uniffiTypeRnDirectBatchObjectFactory.clonePointer(this),
+            FfiConverterString.lower(table),
+            FfiConverterString.lower(valuesJson),
+            FfiConverterOptionalString.lower(objectId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  update(objectId: string, valuesJson: string): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndirectbatch_update(
+            uniffiTypeRnDirectBatchObjectFactory.clonePointer(this),
+            FfiConverterString.lower(objectId),
+            FfiConverterString.lower(valuesJson),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
+   */
+  uniffiDestroy(): void {
+    const ptr = (this as any)[destructorGuardSymbol];
+    if (ptr !== undefined) {
+      const pointer = uniffiTypeRnDirectBatchObjectFactory.pointer(this);
+      uniffiTypeRnDirectBatchObjectFactory.freePointer(pointer);
+      uniffiTypeRnDirectBatchObjectFactory.unbless(ptr);
+      delete (this as any)[destructorGuardSymbol];
+    }
+  }
+
+  static instanceOf(obj: any): obj is RnDirectBatch {
+    return uniffiTypeRnDirectBatchObjectFactory.isConcreteType(obj);
+  }
+}
+
+const uniffiTypeRnDirectBatchObjectFactory: UniffiObjectFactory<RnDirectBatchInterface> =
+  (() => {
+    return {
+      create(pointer: UniffiHandle): RnDirectBatchInterface {
+        const instance = Object.create(RnDirectBatch.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = 'RnDirectBatch';
+        return instance;
+      },
+
+      bless(p: UniffiHandle): UniffiGcObject {
+        return uniffiCaller.rustCall(
+          /*caller:*/ (status) =>
+            nativeModule().ubrn_uniffi_internal_fn_method_rndirectbatch_ffi__bless_pointer(
+              p,
+              status
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      unbless(ptr: UniffiGcObject) {
+        ptr.markDestroyed();
+      },
+
+      pointer(obj: RnDirectBatchInterface): UniffiHandle {
+        if ((obj as any)[destructorGuardSymbol] === undefined) {
+          throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj as any)[pointerLiteralSymbol];
+      },
+
+      clonePointer(obj: RnDirectBatchInterface): UniffiHandle {
+        const pointer = this.pointer(obj);
+        return uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_jazz_rn_fn_clone_rndirectbatch(
+              pointer,
+              callStatus
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      freePointer(pointer: UniffiHandle): void {
+        uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_jazz_rn_fn_free_rndirectbatch(
+              pointer,
+              callStatus
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      isConcreteType(obj: any): obj is RnDirectBatchInterface {
+        return (
+          obj[destructorGuardSymbol] &&
+          obj[uniffiTypeNameSymbol] === 'RnDirectBatch'
+        );
+      },
+    };
+  })();
+// FfiConverter for RnDirectBatchInterface
+const FfiConverterTypeRnDirectBatch = new FfiConverterObject(
+  uniffiTypeRnDirectBatchObjectFactory
+);
+
 export interface RnRuntimeInterface {
   acknowledgeRejectedBatch(batchId: string) /*throws*/ : boolean;
   addClient() /*throws*/ : string;
@@ -690,6 +881,7 @@ export interface RnRuntimeInterface {
    * Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
    */
   batchedTick() /*throws*/ : void;
+  beginDirectBatch() /*throws*/ : RnDirectBatchInterface;
   /**
    * Flush and close the underlying storage, releasing filesystem locks.
    */
@@ -891,6 +1083,23 @@ export class RnRuntime
         );
       },
       /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  beginDirectBatch(): RnDirectBatchInterface /*throws*/ {
+    return FfiConverterTypeRnDirectBatch.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_begin_direct_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
     );
   }
 
@@ -1575,6 +1784,38 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_commit() !==
+    3866
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndirectbatch_commit'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_delete() !==
+    25936
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndirectbatch_delete'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_insert() !==
+    65001
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndirectbatch_insert'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndirectbatch_update() !==
+    49043
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndirectbatch_update'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch() !==
     54914
   ) {
@@ -1604,6 +1845,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_batched_tick'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch() !==
+    43864
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_begin_direct_batch'
     );
   }
   if (
@@ -1864,6 +2113,7 @@ export default Object.freeze({
   initialize: uniffiEnsureInitialized,
   converters: {
     FfiConverterTypeJazzRnError,
+    FfiConverterTypeRnDirectBatch,
     FfiConverterTypeRnRuntime,
   },
 });

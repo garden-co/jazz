@@ -106,10 +106,22 @@ declare module "jazz-wasm" {
 
   export class WasmJazzClient {
     constructor(schemaJson: string, appId: string, env: string, userBranch: string);
+    beginDirectBatch(): WasmJazzClientBatch;
     insert(
       table: string,
       values: InsertValues,
       objectId?: string | null,
     ): { id: string; values: any[]; batchId: string };
+  }
+
+  export class WasmJazzClientBatch {
+    insert(
+      table: string,
+      values: InsertValues,
+      objectId?: string | null,
+    ): { id: string; values: any[]; batchId: string };
+    update(objectId: string, values: InsertValues): { batchId: string };
+    delete(objectId: string): { batchId: string };
+    commit(): { batchId: string };
   }
 }

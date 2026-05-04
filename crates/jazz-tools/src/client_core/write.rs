@@ -43,13 +43,13 @@ pub enum BatchWaitOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BatchContext {
+pub struct WriteBatchContextCore {
     mode: BatchMode,
     batch_id: BatchId,
     target_branch_name: String,
 }
 
-impl BatchContext {
+impl WriteBatchContextCore {
     fn new(mode: BatchMode, env: &str, schema_hash: SchemaHash, user_branch: &str) -> Self {
         Self {
             mode,
@@ -59,11 +59,15 @@ impl BatchContext {
                 .to_string(),
         }
     }
+
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
 }
 
 pub(crate) fn write_context(
     options: &WriteOptions,
-    batch_context: Option<&BatchContext>,
+    batch_context: Option<&WriteBatchContextCore>,
 ) -> Option<WriteContext> {
     if options.session.is_none()
         && options.attribution.is_none()
@@ -150,15 +154,19 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
             .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))
     }
 
-    pub fn begin_direct_batch(&mut self) -> DirectBatchCore<'_, H> {
+    pub fn begin_direct_batch_context(&self) -> WriteBatchContextCore {
         let schema = self.current_schema();
         let schema_hash = SchemaHash::compute(&schema);
-        let context = BatchContext::new(
+        WriteBatchContextCore::new(
             BatchMode::Direct,
             &self.config().env,
             schema_hash,
             &self.config().user_branch,
-        );
+        )
+    }
+
+    pub fn begin_direct_batch(&mut self) -> DirectBatchCore<'_, H> {
+        let context = self.begin_direct_batch_context();
 
         DirectBatchCore {
             client: self,
@@ -166,20 +174,88 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         }
     }
 
-    pub fn begin_transaction(&mut self) -> TransactionCore<'_, H> {
+    pub fn begin_transaction_context(&self) -> WriteBatchContextCore {
         let schema = self.current_schema();
         let schema_hash = SchemaHash::compute(&schema);
-        let context = BatchContext::new(
+        WriteBatchContextCore::new(
             BatchMode::Transactional,
             &self.config().env,
             schema_hash,
             &self.config().user_branch,
-        );
+        )
+    }
+
+    pub fn begin_transaction(&mut self) -> TransactionCore<'_, H> {
+        let context = self.begin_transaction_context();
 
         TransactionCore {
             client: self,
             context,
         }
+    }
+
+    pub fn insert_in_batch(
+        &mut self,
+        batch_context: &WriteBatchContextCore,
+        table: &str,
+        values: HashMap<String, Value>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteResultCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, Some(batch_context));
+        let ((id, values), batch_id) = self
+            .with_runtime_mut(|runtime| {
+                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
+            })
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteResultCore {
+            row: ClientRow { id, values },
+            handle: WriteHandleCore { batch_id },
+        })
+    }
+
+    pub fn update_in_batch(
+        &mut self,
+        batch_context: &WriteBatchContextCore,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, Some(batch_context));
+        let batch_id = self
+            .with_runtime_mut(|runtime| runtime.update(object_id, values, context.as_ref()))
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteHandleCore { batch_id })
+    }
+
+    pub fn delete_in_batch(
+        &mut self,
+        batch_context: &WriteBatchContextCore,
+        object_id: ObjectId,
+        options: Option<WriteOptions>,
+    ) -> Result<WriteHandleCore, ClientError> {
+        let options = options.unwrap_or_default();
+        let context = write_context(&options, Some(batch_context));
+        let batch_id = self
+            .with_runtime_mut(|runtime| runtime.delete(object_id, context.as_ref()))
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteHandleCore { batch_id })
+    }
+
+    pub fn commit_batch_context(
+        &mut self,
+        batch_context: WriteBatchContextCore,
+    ) -> Result<WriteHandleCore, ClientError> {
+        self.with_runtime_mut(|runtime| runtime.seal_batch(batch_context.batch_id))
+            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
+
+        Ok(WriteHandleCore {
+            batch_id: batch_context.batch_id,
+        })
     }
 
     pub fn check_batch_wait(&self, batch_id: BatchId, tier: DurabilityTier) -> BatchWaitOutcome {
@@ -204,7 +280,7 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
 
 pub struct DirectBatchCore<'a, H: ClientRuntimeHost> {
     client: &'a mut JazzClientCore<H>,
-    context: BatchContext,
+    context: WriteBatchContextCore,
 }
 
 impl<'a, H: ClientRuntimeHost> DirectBatchCore<'a, H> {
@@ -214,35 +290,18 @@ impl<'a, H: ClientRuntimeHost> DirectBatchCore<'a, H> {
         values: HashMap<String, Value>,
         options: Option<WriteOptions>,
     ) -> Result<WriteResultCore, ClientError> {
-        let options = options.unwrap_or_default();
-        let context = write_context(&options, Some(&self.context));
-        let ((id, values), batch_id) = self
-            .client
-            .with_runtime_mut(|runtime| {
-                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
-            })
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteResultCore {
-            row: ClientRow { id, values },
-            handle: WriteHandleCore { batch_id },
-        })
+        self.client
+            .insert_in_batch(&self.context, table, values, options)
     }
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .with_runtime_mut(|runtime| runtime.seal_batch(self.context.batch_id))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteHandleCore {
-            batch_id: self.context.batch_id,
-        })
+        self.client.commit_batch_context(self.context)
     }
 }
 
 pub struct TransactionCore<'a, H: ClientRuntimeHost> {
     client: &'a mut JazzClientCore<H>,
-    context: BatchContext,
+    context: WriteBatchContextCore,
 }
 
 impl<'a, H: ClientRuntimeHost> TransactionCore<'a, H> {
@@ -252,28 +311,11 @@ impl<'a, H: ClientRuntimeHost> TransactionCore<'a, H> {
         values: HashMap<String, Value>,
         options: Option<WriteOptions>,
     ) -> Result<WriteResultCore, ClientError> {
-        let options = options.unwrap_or_default();
-        let context = write_context(&options, Some(&self.context));
-        let ((id, values), batch_id) = self
-            .client
-            .with_runtime_mut(|runtime| {
-                runtime.insert_with_id(table, values, options.object_id, context.as_ref())
-            })
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteResultCore {
-            row: ClientRow { id, values },
-            handle: WriteHandleCore { batch_id },
-        })
+        self.client
+            .insert_in_batch(&self.context, table, values, options)
     }
 
     pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .with_runtime_mut(|runtime| runtime.seal_batch(self.context.batch_id))
-            .map_err(|error| ClientError::new(ClientErrorCode::RuntimeError, error.to_string()))?;
-
-        Ok(WriteHandleCore {
-            batch_id: self.context.batch_id,
-        })
+        self.client.commit_batch_context(self.context)
     }
 }
