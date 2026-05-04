@@ -12,26 +12,31 @@ use futures::executor::block_on;
 use serde::Deserialize;
 
 use jazz_tools::binding_support::{
-    acknowledge_rejected_batch_for_binding, binding_write_options, build_runtime_schema_bootstrap,
-    client_error_message, current_timestamp_ms as binding_current_timestamp_ms, delete_sealed_json,
-    delete_unsealed_json, drain_rejected_batch_id_strings, generate_id as generate_binding_id,
-    insert_sealed_json, insert_unsealed_json, local_batch_record_json, local_batch_records_json,
-    parse_batch_id_input, parse_batch_mode_input, parse_external_object_id, parse_object_id_input,
-    parse_query_execution_options, parse_query_input, parse_session_input,
-    parse_subscription_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    record_to_updates, seal_batch_for_binding, serialize_query_rows_json,
-    subscription_delta_to_json, update_sealed_json, update_unsealed_json, write_batch_context_json,
-    PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions,
+    acknowledge_rejected_batch_for_binding, align_query_rows_to_declared_schema,
+    binding_write_options, client_error_message,
+    current_timestamp_ms as binding_current_timestamp_ms, delete_sealed_json, delete_unsealed_json,
+    drain_rejected_batch_id_strings, generate_id as generate_binding_id, insert_sealed_json,
+    insert_unsealed_json, local_batch_record_json, local_batch_records_json, parse_batch_id_input,
+    parse_batch_mode_input, parse_external_object_id, parse_object_id_input, parse_query_input,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    record_to_updates, seal_batch_for_binding, subscription_delta_to_json, update_sealed_json,
+    update_unsealed_json, write_batch_context_json,
 };
 use jazz_tools::client_core::{ClientConfig, ClientError, JazzClientCore, SharedRuntimeHost};
 use jazz_tools::object::ObjectId;
+use jazz_tools::query_manager::manager::LocalUpdates;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
-use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle};
-use jazz_tools::schema_manager::rehydrate_schema_manager_from_catalogue;
+use jazz_tools::runtime_core::{
+    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
+};
+use jazz_tools::schema_manager::{rehydrate_schema_manager_from_catalogue, AppId, SchemaManager};
 use jazz_tools::storage::{SqliteStorage, Storage};
-use jazz_tools::sync_manager::{ClientId, InboxEntry, ServerId, Source, SyncPayload};
+use jazz_tools::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, QueryPropagation, ServerId, Source, SyncManager,
+    SyncPayload,
+};
 
 // ============================================================================
 // Errors
@@ -187,22 +192,56 @@ fn parse_write_context(
 }
 
 fn binding_parse_error(message: String) -> JazzRnError {
-    if message.starts_with("Invalid tier") {
-        JazzRnError::InvalidTier { message }
-    } else if message.contains("Invalid ObjectId") {
+    if message.contains("Invalid ObjectId") {
         JazzRnError::InvalidUuid { message }
     } else {
         JazzRnError::InvalidJson { message }
     }
 }
 
-fn parse_rn_subscription_input(
+fn parse_tier(tier: &str) -> Result<DurabilityTier, JazzRnError> {
+    match tier {
+        "local" => Ok(DurabilityTier::Local),
+        "edge" => Ok(DurabilityTier::EdgeServer),
+        "global" => Ok(DurabilityTier::GlobalServer),
+        _ => Err(JazzRnError::InvalidTier {
+            message: format!(
+                "Invalid tier '{}'. Must be 'local', 'edge', or 'global'.",
+                tier
+            ),
+        }),
+    }
+}
+
+fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
+    ReadDurabilityOptions {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+    }
+}
+
+fn parse_rn_subscription_inputs(
     query_json: &str,
     session_json: Option<String>,
     tier: Option<String>,
-) -> Result<jazz_tools::binding_support::SubscriptionInput, JazzRnError> {
-    parse_subscription_input(query_json, session_json.as_deref(), tier.as_deref(), None)
-        .map_err(binding_parse_error)
+) -> Result<
+    (
+        Query,
+        Option<Session>,
+        ReadDurabilityOptions,
+        QueryPropagation,
+    ),
+    JazzRnError,
+> {
+    let query = parse_query(query_json)?;
+    let session = parse_session(session_json)?;
+    let tier = tier.as_deref().map(parse_tier).transpose()?;
+    Ok((
+        query,
+        session,
+        default_read_durability_options(tier),
+        QueryPropagation::Full,
+    ))
 }
 
 fn make_subscription_callback(
@@ -423,18 +462,22 @@ impl RnRuntime {
         data_path: Option<String>,
     ) -> Result<Arc<Self>, JazzRnError> {
         with_panic_boundary("new", || {
-            let mut bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
-                schema_json: &schema_json,
-                app_id: &app_id,
-                env: &jazz_env,
-                user_branch: &user_branch,
-                node_tier: tier.as_deref(),
-                plain_schema_policy_mode: PlainSchemaPolicyMode::InferFromSchema,
-            })
-            .map_err(|message| JazzRnError::Schema { message })?;
-            let declared_schema = bootstrap.declared_schema.clone();
+            let schema: Schema = serde_json::from_str(&schema_json).map_err(json_err)?;
+            let declared_schema = schema.clone();
 
             let client_config = ClientConfig::new(jazz_env.clone(), user_branch.clone());
+            let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+            let mut sync_manager = SyncManager::new();
+            if let Some(t) = persistence_tier {
+                sync_manager = sync_manager.with_durability_tier(t);
+            }
+            let app_id_obj =
+                AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
+            let mut schema_manager =
+                SchemaManager::new(sync_manager, schema, app_id_obj, &jazz_env, &user_branch)
+                    .map_err(|e| JazzRnError::Schema {
+                        message: format!("{:?}", e),
+                    })?;
 
             let resolved_data_path = data_path.unwrap_or_else(|| {
                 let sanitized_app_id: String = app_id
@@ -462,20 +505,17 @@ impl RnRuntime {
             // Load previously-persisted schema history, permissions bundle, and lens
             // catalogue entries from storage into the in-memory schema manager so
             // offline cold-starts can decode and serve locally stored rows.
-            if let Err(error) = rehydrate_schema_manager_from_catalogue(
-                &mut bootstrap.schema_manager,
-                &storage,
-                bootstrap.app_id,
-            ) {
+            if let Err(error) =
+                rehydrate_schema_manager_from_catalogue(&mut schema_manager, &storage, app_id_obj)
+            {
                 eprintln!(
-                    "jazz-rn: failed to rehydrate schema manager from catalogue storage for app {}: {error}",
-                    bootstrap.app_id
+                    "jazz-rn: failed to rehydrate schema manager from catalogue storage for app {app_id_obj}: {error}"
                 );
             }
 
             let scheduler = RnScheduler::default();
 
-            let mut core = RuntimeCore::new(bootstrap.schema_manager, storage, scheduler);
+            let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -644,8 +684,9 @@ impl RnRuntime {
             let query = parse_query(&query_json)?;
             let query_for_alignment = query.clone();
             let session = parse_session(session_json)?;
-            let options = parse_query_execution_options(tier.as_deref(), None)
-                .map_err(binding_parse_error)?;
+            let tier = tier.as_deref().map(parse_tier).transpose()?;
+            let durability = default_read_durability_options(tier);
+            let propagation = QueryPropagation::Full;
 
             // NOTE: query() triggers immediate_tick() internally.
             // We then block for the first callback result to be delivered.
@@ -654,21 +695,26 @@ impl RnRuntime {
                     message: "lock poisoned".into(),
                 })?;
                 (
-                    core.query_with_propagation(
-                        query,
-                        session,
-                        options.durability,
-                        options.propagation,
-                    ),
+                    core.query_with_propagation(query, session, durability, propagation),
                     core.current_schema().clone(),
                 )
             };
             let results = block_on(fut).map_err(runtime_err)?;
-            let rows_json = serialize_query_rows_json(
+            let rows = align_query_rows_to_declared_schema(
                 &self.declared_schema,
                 &runtime_schema,
                 &query_for_alignment,
                 results,
+            );
+            let rows_json = serde_json::Value::Array(
+                rows.into_iter()
+                    .map(|(id, values)| {
+                        serde_json::json!({
+                            "id": id.uuid().to_string(),
+                            "values": values,
+                        })
+                    })
+                    .collect(),
             );
 
             serde_json::to_string(&rows_json).map_err(json_err)
@@ -687,9 +733,10 @@ impl RnRuntime {
         tier: Option<String>,
     ) -> Result<u64, JazzRnError> {
         with_panic_boundary("subscribe", || {
-            let input = parse_rn_subscription_input(&query_json, session_json, tier)?;
-            let alignment_table = if query_rows_can_be_schema_aligned(&input.query) {
-                Some(input.query.table)
+            let (query, session, durability, propagation) =
+                parse_rn_subscription_inputs(&query_json, session_json, tier)?;
+            let alignment_table = if query_rows_can_be_schema_aligned(&query) {
+                Some(query.table)
             } else {
                 None
             };
@@ -707,11 +754,11 @@ impl RnRuntime {
 
             let handle = core
                 .subscribe_with_durability_and_propagation(
-                    input.query,
+                    query,
                     callback,
-                    input.session,
-                    input.durability,
-                    input.propagation,
+                    session,
+                    durability,
+                    propagation,
                 )
                 .map_err(runtime_err)?;
 
@@ -743,19 +790,15 @@ impl RnRuntime {
         tier: Option<String>,
     ) -> Result<u64, JazzRnError> {
         with_panic_boundary("create_subscription", || {
-            let input = parse_rn_subscription_input(&query_json, session_json, tier)?;
-            let query_for_alignment = input.query.clone();
+            let (query, session, durability, propagation) =
+                parse_rn_subscription_inputs(&query_json, session_json, tier)?;
+            let query_for_alignment = query.clone();
 
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
 
-            let handle = core.create_subscription(
-                input.query,
-                input.session,
-                input.durability,
-                input.propagation,
-            );
+            let handle = core.create_subscription(query, session, durability, propagation);
             drop(core);
 
             if query_rows_can_be_schema_aligned(&query_for_alignment) {
