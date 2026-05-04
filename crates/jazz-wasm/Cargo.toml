@@ -59,9 +59,4 @@ default = ["console_error_panic_hook"]
 wasm-opt = ["-O", "-g"]
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = [
-  "--enable-nontrapping-float-to-int",
-  "--enable-bulk-memory",
-  "-O4",
-  "-g",
-]
+wasm-opt = ["-O4", "-g"]
