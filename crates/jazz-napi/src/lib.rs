@@ -23,14 +23,15 @@ use std::sync::{Arc, Mutex, Weak};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
-    align_query_rows_to_declared_schema, binding_write_options, client_error_message,
-    commit_batch_json, current_timestamp_ms, delete_in_batch_json, delete_unsealed_json,
-    generate_id as generate_binding_id, insert_in_batch_json, insert_unsealed_json,
-    parse_batch_id_input, parse_durability_tier as parse_binding_tier, parse_external_object_id,
-    parse_object_id_input, parse_query_input, parse_runtime_schema_input, parse_session_input,
-    parse_write_context_input, query_rows_can_be_schema_aligned, record_to_updates,
-    serialize_local_batch_record, serialize_local_batch_records, serialize_write_result,
-    subscription_delta_to_json, update_in_batch_json, update_unsealed_json,
+    PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions, binding_write_options,
+    build_runtime_schema_bootstrap, client_error_message, commit_batch_json, current_timestamp_ms,
+    delete_in_batch_json, delete_unsealed_json, generate_id as generate_binding_id,
+    insert_in_batch_json, insert_unsealed_json, parse_batch_id_input, parse_external_object_id,
+    parse_object_id_input, parse_query_execution_options, parse_query_input, parse_session_input,
+    parse_subscription_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    record_to_updates, serialize_local_batch_record, serialize_local_batch_records,
+    serialize_query_rows_json, serialize_write_result, subscription_delta_to_json,
+    update_in_batch_json, update_unsealed_json,
 };
 use jazz_tools::client_core::{
     ClientConfig, ClientRuntimeFlavor, JazzClientCore, SharedRuntimeHost, WriteBatchContextCore,
@@ -42,20 +43,14 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
-use jazz_tools::runtime_core::{
-    QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
-    SubscriptionHandle,
-};
-use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::runtime_core::{RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle};
+use jazz_tools::schema_manager::AppId;
 use jazz_tools::server::{
     CatalogueAuthorityMode, HostedServer as JazzHostedServer, ServerBuilder, StorageBackend,
     TestingServer as JazzTestingServer,
 };
 use jazz_tools::storage::{MemoryStorage, SqliteStorage, Storage};
-use jazz_tools::sync_manager::QueryPropagation;
-use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
-};
+use jazz_tools::sync_manager::{ClientId, InboxEntry, ServerId, Source, SyncPayload};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "value")]
@@ -132,109 +127,9 @@ impl FromNapiValue for FfiRecordArg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct QueryExecutionOptionsWire {
-    propagation: Option<String>,
-    local_updates: Option<String>,
-    transaction_overlay: Option<QueryTransactionOverlayWire>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct QueryTransactionOverlayWire {
-    batch_id: String,
-    branch_name: String,
-    row_ids: Vec<String>,
-}
-
-fn parse_read_durability_options(
-    tier: Option<String>,
-    options_json: Option<String>,
-) -> napi::Result<(
-    ReadDurabilityOptions,
-    QueryPropagation,
-    Option<QueryLocalOverlay>,
-)> {
-    let parsed_tier = tier
-        .as_deref()
-        .map(parse_binding_tier)
-        .transpose()
-        .map_err(napi::Error::from_reason)?;
-    let Some(raw) = options_json else {
-        return Ok((
-            ReadDurabilityOptions {
-                tier: parsed_tier,
-                local_updates: jazz_tools::query_manager::manager::LocalUpdates::Immediate,
-            },
-            QueryPropagation::Full,
-            None,
-        ));
-    };
-
-    let options: QueryExecutionOptionsWire = serde_json::from_str(&raw)
-        .map_err(|err| napi::Error::from_reason(format!("Invalid query options JSON: {err}")))?;
-
-    let propagation = match options.propagation.as_deref() {
-        None | Some("full") => Ok(QueryPropagation::Full),
-        Some("local-only") => Ok(QueryPropagation::LocalOnly),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid propagation '{other}'. Must be 'full' or 'local-only'."
-        ))),
-    }?;
-
-    let local_updates = match options.local_updates.as_deref() {
-        None | Some("immediate") => Ok(jazz_tools::query_manager::manager::LocalUpdates::Immediate),
-        Some("deferred") => Ok(jazz_tools::query_manager::manager::LocalUpdates::Deferred),
-        Some(other) => Err(napi::Error::from_reason(format!(
-            "Invalid localUpdates '{other}'. Must be 'immediate' or 'deferred'."
-        ))),
-    }?;
-
-    let overlay = match options.transaction_overlay {
-        None => None,
-        Some(overlay) => Some(QueryLocalOverlay {
-            batch_id: parse_batch_id_input(&overlay.batch_id).map_err(napi::Error::from_reason)?,
-            branch_name: jazz_tools::object::BranchName::new(&overlay.branch_name),
-            row_ids: overlay
-                .row_ids
-                .into_iter()
-                .map(|row_id| {
-                    parse_external_object_id(Some(&row_id))
-                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
-                        .map_err(napi::Error::from_reason)
-                })
-                .collect::<napi::Result<Vec<_>>>()?,
-        }),
-    };
-
-    Ok((
-        ReadDurabilityOptions {
-            tier: parsed_tier,
-            local_updates,
-        },
-        propagation,
-        overlay,
-    ))
-}
-
-fn parse_node_durability_tiers(tier: Option<&str>) -> napi::Result<Vec<DurabilityTier>> {
-    let Some(raw) = tier else {
-        return Ok(Vec::new());
-    };
-    Ok(vec![parse_tier(raw)?])
-}
-
-fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<DurabilityTier>> {
-    parse_node_durability_tiers(tier.as_deref())
-}
-
 fn open_sqlite_storage(data_path: &str) -> napi::Result<SqliteStorage> {
     SqliteStorage::open(data_path)
         .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))
-}
-
-// ============================================================================
-fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
-    parse_binding_tier(tier).map_err(napi::Error::from_reason)
 }
 
 fn parse_optional_sequence(sequence: Option<f64>) -> napi::Result<Option<u64>> {
@@ -268,23 +163,6 @@ fn parse_write_context_json(
 ) -> napi::Result<Option<WriteContext>> {
     parse_write_context_input(write_context_json.as_deref())
         .map_err(|err| napi::Error::from_reason(format!("Invalid write context JSON: {}", err)))
-}
-
-fn parse_subscription_inputs(
-    query_json: &str,
-    session_json: Option<String>,
-    tier: Option<String>,
-    options_json: Option<String>,
-) -> napi::Result<(
-    Query,
-    Option<Session>,
-    ReadDurabilityOptions,
-    QueryPropagation,
-)> {
-    let query = parse_query(query_json)?;
-    let session = parse_session_json(session_json)?;
-    let (durability, propagation, _overlay) = parse_read_durability_options(tier, options_json)?;
-    Ok((query, session, durability, propagation))
 }
 
 fn parse_testing_server_start_options(
@@ -417,41 +295,21 @@ fn build_napi_core(
     storage: Box<dyn Storage + Send>,
     tier: Option<String>,
 ) -> napi::Result<(Arc<Mutex<NapiCoreType>>, Schema)> {
-    // Parse schema
-    let runtime_schema = parse_runtime_schema_input(&schema_json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
-    let schema = runtime_schema.schema;
-    let declared_schema = schema.clone();
-
-    // Parse optional tier
-    let node_tiers = parse_node_durability_tier(tier)?;
-
-    // Create sync manager
-    let mut sync_manager = SyncManager::new();
-    if !node_tiers.is_empty() {
-        sync_manager = sync_manager.with_durability_tiers(node_tiers);
-    }
-
-    // Create schema manager
-    let schema_manager = SchemaManager::new_with_policy_mode(
-        sync_manager,
-        schema,
-        AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
-        &jazz_env,
-        &user_branch,
-        if runtime_schema.loaded_policy_bundle {
-            jazz_tools::query_manager::types::RowPolicyMode::Enforcing
-        } else {
-            jazz_tools::query_manager::types::RowPolicyMode::PermissiveLocal
-        },
-    )
-    .map_err(|e| napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e)))?;
+    let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
+        schema_json: &schema_json,
+        app_id: &app_id,
+        env: &jazz_env,
+        user_branch: &user_branch,
+        node_tier: tier.as_deref(),
+        plain_schema_policy_mode: PlainSchemaPolicyMode::PermissiveLocal,
+    })
+    .map_err(|e| napi::Error::from_reason(format!("Invalid schema JSON: {}", e)))?;
 
     // Create components
     let scheduler = NapiScheduler::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler);
+    let core = RuntimeCore::new(bootstrap.schema_manager, storage, scheduler);
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -491,7 +349,7 @@ fn build_napi_core(
         core_guard.persist_schema();
     }
 
-    Ok((core_arc, declared_schema))
+    Ok((core_arc, bootstrap.declared_schema))
 }
 
 fn build_napi_runtime(
@@ -1013,7 +871,8 @@ impl NapiRuntime {
         let query_for_alignment = query.clone();
         let session = parse_session_json(session_json)?;
 
-        let (durability, propagation, overlay) = parse_read_durability_options(tier, options_json)?;
+        let options = parse_query_execution_options(tier.as_deref(), options_json.as_deref())
+            .map_err(napi::Error::from_reason)?;
 
         let (future, runtime_schema) = {
             let mut core = self
@@ -1021,15 +880,20 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             (
-                match overlay {
+                match options.transaction_overlay {
                     Some(overlay) => core.query_with_local_overlay(
                         query,
                         session,
-                        durability,
-                        propagation,
+                        options.durability,
+                        options.propagation,
                         overlay,
                     ),
-                    None => core.query_with_propagation(query, session, durability, propagation),
+                    None => core.query_with_propagation(
+                        query,
+                        session,
+                        options.durability,
+                        options.propagation,
+                    ),
                 },
                 core.current_schema().clone(),
             )
@@ -1038,24 +902,12 @@ impl NapiRuntime {
         let rows = future
             .await
             .map_err(|e| napi::Error::from_reason(format!("Query failed: {:?}", e)))?;
-        let rows = align_query_rows_to_declared_schema(
+        Ok(serialize_query_rows_json(
             &self.declared_schema,
             &runtime_schema,
             &query_for_alignment,
             rows,
-        );
-
-        let json_rows: Vec<serde_json::Value> = rows
-            .into_iter()
-            .map(|(id, values)| {
-                serde_json::json!({
-                    "id": id.uuid().to_string(),
-                    "values": values
-                })
-            })
-            .collect();
-
-        Ok(serde_json::Value::Array(json_rows))
+        ))
     }
 
     // =========================================================================
@@ -1073,9 +925,15 @@ impl NapiRuntime {
         tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<f64> {
-        let (query, session, durability, propagation) =
-            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
-        let alignment_table = query_rows_can_be_schema_aligned(&query).then_some(query.table);
+        let input = parse_subscription_input(
+            &query_json,
+            session_json.as_deref(),
+            tier.as_deref(),
+            options_json.as_deref(),
+        )
+        .map_err(napi::Error::from_reason)?;
+        let alignment_table =
+            query_rows_can_be_schema_aligned(&input.query).then_some(input.query.table);
 
         let callback = make_subscription_callback(
             on_update,
@@ -1091,11 +949,11 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let handle = core
             .subscribe_with_durability_and_propagation(
-                query,
+                input.query,
                 callback,
-                session,
-                durability,
-                propagation,
+                input.session,
+                input.durability,
+                input.propagation,
             )
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
 
@@ -1125,15 +983,25 @@ impl NapiRuntime {
         tier: Option<String>,
         options_json: Option<String>,
     ) -> napi::Result<f64> {
-        let (query, session, durability, propagation) =
-            parse_subscription_inputs(&query_json, session_json, tier, options_json)?;
-        let query_for_alignment = query.clone();
+        let input = parse_subscription_input(
+            &query_json,
+            session_json.as_deref(),
+            tier.as_deref(),
+            options_json.as_deref(),
+        )
+        .map_err(napi::Error::from_reason)?;
+        let query_for_alignment = input.query.clone();
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let handle = core.create_subscription(query, session, durability, propagation);
+        let handle = core.create_subscription(
+            input.query,
+            input.session,
+            input.durability,
+            input.propagation,
+        );
         drop(core);
 
         if query_rows_can_be_schema_aligned(&query_for_alignment) {

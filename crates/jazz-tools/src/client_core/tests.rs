@@ -1,6 +1,5 @@
 use super::*;
 use crate::object::ObjectId;
-use crate::query_manager::query::Query;
 use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::Value;
 use crate::query_manager::types::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema};
@@ -316,28 +315,6 @@ fn client_core_local_batch_helpers_wrap_runtime_state() {
 }
 
 #[test]
-fn direct_batch_uses_one_rust_generated_batch_id() {
-    let schema = users_schema();
-    let mut client = JazzClientCore::from_runtime_parts(
-        ClientConfig::memory_for_test("direct-batch-test", schema.clone()),
-        test_runtime(schema),
-    )
-    .unwrap();
-
-    let mut batch = client.begin_direct_batch();
-    let alice = batch
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .expect("first insert should succeed");
-    let bob = batch
-        .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
-        .expect("second insert should succeed");
-    let handle = batch.commit().expect("batch commit should seal");
-
-    assert_eq!(alice.handle.batch_id, bob.handle.batch_id);
-    assert_eq!(alice.handle.batch_id, handle.batch_id);
-}
-
-#[test]
 fn direct_batch_context_is_owned_for_binding_adapters() {
     let schema = users_schema();
     let mut client = JazzClientCore::from_runtime_parts(
@@ -420,32 +397,6 @@ fn direct_batch_context_supports_update_and_delete_for_binding_adapters() {
 }
 
 #[test]
-fn transaction_commit_returns_transactional_batch_handle() {
-    let schema = users_schema();
-    let mut client = JazzClientCore::from_runtime_parts(
-        ClientConfig::memory_for_test("transaction-test", schema.clone()),
-        test_runtime(schema),
-    )
-    .unwrap();
-
-    let mut transaction = client.begin_transaction();
-    let inserted = transaction
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .expect("transaction insert should succeed");
-    let handle = transaction
-        .commit()
-        .expect("transaction commit should seal");
-
-    assert_eq!(inserted.handle.batch_id, handle.batch_id);
-    let record = client
-        .local_batch_record(handle.batch_id)
-        .unwrap()
-        .expect("transaction record should exist");
-    assert_eq!(record.mode, crate::batch_fate::BatchMode::Transactional);
-    assert!(record.sealed);
-}
-
-#[test]
 fn local_wait_check_succeeds_after_direct_batch_commit() {
     let schema = users_schema();
     let mut client = JazzClientCore::from_runtime_parts(
@@ -462,72 +413,6 @@ fn local_wait_check_succeeds_after_direct_batch_commit() {
         client.check_batch_wait(result.handle.batch_id, DurabilityTier::Local),
         BatchWaitOutcome::Satisfied
     );
-}
-
-#[test]
-fn client_core_query_uses_config_default_tier() {
-    let schema = users_schema();
-    let mut config = ClientConfig::memory_for_test("query-default-test", schema.clone());
-    config.runtime_flavor = ClientRuntimeFlavor::Node;
-    config.server_url = Some("https://example.test".to_string());
-    let client = JazzClientCore::from_runtime_parts(config, test_runtime(schema)).unwrap();
-
-    let options = client.resolve_query_options(None);
-    assert_eq!(options.tier, DurabilityTier::EdgeServer);
-    assert_eq!(
-        options.local_updates,
-        crate::query_manager::manager::LocalUpdates::Immediate
-    );
-}
-
-#[test]
-fn client_core_query_returns_inserted_rows() {
-    let schema = users_schema();
-    let mut client = JazzClientCore::from_runtime_parts(
-        ClientConfig::memory_for_test("query-test", schema.clone()),
-        test_runtime(schema),
-    )
-    .unwrap();
-
-    let inserted = client
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .unwrap();
-
-    let rows = futures::executor::block_on(client.query(Query::new("users"), None))
-        .expect("query should succeed");
-
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, inserted.row.id);
-    assert_eq!(rows[0].values, inserted.row.values);
-}
-
-#[test]
-fn client_core_subscribe_and_unsubscribe_owns_runtime_handle() {
-    let schema = users_schema();
-    let mut client = JazzClientCore::from_runtime_parts(
-        ClientConfig::memory_for_test("subscription-test", schema.clone()),
-        test_runtime(schema),
-    )
-    .unwrap();
-
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let seen_for_callback = Arc::clone(&seen);
-    let handle = client
-        .subscribe(Query::new("users"), None, move |delta| {
-            seen_for_callback.lock().unwrap().push(delta);
-        })
-        .expect("subscription should be created");
-
-    client
-        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
-        .expect("insert should trigger subscription");
-    client.with_runtime_mut(|runtime| runtime.batched_tick());
-
-    assert!(!seen.lock().unwrap().is_empty());
-
-    client
-        .unsubscribe(handle)
-        .expect("unsubscribe should remove runtime subscription");
 }
 
 #[test]

@@ -14,27 +14,75 @@ use crate::client_core::{
     ClientError, ClientRuntimeHost, JazzClientCore, WriteBatchContextCore, WriteHandleCore,
     WriteOptions, WriteResultCore,
 };
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
-use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
+use crate::query_manager::types::{RowDescriptor, RowPolicyMode, Schema, TableName, Value};
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
-use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
-use crate::sync_manager::{DurabilityTier, QueryPropagation};
+use crate::runtime_core::{QueryLocalOverlay, ReadDurabilityOptions, SubscriptionDelta};
+use crate::schema_manager::{AppId, SchemaManager};
+use crate::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
+    transaction_overlay: Option<QueryTransactionOverlayWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QueryTransactionOverlayWire {
+    batch_id: String,
+    branch_name: String,
+    row_ids: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct QueryExecutionOptions {
+    pub durability: ReadDurabilityOptions,
+    pub propagation: QueryPropagation,
+    pub transaction_overlay: Option<QueryLocalOverlay>,
+}
+
+#[derive(Debug)]
+pub struct SubscriptionInput {
+    pub query: Query,
+    pub session: Option<Session>,
+    pub durability: ReadDurabilityOptions,
+    pub propagation: QueryPropagation,
+    pub transaction_overlay: Option<QueryLocalOverlay>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSchemaInput {
     pub schema: Schema,
     pub loaded_policy_bundle: bool,
+    pub is_envelope: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlainSchemaPolicyMode {
+    PermissiveLocal,
+    InferFromSchema,
+}
+
+pub struct RuntimeSchemaBootstrapOptions<'a> {
+    pub schema_json: &'a str,
+    pub app_id: &'a str,
+    pub env: &'a str,
+    pub user_branch: &'a str,
+    pub node_tier: Option<&'a str>,
+    pub plain_schema_policy_mode: PlainSchemaPolicyMode,
+}
+
+pub struct RuntimeSchemaBootstrap {
+    pub app_id: AppId,
+    pub declared_schema: Schema,
+    pub schema_manager: SchemaManager,
+    pub default_durability_tier: Option<DurabilityTier>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +191,26 @@ pub fn align_query_rows_to_declared_schema(
         .collect()
 }
 
+pub fn serialize_query_rows_json(
+    declared_schema: &Schema,
+    runtime_schema: &Schema,
+    query: &Query,
+    rows: Vec<(ObjectId, Vec<Value>)>,
+) -> JsonValue {
+    let rows = align_query_rows_to_declared_schema(declared_schema, runtime_schema, query, rows);
+
+    JsonValue::Array(
+        rows.into_iter()
+            .map(|(id, values)| {
+                json!({
+                    "id": id.uuid().to_string(),
+                    "values": values,
+                })
+            })
+            .collect(),
+    )
+}
+
 pub fn parse_query_input(query_json: &str) -> Result<Query, String> {
     parse_query_json(query_json)
 }
@@ -159,13 +227,67 @@ pub fn parse_runtime_schema_input(schema_json: &str) -> Result<RuntimeSchemaInpu
             Ok(RuntimeSchemaInput {
                 schema: envelope.schema,
                 loaded_policy_bundle: envelope.loaded_policy_bundle,
+                is_envelope: true,
             })
         }
         RuntimeSchemaWire::Schema(schema) => Ok(RuntimeSchemaInput {
             schema,
             loaded_policy_bundle: false,
+            is_envelope: false,
         }),
     }
+}
+
+pub fn build_runtime_schema_bootstrap(
+    options: RuntimeSchemaBootstrapOptions<'_>,
+) -> Result<RuntimeSchemaBootstrap, String> {
+    let runtime_schema = parse_runtime_schema_input(options.schema_json)?;
+    let declared_schema = runtime_schema.schema.clone();
+    let default_durability_tier = options.node_tier.map(parse_durability_tier).transpose()?;
+    let sync_manager = match default_durability_tier {
+        Some(tier) => SyncManager::new().with_durability_tier(tier),
+        None => SyncManager::new(),
+    };
+    let app_id =
+        AppId::from_string(options.app_id).unwrap_or_else(|_| AppId::from_name(options.app_id));
+
+    let should_infer_plain_policy = !runtime_schema.is_envelope
+        && matches!(
+            options.plain_schema_policy_mode,
+            PlainSchemaPolicyMode::InferFromSchema
+        );
+
+    let schema_manager = if should_infer_plain_policy {
+        SchemaManager::new(
+            sync_manager,
+            runtime_schema.schema,
+            app_id,
+            options.env,
+            options.user_branch,
+        )
+    } else {
+        let row_policy_mode = if runtime_schema.loaded_policy_bundle {
+            RowPolicyMode::Enforcing
+        } else {
+            RowPolicyMode::PermissiveLocal
+        };
+        SchemaManager::new_with_policy_mode(
+            sync_manager,
+            runtime_schema.schema,
+            app_id,
+            options.env,
+            options.user_branch,
+            row_policy_mode,
+        )
+    }
+    .map_err(|error| format!("{error:?}"))?;
+
+    Ok(RuntimeSchemaBootstrap {
+        app_id,
+        declared_schema,
+        schema_manager,
+        default_durability_tier,
+    })
 }
 
 pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>, String> {
@@ -486,16 +608,17 @@ pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDura
     }
 }
 
-pub fn parse_read_durability_options(
+pub fn parse_query_execution_options(
     tier: Option<&str>,
     options_json: Option<&str>,
-) -> Result<(ReadDurabilityOptions, QueryPropagation), String> {
+) -> Result<QueryExecutionOptions, String> {
     let parsed_tier = tier.map(parse_durability_tier).transpose()?;
     let Some(raw) = options_json else {
-        return Ok((
-            default_read_durability_options(parsed_tier),
-            QueryPropagation::Full,
-        ));
+        return Ok(QueryExecutionOptions {
+            durability: default_read_durability_options(parsed_tier),
+            propagation: QueryPropagation::Full,
+            transaction_overlay: None,
+        });
     };
 
     let options: QueryExecutionOptionsWire =
@@ -519,13 +642,59 @@ pub fn parse_read_durability_options(
         )),
     }?;
 
-    Ok((
-        ReadDurabilityOptions {
+    let transaction_overlay = match options.transaction_overlay {
+        None => None,
+        Some(overlay) => Some(QueryLocalOverlay {
+            batch_id: parse_batch_id_input(&overlay.batch_id)
+                .map_err(|err| format!("Invalid query batch id: {err}"))?,
+            branch_name: BranchName::new(&overlay.branch_name),
+            row_ids: overlay
+                .row_ids
+                .into_iter()
+                .map(|row_id| {
+                    parse_external_object_id(Some(&row_id))
+                        .and_then(|maybe| maybe.ok_or_else(|| "missing query row id".to_string()))
+                        .map_err(|err| format!("Invalid query row id: {err}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+    };
+
+    Ok(QueryExecutionOptions {
+        durability: ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
         },
         propagation,
-    ))
+        transaction_overlay,
+    })
+}
+
+pub fn parse_read_durability_options(
+    tier: Option<&str>,
+    options_json: Option<&str>,
+) -> Result<(ReadDurabilityOptions, QueryPropagation), String> {
+    let options = parse_query_execution_options(tier, options_json)?;
+    Ok((options.durability, options.propagation))
+}
+
+pub fn parse_subscription_input(
+    query_json: &str,
+    session_json: Option<&str>,
+    tier: Option<&str>,
+    options_json: Option<&str>,
+) -> Result<SubscriptionInput, String> {
+    let query = parse_query_input(query_json)?;
+    let session = parse_session_input(session_json)?;
+    let options = parse_query_execution_options(tier, options_json)?;
+
+    Ok(SubscriptionInput {
+        query,
+        session,
+        durability: options.durability,
+        propagation: options.propagation,
+        transaction_overlay: options.transaction_overlay,
+    })
 }
 
 pub fn subscription_delta_to_json(
@@ -609,12 +778,13 @@ pub fn current_timestamp_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_query_rows_to_declared_schema, align_values_to_declared_schema,
-        binding_write_options, commit_batch_json, delete_in_batch_json, delete_unsealed_json,
-        insert_in_batch_json, insert_unsealed_json, parse_object_id_input,
-        parse_read_durability_options, parse_runtime_schema_input, parse_write_context_input,
-        query_rows_can_be_schema_aligned, record_to_updates, update_in_batch_json,
-        update_unsealed_json,
+        PlainSchemaPolicyMode, RuntimeSchemaBootstrapOptions, align_query_rows_to_declared_schema,
+        align_values_to_declared_schema, binding_write_options, build_runtime_schema_bootstrap,
+        commit_batch_json, delete_in_batch_json, delete_unsealed_json, insert_in_batch_json,
+        insert_unsealed_json, parse_object_id_input, parse_query_execution_options,
+        parse_read_durability_options, parse_runtime_schema_input, parse_subscription_input,
+        parse_write_context_input, query_rows_can_be_schema_aligned, record_to_updates,
+        serialize_query_rows_json, update_in_batch_json, update_unsealed_json,
     };
     use crate::batch_fate::BatchMode;
     use crate::client_core::{ClientConfig, JazzClientCore};
@@ -627,7 +797,7 @@ mod tests {
     use crate::runtime_core::{NoopScheduler, RuntimeCore};
     use crate::schema_manager::{AppId, SchemaManager};
     use crate::storage::MemoryStorage;
-    use crate::sync_manager::SyncManager;
+    use crate::sync_manager::{DurabilityTier, QueryPropagation, SyncManager};
     use std::collections::HashMap;
 
     fn declared_todo_schema() -> Schema {
@@ -707,6 +877,40 @@ mod tests {
                 Value::Boolean(false),
                 Value::Text("note".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn binding_support_query_rows_json_aligns_declared_schema() {
+        let row_id = ObjectId::new();
+        let query = Query::new("todos");
+
+        let payload = serialize_query_rows_json(
+            &declared_todo_schema(),
+            &runtime_todo_schema(),
+            &query,
+            vec![(
+                row_id,
+                vec![
+                    Value::Text("note".to_string()),
+                    Value::Boolean(false),
+                    Value::Text("buy milk".to_string()),
+                ],
+            )],
+        );
+
+        assert_eq!(
+            payload,
+            serde_json::json!([
+                {
+                    "id": row_id.uuid().to_string(),
+                    "values": [
+                        Value::Text("buy milk".to_string()),
+                        Value::Boolean(false),
+                        Value::Text("note".to_string()),
+                    ],
+                }
+            ])
         );
     }
 
@@ -892,6 +1096,148 @@ mod tests {
             crate::query_manager::manager::LocalUpdates::Immediate
         );
         assert_eq!(propagation, crate::sync_manager::QueryPropagation::Full);
+    }
+
+    #[test]
+    fn binding_support_query_execution_options_parse_overlay() {
+        let batch_id = crate::row_histories::BatchId::new();
+        let row_id = ObjectId::new();
+        let options_json = format!(
+            r#"{{
+                "propagation": "local-only",
+                "local_updates": "deferred",
+                "transaction_overlay": {{
+                    "batch_id": "{batch_id}",
+                    "branch_name": "dev-111111111111-main",
+                    "row_ids": ["{row_id}"]
+                }}
+            }}"#
+        );
+
+        let options = parse_query_execution_options(Some("edge"), Some(&options_json))
+            .expect("parse query execution options");
+
+        assert_eq!(options.durability.tier, Some(DurabilityTier::EdgeServer));
+        assert_eq!(
+            options.durability.local_updates,
+            crate::query_manager::manager::LocalUpdates::Deferred
+        );
+        assert_eq!(options.propagation, QueryPropagation::LocalOnly);
+        let overlay = options
+            .transaction_overlay
+            .expect("transaction overlay should parse");
+        assert_eq!(overlay.batch_id, batch_id);
+        assert_eq!(overlay.branch_name.to_string(), "dev-111111111111-main");
+        assert_eq!(overlay.row_ids, vec![row_id]);
+    }
+
+    #[test]
+    fn binding_support_query_execution_options_reject_invalid_values() {
+        let error = parse_query_execution_options(
+            None,
+            Some(r#"{ "propagation": "nearby", "local_updates": "immediate" }"#),
+        )
+        .expect_err("invalid propagation should fail");
+        assert!(error.contains("Invalid propagation"));
+
+        let error = parse_query_execution_options(
+            None,
+            Some(r#"{ "propagation": "full", "local_updates": "later" }"#),
+        )
+        .expect_err("invalid local updates should fail");
+        assert!(error.contains("Invalid localUpdates"));
+    }
+
+    #[test]
+    fn binding_support_subscription_input_parses_query_session_and_options() {
+        let query_json = serde_json::to_string(&Query::new("todos")).expect("query json");
+        let input = parse_subscription_input(
+            &query_json,
+            Some(r#"{ "user_id": "alice", "claims": {}, "authMode": "external" }"#),
+            Some("global"),
+            Some(r#"{ "propagation": "local-only", "local_updates": "deferred" }"#),
+        )
+        .expect("parse subscription input");
+
+        assert_eq!(input.query.table, TableName::new("todos"));
+        assert_eq!(input.session.expect("session").user_id, "alice");
+        assert_eq!(input.durability.tier, Some(DurabilityTier::GlobalServer));
+        assert_eq!(
+            input.durability.local_updates,
+            crate::query_manager::manager::LocalUpdates::Deferred
+        );
+        assert_eq!(input.propagation, QueryPropagation::LocalOnly);
+        assert!(input.transaction_overlay.is_none());
+    }
+
+    #[test]
+    fn binding_support_runtime_bootstrap_accepts_plain_schema() {
+        let schema_json = serde_json::to_string(&declared_todo_schema()).expect("schema json");
+
+        let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
+            schema_json: &schema_json,
+            app_id: "binding-bootstrap-app",
+            env: "dev",
+            user_branch: "main",
+            node_tier: Some("local"),
+            plain_schema_policy_mode: PlainSchemaPolicyMode::PermissiveLocal,
+        })
+        .expect("bootstrap runtime schema");
+
+        assert_eq!(bootstrap.app_id, AppId::from_name("binding-bootstrap-app"));
+        assert_eq!(
+            bootstrap.default_durability_tier,
+            Some(DurabilityTier::Local)
+        );
+        assert!(
+            bootstrap
+                .schema_manager
+                .current_schema()
+                .contains_key(&TableName::new("todos"))
+        );
+        assert!(
+            bootstrap
+                .declared_schema
+                .contains_key(&TableName::new("todos"))
+        );
+    }
+
+    #[test]
+    fn binding_support_runtime_bootstrap_accepts_schema_envelope() {
+        let schema_json = r#"{
+            "__jazzRuntimeSchema": 1,
+            "schema": {
+                "todos": {
+                    "columns": [
+                        {
+                            "name": "title",
+                            "column_type": { "type": "Text" },
+                            "nullable": false
+                        }
+                    ]
+                }
+            },
+            "loadedPolicyBundle": true
+        }"#;
+
+        let bootstrap = build_runtime_schema_bootstrap(RuntimeSchemaBootstrapOptions {
+            schema_json,
+            app_id: "binding-envelope-app",
+            env: "dev",
+            user_branch: "main",
+            node_tier: None,
+            plain_schema_policy_mode: PlainSchemaPolicyMode::InferFromSchema,
+        })
+        .expect("bootstrap runtime schema envelope");
+
+        assert_eq!(bootstrap.app_id, AppId::from_name("binding-envelope-app"));
+        assert_eq!(bootstrap.default_durability_tier, None);
+        assert!(
+            bootstrap
+                .schema_manager
+                .current_schema()
+                .contains_key(&TableName::new("todos"))
+        );
     }
 
     #[test]
