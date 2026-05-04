@@ -263,35 +263,6 @@ impl<H: ClientRuntimeHost> JazzClientCore<H> {
         )
     }
 
-    pub fn begin_direct_batch(&mut self) -> DirectBatchCore<'_, H> {
-        let context = self.begin_direct_batch_context();
-
-        DirectBatchCore {
-            client: self,
-            context,
-        }
-    }
-
-    pub fn begin_transaction_context(&self) -> WriteBatchContextCore {
-        let schema = self.current_schema();
-        let schema_hash = SchemaHash::compute(&schema);
-        WriteBatchContextCore::new(
-            BatchMode::Transactional,
-            &self.config().env,
-            schema_hash,
-            &self.config().user_branch,
-        )
-    }
-
-    pub fn begin_transaction(&mut self) -> TransactionCore<'_, H> {
-        let context = self.begin_transaction_context();
-
-        TransactionCore {
-            client: self,
-            context,
-        }
-    }
-
     pub fn insert_in_batch(
         &mut self,
         batch_context: &WriteBatchContextCore,
@@ -376,85 +347,5 @@ fn settlement_satisfies_tier(
             BatchWaitOutcome::Satisfied
         }
         Some(_) | None => BatchWaitOutcome::Pending,
-    }
-}
-
-pub struct DirectBatchCore<'a, H: ClientRuntimeHost> {
-    client: &'a mut JazzClientCore<H>,
-    context: WriteBatchContextCore,
-}
-
-impl<'a, H: ClientRuntimeHost> DirectBatchCore<'a, H> {
-    pub fn insert(
-        &mut self,
-        table: &str,
-        values: HashMap<String, Value>,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteResultCore, ClientError> {
-        self.client
-            .insert_in_batch(&self.context, table, values, options)
-    }
-
-    pub fn update(
-        &mut self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .update_in_batch(&self.context, object_id, values, options)
-    }
-
-    pub fn delete(
-        &mut self,
-        object_id: ObjectId,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .delete_in_batch(&self.context, object_id, options)
-    }
-
-    pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
-        self.client.commit_batch_context(self.context)
-    }
-}
-
-pub struct TransactionCore<'a, H: ClientRuntimeHost> {
-    client: &'a mut JazzClientCore<H>,
-    context: WriteBatchContextCore,
-}
-
-impl<'a, H: ClientRuntimeHost> TransactionCore<'a, H> {
-    pub fn insert(
-        &mut self,
-        table: &str,
-        values: HashMap<String, Value>,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteResultCore, ClientError> {
-        self.client
-            .insert_in_batch(&self.context, table, values, options)
-    }
-
-    pub fn update(
-        &mut self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .update_in_batch(&self.context, object_id, values, options)
-    }
-
-    pub fn delete(
-        &mut self,
-        object_id: ObjectId,
-        options: Option<WriteOptions>,
-    ) -> Result<WriteHandleCore, ClientError> {
-        self.client
-            .delete_in_batch(&self.context, object_id, options)
-    }
-
-    pub fn commit(self) -> Result<WriteHandleCore, ClientError> {
-        self.client.commit_batch_context(self.context)
     }
 }
