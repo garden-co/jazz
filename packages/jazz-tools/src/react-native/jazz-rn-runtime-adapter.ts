@@ -24,7 +24,6 @@ export interface JazzRnRuntimeBinding {
   addClient(): string;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   batchedTick(): void;
-  beginDirectBatch?(): JazzRnDirectBatchBinding;
   close(): void;
   connect(url: string, authJson: string): void;
   disconnect(): void;
@@ -89,13 +88,6 @@ export interface JazzRnRuntimeBinding {
   uniffiDestroy?(): void;
 }
 
-export interface JazzRnDirectBatchBinding {
-  insert(table: string, valuesJson: string, objectId: string | undefined): string;
-  update?(objectId: string, valuesJson: string): string;
-  delete_?(objectId: string): string;
-  commit(): string;
-}
-
 function swallowCallbackError(context: string, error: unknown): void {
   // Callback exceptions crossing the UniFFI boundary can panic Rust and fail writes.
   // Keep runtime alive and surface the real JS error in logs.
@@ -154,8 +146,6 @@ function createErrorWithCause(message: string, cause: unknown): Error {
 }
 
 export class JazzRnRuntimeAdapter implements Runtime {
-  beginDirectBatch?: Runtime["beginDirectBatch"];
-
   private readonly handleMap = new Map<number, bigint>();
   private closed = false;
 
@@ -163,9 +153,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     private readonly binding: JazzRnRuntimeBinding,
     private readonly schema: WasmSchema,
   ) {
-    if (this.binding.beginDirectBatch) {
-      this.beginDirectBatch = () => new JazzRnDirectBatchAdapter(this.binding.beginDirectBatch!());
-    }
     this.binding.onBatchedTickNeeded({
       requestBatchedTick: () => {
         // Avoid re-entering Rust while the originating call still holds its mutex.
@@ -556,55 +543,5 @@ export class JazzRnRuntimeAdapter implements Runtime {
       // Ignore close failures on teardown.
     }
     this.binding.uniffiDestroy?.();
-  }
-}
-
-class JazzRnDirectBatchAdapter {
-  constructor(private readonly binding: JazzRnDirectBatchBinding) {}
-
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult {
-    try {
-      const rowJson = this.binding.insert(
-        table,
-        encodeFFIRecordToJson(values),
-        object_id ?? undefined,
-      );
-      return JSON.parse(rowJson) as DirectInsertResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult {
-    if (!this.binding.update) {
-      throw new Error("RN direct batches do not support update yet");
-    }
-    try {
-      const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  delete(object_id: string): DirectMutationResult {
-    if (!this.binding.delete_) {
-      throw new Error("RN direct batches do not support delete yet");
-    }
-    try {
-      const resultJson = this.binding.delete_(object_id);
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  commit(): DirectMutationResult {
-    try {
-      const resultJson = this.binding.commit();
-      return JSON.parse(resultJson) as DirectMutationResult;
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
   }
 }

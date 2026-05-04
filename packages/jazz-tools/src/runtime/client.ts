@@ -78,8 +78,6 @@ export interface Runtime {
   deleteSealed(object_id: string, write_context_json?: string | null): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
   createWriteBatchContext(mode: BatchMode): BatchWriteContext;
-  beginDirectBatch?(): NativeWriteBatch;
-  beginTransaction?(): NativeWriteBatch;
   insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
   insertPersistedWithSession?(
     table: string,
@@ -303,13 +301,6 @@ export interface DirectInsertResult extends Row {
 
 export interface DirectMutationResult {
   batchId: string;
-}
-
-interface NativeWriteBatch {
-  insert(table: string, values: InsertValues, object_id?: string | null): DirectInsertResult;
-  update(object_id: string, values: Record<string, Value>): DirectMutationResult;
-  delete(object_id: string): DirectMutationResult;
-  commit(): DirectMutationResult;
 }
 
 interface WriteContextPayload {
@@ -958,31 +949,19 @@ export type TransactionScope = Omit<Transaction, "commit">;
 
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
-  private nativeBatchId: string | null = null;
-
-  static fromNative(client: JazzClient, nativeBatch: NativeWriteBatch): DirectBatch {
-    return new DirectBatch(client, null, undefined, undefined, nativeBatch);
-  }
 
   constructor(
     private readonly client: JazzClient,
-    private readonly batchContext: BatchWriteContext | null,
+    private readonly batchContext: BatchWriteContext,
     private readonly session?: Session,
     private readonly attribution?: string,
-    private readonly nativeBatch?: NativeWriteBatch,
   ) {}
 
   batchId(): string {
-    if (this.batchContext) {
-      return this.batchContext.batchId;
-    }
     if (this.committedHandle) {
       return this.committedHandle.batchId;
     }
-    if (this.nativeBatchId) {
-      return this.nativeBatchId;
-    }
-    throw new Error("Native direct batch id is available after the first write or commit");
+    return this.batchContext.batchId;
   }
 
   private ensureActive(): void {
@@ -991,36 +970,9 @@ export class DirectBatch {
     }
   }
 
-  private rememberNativeBatchId(batchId: string): void {
-    if (this.nativeBatchId && this.nativeBatchId !== batchId) {
-      throw new Error("Native direct batch returned inconsistent batch ids");
-    }
-    this.nativeBatchId = batchId;
-  }
-
-  private assertNativeSupportsOptions(options?: TimestampOverrideOptions): void {
-    if (options?.updatedAt !== undefined) {
-      throw new Error("Native direct batches do not support updatedAt yet");
-    }
-  }
-
-  private rustBatchContext(): BatchWriteContext {
-    if (!this.batchContext) {
-      throw new Error("Rust direct batch context is missing");
-    }
-    return this.batchContext;
-  }
-
   commit(): WriteHandle {
     if (this.committedHandle) {
       return this.committedHandle;
-    }
-    if (this.nativeBatch) {
-      const result = this.nativeBatch.commit();
-      this.rememberNativeBatchId(result.batchId);
-      const handle = new WriteHandle(result.batchId, this.client);
-      this.committedHandle = handle;
-      return handle;
     }
     const handle = this.client.sealBatch(this.batchId());
     this.committedHandle = handle;
@@ -1029,39 +981,18 @@ export class DirectBatch {
 
   create(table: string, values: InsertValues, options?: CreateOptions): Row {
     this.ensureActive();
-    if (this.nativeBatch) {
-      this.assertNativeSupportsOptions(options);
-      const row = this.nativeBatch.insert(table, values, options?.id);
-      this.rememberNativeBatchId(row.batchId);
-      return this.client.normalizeDirectInsertResult(table, row);
-    }
     return this.client.createInternal(
       table,
       values,
       this.session,
       this.attribution,
       options,
-      this.rustBatchContext(),
+      this.batchContext,
     );
   }
 
   upsert(table: string, values: InsertValues, options: UpsertOptions): void {
     this.ensureActive();
-    if (this.nativeBatch) {
-      this.assertNativeSupportsOptions(options);
-      try {
-        const row = this.nativeBatch.insert(table, values, options.id);
-        this.rememberNativeBatchId(row.batchId);
-        return;
-      } catch (error) {
-        if (!shouldFallbackToUpsertUpdate(error)) {
-          throw error;
-        }
-      }
-      const result = this.nativeBatch.update(options.id, values as Record<string, Value>);
-      this.rememberNativeBatchId(result.batchId);
-      return;
-    }
     this.client.upsertInternal(
       table,
       values,
@@ -1069,34 +1000,24 @@ export class DirectBatch {
       this.session,
       this.attribution,
       options.updatedAt,
-      this.rustBatchContext(),
+      this.batchContext,
     );
   }
 
   update(objectId: string, updates: Record<string, Value>): void {
     this.ensureActive();
-    if (this.nativeBatch) {
-      const result = this.nativeBatch.update(objectId, updates);
-      this.rememberNativeBatchId(result.batchId);
-      return;
-    }
     this.client.updateInternal(
       objectId,
       updates,
       this.session,
       this.attribution,
-      this.rustBatchContext(),
+      this.batchContext,
     );
   }
 
   delete(objectId: string): void {
     this.ensureActive();
-    if (this.nativeBatch) {
-      const result = this.nativeBatch.delete(objectId);
-      this.rememberNativeBatchId(result.batchId);
-      return;
-    }
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.rustBatchContext());
+    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
@@ -1571,11 +1492,6 @@ export class JazzClient {
   }
 
   beginBatchInternal(session?: Session, attribution?: string): DirectBatch {
-    const nativeBatch =
-      !session && attribution === undefined ? this.runtime.beginDirectBatch?.() : undefined;
-    if (nativeBatch) {
-      return DirectBatch.fromNative(this, nativeBatch);
-    }
     return new DirectBatch(
       this,
       this.createBatchContext("direct"),
