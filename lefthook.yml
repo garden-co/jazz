@@ -18,4 +18,4 @@ pre-commit:
       stage_fixed: true
     starters-parity:
       glob: "starters/**"
-      run: node scripts/check-starters-parity.mjs
+      run: node dev/scripts/check-starters-parity.mjs

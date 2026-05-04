@@ -1,5 +1,21 @@
 # create-jazz
 
+## 2.0.0-alpha.46
+
+## 2.0.0-alpha.45
+
+### Patch Changes
+
+- 2ee98be: Add sync protocol version checks to the WebSocket handshake so incompatible clients and servers fail with an explicit update prompt.
+
+## 2.0.0-alpha.44
+
+## 2.0.0-alpha.43
+
+### Patch Changes
+
+- 5dec68f: Advance the `create-jazz` spinner to "Provisioning Jazz Cloud app" during the dashboard call, and stop credential/banner output from concatenating onto the active spinner line.
+
 ## 2.0.0-alpha.42
 
 ## 2.0.0-alpha.41

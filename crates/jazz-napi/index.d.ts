@@ -34,12 +34,6 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  insertDurable(table: string, values: Record<string, unknown>, tier: string, objectId?: string | undefined | null): Promise<any>
-  insertDurableWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string, objectId?: string | undefined | null): Promise<any>
-  updateDurable(objectId: string, values: any, tier: string): Promise<void>
-  updateDurableWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): Promise<void>
-  deleteDurable(objectId: string, tier: string): Promise<void>
-  deleteDurableWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): Promise<void>
   onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void

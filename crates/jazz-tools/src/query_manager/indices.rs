@@ -1,6 +1,8 @@
 use crate::object::ObjectId;
 use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_size};
 
+use crate::row_format::CompiledRowLayout;
+
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
 use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
@@ -138,6 +140,20 @@ impl QueryManager {
         data: &[u8],
         descriptor: &'a RowDescriptor,
     ) -> Vec<IndexMutation<'a>> {
+        let layout = crate::row_format::compiled_row_layout(descriptor);
+        Self::index_mutations_for_insert_on_branch_with_layout(
+            table, branch, object_id, data, descriptor, &layout,
+        )
+    }
+
+    pub(super) fn index_mutations_for_insert_on_branch_with_layout<'a>(
+        table: &'a str,
+        branch: &'a str,
+        object_id: ObjectId,
+        data: &[u8],
+        descriptor: &'a RowDescriptor,
+        layout: &CompiledRowLayout,
+    ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Insert {
             table,
             column: "_id",
@@ -147,7 +163,8 @@ impl QueryManager {
         }];
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Ok(value) = decode_column(descriptor, data, col_idx)
+            if let Ok(value) =
+                crate::row_format::decode_column_with_layout(descriptor, layout, data, col_idx)
                 && value != Value::Null
             {
                 Self::push_insert_column_index_values(

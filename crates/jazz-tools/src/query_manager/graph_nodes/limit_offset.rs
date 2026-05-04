@@ -15,7 +15,12 @@ pub struct LimitOffsetNode {
     output_tuple_descriptor: TupleDescriptor,
     limit: Option<usize>,
     offset: usize,
-    /// All tuples from input (before limit/offset applied).
+    /// Ordered tuples used to compute the current window.
+    ///
+    /// Ordered full-input rebuilds retain only the prefix through
+    /// `offset + limit` for limited queries. Incremental unordered updates may
+    /// retain more, so `sync_input_tuples()` still slices this to the replay
+    /// prefix.
     all_tuples: Vec<Tuple>,
     /// Current tuples after limit/offset.
     windowed_tuples: Vec<Tuple>,
@@ -56,18 +61,9 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
-        let sync_scope = self.sync_scope_provenance();
         self.windowed_tuples.clear();
         self.windowed_tuples
-            .extend(
-                self.all_tuples[start..end]
-                    .iter()
-                    .cloned()
-                    .map(|mut tuple| {
-                        tuple.merge_provenance(&sync_scope);
-                        tuple
-                    }),
-            );
+            .extend(self.all_tuples[start..end].iter().cloned());
         self.current_tuples = self.windowed_tuples.iter().cloned().collect();
     }
 
@@ -75,7 +71,8 @@ impl LimitOffsetNode {
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
         let old_tuples = std::mem::take(&mut self.windowed_tuples);
         self.all_tuples.clear();
-        self.all_tuples.extend_from_slice(ordered_tuples);
+        self.all_tuples
+            .extend_from_slice(&ordered_tuples[..self.sync_input_len(ordered_tuples.len())]);
         self.recompute_tuple_window();
         self.dirty = false;
         compute_tuple_delta(&old_tuples, &self.windowed_tuples)
@@ -92,18 +89,20 @@ impl LimitOffsetNode {
     /// `offset + limit` so it can reapply the same windowing logic locally.
     /// When no limit is present, that means the full ordered input.
     pub fn sync_input_tuples(&self) -> &[Tuple] {
-        let end = match self.limit {
-            Some(limit) => self.offset.saturating_add(limit).min(self.all_tuples.len()),
-            None => self.all_tuples.len(),
-        };
-        &self.all_tuples[..end]
+        &self.all_tuples[..self.sync_input_len(self.all_tuples.len())]
     }
 
-    fn sync_scope_provenance(&self) -> crate::query_manager::types::TupleProvenance {
-        self.sync_input_tuples()
-            .iter()
-            .flat_map(|tuple| tuple.provenance().iter().copied())
-            .collect()
+    /// Tuples from an already-filtered ordered input that must be present locally
+    /// to reproduce this paginated window.
+    pub fn filtered_sync_input_tuples<'a>(&self, ordered_tuples: &'a [Tuple]) -> &'a [Tuple] {
+        &ordered_tuples[..self.sync_input_len(ordered_tuples.len())]
+    }
+
+    fn sync_input_len(&self, input_len: usize) -> usize {
+        match self.limit {
+            Some(limit) => self.offset.saturating_add(limit).min(input_len),
+            None => input_len,
+        }
     }
 }
 
@@ -184,6 +183,14 @@ mod tests {
             batch_id: crate::row_histories::BatchId([0; 16]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
+    }
+
+    fn make_scoped_tuple(id: ObjectId, n: i32, name: &str) -> Tuple {
+        make_tuple(id, n, name).with_provenance(
+            [(id, crate::object::BranchName::new("main"))]
+                .into_iter()
+                .collect(),
+        )
     }
 
     fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
@@ -280,6 +287,58 @@ mod tests {
         assert_eq!(windowed_ids.len(), 2);
         assert_eq!(windowed_ids[0], ids[1]);
         assert_eq!(windowed_ids[1], ids[2]);
+    }
+
+    #[test]
+    fn windowed_tuples_keep_row_provenance_separate_from_sync_prefix() {
+        let mut node = make_limit_offset_node(Some(2), 1);
+
+        let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_scoped_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples);
+
+        assert_eq!(node.sync_input_tuples().len(), 3);
+        assert_eq!(node.windowed_tuples().len(), 2);
+        assert_eq!(node.windowed_tuples()[0].first_id(), Some(ids[1]));
+        assert_eq!(node.windowed_tuples()[1].first_id(), Some(ids[2]));
+        assert_eq!(node.windowed_tuples()[0].provenance().len(), 1);
+        assert_eq!(node.windowed_tuples()[1].provenance().len(), 1);
+        assert!(
+            node.windowed_tuples()[0]
+                .provenance()
+                .contains(&(ids[1], crate::object::BranchName::new("main")))
+        );
+        assert!(
+            node.windowed_tuples()[1]
+                .provenance()
+                .contains(&(ids[2], crate::object::BranchName::new("main")))
+        );
+    }
+
+    #[test]
+    fn ordered_limited_input_keeps_only_replay_prefix() {
+        let mut node = make_limit_offset_node(Some(2), 1);
+
+        let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
+        let tuples: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| make_scoped_tuple(*id, i as i32, &format!("Row{}", i)))
+            .collect();
+
+        node.process_with_ordered_input(&tuples[..4]);
+        assert_eq!(node.sync_input_tuples().len(), 3);
+        assert_eq!(get_windowed_ids(&node), vec![ids[1], ids[2]]);
+
+        let delta = node.process_with_ordered_input(&tuples);
+        assert!(delta.is_empty());
+        assert_eq!(node.sync_input_tuples().len(), 3);
+        assert_eq!(get_windowed_ids(&node), vec![ids[1], ids[2]]);
     }
 
     #[test]

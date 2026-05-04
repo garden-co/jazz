@@ -7,7 +7,12 @@
  * `runtime.connect()` — no HTTP/SSE code lives here.
  */
 
-import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
+import type {
+  InitMessage,
+  MainToWorkerMessage,
+  SequencedSyncPayload,
+  WorkerToMainMessage,
+} from "./worker-protocol.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 import { mapAuthReason } from "../runtime/auth-state.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
@@ -58,7 +63,7 @@ let initComplete = false;
 let wasmInitialized = false;
 let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
-let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
+let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -153,8 +158,8 @@ async function ensureWorkerWasmInitialized(
   wasmInitialized = true;
 }
 
-function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
-  pendingSyncPayloadsForMain.push(payload);
+function enqueueSyncMessageForMain(payload: Uint8Array | string, sequence?: number | null): void {
+  pendingSyncPayloadsForMain.push(typeof sequence === "number" ? { payload, sequence } : payload);
   if (syncBatchFlushQueued) return;
 
   syncBatchFlushQueued = true;
@@ -175,14 +180,27 @@ function post(msg: WorkerToMainMessage): void {
   self.postMessage(msg, transfer);
 }
 
-function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
+function collectPayloadTransferables(
+  payloads: (Uint8Array | string | SequencedSyncPayload)[],
+): Transferable[] {
   const transferables = [];
-  for (const payload of payloads) {
+  for (const entry of payloads) {
+    const payload = isSequencedSyncPayload(entry) ? entry.payload : entry;
     if (payload instanceof Uint8Array) {
       transferables.push(payload.buffer);
     }
   }
   return transferables;
+}
+
+function isSequencedSyncPayload(value: unknown): value is SequencedSyncPayload {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "payload" in value &&
+    "sequence" in value &&
+    typeof (value as { sequence?: unknown }).sequence === "number"
+  );
 }
 
 // ============================================================================
@@ -341,12 +359,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
         destinationId: string,
         payload: Uint8Array | string,
         isCatalogue: boolean,
+        sequence?: number | null,
       ) => {
         if (destinationKind === "client") {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
-            enqueueSyncMessageForMain(payload);
+            enqueueSyncMessageForMain(payload, sequence);
             return;
           }
 
@@ -365,7 +384,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
         } else if (destinationKind === "server") {
           if (bootstrapCatalogueForwarding) {
             if (isCatalogue) {
-              enqueueSyncMessageForMain(payload);
+              enqueueSyncMessageForMain(payload, sequence);
             }
           }
           // Server-bound payloads are delivered by the Rust transport; no TS action needed.
