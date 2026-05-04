@@ -407,8 +407,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
-            enqueueSyncMessageForMain(payload, sequence);
             queueRejectedBatchReplayToMain();
+            enqueueSyncMessageForMain(payload, sequence);
             return;
           }
 
