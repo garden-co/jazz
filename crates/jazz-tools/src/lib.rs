@@ -1,5 +1,6 @@
 pub mod batch_fate;
 pub mod catalogue;
+pub mod client_core;
 pub mod commit;
 pub mod digest;
 pub mod identity;
