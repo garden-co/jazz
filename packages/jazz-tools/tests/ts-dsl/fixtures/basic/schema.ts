@@ -40,6 +40,7 @@ export const schema = {
     array: s.array(s.string()).default(["a", "b", "c"]),
     boolean: s.boolean().default(true),
     nullable: s.string().optional().default(null),
+    nullableInteger: s.int().optional().default(null),
     refId: s.ref("todos").optional().default("00000000-0000-0000-0000-000000000000"),
   }),
 };

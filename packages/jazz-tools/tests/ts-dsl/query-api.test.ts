@@ -102,6 +102,152 @@ describe("TS Query API", () => {
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
     });
 
+    it("filters int columns with multiple range operators on the same column", async () => {
+      db.insert(app.table_with_defaults, { integer: 5 });
+      const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });
+      const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
+      db.insert(app.table_with_defaults, { integer: 20 });
+
+      const results = await db.all(
+        app.table_with_defaults
+          .where({ integer: { gt: 5, lt: 20 } })
+          .select("integer")
+          .orderBy("integer", "asc"),
+      );
+
+      expect(results).toEqual([
+        { id: aliceTask.id, integer: 10 },
+        { id: bobTask.id, integer: 15 },
+      ]);
+    });
+
+    it("filters nullable int columns with range and not-null predicates", async () => {
+      db.insert(app.table_with_defaults, { nullableInteger: null });
+      const { value: aliceTask } = db.insert(app.table_with_defaults, { nullableInteger: 5 });
+      db.insert(app.table_with_defaults, { nullableInteger: 10 });
+      db.insert(app.table_with_defaults, { nullableInteger: 15 });
+
+      const results = await db.all(
+        app.table_with_defaults
+          .where({ nullableInteger: { lt: 10, ne: null } })
+          .select("nullableInteger")
+          .orderBy("nullableInteger", "asc"),
+      );
+
+      expect(results).toEqual([{ id: aliceTask.id, nullableInteger: 5 }]);
+    });
+
+    it("filters nullable int columns with range and null equality predicates", async () => {
+      db.insert(app.table_with_defaults, { nullableInteger: null });
+      db.insert(app.table_with_defaults, { nullableInteger: 5 });
+      db.insert(app.table_with_defaults, { nullableInteger: 10 });
+      db.insert(app.table_with_defaults, { nullableInteger: 15 });
+
+      const results = await db.all(
+        app.table_with_defaults
+          .where({ nullableInteger: { lt: 10, eq: null } })
+          .select("nullableInteger")
+          .orderBy("nullableInteger", "asc"),
+      );
+
+      expect(results).toEqual([]);
+    });
+
+    it("filters float columns with multiple range operators on the same column", async () => {
+      db.insert(app.table_with_defaults, { float: 1.5 });
+      const { value: aliceTask } = db.insert(app.table_with_defaults, { float: 2.5 });
+      const { value: bobTask } = db.insert(app.table_with_defaults, { float: 3.5 });
+      db.insert(app.table_with_defaults, { float: 4.5 });
+
+      const results = await db.all(
+        app.table_with_defaults
+          .where({ float: { gt: 1.5, lt: 4.5 } })
+          .select("float")
+          .orderBy("float", "asc"),
+      );
+
+      expect(results).toEqual([
+        { id: aliceTask.id, float: 2.5 },
+        { id: bobTask.id, float: 3.5 },
+      ]);
+    });
+
+    it("filters timestamp columns with multiple range operators on the same column", async () => {
+      const lowerBound = new Date("2026-02-01T00:00:00.000Z");
+      const aliceDueAt = new Date("2026-02-02T00:00:00.000Z");
+      const bobDueAt = new Date("2026-02-03T00:00:00.000Z");
+      const upperBound = new Date("2026-02-04T00:00:00.000Z");
+
+      db.insert(app.table_with_defaults, { timestampDate: lowerBound });
+      const { value: aliceTask } = db.insert(app.table_with_defaults, {
+        timestampDate: aliceDueAt,
+      });
+      const { value: bobTask } = db.insert(app.table_with_defaults, { timestampDate: bobDueAt });
+      db.insert(app.table_with_defaults, { timestampDate: upperBound });
+
+      const results = await db.all(
+        app.table_with_defaults
+          .where({ timestampDate: { gt: lowerBound, lt: upperBound } })
+          .select("timestampDate")
+          .orderBy("timestampDate", "asc"),
+      );
+
+      expect(results).toEqual([
+        { id: aliceTask.id, timestampDate: aliceDueAt },
+        { id: bobTask.id, timestampDate: bobDueAt },
+      ]);
+    });
+
+    it("filters same-column numeric bounds by the full predicate after index scanning", async () => {
+      const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 5 });
+      const { value: daveTask } = db.insert(app.table_with_defaults, { integer: 10 });
+      const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
+      const { value: carolTask } = db.insert(app.table_with_defaults, { integer: 20 });
+
+      const duplicateLowerBoundResults = await db.all(
+        app.table_with_defaults
+          .where({ integer: { gt: 10, gte: 5 } })
+          .select("integer")
+          .orderBy("integer", "asc"),
+      );
+
+      expect(duplicateLowerBoundResults).toEqual([
+        { id: bobTask.id, integer: 15 },
+        { id: carolTask.id, integer: 20 },
+      ]);
+
+      const duplicateUpperBoundResults = await db.all(
+        app.table_with_defaults
+          .where({ integer: { lt: 20, lte: 15 } })
+          .select("integer")
+          .orderBy("integer", "asc"),
+      );
+
+      expect(duplicateUpperBoundResults).toEqual([
+        { id: aliceTask.id, integer: 5 },
+        { id: daveTask.id, integer: 10 },
+        { id: bobTask.id, integer: 15 },
+      ]);
+
+      const eqInsideRangeResults = await db.all(
+        app.table_with_defaults
+          .where({ integer: { eq: 15, gte: 5, lt: 20 } })
+          .select("integer")
+          .orderBy("integer", "asc"),
+      );
+
+      expect(eqInsideRangeResults).toEqual([{ id: bobTask.id, integer: 15 }]);
+
+      const impossibleRangeResults = await db.all(
+        app.table_with_defaults
+          .where({ integer: { eq: 10, lt: 10 } })
+          .select("integer")
+          .orderBy("integer", "asc"),
+      );
+
+      expect(impossibleRangeResults).toEqual([]);
+    });
+
     describe("query by array column", () => {
       it("using eq", async () => {
         const { id: id1 } = insertTodo(db, {

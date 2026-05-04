@@ -70,6 +70,7 @@ impl IndexScanNode {
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
         let new_ids: AHashSet<ObjectId> = match &self.condition {
+            ScanCondition::Empty => AHashSet::new(),
             ScanCondition::All => ctx
                 .storage
                 .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
