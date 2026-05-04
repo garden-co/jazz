@@ -1,11 +1,13 @@
 pub mod config;
 pub mod error;
+pub mod write;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::{ClientConfig, ClientRuntimeFlavor, ClientStorageMode};
 pub use error::{ClientError, ClientErrorCode};
+pub use write::{DirectBatchCore, WriteHandleCore, WriteOptions, WriteResultCore};
 
 use crate::query_manager::types::Schema;
 use crate::runtime_core::{RuntimeCore, Scheduler};
