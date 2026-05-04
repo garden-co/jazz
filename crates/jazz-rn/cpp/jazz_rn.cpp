@@ -144,10 +144,15 @@ void uniffi_jazz_rn_fn_method_rnruntime_connect(
 uint64_t uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
     /*handle*/ uint64_t ptr, RustBuffer query_json, RustBuffer session_json,
     RustBuffer tier, RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_create_write_batch_context(
+    /*handle*/ uint64_t ptr, RustBuffer mode, RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_delete(
     /*handle*/ uint64_t ptr, RustBuffer object_id,
     RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+    /*handle*/ uint64_t ptr, RustBuffer object_id,
+    RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_delete_sealed(
     /*handle*/ uint64_t ptr, RustBuffer object_id,
     RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_disconnect(
@@ -164,6 +169,10 @@ RustBuffer uniffi_jazz_rn_fn_method_rnruntime_get_schema_hash(
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_insert(
     /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
     RustBuffer object_id, RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_insert_sealed(
+    /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
+    RustBuffer write_context_json, RustBuffer object_id,
+    RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
     /*handle*/ uint64_t ptr, RustBuffer table, RustBuffer values_json,
     RustBuffer write_context_json, RustBuffer object_id,
@@ -206,6 +215,9 @@ RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update(
 void uniffi_jazz_rn_fn_method_rnruntime_update_auth(
     /*handle*/ uint64_t ptr, RustBuffer auth_json,
     RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update_sealed(
+    /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
+    RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
     RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
@@ -347,14 +359,17 @@ uint16_t uniffi_jazz_rn_checksum_method_rnruntime_batched_tick();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_close();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_connect();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_create_subscription();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_create_write_batch_context();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_delete();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_disconnect();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_flush();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_insert();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records();
@@ -371,6 +386,7 @@ uint16_t uniffi_jazz_rn_checksum_method_rnruntime_subscribe();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_auth();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_sealed();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_with_session();
 uint16_t uniffi_jazz_rn_checksum_constructor_rnruntime_new();
 uint16_t uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure();
@@ -3029,6 +3045,18 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_create_write_batch_context"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_fn_method_"
+                                        "rnruntime_create_write_batch_context"),
+          2,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_fn_method_rnruntime_create_write_batch_context(
+                    rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3051,6 +3079,17 @@ NativeJazzRn::NativeJazzRn(
             return this
                 ->cpp_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
                     rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete_sealed"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_delete_sealed(
+                rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_disconnect"] =
       jsi::Function::createFromHostFunction(
@@ -3119,6 +3158,17 @@ NativeJazzRn::NativeJazzRn(
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_insert(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_sealed"),
+          5,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_insert_sealed(
                 rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session"] =
@@ -3292,6 +3342,17 @@ NativeJazzRn::NativeJazzRn(
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_sealed"),
+          4,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_update_sealed(
                 rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_with_session"] =
@@ -3492,6 +3553,18 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_write_batch_"
+        "context"] = jsi::Function::createFromHostFunction(
+      rt,
+      jsi::PropNameID::forAscii(rt, "ubrn_uniffi_jazz_rn_checksum_method_"
+                                    "rnruntime_create_write_batch_context"),
+      0,
+      [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+             const jsi::Value *args, size_t count) -> jsi::Value {
+        return this
+            ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_create_write_batch_context(
+                rt, thisVal, args, count);
+      });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3513,6 +3586,19 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect"] =
@@ -3585,6 +3671,19 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed(
+                    rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session"] =
       jsi::Function::createFromHostFunction(
@@ -3765,6 +3864,19 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_sealed"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_sealed"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_sealed(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session"] =
@@ -4101,6 +4213,22 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_create_subscription(
 
   return uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, value);
 }
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_create_write_batch_context(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_create_write_batch_context(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_delete(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4123,6 +4251,22 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
   RustCallStatus status =
       uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
   auto value = uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_delete_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_delete_sealed(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
@@ -4218,6 +4362,24 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_insert(
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_insert_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_insert_sealed(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[4]),
       &status);
   uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
                                                         args[count - 1]);
@@ -4464,6 +4626,23 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_auth(
 
   return jsi::Value::undefined();
 }
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_update_sealed(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -4638,6 +4817,15 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
+jsi::Value NativeJazzRn::
+    cpp_uniffi_jazz_rn_checksum_method_rnruntime_create_write_batch_context(
+        jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+        size_t count) {
+  auto value =
+      uniffi_jazz_rn_checksum_method_rnruntime_create_write_batch_context();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_delete(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4650,6 +4838,14 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_delete_sealed();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -4697,6 +4893,14 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_insert();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_insert_sealed();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
@@ -4819,6 +5023,14 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_update_auth();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_sealed(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_update_sealed();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

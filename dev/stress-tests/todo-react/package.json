@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 5477",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

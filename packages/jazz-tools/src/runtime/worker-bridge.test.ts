@@ -63,12 +63,17 @@ function createRuntimeMock(): {
   const runtime: Runtime = {
     loadLocalBatchRecord: () => null,
     loadLocalBatchRecords: () => [],
-    insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
-    update: () => ({
+    insertSealed: () => ({ id: "id", values: [], batchId: "batch-id" }),
+    updateSealed: () => ({
       batchId: "batch-id",
     }),
-    delete: () => ({
+    deleteSealed: () => ({
       batchId: "batch-id",
+    }),
+    createWriteBatchContext: (batchMode) => ({
+      batchMode,
+      batchId: `${batchMode}-batch-id`,
+      targetBranchName: "dev-schema-hash-main",
     }),
     query: async () => [],
     subscribe: () => 1,

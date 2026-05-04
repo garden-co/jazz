@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use futures::channel::oneshot;
 
+#[cfg(feature = "client")]
+use crate::client_core::SharedRuntimeHost;
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::{Session, WriteContext};
@@ -281,6 +283,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             _sync_sender: sync_sender,
             scheduler: scheduler_clone,
         }
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn shared_runtime_host(&self) -> SharedRuntimeHost<S, TokioScheduler<S>> {
+        SharedRuntimeHost::new(Arc::clone(&self.core))
     }
 
     /// Persist the current schema to the catalogue for server sync.

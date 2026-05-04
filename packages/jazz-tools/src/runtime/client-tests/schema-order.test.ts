@@ -4,21 +4,17 @@ import {
   flushMicrotasks,
   mockRow,
   runtimeBatchRecordStubs,
+  runtimeSealedWriteStubs,
   type Runtime,
 } from "./support.js";
 
 describe("JazzClient schema order", () => {
   it("passes create values through in the declared schema order", async () => {
-    const insert = vi.fn(() => mockRow());
+    const insertSealed = vi.fn(() => mockRow());
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert,
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
+      insertSealed,
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 0,
@@ -76,10 +72,15 @@ describe("JazzClient schema order", () => {
       done: { type: "Boolean", value: false },
     });
 
-    expect(insert).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Buy milk" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(insertSealed).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Buy milk" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+      undefined,
+    );
   });
 
   it("aligns create result rows from declared schema context without runtime schema hashing", async () => {
@@ -91,18 +92,13 @@ describe("JazzClient schema order", () => {
     });
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => ({
+      ...runtimeSealedWriteStubs,
+      insertSealed: () => ({
         id: "todo-1",
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
         ],
-        batchId: "batch-id",
-      }),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
         batchId: "batch-id",
       }),
       query: async () => [],
@@ -155,13 +151,7 @@ describe("JazzClient schema order", () => {
   it("reorders query rows back to the declared schema order", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
       query: async () => [
         {
           id: "todo-1",
@@ -240,13 +230,7 @@ describe("JazzClient schema order", () => {
   it("reorders query row columns while preserving included relation values", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
       query: async () => [
         {
           id: "todo-1",
@@ -349,13 +333,7 @@ describe("JazzClient schema order", () => {
   it("reorders included relation row values to the declared schema order", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
       query: async () => [
         {
           id: "todo-1",
@@ -498,13 +476,7 @@ describe("JazzClient schema order", () => {
   it("keeps magic projection values ahead of included rows during schema alignment", async () => {
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
       query: async () => [
         {
           id: "todo-1",
@@ -650,13 +622,7 @@ describe("JazzClient schema order", () => {
     let onUpdate: ((delta: unknown) => void) | undefined;
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert: () => mockRow(),
-      update: () => ({
-        batchId: "batch-id",
-      }),
-      delete: () => ({
-        batchId: "batch-id",
-      }),
+      ...runtimeSealedWriteStubs,
       query: async () => [],
       subscribe: () => 0,
       createSubscription: () => 1,

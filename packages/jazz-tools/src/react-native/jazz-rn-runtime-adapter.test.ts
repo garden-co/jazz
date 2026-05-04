@@ -13,13 +13,24 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     updateAuth: vi.fn(),
     onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
+    createWriteBatchContext: vi.fn((mode) =>
+      JSON.stringify({
+        batchMode: mode,
+        batchId: `${mode}-batch`,
+        targetBranchName: "dev-schema-main",
+      }),
+    ),
     delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
+    deleteSealed: vi.fn(() => JSON.stringify({ batchId: "batch-delete-sealed" })),
     deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
+    ),
+    insertSealed: vi.fn((_table, _valuesJson, _writeContextJson, objectId) =>
+      JSON.stringify({ id: objectId ?? "row-1", values: [], batchId: "batch-sealed" }),
     ),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
@@ -33,6 +44,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
+    updateSealed: vi.fn(() => JSON.stringify({ batchId: "batch-update-sealed" })),
     updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
   };
@@ -184,6 +196,42 @@ describe("JazzRnRuntimeAdapter", () => {
 
     adapter.deleteWithSession("row-1", writeContextJson);
     expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
+  });
+
+  it("serializes sealed mutations and parses Rust batch contexts", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+    const writeContextJson = JSON.stringify({ attribution: "alice" });
+
+    const row = adapter.insertSealed(
+      "todos",
+      { title: { type: "Text", value: "milk" } },
+      writeContextJson,
+      "row-1",
+    );
+    expect(row).toEqual({ id: "row-1", values: [], batchId: "batch-sealed" });
+    expect(binding.insertSealed).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      writeContextJson,
+      "row-1",
+    );
+
+    adapter.updateSealed("row-1", { done: { type: "Boolean", value: true } }, writeContextJson);
+    expect(binding.updateSealed).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      writeContextJson,
+    );
+
+    adapter.deleteSealed("row-1", writeContextJson);
+    expect(binding.deleteSealed).toHaveBeenCalledWith("row-1", writeContextJson);
+
+    expect(adapter.createWriteBatchContext("transactional")).toEqual({
+      batchMode: "transactional",
+      batchId: "transactional-batch",
+      targetBranchName: "dev-schema-main",
+    });
   });
 
   it("bridges subscription callbacks with handle conversion", () => {

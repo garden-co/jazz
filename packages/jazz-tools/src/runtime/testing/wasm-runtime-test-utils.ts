@@ -67,7 +67,7 @@ export function hasJazzWasmBuild(): boolean {
   return resolveJazzWasmPaths() !== null;
 }
 
-function loadWasmModule(): Promise<any> {
+export function loadWasmModule(): Promise<any> {
   if (!wasmModulePromise) {
     wasmModulePromise = (async () => {
       const paths = resolveJazzWasmPaths();

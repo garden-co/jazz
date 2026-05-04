@@ -1,4 +1,6 @@
+import { readdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { onTestFinished } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
@@ -10,6 +12,23 @@ export type TestNapiRuntime = Runtime & { close?: () => void };
 const require = createRequire(import.meta.url);
 
 let napiModulePromise: Promise<NapiModule> | null = null;
+
+function requireBuiltNapiModule(): NapiModule {
+  try {
+    return require("jazz-napi") as NapiModule;
+  } catch (error) {
+    try {
+      const packageDir = dirname(require.resolve("jazz-napi/package.json"));
+      const binary = readdirSync(packageDir).find((name) => /^jazz-napi\..*\.node$/.test(name));
+      if (binary) {
+        return require(join(packageDir, binary)) as NapiModule;
+      }
+    } catch {
+      // Preserve the original package-load error for the user-facing message.
+    }
+    throw error;
+  }
+}
 
 function registerRuntimeCleanup(runtime: { close?: () => void }): void {
   onTestFinished(() => {
@@ -30,7 +49,7 @@ function formatNapiLoadError(error: unknown): Error {
 
 export function hasJazzNapiBuild(): boolean {
   try {
-    require("jazz-napi");
+    requireBuiltNapiModule();
     return true;
   } catch {
     return false;
@@ -41,7 +60,7 @@ export async function loadNapiModule(): Promise<NapiModule> {
   if (!napiModulePromise) {
     napiModulePromise = Promise.resolve().then(() => {
       try {
-        return require("jazz-napi") as NapiModule;
+        return requireBuiltNapiModule();
       } catch (error) {
         throw formatNapiLoadError(error);
       }

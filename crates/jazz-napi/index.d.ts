@@ -11,6 +11,12 @@ export declare class DevServer {
   stop(): Promise<void>
 }
 
+export declare class NapiJazzClient {
+  constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string)
+  insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
+  close(): void
+}
+
 export declare class NapiRuntime {
   /** Create a new NapiRuntime with SQLite-backed persistent storage. */
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
@@ -18,10 +24,14 @@ export declare class NapiRuntime {
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
   insert(table: string, values: Record<string, unknown>, objectId?: string | undefined | null): any
   insertWithSession(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
+  insertSealed(table: string, values: Record<string, unknown>, writeContextJson?: string | undefined | null, objectId?: string | undefined | null): any
+  createWriteBatchContext(mode: string): any
   update(objectId: string, values: any): any
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
+  updateSealed(objectId: string, values: any, writeContextJson?: string | undefined | null): any
   delete(objectId: string): any
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
+  deleteSealed(objectId: string, writeContextJson?: string | undefined | null): any
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
   drainRejectedBatchIds(): string[]

@@ -15,9 +15,18 @@ function makeFakeRuntime() {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
-    insert: vi.fn(),
-    update: vi.fn(),
-    delete: vi.fn(),
+    insertSealed: vi.fn().mockReturnValue({
+      id: "row-1",
+      values: [],
+      batchId: "sealed-insert-batch-id",
+    }),
+    updateSealed: vi.fn().mockReturnValue({ batchId: "sealed-update-batch-id" }),
+    deleteSealed: vi.fn().mockReturnValue({ batchId: "sealed-delete-batch-id" }),
+    createWriteBatchContext: vi.fn((batchMode: "direct" | "transactional") => ({
+      batchMode,
+      batchId: `${batchMode}-batch-id`,
+      targetBranchName: `dev-hash-main`,
+    })),
     query:
       vi.fn<
         (
@@ -304,8 +313,10 @@ describe("JazzClient transactions", () => {
     const committed = client.beginTransaction().commit();
 
     expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.createWriteBatchContext).toHaveBeenCalledWith("transactional");
+    expect(runtime.sealBatch).toHaveBeenCalledWith("transactional-batch-id");
     expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBeDefined();
+    expect(committed.batchId).toBe("transactional-batch-id");
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
@@ -320,10 +331,40 @@ describe("JazzClient transactions", () => {
     const committed = client.beginBatch().commit();
 
     expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.createWriteBatchContext).toHaveBeenCalledWith("direct");
+    expect(runtime.sealBatch).toHaveBeenCalledWith("direct-batch-id");
     expect(committed).toBeInstanceOf(WriteHandle);
-    expect(committed.batchId).toBeDefined();
+    expect(committed.batchId).toBe("direct-batch-id");
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+  });
+
+  it("uses Rust-owned batch contexts instead of legacy native batch objects", () => {
+    const runtime = makeFakeRuntime() as unknown as Runtime & {
+      beginDirectBatch: ReturnType<typeof vi.fn>;
+    };
+    runtime.beginDirectBatch = vi.fn(() => ({
+      insert: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(),
+    }));
+    runtime.insertWithSession = vi.fn(() => ({
+      id: "row-1",
+      values: [],
+      batchId: "direct-batch-id",
+    }));
+
+    const client = JazzClient.connectWithRuntime(runtime, makeContext());
+    const batch = client.beginBatch();
+    batch.create("todos", {});
+    const handle = batch.commit();
+
+    expect(runtime.beginDirectBatch).not.toHaveBeenCalled();
+    expect(runtime.createWriteBatchContext).toHaveBeenCalledWith("direct");
+    expect(runtime.insertWithSession).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).toHaveBeenCalledWith("direct-batch-id");
+    expect(handle.batchId).toBe("direct-batch-id");
   });
 
   it("commits a sync callback transaction and returns the callback result handle", async () => {

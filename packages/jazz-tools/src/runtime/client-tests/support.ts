@@ -1,5 +1,7 @@
 import {
   JazzClient,
+  type BatchMode,
+  type BatchWriteContext,
   type DirectInsertResult,
   type DirectMutationResult,
   type Runtime,
@@ -49,6 +51,21 @@ export const runtimeBatchRecordStubs = {
   sealBatch: () => {},
 };
 
+export function mockBatchContext(batchMode: BatchMode): BatchWriteContext {
+  return {
+    batchMode,
+    batchId: `${batchMode}-batch-id`,
+    targetBranchName: `dev-schema-hash-main`,
+  };
+}
+
+export const runtimeSealedWriteStubs = {
+  insertSealed: () => mockRow(),
+  updateSealed: () => mockMutation(),
+  deleteSealed: () => mockMutation(),
+  createWriteBatchContext: mockBatchContext,
+};
+
 export function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined, string | undefined]> =
     [];
@@ -61,17 +78,7 @@ export function makeClient() {
 
   const runtime: Runtime = {
     ...runtimeBatchRecordStubs,
-    insert: () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-      batchId: "plain-insert-batch",
-    }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
+    ...runtimeSealedWriteStubs,
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -143,17 +150,7 @@ export function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
     ...runtimeBatchRecordStubs,
-    insert: () => ({
-      id: "00000000-0000-0000-0000-000000000001",
-      values: [],
-      batchId: "plain-insert-batch",
-    }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
+    ...runtimeSealedWriteStubs,
     query: async () => [],
     subscribe: () => nextHandle++,
     createSubscription: () => nextHandle++,
