@@ -153,13 +153,34 @@ describe("agent-infra backend CLI run commands", () => {
       expect(operation.operationType).toBe("delete-branch-path");
       expect(operation.relPath).toBe("tests");
 
+      const contextOperation = runCliJson("record-cursor-review-op", {
+        operationId: "cursor-op-context-chat",
+        operationType: "open-review-context-chat",
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        workspaceRoot: "/Users/nikitavoloboev/workspaces/dev.code-workspace",
+        relPath:
+          "/Users/nikitavoloboev/.cursor/plans/telemetry_review_understanding_019df3bb.md",
+        note: "open this review packet in a fresh Cursor Claude chat",
+        sourceSessionId: "codex:019df561-c871-7580-9a19-335278c2b27c",
+        sourceChatKind: "codex",
+      });
+
+      expect(contextOperation.operationId).toBe("cursor-op-context-chat");
+      expect(contextOperation.operationType).toBe("open-review-context-chat");
+      expect(contextOperation.relPath).toBe(
+        "/Users/nikitavoloboev/.cursor/plans/telemetry_review_understanding_019df3bb.md",
+      );
+
       const pending = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",
         "/Users/nikitavoloboev/code/prom",
       ]);
-      expect(pending).toHaveLength(1);
-      expect(pending[0]?.bookmark).toBe(
-        "review/nikiv-ai-proxy-opus-4-7-thinking",
+      expect(pending).toHaveLength(2);
+      expect(pending.map((item: any) => item.operationType)).toEqual(
+        expect.arrayContaining([
+          "delete-branch-path",
+          "open-review-context-chat",
+        ]),
       );
 
       const result = runCliJson("record-cursor-review-result", {
@@ -170,6 +191,15 @@ describe("agent-infra backend CLI run commands", () => {
         message: "opened in fresh chat",
       });
       expect(result.operationId).toBe("cursor-op-2");
+
+      const contextResult = runCliJson("record-cursor-review-result", {
+        operationId: "cursor-op-context-chat",
+        status: "completed",
+        clientId: "flow-window-cli",
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        message: "opened review context chat",
+      });
+      expect(contextResult.operationId).toBe("cursor-op-context-chat");
 
       const filtered = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",
@@ -182,8 +212,18 @@ describe("agent-infra backend CLI run commands", () => {
         "/Users/nikitavoloboev/code/prom",
         "--include-processed",
       ]);
-      expect(withProcessed).toHaveLength(1);
-      expect(withProcessed[0]?.latestResult?.status).toBe("completed");
+      expect(withProcessed).toHaveLength(2);
+      expect(
+        withProcessed.map((item: any) => [
+          item.operationType,
+          item.latestResult?.status,
+        ]),
+      ).toEqual(
+        expect.arrayContaining([
+          ["delete-branch-path", "completed"],
+          ["open-review-context-chat", "completed"],
+        ]),
+      );
     },
   );
 

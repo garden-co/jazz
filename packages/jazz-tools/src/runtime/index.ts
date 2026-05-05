@@ -82,3 +82,32 @@ export {
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export {
+  DESIGNER_TRACE_SCHEMA_VERSION,
+  createDesignerTraceControlPlane,
+  designerTraceTables,
+  type CodebaseIndexSnapshotWrite,
+  type CodebaseIndexObjectRefsInput,
+  type DesignerCodebaseIndexSnapshotInit,
+  type DesignerCodebaseIndexSnapshotRow,
+  type DesignerObjectRefInit,
+  type DesignerObjectRefInput,
+  type DesignerObjectRefRole,
+  type DesignerObjectRefRow,
+  type DesignerTraceBatch,
+  type DesignerTraceControlPlaneOptions,
+  type DesignerTraceDb,
+  type DesignerTraceEventInit,
+  type DesignerTraceEventRow,
+  type DesignerTraceJson,
+  type DesignerTraceSessionContext,
+  type DesignerUploadJobInit,
+  type DesignerUploadJobRow,
+  type DesignerUploadReceiptInit,
+  type DesignerUploadReceiptRow,
+  type RecordCodebaseIndexSnapshotInput,
+  type RecordTelemetryEventInput,
+  type RecordUploadReceiptInput,
+  type TelemetryEventWrite,
+  type UploadReceiptWrite,
+} from "./designer-trace-control-plane.js";
