@@ -988,7 +988,14 @@ export function createDesignerTraceControlPlane(
         `upload job ${uploadJob.upload_job_id} cannot be processed from status ${uploadJob.status}`,
       );
     }
-    if (uploadJob.claimed_by && workerId && uploadJob.claimed_by !== workerId) {
+    if (uploadJob.status === "failed" && uploadJob.next_retry_at) {
+      if (uploadJob.next_retry_at.getTime() > now().getTime()) {
+        throw new DesignerTraceUploadError(
+          `upload job ${uploadJob.upload_job_id} cannot retry before ${uploadJob.next_retry_at.toISOString()}`,
+        );
+      }
+    }
+    if (uploadJob.claimed_by && uploadJob.claimed_by !== workerId) {
       throw new DesignerTraceUploadError(
         `upload job ${uploadJob.upload_job_id} is claimed by ${uploadJob.claimed_by}`,
       );
@@ -1555,6 +1562,12 @@ export function createDesignerTraceControlPlane(
           ...(input.metadata ?? {}),
         },
       });
+      assertStorageReceiptMatchesObject(
+        storageReceipt,
+        input.objectRef,
+        expectedContentHash,
+        content.byteLength,
+      );
       const receiptWrite = recordUploadReceipt({
         uploadJobId: input.uploadJob.upload_job_id,
         uploadJobRowId: input.uploadJob.id,
@@ -1584,11 +1597,7 @@ export function createDesignerTraceControlPlane(
       if (input.uploadJob.session_id !== session.sessionId) {
         throw new DesignerTraceUploadError("upload job must belong to this session");
       }
-      if (
-        input.uploadJob.claimed_by &&
-        input.workerId &&
-        input.uploadJob.claimed_by !== input.workerId
-      ) {
+      if (input.uploadJob.claimed_by && input.uploadJob.claimed_by !== input.workerId) {
         throw new DesignerTraceUploadError(
           `upload job ${input.uploadJob.upload_job_id} is claimed by ${input.uploadJob.claimed_by}`,
         );
@@ -1659,6 +1668,64 @@ function assertObjectRefInput(input: DesignerObjectRefInput): void {
   }
   if (input.sizeBytes !== null && input.sizeBytes !== undefined && input.sizeBytes < 0) {
     throw new DesignerTraceUploadError("object ref sizeBytes must be non-negative");
+  }
+}
+
+function assertStorageReceiptMatchesObject(
+  receipt: DesignerTraceObjectStoragePutReceipt,
+  objectRef: DesignerObjectRefRow,
+  expectedContentHash: string,
+  expectedSizeBytes: number,
+): void {
+  if (!receipt.contentHash) {
+    throw new DesignerTraceUploadError(
+      `storage receipt content hash missing for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (receipt.contentHash !== expectedContentHash) {
+    throw new DesignerTraceUploadError(
+      `storage receipt content hash mismatch for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (receipt.sizeBytes === null || receipt.sizeBytes === undefined) {
+    throw new DesignerTraceUploadError(
+      `storage receipt size missing for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (receipt.sizeBytes !== expectedSizeBytes) {
+    throw new DesignerTraceUploadError(
+      `storage receipt size mismatch for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (objectRef.bucket && !receipt.bucket) {
+    throw new DesignerTraceUploadError(
+      `storage receipt bucket missing for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (objectRef.bucket && receipt.bucket !== objectRef.bucket) {
+    throw new DesignerTraceUploadError(
+      `storage receipt bucket mismatch for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (!receipt.key) {
+    throw new DesignerTraceUploadError(
+      `storage receipt key missing for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (receipt.key !== objectRef.key) {
+    throw new DesignerTraceUploadError(
+      `storage receipt key mismatch for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (!receipt.uri) {
+    throw new DesignerTraceUploadError(
+      `storage receipt uri missing for ${objectRef.object_ref_id}`,
+    );
+  }
+  if (receipt.uri !== objectRef.uri) {
+    throw new DesignerTraceUploadError(
+      `storage receipt uri mismatch for ${objectRef.object_ref_id}`,
+    );
   }
 }
 

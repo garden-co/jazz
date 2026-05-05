@@ -80,6 +80,14 @@ const DEFAULT_OBJECT_STORAGE_BUCKET = "reactron-updates-dev";
 const DEFAULT_DESIGNER_SPACES_PREFIX = "x/nikiv/designer/spaces";
 const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
 
+type ObjectStorageDescriptor = {
+  provider: "oci";
+  region: string;
+  bucket: string;
+  prefix: string;
+  uri: string;
+};
+
 type DesignerSpaceRecord = {
   slug: string;
   title: string;
@@ -87,6 +95,7 @@ type DesignerSpaceRecord = {
   remotePath: string;
   objectStoragePrefix: string;
   objectStorageUri: string;
+  objectStorage: ObjectStorageDescriptor;
   syncKind: typeof SPACE_SYNC_JOB_KIND;
 };
 
@@ -335,7 +344,8 @@ export function createRemoteAutonomyGateway(
           const payload = jsonObject(event.payload_json);
           if (!executor && !traceId) return true;
           if (executor && payload?.executor !== executor) return false;
-          if (traceId && payload?.traceId !== traceId && payload?.trace_id !== traceId) return false;
+          if (traceId && payload?.traceId !== traceId && payload?.trace_id !== traceId)
+            return false;
           return true;
         })
         .slice(-Math.max(0, limit))
@@ -554,6 +564,7 @@ export function createRemoteAutonomyGateway(
         localPath: space.localPath,
         remotePath: space.remotePath,
         objectStoragePrefix: space.objectStoragePrefix,
+        objectStorage: space.objectStorage,
         jobId: job.jobId,
         claimId: claim.claimId,
       });
@@ -706,10 +717,12 @@ function spaceRecordFromJob(job: JobRecord): DesignerSpaceRecord | null {
     typeof space.slug !== "string" ||
     typeof space.title !== "string" ||
     typeof space.localPath !== "string" ||
-    typeof space.remotePath !== "string" ||
-    typeof space.objectStoragePrefix !== "string" ||
-    typeof space.objectStorageUri !== "string"
+    typeof space.remotePath !== "string"
   ) {
+    return null;
+  }
+  const objectStorage = objectStorageFromSpacePayload(space);
+  if (!objectStorage) {
     return null;
   }
   return {
@@ -717,8 +730,9 @@ function spaceRecordFromJob(job: JobRecord): DesignerSpaceRecord | null {
     title: space.title,
     localPath: space.localPath,
     remotePath: space.remotePath,
-    objectStoragePrefix: space.objectStoragePrefix,
-    objectStorageUri: space.objectStorageUri,
+    objectStoragePrefix: objectStorage.prefix,
+    objectStorageUri: objectStorage.uri,
+    objectStorage,
     syncKind: SPACE_SYNC_JOB_KIND,
   };
 }
@@ -733,14 +747,86 @@ function resolveDesignerSpace(payload: JsonObject, options: ResolvedOptions): De
     optionalString(payload, "remotePath") ?? posix.join(options.remoteSpacesRoot, slug),
   );
   const objectStoragePrefix = storageKey(options.designerSpacesPrefix, slug);
+  const objectStorage = designerSpaceObjectStorage(options, objectStoragePrefix);
   return {
     slug,
     title,
     localPath,
     remotePath,
-    objectStoragePrefix,
-    objectStorageUri: `oci://${options.objectStorageRegion}/${options.objectStorageBucket}/${objectStoragePrefix}/`,
+    objectStoragePrefix: objectStorage.prefix,
+    objectStorageUri: objectStorage.uri,
+    objectStorage,
     syncKind: SPACE_SYNC_JOB_KIND,
+  };
+}
+
+function designerSpaceObjectStorage(
+  options: ResolvedOptions,
+  prefix: string,
+): ObjectStorageDescriptor {
+  const region = options.objectStorageRegion;
+  const bucket = options.objectStorageBucket;
+  return {
+    provider: "oci",
+    region,
+    bucket,
+    prefix,
+    uri: objectStorageUri(region, bucket, prefix),
+  };
+}
+
+function objectStorageFromSpacePayload(space: JsonObject): ObjectStorageDescriptor | null {
+  const objectStorage = jsonObject(space.objectStorage);
+  if (
+    objectStorage?.provider === "oci" &&
+    typeof objectStorage.region === "string" &&
+    typeof objectStorage.bucket === "string" &&
+    typeof objectStorage.prefix === "string" &&
+    typeof objectStorage.uri === "string"
+  ) {
+    const region = objectStorage.region.trim();
+    const bucket = objectStorage.bucket.trim();
+    const prefix = storageKey(objectStorage.prefix);
+    if (!region || !bucket || !prefix) {
+      return null;
+    }
+    const uri = objectStorageUri(region, bucket, prefix);
+    if (objectStorage.uri !== uri) {
+      return null;
+    }
+    return {
+      provider: "oci",
+      region,
+      bucket,
+      prefix,
+      uri,
+    };
+  }
+  if (typeof space.objectStoragePrefix !== "string" || typeof space.objectStorageUri !== "string") {
+    return null;
+  }
+  return parseOciObjectStorage(space.objectStorageUri, space.objectStoragePrefix);
+}
+
+function objectStorageUri(region: string, bucket: string, prefix: string): string {
+  return `oci://${region}/${bucket}/${prefix}/`;
+}
+
+function parseOciObjectStorage(uri: string, prefix: string): ObjectStorageDescriptor | null {
+  const match = /^oci:\/\/([^/]+)\/([^/]+)\/(.+)\/$/.exec(uri);
+  if (!match) {
+    return null;
+  }
+  const normalizedPrefix = storageKey(prefix);
+  if (storageKey(match[3] ?? "") !== normalizedPrefix) {
+    return null;
+  }
+  return {
+    provider: "oci",
+    region: match[1]!,
+    bucket: match[2]!,
+    prefix: normalizedPrefix,
+    uri,
   };
 }
 

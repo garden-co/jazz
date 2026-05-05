@@ -301,6 +301,13 @@ describe("remote autonomy gateway", () => {
         objectStoragePrefix: "x/nikiv/designer/spaces/designer-starter-project",
         objectStorageUri:
           "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+        objectStorage: {
+          provider: "oci",
+          region: "us-dallas-1",
+          bucket: "reactron-updates-dev",
+          prefix: "x/nikiv/designer/spaces/designer-starter-project",
+          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+        },
       },
       job: {
         kind: "space-rsync-mirror",
@@ -327,6 +334,13 @@ describe("remote autonomy gateway", () => {
         slug: "designer-starter-project",
         objectStorageUri:
           "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+        objectStorage: {
+          provider: "oci",
+          region: "us-dallas-1",
+          bucket: "reactron-updates-dev",
+          prefix: "x/nikiv/designer/spaces/designer-starter-project",
+          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+        },
       }),
     ]);
   });
@@ -346,6 +360,13 @@ describe("remote autonomy gateway", () => {
         objectStoragePrefix: "x/nikiv/designer/spaces/bay-bridge-clock",
         objectStorageUri:
           "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/bay-bridge-clock/",
+        objectStorage: {
+          provider: "oci",
+          region: "us-dallas-1",
+          bucket: "reactron-updates-dev",
+          prefix: "x/nikiv/designer/spaces/bay-bridge-clock",
+          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/bay-bridge-clock/",
+        },
         syncKind: "space-rsync-mirror",
       },
       job: {
@@ -394,7 +415,40 @@ describe("remote autonomy gateway", () => {
       objectStoragePrefix: "custom/designer/spaces/custom-space",
       objectStorageUri:
         "oci://us-ashburn-1/designer-spaces-test/custom/designer/spaces/custom-space/",
+      objectStorage: {
+        provider: "oci",
+        region: "us-ashburn-1",
+        bucket: "designer-spaces-test",
+        prefix: "custom/designer/spaces/custom-space",
+        uri: "oci://us-ashburn-1/designer-spaces-test/custom/designer/spaces/custom-space/",
+      },
     });
+  });
+
+  it("does not list Designer spaces with inconsistent object storage descriptors", async () => {
+    await requestJson("POST", "/v1/sync/jobs", {
+      kind: "space-rsync-mirror",
+      repoRoot: "/users/nikiv/spaces/bad-storage-space",
+      workspaceRoot: "/users/nikiv/spaces/bad-storage-space",
+      payloadJson: {
+        space: {
+          slug: "bad-storage-space",
+          title: "Bad Storage Space",
+          localPath: join(tempDir, "spaces", "bad-storage-space"),
+          remotePath: "/users/nikiv/spaces/bad-storage-space",
+          objectStorage: {
+            provider: "oci",
+            region: "us-dallas-1",
+            bucket: "reactron-updates-dev",
+            prefix: "x/nikiv/designer/spaces/bad-storage-space",
+            uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/other-space/",
+          },
+        },
+      },
+    });
+
+    const listed = await requestJson("GET", "/v1/spaces");
+    expect(listed.spaces).toEqual([]);
   });
 
   it("rejects invalid Designer space slugs before recording jobs", async () => {

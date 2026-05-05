@@ -11,6 +11,7 @@ import {
   type DesignerTraceControlPlaneOptions,
   type DesignerTraceDb,
   type DesignerTraceObjectStorageProvider,
+  type DesignerTraceObjectStoragePutReceipt,
 } from "./designer-trace-control-plane.js";
 
 const fixedNow = new Date("2026-05-05T12:00:00.000Z");
@@ -927,6 +928,227 @@ describe("designer trace control plane", () => {
     });
   });
 
+  it("rejects object storage receipts that do not match the object ref", async () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+    const content = "archive payload";
+    const write = controlPlane.recordTelemetryEvent({
+      eventId: "event-with-archive-payload",
+      kind: "designer.archive.payload.ready",
+      objectRefs: [
+        {
+          objectRefId: "object-archive-payload",
+          provider: "oci",
+          bucket: "designer-archive",
+          key: "spaces/workspace-1/archive/event-with-archive-payload.json",
+          contentHash: contentHash(content),
+          contentType: "application/json",
+          sizeBytes: new TextEncoder().encode(content).byteLength,
+        },
+      ],
+    });
+    const provider: DesignerTraceObjectStorageProvider = {
+      async putObject() {
+        return {
+          storageBackend: "oci",
+          bucket: "designer-archive",
+          key: "spaces/workspace-1/archive/event-with-archive-payload.json",
+          uri: "oci://designer-archive/spaces/workspace-1/archive/event-with-archive-payload.json",
+          contentHash: contentHash("different payload"),
+          sizeBytes: new TextEncoder().encode(content).byteLength,
+          receivedAt: fixedNow,
+        };
+      },
+    };
+
+    await expect(
+      controlPlane.processUploadJob({
+        uploadJob: write.uploadJobs[0]!.value,
+        objectRef: write.objectRefs[0]!.value,
+        content,
+        provider,
+      }),
+    ).rejects.toThrow(DesignerTraceUploadError);
+  });
+
+  it("rejects object storage receipts that omit required integrity fields", async () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+    const content = "reviewable payload";
+    const write = controlPlane.recordTelemetryEvent({
+      eventId: "event-with-reviewable-payload",
+      kind: "designer.archive.reviewable_payload.ready",
+      objectRefs: [
+        {
+          objectRefId: "object-reviewable-payload",
+          provider: "oci",
+          bucket: "designer-archive",
+          key: "spaces/workspace-1/archive/event-with-reviewable-payload.json",
+          contentHash: contentHash(content),
+          contentType: "application/json",
+          sizeBytes: new TextEncoder().encode(content).byteLength,
+        },
+      ],
+    });
+    const provider: DesignerTraceObjectStorageProvider = {
+      async putObject() {
+        return {
+          storageBackend: "oci",
+          key: "spaces/workspace-1/archive/event-with-reviewable-payload.json",
+          uri: "oci://designer-archive/spaces/workspace-1/archive/event-with-reviewable-payload.json",
+          receivedAt: fixedNow,
+        };
+      },
+    };
+
+    await expect(
+      controlPlane.processUploadJob({
+        uploadJob: write.uploadJobs[0]!.value,
+        objectRef: write.objectRefs[0]!.value,
+        content,
+        provider,
+      }),
+    ).rejects.toThrow(DesignerTraceUploadError);
+  });
+
+  it("rejects object storage receipts with incomplete object location proof", async () => {
+    const content = "location payload";
+    const badReceipts: Array<Partial<DesignerTraceObjectStoragePutReceipt>> = [
+      { bucket: undefined },
+      { bucket: "other-bucket" },
+      { key: undefined },
+      { key: "spaces/workspace-1/archive/other-location-payload.json" },
+      { uri: undefined },
+      { uri: "oci://designer-archive/spaces/workspace-1/archive/other-location-payload.json" },
+    ];
+
+    for (const badReceipt of badReceipts) {
+      const db = new FakeDb();
+      const controlPlane = createControlPlane(db);
+      const write = controlPlane.recordTelemetryEvent({
+        eventId: "event-with-location-payload",
+        kind: "designer.archive.location_payload.ready",
+        objectRefs: [
+          {
+            objectRefId: "object-location-payload",
+            provider: "oci",
+            bucket: "designer-archive",
+            key: "spaces/workspace-1/archive/event-with-location-payload.json",
+            contentHash: contentHash(content),
+            contentType: "application/json",
+            sizeBytes: new TextEncoder().encode(content).byteLength,
+          },
+        ],
+      });
+      const provider: DesignerTraceObjectStorageProvider = {
+        async putObject() {
+          return {
+            storageBackend: "oci",
+            bucket: "designer-archive",
+            key: "spaces/workspace-1/archive/event-with-location-payload.json",
+            uri: "oci://designer-archive/spaces/workspace-1/archive/event-with-location-payload.json",
+            contentHash: contentHash(content),
+            sizeBytes: new TextEncoder().encode(content).byteLength,
+            receivedAt: fixedNow,
+            ...badReceipt,
+          };
+        },
+      };
+
+      await expect(
+        controlPlane.processUploadJob({
+          uploadJob: write.uploadJobs[0]!.value,
+          objectRef: write.objectRefs[0]!.value,
+          content,
+          provider,
+        }),
+      ).rejects.toThrow(DesignerTraceUploadError);
+    }
+  });
+
+  it("requires the active claimant before processing a claimed upload job", async () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+    const content = "claimed payload";
+    const write = controlPlane.recordTelemetryEvent({
+      kind: "designer.archive.claimed_payload.ready",
+      objectRefs: [
+        {
+          provider: "s3",
+          bucket: "designer-index",
+          key: "telemetry/session-1/claimed-payload.json",
+          contentHash: contentHash(content),
+        },
+      ],
+    });
+    const uploadJob = {
+      ...write.uploadJobs[0]!.value,
+      claimed_by: "worker-1",
+      lease_expires_at: leaseExpiresAt,
+      last_heartbeat_at: fixedNow,
+    };
+    const provider: DesignerTraceObjectStorageProvider = {
+      async putObject() {
+        throw new Error("claimed upload should not be processed by another worker");
+      },
+    };
+
+    await expect(
+      controlPlane.processUploadJob({
+        uploadJob,
+        objectRef: write.objectRefs[0]!.value,
+        content,
+        provider,
+      }),
+    ).rejects.toThrow(DesignerTraceUploadError);
+    await expect(
+      controlPlane.processUploadJob({
+        uploadJob,
+        objectRef: write.objectRefs[0]!.value,
+        content,
+        provider,
+        workerId: "worker-2",
+      }),
+    ).rejects.toThrow(DesignerTraceUploadError);
+  });
+
+  it("does not process failed upload jobs before their retry time", async () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+    const content = "retry payload";
+    const write = controlPlane.recordTelemetryEvent({
+      kind: "designer.archive.retry_payload.ready",
+      objectRefs: [
+        {
+          provider: "s3",
+          bucket: "designer-index",
+          key: "telemetry/session-1/retry-payload.json",
+          contentHash: contentHash(content),
+        },
+      ],
+    });
+    const uploadJob = {
+      ...write.uploadJobs[0]!.value,
+      status: "failed",
+      next_retry_at: new Date("2026-05-05T12:10:00.000Z"),
+      failed_at: fixedNow,
+    };
+    const provider: DesignerTraceObjectStorageProvider = {
+      async putObject() {
+        throw new Error("upload should wait for the retry time");
+      },
+    };
+
+    await expect(
+      controlPlane.processUploadJob({
+        uploadJob,
+        objectRef: write.objectRefs[0]!.value,
+        content,
+        provider,
+      }),
+    ).rejects.toThrow(DesignerTraceUploadError);
+  });
+
   it("rejects upload content that does not match the object ref hash", async () => {
     const db = new FakeDb();
     const controlPlane = createControlPlane(db);
@@ -1014,5 +1236,50 @@ describe("designer trace control plane", () => {
         },
       },
     ]);
+  });
+
+  it("requires the active claimant before recording failure for a claimed upload job", () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+    const uploadJob = {
+      id: "upload_jobs-row-1",
+      upload_job_id: "upload-job-1",
+      session_id: "session-1",
+      session_row_id: "00000000-0000-0000-0000-000000000001",
+      workspace_id: "workspace-1",
+      target_kind: "trace_event",
+      target_id: "event-1",
+      status: "queued",
+      backend: "object-storage.local",
+      object_ref_id: "object-1",
+      object_ref_row_id: "object_refs-row-1",
+      attempt_count: 2,
+      last_error: null,
+      next_retry_at: null,
+      claimed_by: "worker-1",
+      lease_expires_at: leaseExpiresAt,
+      last_heartbeat_at: fixedNow,
+      completed_at: null,
+      failed_at: null,
+      access_policy_json: {},
+      request_json: {},
+      created_at: fixedNow,
+      updated_at: fixedNow,
+    };
+
+    expect(() =>
+      controlPlane.recordUploadFailure({
+        uploadJob,
+        error: new Error("s3 503"),
+      }),
+    ).toThrow(DesignerTraceUploadError);
+    expect(() =>
+      controlPlane.recordUploadFailure({
+        uploadJob,
+        workerId: "worker-2",
+        error: new Error("s3 503"),
+      }),
+    ).toThrow(DesignerTraceUploadError);
+    expect(db.updates).toEqual([]);
   });
 });
