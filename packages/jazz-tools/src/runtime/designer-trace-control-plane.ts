@@ -86,6 +86,10 @@ export type DesignerObjectRefRole =
   | "index_latest"
   | "workspace_snapshot"
   | "trace_projection"
+  | "turn_transcript"
+  | "tool_stdout"
+  | "tool_stderr"
+  | "vcs_diff"
   | (string & {});
 
 export interface DesignerObjectRefRow {
@@ -186,6 +190,114 @@ export interface DesignerCodebaseIndexSnapshotRow {
 }
 
 export type DesignerCodebaseIndexSnapshotInit = Omit<DesignerCodebaseIndexSnapshotRow, "id">;
+
+export interface DesignerAgentTurnRow {
+  id: string;
+  turn_id: string;
+  session_id: string;
+  session_row_id: string;
+  workspace_id: string;
+  provider: string;
+  provider_session_id: string;
+  provider_turn_ordinal?: number | null;
+  provider_turn_id?: string | null;
+  cwd: string;
+  repo_root?: string | null;
+  branch_name?: string | null;
+  model?: string | null;
+  transcript_object_ref_id?: string | null;
+  transcript_object_ref_row_id?: string | null;
+  status: string;
+  started_at: Date;
+  completed_at?: Date | null;
+  metadata_json: DesignerTraceJson;
+}
+
+export type DesignerAgentTurnInit = Omit<DesignerAgentTurnRow, "id">;
+
+export interface DesignerToolInvocationRow {
+  id: string;
+  invocation_id: string;
+  session_id: string;
+  session_row_id: string;
+  agent_turn_id?: string | null;
+  agent_turn_row_id?: string | null;
+  tool_name: string;
+  command_hash: string;
+  command_summary: string;
+  cwd: string;
+  started_at: Date;
+  completed_at?: Date | null;
+  exit_code?: number | null;
+  status: string;
+  stdout_object_ref_id?: string | null;
+  stdout_object_ref_row_id?: string | null;
+  stderr_object_ref_id?: string | null;
+  stderr_object_ref_row_id?: string | null;
+  metadata_json: DesignerTraceJson;
+}
+
+export type DesignerToolInvocationInit = Omit<DesignerToolInvocationRow, "id">;
+
+export interface DesignerVcsOperationRow {
+  id: string;
+  vcs_operation_id: string;
+  session_id: string;
+  session_row_id: string;
+  agent_turn_id?: string | null;
+  agent_turn_row_id?: string | null;
+  tool_invocation_id?: string | null;
+  tool_invocation_row_id?: string | null;
+  repo_root: string;
+  vcs_kind: string;
+  operation_kind: string;
+  ref_name?: string | null;
+  before_oid?: string | null;
+  after_oid?: string | null;
+  commit_oid?: string | null;
+  tree_oid?: string | null;
+  parent_oids_json: string[];
+  is_empty_commit?: boolean | null;
+  trace_refs_json: string[];
+  jj_operation_id?: string | null;
+  git_reflog_selector?: string | null;
+  diff_object_ref_id?: string | null;
+  diff_object_ref_row_id?: string | null;
+  status: string;
+  started_at: Date;
+  completed_at?: Date | null;
+  metadata_json: DesignerTraceJson;
+}
+
+export type DesignerVcsOperationInit = Omit<DesignerVcsOperationRow, "id">;
+
+export interface DesignerAutonomyDecisionRow {
+  id: string;
+  decision_id: string;
+  session_id: string;
+  session_row_id: string;
+  agent_turn_id?: string | null;
+  agent_turn_row_id?: string | null;
+  tool_invocation_id?: string | null;
+  tool_invocation_row_id?: string | null;
+  daemon_run_id?: string | null;
+  decision_kind: string;
+  decision: string;
+  resource_kind: string;
+  resource_id: string;
+  owner_session_id?: string | null;
+  lease_id?: string | null;
+  command_id?: string | null;
+  status: string;
+  reason?: string | null;
+  resource_json: DesignerTraceJson;
+  invariant_json: DesignerTraceJson;
+  outcome_json: DesignerTraceJson;
+  decided_at: Date;
+  metadata_json: DesignerTraceJson;
+}
+
+export type DesignerAutonomyDecisionInit = Omit<DesignerAutonomyDecisionRow, "id">;
 
 export interface DesignerTraceEventRow {
   id: string;
@@ -303,6 +415,93 @@ export interface RecordCodebaseIndexSnapshotInput {
   uploadBackend?: string;
 }
 
+export interface RecordAgentTurnInput {
+  turnId?: string;
+  workspaceId?: string;
+  provider: string;
+  providerSessionId: string;
+  providerTurnOrdinal?: number | null;
+  providerTurnId?: string | null;
+  cwd: string;
+  repoRoot?: string | null;
+  branchName?: string | null;
+  model?: string | null;
+  status?: string;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  metadata?: DesignerTraceJson;
+  transcriptObjectRef?: DesignerObjectRefInput;
+  uploadBackend?: string;
+}
+
+export interface RecordToolInvocationInput {
+  invocationId?: string;
+  agentTurnId?: string | null;
+  agentTurnRowId?: string | null;
+  toolName: string;
+  commandHash?: string;
+  commandSummary: string;
+  cwd: string;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  exitCode?: number | null;
+  status?: string;
+  stdoutObjectRef?: DesignerObjectRefInput;
+  stderrObjectRef?: DesignerObjectRefInput;
+  metadata?: DesignerTraceJson;
+  uploadBackend?: string;
+}
+
+export interface RecordVcsOperationInput {
+  vcsOperationId?: string;
+  agentTurnId?: string | null;
+  agentTurnRowId?: string | null;
+  toolInvocationId?: string | null;
+  toolInvocationRowId?: string | null;
+  repoRoot: string;
+  vcsKind: string;
+  operationKind: string;
+  refName?: string | null;
+  beforeOid?: string | null;
+  afterOid?: string | null;
+  commitOid?: string | null;
+  treeOid?: string | null;
+  parentOids?: string[];
+  isEmptyCommit?: boolean | null;
+  traceRefs?: string[];
+  jjOperationId?: string | null;
+  gitReflogSelector?: string | null;
+  diffObjectRef?: DesignerObjectRefInput;
+  status?: string;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  metadata?: DesignerTraceJson;
+  uploadBackend?: string;
+}
+
+export interface RecordAutonomyDecisionInput {
+  decisionId?: string;
+  agentTurnId?: string | null;
+  agentTurnRowId?: string | null;
+  toolInvocationId?: string | null;
+  toolInvocationRowId?: string | null;
+  daemonRunId?: string | null;
+  decisionKind: string;
+  decision: string;
+  resourceKind: string;
+  resourceId: string;
+  ownerSessionId?: string | null;
+  leaseId?: string | null;
+  commandId?: string | null;
+  status?: string;
+  reason?: string | null;
+  resource?: DesignerTraceJson;
+  invariant?: DesignerTraceJson;
+  outcome?: DesignerTraceJson;
+  decidedAt?: Date;
+  metadata?: DesignerTraceJson;
+}
+
 export interface RecordUploadReceiptInput {
   receiptId?: string;
   uploadJobId: string;
@@ -378,6 +577,39 @@ export interface CodebaseIndexSnapshotWrite {
   uploadJobs: InsertHandle<DesignerUploadJobRow>[];
 }
 
+export interface AgentTurnWrite {
+  batchId: string;
+  turn: InsertHandle<DesignerAgentTurnRow>;
+  objectRefs: {
+    transcript?: InsertHandle<DesignerObjectRefRow>;
+  };
+  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+}
+
+export interface ToolInvocationWrite {
+  batchId: string;
+  invocation: InsertHandle<DesignerToolInvocationRow>;
+  objectRefs: {
+    stdout?: InsertHandle<DesignerObjectRefRow>;
+    stderr?: InsertHandle<DesignerObjectRefRow>;
+  };
+  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+}
+
+export interface VcsOperationWrite {
+  batchId: string;
+  operation: InsertHandle<DesignerVcsOperationRow>;
+  objectRefs: {
+    diff?: InsertHandle<DesignerObjectRefRow>;
+  };
+  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+}
+
+export interface AutonomyDecisionWrite {
+  batchId: string;
+  decision: InsertHandle<DesignerAutonomyDecisionRow>;
+}
+
 export interface UploadReceiptWrite {
   batchId: string;
   receipt: InsertHandle<DesignerUploadReceiptRow>;
@@ -412,6 +644,14 @@ export const designerTraceTables = {
     DesignerCodebaseIndexSnapshotRow,
     DesignerCodebaseIndexSnapshotInit
   >("codebase_index_snapshots"),
+  agentTurns: makeTable<DesignerAgentTurnRow, DesignerAgentTurnInit>("agent_turns"),
+  toolInvocations: makeTable<DesignerToolInvocationRow, DesignerToolInvocationInit>(
+    "tool_invocations",
+  ),
+  vcsOperations: makeTable<DesignerVcsOperationRow, DesignerVcsOperationInit>("vcs_operations"),
+  autonomyDecisions: makeTable<DesignerAutonomyDecisionRow, DesignerAutonomyDecisionInit>(
+    "autonomy_decisions",
+  ),
 } as const;
 
 export function createDesignerTraceControlPlane(
@@ -537,10 +777,14 @@ export function createDesignerTraceControlPlane(
       uploadJob.session_row_id !== session.sessionRowId ||
       objectRef.session_row_id !== session.sessionRowId
     ) {
-      throw new DesignerTraceUploadError("upload job and object ref must belong to this session row");
+      throw new DesignerTraceUploadError(
+        "upload job and object ref must belong to this session row",
+      );
     }
     if (uploadJob.workspace_id !== objectRef.workspace_id) {
-      throw new DesignerTraceUploadError("upload job workspace does not match object ref workspace");
+      throw new DesignerTraceUploadError(
+        "upload job workspace does not match object ref workspace",
+      );
     }
     if (uploadJob.object_ref_id && uploadJob.object_ref_id !== objectRef.object_ref_id) {
       throw new DesignerTraceUploadError("upload job object_ref_id does not match object ref");
@@ -727,14 +971,180 @@ export function createDesignerTraceControlPlane(
       };
     },
 
+    recordAgentTurn(input: RecordAgentTurnInput): AgentTurnWrite {
+      const turnId = input.turnId ?? idFactory("agent-turn");
+      const workspaceId = input.workspaceId ?? session.workspaceId;
+      const uploadBackend = input.uploadBackend ?? defaultUploadBackend;
+      const batch = db.beginDirectBatch(designerTraceTables.agentTurns);
+      const transcript = input.transcriptObjectRef
+        ? insertObjectRef(batch, input.transcriptObjectRef, "turn_transcript", workspaceId)
+        : undefined;
+      const uploadJobs = transcript
+        ? [insertUploadJob(batch, transcript, "agent_turn", turnId, uploadBackend, workspaceId)]
+        : [];
+      const row: DesignerAgentTurnInit = {
+        turn_id: turnId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        workspace_id: workspaceId,
+        provider: input.provider,
+        provider_session_id: input.providerSessionId,
+        provider_turn_ordinal: input.providerTurnOrdinal ?? null,
+        provider_turn_id: input.providerTurnId ?? null,
+        cwd: input.cwd,
+        repo_root: input.repoRoot ?? null,
+        branch_name: input.branchName ?? null,
+        model: input.model ?? null,
+        transcript_object_ref_id: transcript?.value.object_ref_id ?? null,
+        transcript_object_ref_row_id: transcript?.value.id ?? null,
+        status: input.status ?? "running",
+        started_at: input.startedAt ?? now(),
+        completed_at: input.completedAt ?? null,
+        metadata_json: input.metadata ?? {},
+      };
+      return {
+        batchId: batch.batchId(),
+        turn: batch.insert(designerTraceTables.agentTurns, row),
+        objectRefs: { transcript },
+        uploadJobs,
+      };
+    },
+
+    recordToolInvocation(input: RecordToolInvocationInput): ToolInvocationWrite {
+      const invocationId = input.invocationId ?? idFactory("tool-invocation");
+      const uploadBackend = input.uploadBackend ?? defaultUploadBackend;
+      const batch = db.beginDirectBatch(designerTraceTables.toolInvocations);
+      const stdout = input.stdoutObjectRef
+        ? insertObjectRef(batch, input.stdoutObjectRef, "tool_stdout")
+        : undefined;
+      const stderr = input.stderrObjectRef
+        ? insertObjectRef(batch, input.stderrObjectRef, "tool_stderr")
+        : undefined;
+      const uploadJobs = [stdout, stderr]
+        .filter((handle): handle is InsertHandle<DesignerObjectRefRow> => handle !== undefined)
+        .map((objectRef) =>
+          insertUploadJob(batch, objectRef, "tool_invocation", invocationId, uploadBackend),
+        );
+      const row: DesignerToolInvocationInit = {
+        invocation_id: invocationId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        agent_turn_id: input.agentTurnId ?? null,
+        agent_turn_row_id: input.agentTurnRowId ?? null,
+        tool_name: input.toolName,
+        command_hash:
+          input.commandHash ??
+          hashCanonical({
+            tool_name: input.toolName,
+            command_summary: input.commandSummary,
+            cwd: input.cwd,
+          }),
+        command_summary: input.commandSummary,
+        cwd: input.cwd,
+        started_at: input.startedAt ?? now(),
+        completed_at: input.completedAt ?? null,
+        exit_code: input.exitCode ?? null,
+        status: input.status ?? "running",
+        stdout_object_ref_id: stdout?.value.object_ref_id ?? null,
+        stdout_object_ref_row_id: stdout?.value.id ?? null,
+        stderr_object_ref_id: stderr?.value.object_ref_id ?? null,
+        stderr_object_ref_row_id: stderr?.value.id ?? null,
+        metadata_json: input.metadata ?? {},
+      };
+      return {
+        batchId: batch.batchId(),
+        invocation: batch.insert(designerTraceTables.toolInvocations, row),
+        objectRefs: { stdout, stderr },
+        uploadJobs,
+      };
+    },
+
+    recordVcsOperation(input: RecordVcsOperationInput): VcsOperationWrite {
+      const vcsOperationId = input.vcsOperationId ?? idFactory("vcs-operation");
+      const uploadBackend = input.uploadBackend ?? defaultUploadBackend;
+      const batch = db.beginDirectBatch(designerTraceTables.vcsOperations);
+      const diff = input.diffObjectRef
+        ? insertObjectRef(batch, input.diffObjectRef, "vcs_diff")
+        : undefined;
+      const uploadJobs = diff
+        ? [insertUploadJob(batch, diff, "vcs_operation", vcsOperationId, uploadBackend)]
+        : [];
+      const row: DesignerVcsOperationInit = {
+        vcs_operation_id: vcsOperationId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        agent_turn_id: input.agentTurnId ?? null,
+        agent_turn_row_id: input.agentTurnRowId ?? null,
+        tool_invocation_id: input.toolInvocationId ?? null,
+        tool_invocation_row_id: input.toolInvocationRowId ?? null,
+        repo_root: input.repoRoot,
+        vcs_kind: input.vcsKind,
+        operation_kind: input.operationKind,
+        ref_name: input.refName ?? null,
+        before_oid: input.beforeOid ?? null,
+        after_oid: input.afterOid ?? null,
+        commit_oid: input.commitOid ?? null,
+        tree_oid: input.treeOid ?? null,
+        parent_oids_json: input.parentOids ?? [],
+        is_empty_commit: input.isEmptyCommit ?? null,
+        trace_refs_json: input.traceRefs ?? [],
+        jj_operation_id: input.jjOperationId ?? null,
+        git_reflog_selector: input.gitReflogSelector ?? null,
+        diff_object_ref_id: diff?.value.object_ref_id ?? null,
+        diff_object_ref_row_id: diff?.value.id ?? null,
+        status: input.status ?? "observed",
+        started_at: input.startedAt ?? now(),
+        completed_at: input.completedAt ?? null,
+        metadata_json: input.metadata ?? {},
+      };
+      return {
+        batchId: batch.batchId(),
+        operation: batch.insert(designerTraceTables.vcsOperations, row),
+        objectRefs: { diff },
+        uploadJobs,
+      };
+    },
+
+    recordAutonomyDecision(input: RecordAutonomyDecisionInput): AutonomyDecisionWrite {
+      const decisionId = input.decisionId ?? idFactory("autonomy-decision");
+      const batch = db.beginDirectBatch(designerTraceTables.autonomyDecisions);
+      const row: DesignerAutonomyDecisionInit = {
+        decision_id: decisionId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        agent_turn_id: input.agentTurnId ?? null,
+        agent_turn_row_id: input.agentTurnRowId ?? null,
+        tool_invocation_id: input.toolInvocationId ?? null,
+        tool_invocation_row_id: input.toolInvocationRowId ?? null,
+        daemon_run_id: input.daemonRunId ?? null,
+        decision_kind: input.decisionKind,
+        decision: input.decision,
+        resource_kind: input.resourceKind,
+        resource_id: input.resourceId,
+        owner_session_id: input.ownerSessionId ?? null,
+        lease_id: input.leaseId ?? null,
+        command_id: input.commandId ?? null,
+        status: input.status ?? "observed",
+        reason: input.reason ?? null,
+        resource_json: input.resource ?? {},
+        invariant_json: input.invariant ?? {},
+        outcome_json: input.outcome ?? {},
+        decided_at: input.decidedAt ?? now(),
+        metadata_json: input.metadata ?? {},
+      };
+      return {
+        batchId: batch.batchId(),
+        decision: batch.insert(designerTraceTables.autonomyDecisions, row),
+      };
+    },
+
     recordUploadReceipt(input: RecordUploadReceiptInput): UploadReceiptWrite {
       return recordUploadReceipt(input);
     },
 
     claimUploadJob(input: ClaimUploadJobInput): UploadJobUpdateWrite {
       const claimedAt = now();
-      const leaseExpiresAt =
-        input.leaseExpiresAt ?? new Date(claimedAt.getTime() + defaultLeaseMs);
+      const leaseExpiresAt = input.leaseExpiresAt ?? new Date(claimedAt.getTime() + defaultLeaseMs);
       assertFutureLease(claimedAt, leaseExpiresAt);
       const batch = db.beginDirectBatch(designerTraceTables.uploadJobs);
       const uploadJobUpdate = batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
@@ -831,7 +1241,11 @@ export function createDesignerTraceControlPlane(
       if (input.uploadJob.session_id !== session.sessionId) {
         throw new DesignerTraceUploadError("upload job must belong to this session");
       }
-      if (input.uploadJob.claimed_by && input.workerId && input.uploadJob.claimed_by !== input.workerId) {
+      if (
+        input.uploadJob.claimed_by &&
+        input.workerId &&
+        input.uploadJob.claimed_by !== input.workerId
+      ) {
         throw new DesignerTraceUploadError(
           `upload job ${input.uploadJob.upload_job_id} is claimed by ${input.uploadJob.claimed_by}`,
         );
@@ -955,7 +1369,9 @@ function assertAccessPolicy(
     throw new DesignerTraceAccessPolicyError("access proof kind does not match policy");
   }
   if (proof.workspaceId && proof.workspaceId !== workspaceId) {
-    throw new DesignerTraceAccessPolicyError("access proof workspace does not match object workspace");
+    throw new DesignerTraceAccessPolicyError(
+      "access proof workspace does not match object workspace",
+    );
   }
   if (proof.writerId && proof.writerId !== session.writerId) {
     throw new DesignerTraceAccessPolicyError("access proof writer does not match session writer");
@@ -992,21 +1408,18 @@ function formatUploadError(error: unknown): string {
 }
 
 const SHA256_K = new Uint32Array([
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-  0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-  0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-  0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-  0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-  0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-  0xc67178f2,
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
 const SHA256_INITIAL = new Uint32Array([
-  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-  0x5be0cd19,
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ]);
 
 function sha256Hex(input: string | Uint8Array): string {
