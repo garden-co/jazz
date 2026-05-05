@@ -250,10 +250,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 row.batch_id(),
                 row.data.to_vec(),
                 matches!(row.state, RowState::VisibleDirect),
+                row.delete_kind.is_some(),
             ));
         }
 
-        for (table, _, _, _, _, _, was_visible) in &cleared_rows {
+        for (table, _, _, _, _, _, was_visible, _) in &cleared_rows {
             if *was_visible {
                 continue;
             }
@@ -272,8 +273,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         let query_manager = self.schema_manager.query_manager_mut();
-        for (table, schema_hash, branch, row_id, member_batch_id, row_data, was_visible) in
-            cleared_rows
+        for (
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            member_batch_id,
+            row_data,
+            was_visible,
+            was_delete,
+        ) in cleared_rows
         {
             if was_visible {
                 let branch_name = crate::object::BranchName::new(&branch);
@@ -306,7 +315,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .load_visible_region_row(&table, &branch, row_id)
                 {
                     Ok(Some(_)) => {
-                        query_manager.clear_local_pending_row_overlay(&table, row_id);
+                        if was_delete {
+                            query_manager.restore_local_rejected_delete_row(
+                                &mut self.storage,
+                                &table,
+                                &branch,
+                                row_id,
+                                &row_data,
+                            );
+                        } else {
+                            query_manager.clear_local_pending_row_overlay(&table, row_id);
+                        }
                     }
                     _ => {
                         let _ = self

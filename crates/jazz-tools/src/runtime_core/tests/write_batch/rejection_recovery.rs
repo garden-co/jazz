@@ -154,6 +154,55 @@ fn rc_direct_update_rejection_restores_previous_visible_row() {
 }
 
 #[test]
+fn rc_direct_delete_rejection_restores_previous_visible_row() {
+    let mut core = create_runtime_with_schema(test_schema(), "direct-delete-reject-restore-test");
+
+    let ((row_id, _row_values), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let delete_batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("delete should be visible optimistically")
+        .batch_id;
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Rejected {
+                batch_id: delete_batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lost delete rights".to_string(),
+            },
+        },
+    });
+    core.immediate_tick();
+
+    let visible = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("rejecting a delete should restore the previous visible row");
+    assert_ne!(visible.batch_id, delete_batch_id);
+
+    let query = Query::new("users");
+    let results = execute_query(&mut core, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Carol".into()))],
+        None,
+    )
+    .expect("restored rows should remain writable after a rejected delete");
+}
+
+#[test]
 fn rc_worker_peer_relays_rejected_batch_settlement_to_downstream_peer() {
     let mut s = create_3tier_rc();
 
