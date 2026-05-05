@@ -1,0 +1,48 @@
+{
+  "name": "expo-hybrid",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.js",
+  "scripts": {
+    "start": "concurrently --kill-others-on-fail --names server,expo \"pnpm dev:server\" \"pnpm dev:expo\"",
+    "dev:expo": "wait-on --timeout 20000 http-get://127.0.0.1:3001/health && expo start --clear",
+    "dev:server": "tsx watch --env-file=.env server/index.ts",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild": "node scripts/ensure-env.mjs",
+    "build": "jazz-tools validate && tsc --noEmit && tsc -p tsconfig.server.json",
+    "start:server": "node server-dist/index.js",
+    "expo:prebuild": "expo prebuild --clean",
+    "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
+    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install",
+    "test:e2e": "maestro test .maestro/flows"
+  },
+  "dependencies": {
+    "@better-auth/expo": "1.5.6",
+    "@hono/node-server": "^1.14.4",
+    "better-auth": "^1.5.5",
+    "expo": "^54.0.0",
+    "expo-constants": "~17.0.0",
+    "expo-crypto": "~14.0.0",
+    "expo-linking": "~7.0.0",
+    "expo-network": "~8.0.7",
+    "expo-secure-store": "~14.0.0",
+    "expo-web-browser": "~14.0.0",
+    "hono": "^4.7.11",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "metro-runtime": "0.83.3",
+    "react": "19.2.4",
+    "react-native": "0.81.5"
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-flow-strip-types": "^7.27.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "babel-preset-expo": "~54.0.10",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.4",
+    "typescript": "catalog:default",
+    "wait-on": "^8.0.2"
+  }
+}

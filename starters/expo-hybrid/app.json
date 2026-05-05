@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "expo-hybrid",
+    "slug": "expo-hybrid",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "jsEngine": "hermes",
+    "newArchEnabled": true,
+    "scheme": "expohybrid",
+    "android": {
+      "package": "dev.jazz.starter.expohybrid"
+    },
+    "ios": {
+      "bundleIdentifier": "dev.jazz.starter.expohybrid"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+# Hybrid flow: start anonymous (local-first), add a local todo,
+# then upgrade to a BetterAuth account and assert the todo is still
+# visible — i.e. the new account adopted the existing local-first
+# identity rather than creating a fresh one.
+appId: dev.jazz.starter.expohybrid
+---
+- evalScript: ${output.email = "test-" + Date.now() + "@example.com"}
+
+- launchApp:
+    clearState: true
+
+- extendedWaitUntil:
+    visible: "Your todos"
+    timeout: 60000
+
+- tapOn: "New todo"
+- inputText: "Local todo"
+- tapOn: "Add todo"
+- assertNotVisible: "No todos yet."
+- assertVisible: "Local todo"
+
+- tapOn: "Sign up"
+
+- extendedWaitUntil:
+    visible: "Create account"
+    timeout: 10000
+- tapOn: "Name"
+- inputText: "Test User"
+- tapOn: "Email"
+- inputText: ${output.email}
+- tapOn: "Password"
+- inputText: "testpassword"
+- pressKey: "Enter"
+
+- extendedWaitUntil:
+    visible: "Sign out"
+    timeout: 20000
+- assertVisible: "Local todo"

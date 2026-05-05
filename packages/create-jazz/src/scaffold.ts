@@ -19,6 +19,9 @@ export const KNOWN_STARTERS = [
   "sveltekit-betterauth",
   "sveltekit-localfirst",
   "sveltekit-hybrid",
+  "expo-betterauth",
+  "expo-localfirst",
+  "expo-hybrid",
 ] as const;
 export type StarterName = (typeof KNOWN_STARTERS)[number];
 

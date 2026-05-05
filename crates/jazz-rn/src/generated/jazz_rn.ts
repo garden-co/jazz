@@ -103,6 +103,25 @@ export function generateId(): string {
   );
 }
 /**
+ * Install a tracing subscriber that forwards events to Android logcat (tag
+ * "jazz-rn") on Android, or stderr on host targets.
+ *
+ * `filter` is a tracing-subscriber EnvFilter directive (e.g. "info",
+ * "jazz_tools::query_manager=trace,jazz_tools::sync_manager=debug").
+ * Calling more than once is a no-op.
+ */
+export function initDiagnosticLogging(filter: string): void {
+  uniffiCaller.rustCall(
+    /*caller:*/ (callStatus) => {
+      nativeModule().ubrn_uniffi_jazz_rn_fn_func_init_diagnostic_logging(
+        FfiConverterString.lower(filter),
+        callStatus
+      );
+    },
+    /*liftString:*/ FfiConverterString.lift
+  );
+}
+/**
  * Mint a local-first JWT from a base64url-encoded 32-byte seed.
  *
  * Returns a signed JWT that can be used as a bearer token for local-first auth.
@@ -1564,6 +1583,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_func_generate_id'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_func_init_diagnostic_logging() !==
+    53721
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_func_init_diagnostic_logging'
     );
   }
   if (

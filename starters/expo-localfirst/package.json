@@ -1,0 +1,31 @@
+{
+  "name": "expo-localfirst",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./index.js",
+  "scripts": {
+    "start": "expo start --clear",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "build": "jazz-tools validate && tsc --noEmit",
+    "prebuild": "expo prebuild --clean",
+    "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
+    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install",
+    "test:e2e": "maestro test .maestro/flows"
+  },
+  "dependencies": {
+    "expo": "^54.0.0",
+    "expo-crypto": "~14.0.0",
+    "expo-secure-store": "~14.0.0",
+    "jazz-tools": "workspace:*",
+    "metro-runtime": "0.83.3",
+    "react": "19.2.4",
+    "react-native": "0.81.5"
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-flow-strip-types": "^7.27.1",
+    "@types/react": "^19.0.0",
+    "babel-preset-expo": "~54.0.10",
+    "typescript": "catalog:default"
+  }
+}

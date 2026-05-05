@@ -1751,10 +1751,13 @@ dependencies = [
  "hex",
  "indexmap",
  "jazz-tools",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uniffi",
  "uuid",
 ]

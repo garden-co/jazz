@@ -1,0 +1,47 @@
+# Bug-finder flow: sign up → add a todo → sign out → sign in →
+# assert the todo is still there. Catches the JWKS / sync regressions.
+appId: dev.jazz.starter.expobetterauth
+---
+- evalScript: ${output.email = "test-" + Date.now() + "@example.com"}
+
+- launchApp:
+    clearState: true
+
+- extendedWaitUntil:
+    visible: "Sign in"
+    timeout: 60000
+- tapOn: "New here? Create an account"
+
+- tapOn: "Name"
+- inputText: "Test User"
+- tapOn: "Email"
+- inputText: ${output.email}
+- tapOn: "Password"
+- inputText: "testpassword"
+- pressKey: "Enter"
+
+- extendedWaitUntil:
+    visible: "Your todos"
+    timeout: 20000
+
+- tapOn: "New todo"
+- inputText: "Persistent todo"
+- tapOn: "Add todo"
+- assertNotVisible: "No todos yet."
+- assertVisible: "Persistent todo"
+
+- tapOn: "Sign out"
+
+- extendedWaitUntil:
+    visible: "Sign in"
+    timeout: 20000
+- tapOn: "Email"
+- inputText: ${output.email}
+- tapOn: "Password"
+- inputText: "testpassword"
+- pressKey: "Enter"
+
+- extendedWaitUntil:
+    visible: "Your todos"
+    timeout: 20000
+- assertVisible: "Persistent todo"

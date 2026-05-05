@@ -5,6 +5,7 @@
 uniffi::setup_scaffolding!();
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1240,4 +1241,114 @@ pub fn mint_local_first_token(
         ttl_seconds as u64,
     )
     .map_err(|e| JazzRnError::Internal { message: e })
+}
+
+// ============================================================================
+// Diagnostic logging
+// ============================================================================
+// On Android, forwards events to logcat (tag "jazz-rn"). On other targets,
+// writes to stderr — useful for debug builds during cargo tests on macOS/Linux.
+
+const LOG_TAG: &str = "jazz-rn";
+
+#[cfg(target_os = "android")]
+mod android_log {
+    use super::LOG_TAG;
+    use std::ffi::CString;
+
+    const ANDROID_LOG_INFO: libc::c_int = 4;
+
+    extern "C" {
+        pub fn __android_log_write(
+            prio: libc::c_int,
+            tag: *const libc::c_char,
+            text: *const libc::c_char,
+        ) -> libc::c_int;
+    }
+
+    pub fn emit_line(line: &str) {
+        let Ok(tag) = CString::new(LOG_TAG) else {
+            return;
+        };
+        let msg = CString::new(line).unwrap_or_else(|_| CString::new("<bad utf8>").unwrap());
+        unsafe {
+            __android_log_write(ANDROID_LOG_INFO, tag.as_ptr(), msg.as_ptr());
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+mod android_log {
+    use super::LOG_TAG;
+    pub fn emit_line(line: &str) {
+        eprintln!("[{LOG_TAG}] {line}");
+    }
+}
+
+#[derive(Default)]
+struct LogWriter {
+    buf: Vec<u8>,
+}
+
+impl Write for LogWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        while let Some(idx) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=idx).collect();
+            if let Ok(text) = std::str::from_utf8(&line[..line.len().saturating_sub(1)]) {
+                android_log::emit_line(text);
+            }
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let line: Vec<u8> = self.buf.drain(..).collect();
+        if let Ok(text) = std::str::from_utf8(&line) {
+            android_log::emit_line(text);
+        }
+        Ok(())
+    }
+}
+
+struct LogMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogMakeWriter {
+    type Writer = LogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogWriter::default()
+    }
+}
+
+static LOGGING_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Install a tracing subscriber that forwards events to Android logcat (tag
+/// "jazz-rn") on Android, or stderr on host targets.
+///
+/// `filter` is a tracing-subscriber EnvFilter directive (e.g. "info",
+/// "jazz_tools::query_manager=trace,jazz_tools::sync_manager=debug").
+/// Calling more than once is a no-op.
+#[uniffi::export]
+pub fn init_diagnostic_logging(filter: String) {
+    if LOGGING_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let filter_directive = if filter.is_empty() {
+        "info".to_string()
+    } else {
+        filter
+    };
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter_directive)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(LogMakeWriter)
+        .with_ansi(false)
+        .with_target(true)
+        .try_init();
 }

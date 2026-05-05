@@ -1,0 +1,29 @@
+appId: dev.jazz.starter.expolocalfirst
+---
+- launchApp:
+    clearState: true
+
+- extendedWaitUntil:
+    visible: "Your todos"
+    timeout: 20000
+
+- tapOn: "New todo"
+- inputText: "Buy milk"
+- tapOn: "Add todo"
+
+- assertNotVisible: "No todos yet."
+- assertVisible: "Buy milk"
+
+- tapOn: "New todo"
+- inputText: "Pay rent"
+- tapOn: "Add todo"
+
+- assertVisible: "Pay rent"
+- assertVisible: "Buy milk"
+
+- tapOn:
+    text: "Delete"
+    index: 0
+
+- assertNotVisible: "Buy milk"
+- assertVisible: "Pay rent"
