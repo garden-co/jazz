@@ -271,6 +271,7 @@ export class WorkerBridge {
   async shutdown(worker: Worker): Promise<void> {
     if (this.isDisposedLike()) return;
 
+    this.flushPendingSyncToWorker();
     this.transition({ type: "SHUTDOWN_CALLED" });
 
     const shutdownAckPromise = waitForMessage<WorkerToMainMessage>(
