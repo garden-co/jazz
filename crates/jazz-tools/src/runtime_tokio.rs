@@ -642,6 +642,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Ensure a client exists and is marked as Peer without resetting state.
+    pub fn ensure_client_as_peer(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_peer(client_id);
+        Ok(())
+    }
+
     /// Ensure a client exists and is marked as Admin without resetting state.
     pub fn ensure_client_as_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

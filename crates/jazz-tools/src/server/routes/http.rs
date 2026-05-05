@@ -227,6 +227,18 @@ async fn forward_catalogue_request(
         })
 }
 
+fn reject_edge_catalogue_publish(state: &ServerState) -> Option<Response> {
+    state.topology.is_edge().then(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "edge servers cannot publish catalogue locally; publish catalogue to the core server".to_string(),
+            )),
+        )
+            .into_response()
+    })
+}
+
 fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(base_url)
         .map_err(|err| format!("invalid catalogue authority URL '{base_url}': {err}"))?;
@@ -481,6 +493,10 @@ pub(super) async fn publish_schema_handler(
         }
     }
 
+    if let Some(response) = reject_edge_catalogue_publish(&state) {
+        return response;
+    }
+
     if matches!(
         &state.catalogue_authority,
         CatalogueAuthorityMode::Forward { .. }
@@ -668,6 +684,10 @@ pub(super) async fn publish_permissions_handler(
         }
     }
 
+    if let Some(response) = reject_edge_catalogue_publish(&state) {
+        return response;
+    }
+
     if matches!(
         &state.catalogue_authority,
         CatalogueAuthorityMode::Forward { .. }
@@ -809,6 +829,10 @@ pub(super) async fn publish_migration_handler(
         Err((status, msg)) => {
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
+    }
+
+    if let Some(response) = reject_edge_catalogue_publish(&state) {
+        return response;
     }
 
     if matches!(
