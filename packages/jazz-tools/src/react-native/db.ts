@@ -1,8 +1,22 @@
 import jazzRn from "jazz-rn";
+import { Platform } from "react-native";
 import type { WasmSchema } from "../drivers/types.js";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import { Db as RuntimeDb, type DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
+
+/**
+ * On the Android emulator, host-loopback addresses (127.0.0.1, localhost)
+ * resolve to the emulator itself, not the host. The Android emulator exposes
+ * the host machine's loopback at the special address 10.0.2.2. Apps configured
+ * with a localhost dev URL would otherwise fail to reach a host-side Jazz dev
+ * server. Pass-through for non-Android platforms (iOS simulator's localhost
+ * already resolves to the host).
+ */
+function resolveServerUrlForPlatform(serverUrl: string | undefined): string | undefined {
+  if (!serverUrl || Platform.OS !== "android") return serverUrl;
+  return serverUrl.replace(/(^https?:\/\/)(127\.0\.0\.1|localhost)(?=[:/]|$)/i, "$110.0.2.2");
+}
 
 export interface DbConfig extends RuntimeDbConfig {
   dataPath?: string;
@@ -22,6 +36,7 @@ export class Db extends RuntimeDb {
 
     if (!this.nativeClients.has(key)) {
       const tier = this.nativeConfig.tier ?? "local";
+      const serverUrl = resolveServerUrlForPlatform(this.nativeConfig.serverUrl);
       const runtime = createJazzRnRuntime({
         schema,
         appId: this.nativeConfig.appId,
@@ -36,7 +51,7 @@ export class Db extends RuntimeDb {
         {
           appId: this.nativeConfig.appId,
           schema,
-          serverUrl: this.nativeConfig.serverUrl,
+          serverUrl,
           env: this.nativeConfig.env,
           userBranch: this.nativeConfig.userBranch,
           jwtToken: this.nativeConfig.jwtToken,
@@ -51,8 +66,8 @@ export class Db extends RuntimeDb {
         },
       );
 
-      if (this.nativeConfig.serverUrl) {
-        client.connectTransport(this.nativeConfig.serverUrl, {
+      if (serverUrl) {
+        client.connectTransport(serverUrl, {
           jwt_token: this.nativeConfig.jwtToken,
           admin_secret: this.nativeConfig.adminSecret,
         });
