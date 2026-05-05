@@ -5,7 +5,7 @@
  * Handles query translation, execution, and result transformation.
  *
  * Key design:
- * - createDb() is async (pre-loads WASM module)
+ * - createDb() is async (pre-loads the runtime module)
  * - insert/update/delete are sync (local-first immediate writes, no durability wait)
  * - all/one are async (need storage I/O for queries)
  */
@@ -19,13 +19,11 @@ import {
   JazzClient,
   type LocalBatchRecord,
   type MutationErrorEvent,
-  loadWasmModule,
   Transaction as RuntimeTransaction,
   WriteHandle,
   type CreateOptions,
   type UpdateOptions,
   type UpsertOptions,
-  type WasmModule,
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
@@ -33,6 +31,8 @@ import {
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
 } from "./client.js";
+import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
+import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import { translateQuery } from "./query-adapter.js";
@@ -40,7 +40,7 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync, ANONYMOUS_JWT_ISSUER } from "./client-session.js";
+import { resolveClientSessionSync } from "./client-session.js";
 import {
   createConventionalFileStorage,
   type ConventionalFileApp,
@@ -57,7 +57,7 @@ import {
   resolveWorkerBootstrapWasmUrl,
   resolveRuntimeConfigWorkerUrl,
 } from "./runtime-config.js";
-import { installWasmTelemetry, resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
+import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
 import {
   isTabSyncMessage,
   resolveBroadcastChannelCtor,
@@ -70,10 +70,7 @@ import {
 import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-const DEFAULT_WASM_LOG_LEVEL: WasmLogLevel = "warn";
-function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
-  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
+type AnyDbRuntimeModule = DbRuntimeModule<any>;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -785,7 +782,7 @@ export type DbBatchScope = Omit<DbDirectBatch, "commit">;
 export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
-  private wasmModule: WasmModule | null;
+  private readonly runtimeModule: AnyDbRuntimeModule | null;
   private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
@@ -850,11 +847,11 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    wasmModule: WasmModule | null,
+    runtimeModule: AnyDbRuntimeModule | null,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
-    this.wasmModule = wasmModule;
+    this.runtimeModule = runtimeModule;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
@@ -879,23 +876,30 @@ export class Db {
     if (!this._localFirstSecret || this.isShuttingDown) return;
 
     try {
-      const wasmModule = this.wasmModule;
-      if (!wasmModule) return;
-
       const ttlSeconds = 3600;
-      const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-      const newToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
+      const newToken = this.mintLocalFirstToken(
         this._localFirstSecret,
-        "urn:jazz:local-first",
         this.config.appId,
-        BigInt(ttlSeconds),
-        nowSeconds,
+        ttlSeconds,
       );
       this.updateAuthToken(newToken);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
     }
+  }
+
+  private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
+    if (!this.runtimeModule) {
+      throw new Error("Db runtime module is not initialized for this Db implementation");
+    }
+
+    return this.runtimeModule.mintLocalFirstToken({
+      secret,
+      audience,
+      ttlSeconds,
+      nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+    });
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -951,12 +955,11 @@ export class Db {
   }
 
   /**
-   * Create a Db instance with pre-loaded WASM module.
+   * Create a Db instance with a loaded runtime module.
    * @internal Use createDb() instead.
    */
-  static async create(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule(config.runtimeSources);
-    return new Db(config, wasmModule);
+  static create(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Db {
+    return new Db(config, runtimeModule);
   }
 
   /**
@@ -968,9 +971,8 @@ export class Db {
    *
    * @internal Use createDb() instead — it auto-detects browser.
    */
-  static async createWithWorker(config: DbConfig): Promise<Db> {
-    const wasmModule = await loadWasmModule(config.runtimeSources);
-    const db = new Db(config, wasmModule);
+  static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
+    const db = new Db(config, runtimeModule);
     const persistentDriver = resolveStorageDriver(config.driver);
     if (persistentDriver.type !== "persistent") {
       throw new Error("Worker-backed Db requires driver.type='persistent'");
@@ -1023,63 +1025,40 @@ export class Db {
 
   /**
    * Get or create a JazzClient for the given schema.
-   * Synchronous because WASM module is pre-loaded.
+   * Synchronous because the runtime module is loaded before Db is created.
    *
    * In worker mode, the first call per schema also initializes the
    * WorkerBridge (async). Subsequent calls are sync.
    */
   protected getClient(schema: WasmSchema): JazzClient {
-    if (!this.wasmModule) {
+    if (!this.runtimeModule) {
       throw new Error("Db runtime module is not initialized for this Db implementation");
     }
 
-    const runtimeSchema = shouldBypassLocalPolicies(this.config)
-      ? getPolicyStrippedSchema(schema)
-      : schema;
+    const runtimeSchema =
+      this.runtimeModule.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
+        ? getPolicyStrippedSchema(schema)
+        : schema;
 
     // Use the canonical schema JSON as the client cache key, but memoize it by
     // schema identity so write-heavy paths don't stringify the same schema per row.
     const key = getRuntimeSchemaCacheKey(runtimeSchema);
 
     if (!this.clients.has(key)) {
-      setGlobalWasmLogLevel(this.config.logLevel);
       this.installMainThreadWasmTelemetry();
 
-      // Create in-memory runtime (works for both direct and worker mode)
-      const client = JazzClient.connectSync(
-        this.wasmModule,
-        {
-          appId: this.config.appId,
-          schema: runtimeSchema,
-          driver: this.config.driver,
-          // In worker mode, don't connect to server directly — worker handles it
-          serverUrl: this.worker ? undefined : this.config.serverUrl,
-          env: this.config.env,
-          userBranch: this.config.userBranch,
-          jwtToken: this.config.jwtToken,
-          cookieSession: this.config.cookieSession,
-          adminSecret: this.config.adminSecret,
-          tier: this.worker ? undefined : "local",
-          // Keep worker-bridged browser clients on local durability by default.
-          // For direct (non-worker) clients connected to a server, default to edge.
-          defaultDurabilityTier: this.worker
-            ? undefined
-            : this.config.serverUrl
-              ? "edge"
-              : undefined,
+      const client = this.runtimeModule.createClient({
+        config: { ...this.config },
+        schema: runtimeSchema,
+        hasWorker: this.worker !== null,
+        useBinaryEncoding: this.worker !== null,
+        onAuthFailure: (reason) => {
+          this.markUnauthenticated(reason);
         },
-        {
-          // Worker-bridged runtimes exchange postcard payloads with peers;
-          // direct browser/server routing keeps JSON payloads.
-          useBinaryEncoding: this.worker !== null,
-          onAuthFailure: (reason) => {
-            this.markUnauthenticated(reason);
-          },
-          onRejectedBatchAcknowledged: (batchId) => {
-            this.workerBridge?.acknowledgeRejectedBatch(batchId);
-          },
+        onRejectedBatchAcknowledged: (batchId) => {
+          this.workerBridge?.acknowledgeRejectedBatch(batchId);
         },
-      );
+      });
 
       this.attachMutationErrorHandler(client);
       // In worker mode, set up the bridge for this client
@@ -1213,16 +1192,16 @@ export class Db {
 
   private installMainThreadWasmTelemetry(): void {
     const collectorUrl = this.resolveTelemetryCollectorUrl();
-    if (!collectorUrl || !this.wasmModule || this.disposeWasmTelemetry) {
+    if (!collectorUrl || !this.runtimeModule || this.disposeWasmTelemetry) {
       return;
     }
 
-    this.disposeWasmTelemetry = installWasmTelemetry({
-      wasmModule: this.wasmModule,
-      collectorUrl,
-      appId: this.config.appId,
-      runtimeThread: "main",
-    });
+    this.disposeWasmTelemetry =
+      this.runtimeModule.installTelemetry?.({
+        config: this.config,
+        collectorUrl,
+        runtimeThread: "main",
+      }) ?? null;
   }
 
   private resolveTelemetryCollectorUrl(): string | undefined {
@@ -1680,30 +1659,14 @@ export class Db {
    * Mint a short-lived local-first JWT proving possession of the current identity.
    * Returns `null` if the current session is not local-first.
    */
-  async getLocalFirstIdentityProof(options?: {
-    ttlSeconds?: number;
-    audience?: string;
-  }): Promise<string | null> {
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
-      return null;
-    }
-
-    const wasmModule = this.wasmModule;
-    if (!wasmModule) {
       return null;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? this.config.appId;
-    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-
-    return wasmModule.WasmRuntime.mintJazzSelfSignedToken(
-      this._localFirstSecret,
-      "urn:jazz:local-first",
-      audience,
-      BigInt(ttl),
-      nowSeconds,
-    );
+    return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
   onAuthChanged(listener: (state: AuthState) => void): () => void {
@@ -2559,7 +2522,7 @@ function generateEphemeralSeedBase64Url(): string {
 /**
  * Create a new Db instance with the given configuration.
  *
- * This is an **async** factory function that pre-loads the WASM module.
+ * This is an **async** factory function that pre-loads the runtime module.
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
@@ -2577,7 +2540,23 @@ function generateEphemeralSeedBase64Url(): string {
  * });
  * ```
  */
-export async function createDb(config: DbConfig): Promise<Db> {
+function createRuntimeTokenOptions(
+  secret: string,
+  audience: string,
+  ttlSeconds: number,
+): RuntimeTokenOptions {
+  return {
+    secret,
+    audience,
+    ttlSeconds,
+    nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+  };
+}
+
+export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
+  config: RuntimeConfig,
+  runtimeModule: DbRuntimeModule<RuntimeConfig>,
+): Promise<Db> {
   if (config.secret && (config.jwtToken || config.cookieSession)) {
     throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
   }
@@ -2586,6 +2565,7 @@ export async function createDb(config: DbConfig): Promise<Db> {
   }
 
   let resolvedConfig = { ...config };
+  await runtimeModule.load(config);
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -2593,29 +2573,17 @@ export async function createDb(config: DbConfig): Promise<Db> {
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const wasmModule = await loadWasmModule(config.runtimeSources);
-    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    const jwtToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
-      secret,
-      "urn:jazz:local-first",
-      config.appId,
-      BigInt(3600),
-      nowSeconds,
+    const jwtToken = runtimeModule.mintLocalFirstToken(
+      createRuntimeTokenOptions(secret, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
-    const wasmModule = await loadWasmModule(config.runtimeSources);
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    const jwtToken = wasmModule.WasmRuntime.mintJazzSelfSignedToken(
-      ephemeralSeed,
-      ANONYMOUS_JWT_ISSUER,
-      config.appId,
-      BigInt(3600),
-      nowSeconds,
+    const jwtToken = runtimeModule.mintAnonymousToken(
+      createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };
   }
@@ -2627,10 +2595,14 @@ export async function createDb(config: DbConfig): Promise<Db> {
   }
 
   let db: Db;
-  if (isBrowser() && driver.type === "persistent") {
-    db = await Db.createWithWorker(resolvedConfig);
+  if (
+    runtimeModule.supportsBrowserWorker !== false &&
+    isBrowser() &&
+    driver.type === "persistent"
+  ) {
+    db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   } else {
-    db = await Db.create(resolvedConfig);
+    db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
   }
 
   if (localFirstSecret) {
@@ -2638,6 +2610,10 @@ export async function createDb(config: DbConfig): Promise<Db> {
   }
 
   return db;
+}
+
+export async function createDb(config: DbConfig): Promise<Db> {
+  return await createDbWithRuntimeModule(config, new WasmRuntimeModule());
 }
 
 export function createDbFromClient(
