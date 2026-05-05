@@ -42,6 +42,11 @@ The two modes are:
 - Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable settlements, and public handles.
 - Visible resolution only merges visible rows. Staged or rejected transactional batches never
   participate in visible merges.
+- A batch is one fate unit. If any member write in a batch is rejected by authority, the entire
+  batch is rejected and every member is rolled back or left non-visible. Applications that need
+  independent authorization, rollback, or durability fate must use separate batches.
+- `BatchSettlement` is the active durability and visibility acknowledgement. Row-level state-change
+  sync messages are not part of the active protocol.
 - Merge strategy is schema metadata, not batch metadata. The same stored conflicting history can
   therefore resolve differently under different schema versions.
 
@@ -312,7 +317,8 @@ are skipped, so later opens only pay the normal batch-record scan and field chec
 
 ### BatchSettlement
 
-`BatchSettlement` is the replayable outcome model for both write modes:
+`BatchSettlement` is the replayable outcome model for both write modes and the only active sync
+payload that acknowledges batch durability or rejection:
 
 - `Missing`
 - `Rejected`
@@ -321,6 +327,10 @@ are skipped, so later opens only pay the normal batch-record scan and field chec
 
 Both successful cases carry `visible_members`, so replay, reconnect, and missed live acks can
 reason about one logical batch without inventing a separate per-row completion story.
+
+`Rejected` applies to the whole batch, not to one row inside it. A server that rejects any direct or
+transactional member persists one `Rejected` settlement for the shared `batch_id`; receivers mark
+all locally known rows in that batch rejected and re-run visibility from the remaining history.
 
 ### SealedBatchSubmission
 
@@ -334,14 +344,15 @@ reason about one logical batch without inventing a separate per-row completion s
 
 ### RowBatchKey
 
-`RowBatchKey` is the runtime/sync key for one concrete row batch entry:
+`RowBatchKey` is the runtime key for one concrete row batch entry:
 
 - `row_id`
 - `branch_name`
 - `batch_id`
 
-It is the handle used for row-level durability/state-change tracking such as persisted-write ack
-watchers.
+It is still useful for local waiters and query interest, but persisted write completion is resolved
+from `BatchSettlement.visible_members` or `BatchSettlement::Rejected`, not from a row-state sync
+payload.
 
 ## Direct Batch Lifecycle
 
@@ -400,9 +411,13 @@ calls perform this step immediately before returning their write handle.
 Direct batches flow over sync as:
 
 - `RowBatchCreated` for newly learned entries
-- `RowBatchStateChanged` for tier/state progression
 - `SealBatch` for the frozen final member set
-- `BatchSettlement` for replayable fate
+- `BatchSettlement::DurableDirect` or `BatchSettlement::Rejected` for replayable fate
+
+The direct batch is optimistic before authority settlement, but final fate is all-or-nothing. If
+the authority rejects any member's insert/update/delete policy check, it rejects the shared
+`batch_id`; accepted members from that same batch are not allowed to remain durable or visible as
+accepted authority output.
 
 Because the batch record and settlement are durable, a missed live ack no longer strands the write.
 
@@ -470,6 +485,9 @@ The replayable outcome becomes one of:
 - `Rejected`
 - `Missing`
 
+Rejection is batch-wide: a single failed member invalidates the whole transaction. Callers that want
+independent fate should split the writes into independent batches.
+
 ### 6. Accepted publication
 
 If accepted, the same staged `StoredRowBatch` entries become visible with:
@@ -485,7 +503,7 @@ Accepted transactional rows do not get a second visible identity. They keep the 
 
 The sync layer now uses three batch-specific payload families:
 
-- row entry movement: `RowBatchCreated`, `RowBatchNeeded`, `RowBatchStateChanged`
+- row entry movement: `RowBatchCreated`, `RowBatchNeeded`
 - batch sealing: `SealBatch`
 - replayable fate: `BatchSettlement`, `BatchSettlementNeeded`
 
