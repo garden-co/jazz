@@ -623,6 +623,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       disposeWasmTelemetry?.();
       disposeWasmTelemetry = null;
       if (runtime) {
+        runtime.flushWal?.();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
       }
