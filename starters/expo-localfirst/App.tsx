@@ -4,6 +4,7 @@ import { ExpoAuthSecretStore } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Image,
+  Platform,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -39,6 +40,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#f4f4f4",
+    paddingTop: Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0,
   },
   content: {
     paddingHorizontal: 16,
