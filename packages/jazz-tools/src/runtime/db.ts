@@ -867,21 +867,20 @@ export class Db {
     // Refresh at 80% of TTL
     const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
     this.localFirstRefreshTimer = setTimeout(() => {
-      void this.refreshLocalFirstToken();
+      this.refreshLocalFirstToken();
     }, refreshMs);
   }
 
-  private async refreshLocalFirstToken(): Promise<void> {
+  private refreshLocalFirstToken(): void {
     if (!this._localFirstSecret || this.isShuttingDown) return;
 
     try {
       const ttlSeconds = 3600;
-      const newToken = await this.mintLocalFirstToken(
+      const newToken = this.mintLocalFirstToken(
         this._localFirstSecret,
         this.config.appId,
         ttlSeconds,
       );
-      if (!newToken) return;
       this.updateAuthToken(newToken);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
@@ -889,16 +888,18 @@ export class Db {
     }
   }
 
-  private async mintLocalFirstToken(
+  private mintLocalFirstToken(
     secret: string,
     audience: string,
     ttlSeconds: number,
-  ): Promise<string | null> {
+  ): string {
     if (!this.runtimeModule) {
-      return null;
+      throw new Error(
+        "Db runtime module is not initialized for this Db implementation",
+      );
     }
 
-    return await this.runtimeModule.mintLocalFirstToken({
+    return this.runtimeModule.mintLocalFirstToken({
       secret,
       audience,
       ttlSeconds,
@@ -1663,17 +1664,17 @@ export class Db {
    * Mint a short-lived local-first JWT proving possession of the current identity.
    * Returns `null` if the current session is not local-first.
    */
-  async getLocalFirstIdentityProof(options?: {
+  getLocalFirstIdentityProof(options?: {
     ttlSeconds?: number;
     audience?: string;
-  }): Promise<string | null> {
+  }): string | null {
     if (!this._localFirstSecret) {
       return null;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? this.config.appId;
-    return await this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+    return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
   onAuthChanged(listener: (state: AuthState) => void): () => void {
@@ -2580,19 +2581,16 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const jwtToken = await runtimeModule.mintLocalFirstToken(
+    const jwtToken = runtimeModule.mintLocalFirstToken(
       createRuntimeTokenOptions(secret, config.appId, 3600),
     );
-    if (!jwtToken) {
-      throw new Error("Db runtime module does not support local-first auth");
-    }
     resolvedConfig = { ...resolvedConfig, jwtToken };
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = await runtimeModule.mintAnonymousToken(
+    const jwtToken = runtimeModule.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
     resolvedConfig = { ...resolvedConfig, jwtToken };

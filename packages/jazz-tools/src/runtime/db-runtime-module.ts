@@ -59,11 +59,11 @@ export abstract class DbRuntimeModule<RuntimeConfig extends DbConfig = DbConfig>
     return null;
   }
 
-  mintLocalFirstToken(_options: RuntimeTokenOptions): string | Promise<string> | null {
-    return null;
+  mintLocalFirstToken(_options: RuntimeTokenOptions): string {
+    throw new Error("Db runtime module does not support local-first auth");
   }
 
-  mintAnonymousToken(_options: RuntimeTokenOptions): string | Promise<string> {
+  mintAnonymousToken(_options: RuntimeTokenOptions): string {
     throw new Error("Db runtime module does not support anonymous auth");
   }
 }
