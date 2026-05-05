@@ -56,9 +56,11 @@ impl SyncManager {
                 return;
             };
             let metadata_already_sent = server.sent_metadata.contains(&object_id);
-            let object_confirmed_upstream =
-                self.object_has_upstream_confirmation(storage, table, &branch_name, object_id);
-            !metadata_already_sent || !object_confirmed_upstream
+            if !metadata_already_sent {
+                true
+            } else {
+                !self.object_has_upstream_confirmation(storage, table, &branch_name, object_id)
+            }
         };
         self.queue_row_to_server_with_metadata(
             server_id,
