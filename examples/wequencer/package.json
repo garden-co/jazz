@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
+    "jazz-wasm": "workspace:*",
     "svelte": "^5.0.0",
     "tone": "^15.1.22"
   },

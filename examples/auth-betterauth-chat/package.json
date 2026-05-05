@@ -13,6 +13,7 @@
     "better-auth": "^1.5.5",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
+    "jazz-wasm": "workspace:*",
     "next": "16.1.6",
     "react": "19.2.4",
     "react-dom": "19.2.4"
