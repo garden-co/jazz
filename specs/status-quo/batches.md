@@ -30,7 +30,7 @@ stored row shape and the same sync identity. The difference lives in:
 
 The two modes are:
 
-- `Direct`: visible immediately, explicitly sealed/frozen, settles as `DurableDirect`
+- `Direct`: staged until explicit commit/seal, then optimistically visible and settles as `DurableDirect`
 - `Transactional`: staged first, explicitly sealed, authority-decided, settles as `AcceptedTransaction`, `Rejected`, or `Missing`
 
 ## Core Invariants
@@ -39,6 +39,9 @@ The two modes are:
 - Same-row rewrites within one batch keep the frozen pre-batch parent frontier instead of self-parenting through intermediate rewrites.
 - Simple `insert` / `update` / `delete` calls are just one-member direct batches.
 - Explicit direct-batch APIs exist so multiple writes can share one `BatchId`.
+- Direct batches created with `beginBatch()` do not affect global reads until `commit()` seals them.
+  `db.batch(cb)` commits only if the callback resolves; if the callback throws, the batch is
+  rolled back as one unit.
 - Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable settlements, and public handles.
 - Visible resolution only merges visible rows. Staged or rejected transactional batches never
   participate in visible merges.

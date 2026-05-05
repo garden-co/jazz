@@ -102,16 +102,18 @@ describe("worker update-auth error propagation", () => {
 describe("performUpstreamConnect", () => {
   it("posts upstream-connected after runtime.connect succeeds", () => {
     const connect = vi.fn();
+    const batchedTick = vi.fn();
     const posted: WorkerToMainMessage[] = [];
 
     performUpstreamConnect(
-      { connect },
+      { connect, batchedTick },
       (msg) => posted.push(msg),
       "ws://example/ws",
       '{"jwt_token":"x"}',
     );
 
     expect(connect).toHaveBeenCalledWith("ws://example/ws", '{"jwt_token":"x"}');
+    expect(batchedTick).toHaveBeenCalledOnce();
     expect(posted).toEqual([{ type: "upstream-connected" }]);
   });
 

@@ -311,13 +311,14 @@ export function mergeAuth(
  * marked as down instead of optimistically assuming it is up.
  */
 export function performUpstreamConnect(
-  runtime: { connect?: (url: string, auth: string) => void },
+  runtime: { connect?: (url: string, auth: string) => void; batchedTick?: () => void },
   post: (msg: WorkerToMainMessage) => void,
   wsUrl: string,
   authJson: string,
 ): void {
   try {
     runtime.connect?.(wsUrl, authJson);
+    runtime.batchedTick?.();
     post({ type: "upstream-connected" });
   } catch (err) {
     console.error("[worker] runtime.connect failed:", err);
