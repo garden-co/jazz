@@ -2,22 +2,22 @@ import jazzRn from "jazz-rn";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import type { DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import {
-  DbRuntimeModule,
-  type DbRuntimeClientContext,
-  type RuntimeTokenOptions,
-} from "../runtime/db-runtime-module.js";
+  type BackendTokenOptions,
+  DbBackendModule,
+  type DbBackendClientContext,
+} from "../runtime/db-backend.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
 
-export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
+export interface ReactNativeBackendDbConfig extends RuntimeDbConfig {
   dataPath?: string;
   tier?: DurabilityTier;
 }
 
-export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntimeDbConfig> {
+export class ReactNativeBackendModule extends DbBackendModule<ReactNativeBackendDbConfig> {
   override readonly supportsBrowserWorker = false;
   override readonly supportsPolicyBypass = false;
 
-  protected override async loadRuntime(): Promise<void> {
+  protected override async loadResources(): Promise<void> {
     return;
   }
 
@@ -25,7 +25,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
     config,
     schema,
     onAuthFailure,
-  }: DbRuntimeClientContext<ReactNativeRuntimeDbConfig>): JazzClient {
+  }: DbBackendClientContext<ReactNativeBackendDbConfig>): JazzClient {
     const tier = config.tier ?? "local";
     const runtime = createJazzRnRuntime({
       schema,
@@ -55,7 +55,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
     );
   }
 
-  override mintLocalFirstToken(options: RuntimeTokenOptions): string {
+  override mintLocalFirstToken(options: BackendTokenOptions): string {
     return jazzRn.jazz_rn.mintLocalFirstToken(
       options.secret,
       options.audience,
@@ -63,7 +63,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
     );
   }
 
-  override mintAnonymousToken(options: RuntimeTokenOptions): string {
+  override mintAnonymousToken(options: BackendTokenOptions): string {
     return jazzRn.jazz_rn.mintAnonymousToken(
       options.secret,
       options.audience,

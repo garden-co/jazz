@@ -1,40 +1,40 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDbWithRuntimeModule, type DbConfig } from "./db.js";
+import { createDb, type DbConfig } from "./db.js";
 import { LocalFirstAuthManager, resolveDbAuthConfig } from "./db-auth.js";
-import type { DbRuntimeModule, RuntimeTokenOptions } from "./db-runtime-module.js";
+import type { BackendTokenOptions, DbBackendModule } from "./db-backend.js";
 
-function createRuntimeModuleStub() {
+function createBackendModuleStub() {
   return {
     mintLocalFirstToken: vi.fn(
-      (options: RuntimeTokenOptions) =>
+      (options: BackendTokenOptions) =>
         `local:${options.secret}:${options.audience}:${options.ttlSeconds}`,
     ),
     mintAnonymousToken: vi.fn(
-      (options: RuntimeTokenOptions) =>
+      (options: BackendTokenOptions) =>
         `anonymous:${options.secret}:${options.audience}:${options.ttlSeconds}`,
     ),
-  } as Pick<DbRuntimeModule<DbConfig>, "mintLocalFirstToken" | "mintAnonymousToken"> & {
-    mintLocalFirstToken: ReturnType<typeof vi.fn<(options: RuntimeTokenOptions) => string>>;
-    mintAnonymousToken: ReturnType<typeof vi.fn<(options: RuntimeTokenOptions) => string>>;
+  } as Pick<DbBackendModule<DbConfig>, "mintLocalFirstToken" | "mintAnonymousToken"> & {
+    mintLocalFirstToken: ReturnType<typeof vi.fn<(options: BackendTokenOptions) => string>>;
+    mintAnonymousToken: ReturnType<typeof vi.fn<(options: BackendTokenOptions) => string>>;
   };
 }
 
-class LoadingRuntimeModuleStub implements Pick<
-  DbRuntimeModule<DbConfig>,
+class LoadingBackendModuleStub implements Pick<
+  DbBackendModule<DbConfig>,
   "load" | "createClient" | "mintLocalFirstToken" | "mintAnonymousToken"
 > {
   readonly load = vi.fn(async (_config: DbConfig) => undefined);
   readonly createClient = vi.fn(() => {
     throw new Error("createClient should not be called");
   });
-  readonly mintLocalFirstToken = vi.fn((_options: RuntimeTokenOptions) => "local-jwt");
-  readonly mintAnonymousToken = vi.fn((_options: RuntimeTokenOptions) => "anonymous-jwt");
+  readonly mintLocalFirstToken = vi.fn((_options: BackendTokenOptions) => "local-jwt");
+  readonly mintAnonymousToken = vi.fn((_options: BackendTokenOptions) => "anonymous-jwt");
 }
 
 describe("resolveDbAuthConfig", () => {
-  it("rejects secret and jwtToken before runtime setup", async () => {
-    const runtimeModule = createRuntimeModuleStub();
-    const loadingRuntimeModule = new LoadingRuntimeModuleStub();
+  it("rejects secret and jwtToken before backend setup", async () => {
+    const backend = createBackendModuleStub();
+    const loadingBackendModule = new LoadingBackendModuleStub();
 
     expect(() =>
       resolveDbAuthConfig(
@@ -43,28 +43,26 @@ describe("resolveDbAuthConfig", () => {
           secret: "alice-secret",
           jwtToken: "existing-jwt",
         },
-        runtimeModule,
+        backend,
       ),
     ).toThrow("mutually exclusive");
 
-    expect(runtimeModule.mintLocalFirstToken).not.toHaveBeenCalled();
-    expect(runtimeModule.mintAnonymousToken).not.toHaveBeenCalled();
+    expect(backend.mintLocalFirstToken).not.toHaveBeenCalled();
+    expect(backend.mintAnonymousToken).not.toHaveBeenCalled();
 
     await expect(
-      createDbWithRuntimeModule(
-        {
-          appId: "test-app",
-          secret: "alice-secret",
-          jwtToken: "existing-jwt",
-        },
-        loadingRuntimeModule as unknown as DbRuntimeModule<DbConfig>,
-      ),
+      createDb({
+        appId: "test-app",
+        secret: "alice-secret",
+        jwtToken: "existing-jwt",
+        runtime: loadingBackendModule as unknown as DbBackendModule<DbConfig>,
+      }),
     ).rejects.toThrow("mutually exclusive");
-    expect(loadingRuntimeModule.load).not.toHaveBeenCalled();
+    expect(loadingBackendModule.load).not.toHaveBeenCalled();
   });
 
   it("rejects jwtToken and cookieSession before minting auth tokens", () => {
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
 
     expect(() =>
       resolveDbAuthConfig(
@@ -77,16 +75,16 @@ describe("resolveDbAuthConfig", () => {
             authMode: "external",
           },
         },
-        runtimeModule,
+        backend,
       ),
     ).toThrow("mutually exclusive");
 
-    expect(runtimeModule.mintLocalFirstToken).not.toHaveBeenCalled();
-    expect(runtimeModule.mintAnonymousToken).not.toHaveBeenCalled();
+    expect(backend.mintLocalFirstToken).not.toHaveBeenCalled();
+    expect(backend.mintAnonymousToken).not.toHaveBeenCalled();
   });
 
   it("mints a local-first startup token when secret is present", () => {
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
 
     const resolved = resolveDbAuthConfig(
       {
@@ -94,33 +92,33 @@ describe("resolveDbAuthConfig", () => {
         secret: "alice-secret",
         serverUrl: "https://example.test",
       },
-      runtimeModule,
+      backend,
     );
 
     expect(resolved.localFirstSecret).toBe("alice-secret");
     expect(resolved.config.secret).toBe("alice-secret");
     expect(resolved.config.jwtToken).toBe("local:alice-secret:auth-app:3600");
-    expect(runtimeModule.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(backend.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "auth-app",
         ttlSeconds: 3600,
       }),
     );
-    const tokenOptions = runtimeModule.mintLocalFirstToken.mock.calls[0]?.[0];
+    const tokenOptions = backend.mintLocalFirstToken.mock.calls[0]?.[0];
     expect(tokenOptions?.nowSeconds).toBeTypeOf("bigint");
-    expect(runtimeModule.mintAnonymousToken).not.toHaveBeenCalled();
+    expect(backend.mintAnonymousToken).not.toHaveBeenCalled();
   });
 
   it("mints an anonymous startup token when user auth is absent", () => {
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
 
-    const resolved = resolveDbAuthConfig({ appId: "anonymous-app" }, runtimeModule);
+    const resolved = resolveDbAuthConfig({ appId: "anonymous-app" }, backend);
 
     expect(resolved.localFirstSecret).toBeNull();
     expect(resolved.config.jwtToken).toMatch(/^anonymous:[A-Za-z0-9_-]{43}:anonymous-app:3600$/);
-    expect(runtimeModule.mintLocalFirstToken).not.toHaveBeenCalled();
-    expect(runtimeModule.mintAnonymousToken).toHaveBeenCalledWith(
+    expect(backend.mintLocalFirstToken).not.toHaveBeenCalled();
+    expect(backend.mintAnonymousToken).toHaveBeenCalledWith(
       expect.objectContaining({
         audience: "anonymous-app",
         ttlSeconds: 3600,
@@ -129,20 +127,20 @@ describe("resolveDbAuthConfig", () => {
   });
 
   it("does not mint anonymous auth for admin-secret clients", () => {
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
 
     const resolved = resolveDbAuthConfig(
       {
         appId: "admin-app",
         adminSecret: "admin-secret",
       },
-      runtimeModule,
+      backend,
     );
 
     expect(resolved.localFirstSecret).toBeNull();
     expect(resolved.config.jwtToken).toBeUndefined();
-    expect(runtimeModule.mintLocalFirstToken).not.toHaveBeenCalled();
-    expect(runtimeModule.mintAnonymousToken).not.toHaveBeenCalled();
+    expect(backend.mintLocalFirstToken).not.toHaveBeenCalled();
+    expect(backend.mintAnonymousToken).not.toHaveBeenCalled();
   });
 });
 
@@ -152,11 +150,11 @@ describe("LocalFirstAuthManager", () => {
   });
 
   it("mints identity proofs with default ttl 60", () => {
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
     const manager = new LocalFirstAuthManager({
       appId: "auth-app",
       secret: "alice-secret",
-      runtimeModule,
+      backend,
       applyToken: vi.fn(),
       isShuttingDown: () => false,
     });
@@ -164,7 +162,7 @@ describe("LocalFirstAuthManager", () => {
     const proof = manager.getIdentityProof({ audience: "proof-audience" });
 
     expect(proof).toBe("local:alice-secret:proof-audience:60");
-    expect(runtimeModule.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(backend.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "proof-audience",
@@ -175,12 +173,12 @@ describe("LocalFirstAuthManager", () => {
 
   it("refreshes app auth at 80 percent of the 3600 second ttl", async () => {
     vi.useFakeTimers();
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
     const applyToken = vi.fn();
     const manager = new LocalFirstAuthManager({
       appId: "auth-app",
       secret: "alice-secret",
-      runtimeModule,
+      backend,
       applyToken,
       isShuttingDown: () => false,
     });
@@ -193,7 +191,7 @@ describe("LocalFirstAuthManager", () => {
     await vi.advanceTimersByTimeAsync(1);
 
     expect(applyToken).toHaveBeenCalledWith("local:alice-secret:auth-app:3600");
-    expect(runtimeModule.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(backend.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "auth-app",
@@ -207,12 +205,12 @@ describe("LocalFirstAuthManager", () => {
 
   it("clears the refresh timer on stop", async () => {
     vi.useFakeTimers();
-    const runtimeModule = createRuntimeModuleStub();
+    const backend = createBackendModuleStub();
     const applyToken = vi.fn();
     const manager = new LocalFirstAuthManager({
       appId: "auth-app",
       secret: "alice-secret",
-      runtimeModule,
+      backend,
       applyToken,
       isShuttingDown: () => false,
     });

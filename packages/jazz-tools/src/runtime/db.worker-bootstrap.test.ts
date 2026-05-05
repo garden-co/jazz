@@ -50,17 +50,32 @@ vi.mock("./tab-leader-election.js", async (importOriginal) => {
   };
 });
 
-import { Db, type DbConfig } from "./db.js";
-import { WasmRuntimeModule } from "./wasm-runtime-module.js";
+import type { DbConfig } from "./db.js";
+import { BrowserWasmBackend } from "./browser-wasm-backend.js";
+import { WasmBackendModule } from "./wasm-backend-module.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
 
-async function createWorkerDb(config: DbConfig): Promise<Db> {
-  const runtimeModule = new WasmRuntimeModule();
-  await runtimeModule.load(config);
-  return await Db.createWithWorker(config, runtimeModule);
+function createWorkerBackendHost(config: DbConfig) {
+  return {
+    isShuttingDown: () => false,
+    onAuthFailure: vi.fn(),
+    onMutationErrorReplay: vi.fn(),
+    getTelemetryCollectorUrl: () => config.telemetryCollectorUrl,
+    shutdownClientsForStorageReset: vi.fn(async () => undefined),
+  };
+}
+
+async function createWorkerBackend(config: DbConfig): Promise<BrowserWasmBackend> {
+  const runtime = new WasmBackendModule();
+  await runtime.load(config);
+  return await BrowserWasmBackend.create({
+    config,
+    host: createWorkerBackendHost(config),
+    createClient: (context) => runtime.createClient(context),
+  });
 }
 
 afterEach(() => {
@@ -85,7 +100,49 @@ afterEach(() => {
   }
 });
 
-describe("Db worker runtime bootstrap", () => {
+describe("Db worker backend bootstrap", () => {
+  it("WasmBackendModule creates the browser worker backend in browser persistent mode", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const config: DbConfig = {
+      appId: "worker-bootstrap-backend-selection",
+      driver: { type: "persistent", dbName: "worker-bootstrap-backend-selection" },
+    };
+    const runtime = new WasmBackendModule();
+    await runtime.load(config);
+
+    const backend = await runtime.createBackend({
+      config,
+      host: createWorkerBackendHost(config),
+    });
+
+    await backend.shutdown();
+
+    expect(backend).toBeInstanceOf(BrowserWasmBackend);
+  });
+
   it("prefers explicit workerUrl and wasmUrl over baseUrl and fallback resolution", async () => {
     const spawnedWorkerUrls: string[] = [];
 
@@ -114,7 +171,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-explicit-urls",
       driver: { type: "persistent", dbName: "worker-bootstrap-explicit-urls" },
       runtimeSources: {
@@ -124,7 +181,7 @@ describe("Db worker runtime bootstrap", () => {
       },
     });
 
-    await db.shutdown();
+    await backend.shutdown();
 
     expect(spawnedWorkerUrls).toEqual([
       "http://localhost:3000/custom/jazz-worker.js?jazz-wasm-url=http%3A%2F%2Flocalhost%3A3000%2Fcustom%2Fjazz_wasm_bg.wasm",
@@ -159,7 +216,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-base-url",
       driver: { type: "persistent", dbName: "worker-bootstrap-base-url" },
       runtimeSources: {
@@ -167,7 +224,7 @@ describe("Db worker runtime bootstrap", () => {
       },
     });
 
-    await db.shutdown();
+    await backend.shutdown();
 
     expect(spawnedWorkerUrls).toEqual([
       "http://localhost:3000/assets/jazz/worker/jazz-worker.js?jazz-wasm-url=http%3A%2F%2Flocalhost%3A3000%2Fassets%2Fjazz%2Fjazz_wasm_bg.wasm",
@@ -202,12 +259,12 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-browser-assets",
       driver: { type: "persistent", dbName: "worker-bootstrap-browser-assets" },
     });
 
-    await db.shutdown();
+    await backend.shutdown();
 
     expect(loadWasmModuleMock).toHaveBeenCalledTimes(1);
     expect(spawnedWorkerUrls).toHaveLength(1);
@@ -239,13 +296,13 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-fallback-wasm",
       driver: { type: "persistent", dbName: "worker-bootstrap-fallback-wasm" },
     });
 
-    const options = (db as any).buildWorkerBridgeOptions("{}");
-    await db.shutdown();
+    const options = (backend as any).buildWorkerBridgeOptions("{}");
+    await backend.shutdown();
 
     expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
   });
@@ -275,14 +332,14 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-telemetry",
       driver: { type: "persistent", dbName: "worker-bootstrap-telemetry" },
       telemetryCollectorUrl: "http://127.0.0.1:54418",
     });
 
-    const options = (db as any).buildWorkerBridgeOptions("{}");
-    await db.shutdown();
+    const options = (backend as any).buildWorkerBridgeOptions("{}");
+    await backend.shutdown();
 
     expect(options.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
   });
@@ -315,7 +372,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await createWorkerDb({
+    const backend = await createWorkerBackend({
       appId: "worker-bootstrap-wasm-source",
       driver: { type: "persistent", dbName: "worker-bootstrap-wasm-source" },
       runtimeSources: {
@@ -324,7 +381,7 @@ describe("Db worker runtime bootstrap", () => {
       },
     });
 
-    await db.shutdown();
+    await backend.shutdown();
 
     expect(spawnedWorkerUrls).toEqual(["http://localhost:3000/custom/jazz-worker.js"]);
   });

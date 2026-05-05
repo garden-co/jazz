@@ -1,29 +1,29 @@
 import type { DbConfig } from "./db.js";
-import type { DbRuntimeModule, RuntimeTokenOptions } from "./db-runtime-module.js";
+import type { BackendTokenOptions, DbBackendModule } from "./db-backend.js";
 
 const LOCAL_FIRST_TOKEN_TTL_SECONDS = 3600;
 const LOCAL_FIRST_REFRESH_RATIO = 0.8;
 const IDENTITY_PROOF_TTL_SECONDS = 60;
 
-type TokenMintingRuntime<RuntimeConfig extends DbConfig> = Pick<
-  DbRuntimeModule<RuntimeConfig>,
+type TokenMintingBackend<BackendConfig extends DbConfig> = Pick<
+  DbBackendModule<BackendConfig>,
   "mintLocalFirstToken" | "mintAnonymousToken"
 >;
 
-type LocalFirstTokenRuntime<RuntimeConfig extends DbConfig> = Pick<
-  DbRuntimeModule<RuntimeConfig>,
+type LocalFirstTokenBackend<BackendConfig extends DbConfig> = Pick<
+  DbBackendModule<BackendConfig>,
   "mintLocalFirstToken"
 >;
 
-export interface ResolvedDbAuthConfig<RuntimeConfig extends DbConfig> {
-  config: RuntimeConfig & DbConfig;
+export interface ResolvedDbAuthConfig<BackendConfig extends DbConfig> {
+  config: BackendConfig & DbConfig;
   localFirstSecret: string | null;
 }
 
-export interface LocalFirstAuthManagerOptions<RuntimeConfig extends DbConfig = DbConfig> {
+export interface LocalFirstAuthManagerOptions<BackendConfig extends DbConfig = DbConfig> {
   appId: string;
   secret: string;
-  runtimeModule: LocalFirstTokenRuntime<RuntimeConfig>;
+  backend: LocalFirstTokenBackend<BackendConfig>;
   applyToken: (jwtToken: string) => void;
   isShuttingDown: () => boolean;
   ttlSeconds?: number;
@@ -43,15 +43,15 @@ export function validateDbAuthConfig(config: DbConfig): void {
   }
 }
 
-export function resolveDbAuthConfig<RuntimeConfig extends DbConfig>(
-  config: RuntimeConfig,
-  runtimeModule: TokenMintingRuntime<RuntimeConfig>,
-): ResolvedDbAuthConfig<RuntimeConfig> {
+export function resolveDbAuthConfig<BackendConfig extends DbConfig>(
+  config: BackendConfig,
+  backend: TokenMintingBackend<BackendConfig>,
+): ResolvedDbAuthConfig<BackendConfig> {
   validateDbAuthConfig(config);
 
   if (config.secret) {
-    const jwtToken = runtimeModule.mintLocalFirstToken(
-      createRuntimeTokenOptions(config.secret, config.appId, LOCAL_FIRST_TOKEN_TTL_SECONDS),
+    const jwtToken = backend.mintLocalFirstToken(
+      createBackendTokenOptions(config.secret, config.appId, LOCAL_FIRST_TOKEN_TTL_SECONDS),
     );
     return {
       config: { ...config, jwtToken },
@@ -61,8 +61,8 @@ export function resolveDbAuthConfig<RuntimeConfig extends DbConfig>(
 
   if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = runtimeModule.mintAnonymousToken(
-      createRuntimeTokenOptions(ephemeralSeed, config.appId, LOCAL_FIRST_TOKEN_TTL_SECONDS),
+    const jwtToken = backend.mintAnonymousToken(
+      createBackendTokenOptions(ephemeralSeed, config.appId, LOCAL_FIRST_TOKEN_TTL_SECONDS),
     );
 
     return {
@@ -84,11 +84,11 @@ export function resolveDbAuthConfig<RuntimeConfig extends DbConfig>(
  * the resolved secret available for identity proofs and periodically mints a
  * fresh app auth token before the current one expires.
  */
-export class LocalFirstAuthManager<RuntimeConfig extends DbConfig = DbConfig> {
+export class LocalFirstAuthManager<BackendConfig extends DbConfig = DbConfig> {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly ttlSeconds: number;
 
-  constructor(private readonly options: LocalFirstAuthManagerOptions<RuntimeConfig>) {
+  constructor(private readonly options: LocalFirstAuthManagerOptions<BackendConfig>) {
     this.ttlSeconds = options.ttlSeconds ?? LOCAL_FIRST_TOKEN_TTL_SECONDS;
   }
 
@@ -134,17 +134,17 @@ export class LocalFirstAuthManager<RuntimeConfig extends DbConfig = DbConfig> {
   }
 
   private mintToken(audience: string, ttlSeconds: number): string {
-    return this.options.runtimeModule.mintLocalFirstToken(
-      createRuntimeTokenOptions(this.options.secret, audience, ttlSeconds),
+    return this.options.backend.mintLocalFirstToken(
+      createBackendTokenOptions(this.options.secret, audience, ttlSeconds),
     );
   }
 }
 
-function createRuntimeTokenOptions(
+function createBackendTokenOptions(
   secret: string,
   audience: string,
   ttlSeconds: number,
-): RuntimeTokenOptions {
+): BackendTokenOptions {
   return {
     secret,
     audience,
