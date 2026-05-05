@@ -58,5 +58,10 @@ default = ["console_error_panic_hook"]
 [package.metadata.wasm-pack.profile.profiling]
 wasm-opt = ["-O", "-g"]
 
+# `-O` (level 2) matched higher levels in our runtime benchmarks, so we stop there.
+# `-g` is kept because it had no measurable impact on runtime or output size,
+# and it preserves the wasm `name` section so function names appear in profilers.
+# wasm-pack only recognizes the profile names `dev`/`profiling`/`release`; any other
+# name is silently ignored and wasm-pack falls back to its built-in defaults.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O4", "-g"]
+wasm-opt = ["-O", "-g"]
