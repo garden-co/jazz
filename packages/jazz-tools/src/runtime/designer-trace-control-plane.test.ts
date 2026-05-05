@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { InsertHandle, JazzClient, WriteHandle } from "./client.js";
 import type { TableProxy } from "./db.js";
 import {
   DesignerTraceAccessPolicyError,
@@ -12,10 +11,22 @@ import {
   type DesignerTraceDb,
   type DesignerTraceObjectStorageProvider,
   type DesignerTraceObjectStoragePutReceipt,
+  type DesignerTraceWriteHandle,
 } from "./designer-trace-control-plane.js";
 
 const fixedNow = new Date("2026-05-05T12:00:00.000Z");
 const leaseExpiresAt = new Date("2026-05-05T12:05:00.000Z");
+
+class FakeWriteHandle<T = void> implements DesignerTraceWriteHandle<T> {
+  constructor(
+    readonly batchId: string,
+    private readonly value?: T,
+  ) {}
+
+  async wait(_options: { tier: "local" | "edge" | "global" }): Promise<T> {
+    return this.value as T;
+  }
+}
 
 class FakeDb implements DesignerTraceDb {
   readonly inserts: Array<{
@@ -29,46 +40,36 @@ class FakeDb implements DesignerTraceDb {
     data: Record<string, unknown>;
     batchId: string;
   }> = [];
+  readonly commits: string[] = [];
 
   #nextRowId = 1;
   #nextBatchId = 1;
-  readonly #client = {
-    waitForPersistedBatch: async () => {},
-  } as unknown as JazzClient;
 
   beginDirectBatch<T, Init>(_table: TableProxy<T, Init>): DesignerTraceBatch {
     const batchId = `direct-batch-${this.#nextBatchId++}`;
     return {
       batchId: () => batchId,
-      insert: <Row, RowInit>(table: TableProxy<Row, RowInit>, data: RowInit): InsertHandle<Row> =>
+      insert: <Row, RowInit>(table: TableProxy<Row, RowInit>, data: RowInit): Row =>
         this.insertWithBatch(table, data, batchId),
       update: <Row, RowInit>(
         table: TableProxy<Row, RowInit>,
         id: string,
         data: Partial<RowInit>,
-      ): WriteHandle => this.updateWithBatch(table, id, data, batchId),
+      ): void => this.updateWithBatch(table, id, data, batchId),
+      commit: (): DesignerTraceWriteHandle => {
+        this.commits.push(batchId);
+        return new FakeWriteHandle(batchId);
+      },
     };
   }
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
-    return this.insertWithBatch(table, data, `insert-batch-${this.#nextBatchId++}`);
-  }
-
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle {
-    return this.updateWithBatch(table, id, data, `update-batch-${this.#nextBatchId++}`);
-  }
-
-  private insertWithBatch<T, Init>(
-    table: TableProxy<T, Init>,
-    data: Init,
-    batchId: string,
-  ): InsertHandle<T> {
+  private insertWithBatch<T, Init>(table: TableProxy<T, Init>, data: Init, batchId: string): T {
     const row = {
       id: `${table._table}-row-${this.#nextRowId++}`,
       ...(data as Record<string, unknown>),
     };
     this.inserts.push({ table: table._table, data: row, batchId });
-    return new InsertHandle(row as T, batchId, this.#client);
+    return row as T;
   }
 
   private updateWithBatch<T, Init>(
@@ -76,9 +77,8 @@ class FakeDb implements DesignerTraceDb {
     id: string,
     data: Partial<Init>,
     batchId: string,
-  ): WriteHandle {
+  ): void {
     this.updates.push({ table: table._table, id, data: data as Record<string, unknown>, batchId });
-    return new WriteHandle(batchId, this.#client);
   }
 }
 
@@ -155,6 +155,8 @@ describe("designer trace control plane", () => {
     expect(new Set(db.inserts.map((insert) => insert.batchId))).toEqual(
       new Set(["direct-batch-1"]),
     );
+    expect(db.commits).toEqual(["direct-batch-1"]);
+    expect(write.commit.batchId).toBe("direct-batch-1");
     expect(write.event.value).toMatchObject({
       event_id: "event-indexer-finished",
       session_id: "session-1",
@@ -773,6 +775,7 @@ describe("designer trace control plane", () => {
         },
       },
     ]);
+    expect(db.commits).toEqual(["direct-batch-1", "direct-batch-2"]);
   });
 
   it("records upload receipts and marks the matching upload job uploaded", () => {
@@ -831,6 +834,8 @@ describe("designer trace control plane", () => {
         },
       },
     ]);
+    expect(write.commit.batchId).toBe("direct-batch-1");
+    expect(write.uploadJobUpdate?.batchId).toBe("direct-batch-1");
   });
 
   it("processes an upload job through an object storage provider and records the receipt", async () => {

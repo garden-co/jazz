@@ -79,6 +79,9 @@ const DEFAULT_OBJECT_STORAGE_REGION = "us-dallas-1";
 const DEFAULT_OBJECT_STORAGE_BUCKET = "reactron-updates-dev";
 const DEFAULT_DESIGNER_SPACES_PREFIX = "x/nikiv/designer/spaces";
 const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
+const SPACE_FILE_UPLOAD_JOB_KIND = "space-file-object-upload";
+const SPACE_FILE_MATERIALIZE_JOB_KIND = "space-file-materialize";
+const SPACE_FILE_EVENT_TYPE = "designer_space_file";
 
 type ObjectStorageDescriptor = {
   provider: "oci";
@@ -97,6 +100,31 @@ type DesignerSpaceRecord = {
   objectStorageUri: string;
   objectStorage: ObjectStorageDescriptor;
   syncKind: typeof SPACE_SYNC_JOB_KIND;
+};
+
+type SpaceFileMaterializeTarget = "local" | "remote";
+
+type DesignerSpaceFileRecord = {
+  objectRefId: string;
+  spaceSlug: string;
+  path: string;
+  localPath: string;
+  remotePath: string;
+  contentHash: string;
+  sizeBytes?: number;
+  contentType?: string;
+  revisionId?: string;
+  writerId?: string;
+  sourceSession?: string;
+  objectStorage: ObjectStorageObjectDescriptor;
+  uploadJobId?: string;
+  materializeJobId?: string;
+  materializeTarget: SpaceFileMaterializeTarget;
+  updatedAt: string;
+};
+
+type ObjectStorageObjectDescriptor = ObjectStorageDescriptor & {
+  key: string;
 };
 
 export function createRemoteAutonomyGateway(
@@ -205,15 +233,18 @@ export function createRemoteAutonomyGateway(
         syncReceipts: "/v1/sync/receipts",
         claims: "/v1/claims",
         spaces: "/v1/spaces",
+        spaceFiles: "/v1/spaces/:slug/files",
+        spaceSync: "/v1/spaces/:slug/sync",
       },
     }))
     .get("/v1/state", async ({ query }) => {
       const limit = intQuery(query.limit, 20);
-      const [sessions, jobs, claims, spaces] = await Promise.all([
+      const [sessions, jobs, claims, spaces, spaceFiles] = await Promise.all([
         codexStore.listActiveSessionSummaries({ limit }),
         agentStore.listJobs({ includeFinished: false, limit }),
         agentStore.listAgentClaims({ limit }),
         listSpaceRecords(agentStore, limit),
+        listSpaceFileRecords(agentStore, undefined, limit),
       ]);
       return {
         ok: true,
@@ -226,6 +257,7 @@ export function createRemoteAutonomyGateway(
         jobs: serialize(jobs),
         claims: serialize(claims),
         spaces,
+        spaceFiles,
       };
     })
     .post("/v1/codex/presence", async ({ body }) => {
@@ -574,6 +606,99 @@ export function createRemoteAutonomyGateway(
         job: serializeJob(job),
         claim: serializeClaim(claim),
       };
+    })
+    .get("/v1/spaces/:slug/files", async ({ params, query }) => {
+      const slug = spaceSlug(params.slug);
+      return {
+        ok: true,
+        files: await listSpaceFileRecords(agentStore, slug, intQuery(query.limit, 50)),
+      };
+    })
+    .post("/v1/spaces/:slug/files", async ({ params, body }) => {
+      const slug = spaceSlug(params.slug);
+      const payload = objectBody(body);
+      const space = await requireSpaceRecord(agentStore, slug);
+      const file = resolveDesignerSpaceFile(space, payload);
+      const uploadJob = await agentStore.recordJob({
+        kind: SPACE_FILE_UPLOAD_JOB_KIND,
+        repoRoot: space.remotePath,
+        workspaceRoot: space.remotePath,
+        sourceSession: file.sourceSession,
+        dedupeKey: spaceFileUploadDedupeKey(file),
+        payloadJson: {
+          action: "upload-object",
+          sourcePath: optionalString(payload, "sourcePath") ?? file.localPath,
+          targetUri: file.objectStorage.uri,
+          file,
+          objectStorage: file.objectStorage,
+          space,
+        } as AgentJsonValue,
+        note: `upload ${file.path} for Designer space ${space.slug}`,
+      });
+      const materializeJob = await agentStore.recordJob({
+        kind: SPACE_FILE_MATERIALIZE_JOB_KIND,
+        repoRoot: space.remotePath,
+        workspaceRoot: space.remotePath,
+        sourceSession: file.sourceSession,
+        dedupeKey: spaceFileMaterializeDedupeKey(file),
+        payloadJson: {
+          action: "materialize-object",
+          sourceUri: file.objectStorage.uri,
+          targetPath: file.materializeTarget === "remote" ? file.remotePath : file.localPath,
+          target: file.materializeTarget,
+          file,
+          objectStorage: file.objectStorage,
+          space,
+        } as AgentJsonValue,
+        note: `materialize ${file.path} for Designer space ${space.slug}`,
+      });
+      const recordedFile: DesignerSpaceFileRecord = {
+        ...file,
+        uploadJobId: uploadJob.jobId,
+        materializeJobId: materializeJob.jobId,
+      };
+      await recordGatewayEvent(
+        SPACE_FILE_EVENT_TYPE,
+        `Designer space file ${recordedFile.path} recorded`,
+        {
+          file: recordedFile,
+          space,
+        },
+        spaceFileEventId(recordedFile),
+      );
+      return {
+        ok: true,
+        file: recordedFile,
+        uploadJob: serializeJob(uploadJob),
+        materializeJob: serializeJob(materializeJob),
+      };
+    })
+    .post("/v1/spaces/:slug/sync", async ({ params, body }) => {
+      const slug = spaceSlug(params.slug);
+      const payload = objectBody(body);
+      const space = await requireSpaceRecord(agentStore, slug);
+      const direction = syncDirection(optionalString(payload, "direction") ?? "pull");
+      const job = await agentStore.recordJob({
+        kind: SPACE_SYNC_JOB_KIND,
+        repoRoot: space.remotePath,
+        workspaceRoot: space.remotePath,
+        sourceSession: optionalString(payload, "sourceSession"),
+        dedupeKey: `${SPACE_SYNC_JOB_KIND}:${space.slug}:${direction}`,
+        payloadJson: {
+          direction,
+          sourcePath: direction === "push" ? space.localPath : space.remotePath,
+          targetPath: direction === "push" ? space.remotePath : space.localPath,
+          transport: "rsync",
+          space,
+        } as AgentJsonValue,
+        note: `${direction} Designer space ${space.slug}`,
+      });
+      await recordGatewayEvent("designer_space_sync_requested", "Designer space sync requested", {
+        slug: space.slug,
+        direction,
+        jobId: job.jobId,
+      });
+      return { ok: true, space, job: serializeJob(job) };
     });
 
   return {
@@ -709,6 +834,100 @@ async function listSpaceRecords(
   return [...spaces.values()].slice(0, resultLimit);
 }
 
+async function requireSpaceRecord(
+  agentStore: AgentDataStore,
+  slug: string,
+): Promise<DesignerSpaceRecord> {
+  const spaces = await listSpaceRecords(agentStore, 200);
+  const space = spaces.find((candidate) => candidate.slug === slug);
+  if (!space) {
+    throw new GatewayError(404, `Designer space ${slug} not found`);
+  }
+  return space;
+}
+
+async function listSpaceFileRecords(
+  agentStore: AgentDataStore,
+  slug: string | undefined,
+  limit: number,
+): Promise<DesignerSpaceFileRecord[]> {
+  const resultLimit = Math.max(0, Math.floor(limit));
+  if (resultLimit === 0) {
+    return [];
+  }
+  const summary = await agentStore.getRunSummary(CONTROL_RUN_ID);
+  const files = new Map<string, DesignerSpaceFileRecord>();
+  for (const event of [...(summary?.semanticEvents ?? [])].reverse()) {
+    if (event.event_type !== SPACE_FILE_EVENT_TYPE) {
+      continue;
+    }
+    const file = spaceFileRecordFromEvent(event);
+    if (!file || (slug && file.spaceSlug !== slug) || files.has(spaceFileKey(file))) {
+      continue;
+    }
+    files.set(spaceFileKey(file), file);
+    if (files.size >= resultLimit) {
+      break;
+    }
+  }
+  return [...files.values()];
+}
+
+function spaceFileRecordFromEvent(event: {
+  payload_json?: unknown;
+}): DesignerSpaceFileRecord | null {
+  const payload = jsonObject(event.payload_json);
+  const file = jsonObject(payload?.file);
+  const objectStorage = jsonObject(file?.objectStorage);
+  if (
+    !file ||
+    !objectStorage ||
+    typeof file.objectRefId !== "string" ||
+    typeof file.spaceSlug !== "string" ||
+    typeof file.path !== "string" ||
+    typeof file.localPath !== "string" ||
+    typeof file.remotePath !== "string" ||
+    typeof file.contentHash !== "string" ||
+    typeof file.updatedAt !== "string" ||
+    objectStorage.provider !== "oci" ||
+    typeof objectStorage.region !== "string" ||
+    typeof objectStorage.bucket !== "string" ||
+    typeof objectStorage.prefix !== "string" ||
+    typeof objectStorage.key !== "string" ||
+    typeof objectStorage.uri !== "string"
+  ) {
+    return null;
+  }
+  return {
+    objectRefId: file.objectRefId,
+    spaceSlug: file.spaceSlug,
+    path: file.path,
+    localPath: file.localPath,
+    remotePath: file.remotePath,
+    contentHash: file.contentHash,
+    sizeBytes: typeof file.sizeBytes === "number" ? file.sizeBytes : undefined,
+    contentType: typeof file.contentType === "string" ? file.contentType : undefined,
+    revisionId: typeof file.revisionId === "string" ? file.revisionId : undefined,
+    writerId: typeof file.writerId === "string" ? file.writerId : undefined,
+    sourceSession: typeof file.sourceSession === "string" ? file.sourceSession : undefined,
+    uploadJobId: typeof file.uploadJobId === "string" ? file.uploadJobId : undefined,
+    materializeJobId: typeof file.materializeJobId === "string" ? file.materializeJobId : undefined,
+    materializeTarget:
+      file.materializeTarget === "remote" || file.materializeTarget === "local"
+        ? file.materializeTarget
+        : "local",
+    updatedAt: file.updatedAt,
+    objectStorage: {
+      provider: "oci",
+      region: objectStorage.region,
+      bucket: objectStorage.bucket,
+      prefix: objectStorage.prefix,
+      key: objectStorage.key,
+      uri: objectStorage.uri,
+    },
+  };
+}
+
 function spaceRecordFromJob(job: JobRecord): DesignerSpaceRecord | null {
   const payload = jsonObject(job.payloadJson);
   const space = jsonObject(payload?.space);
@@ -757,6 +976,42 @@ function resolveDesignerSpace(payload: JsonObject, options: ResolvedOptions): De
     objectStorageUri: objectStorage.uri,
     objectStorage,
     syncKind: SPACE_SYNC_JOB_KIND,
+  };
+}
+
+function resolveDesignerSpaceFile(
+  space: DesignerSpaceRecord,
+  payload: JsonObject,
+): DesignerSpaceFileRecord {
+  const filePath = spaceFilePath(requiredString(payload, "path"));
+  const contentHash = requiredString(payload, "contentHash");
+  const objectKey = storageKey(space.objectStorage.prefix, "files", filePath);
+  const materializeTarget = spaceFileMaterializeTarget(
+    optionalString(payload, "materializeTarget"),
+  );
+  return {
+    objectRefId: optionalString(payload, "objectRefId") ?? `space-file:${space.slug}:${filePath}`,
+    spaceSlug: space.slug,
+    path: filePath,
+    localPath: join(space.localPath, ...filePath.split("/")),
+    remotePath: posix.join(space.remotePath, filePath),
+    contentHash,
+    sizeBytes: optionalNumber(payload, "sizeBytes"),
+    contentType: optionalString(payload, "contentType"),
+    revisionId: optionalString(payload, "revisionId"),
+    writerId: optionalString(payload, "writerId"),
+    sourceSession: optionalString(payload, "sourceSession"),
+    materializeTarget,
+    updatedAt: new Date().toISOString(),
+    objectStorage: {
+      ...space.objectStorage,
+      key: objectKey,
+      uri: objectStorageObjectUri(
+        space.objectStorage.region,
+        space.objectStorage.bucket,
+        objectKey,
+      ),
+    },
   };
 }
 
@@ -812,6 +1067,10 @@ function objectStorageUri(region: string, bucket: string, prefix: string): strin
   return `oci://${region}/${bucket}/${prefix}/`;
 }
 
+function objectStorageObjectUri(region: string, bucket: string, key: string): string {
+  return `oci://${region}/${bucket}/${key}`;
+}
+
 function parseOciObjectStorage(uri: string, prefix: string): ObjectStorageDescriptor | null {
   const match = /^oci:\/\/([^/]+)\/([^/]+)\/(.+)\/$/.exec(uri);
   if (!match) {
@@ -838,12 +1097,62 @@ function spaceClaimId(slug: string): string {
   return `designer-space:${slug}`;
 }
 
+function spaceFileKey(file: Pick<DesignerSpaceFileRecord, "spaceSlug" | "path">): string {
+  return `${file.spaceSlug}:${file.path}`;
+}
+
+function spaceFileEventId(file: DesignerSpaceFileRecord): string {
+  return `${SPACE_FILE_EVENT_TYPE}:${file.spaceSlug}:${file.path}:${file.contentHash}`;
+}
+
+function spaceFileUploadDedupeKey(file: DesignerSpaceFileRecord): string {
+  return `${SPACE_FILE_UPLOAD_JOB_KIND}:${file.spaceSlug}:${file.path}:${file.contentHash}`;
+}
+
+function spaceFileMaterializeDedupeKey(file: DesignerSpaceFileRecord): string {
+  return `${SPACE_FILE_MATERIALIZE_JOB_KIND}:${file.spaceSlug}:${file.path}:${file.contentHash}:${file.materializeTarget}`;
+}
+
 function spaceSlug(value: string): string {
   const slug = value.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug)) {
     throw new GatewayError(400, `invalid Designer space slug ${value}`);
   }
   return slug;
+}
+
+function spaceFilePath(value: string): string {
+  const rawPath = value.trim();
+  const normalized = posix.normalize(rawPath);
+  if (
+    rawPath === "" ||
+    rawPath.includes("\\") ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.startsWith("/") ||
+    normalized.endsWith("/")
+  ) {
+    throw new GatewayError(400, `invalid Designer space file path ${value}`);
+  }
+  return normalized;
+}
+
+function syncDirection(value: string): "pull" | "push" {
+  if (value === "pull" || value === "push") {
+    return value;
+  }
+  throw new GatewayError(400, `invalid Designer space sync direction ${value}`);
+}
+
+function spaceFileMaterializeTarget(value: string | undefined): SpaceFileMaterializeTarget {
+  if (value === undefined || value === "local") {
+    return "local";
+  }
+  if (value === "remote") {
+    return "remote";
+  }
+  throw new GatewayError(400, `invalid Designer space file materialize target ${value}`);
 }
 
 function storageKey(...segments: string[]): string {

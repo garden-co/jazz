@@ -1,4 +1,3 @@
-import type { InsertHandle, WriteHandle } from "./client.js";
 import type { TableProxy } from "./db.js";
 import { app as designerTraceApp } from "./designer-trace-phase0.schema.js";
 
@@ -67,15 +66,31 @@ export interface DesignerTraceSessionContext {
   schemaVersion?: string;
 }
 
+export type DesignerTraceDurabilityTier = "local" | "edge" | "global";
+
+export interface DesignerTraceWriteHandle<T = void> {
+  readonly batchId: string;
+  wait(options: { tier: DesignerTraceDurabilityTier }): Promise<T>;
+}
+
+export interface DesignerTraceInserted<T> extends DesignerTraceWriteHandle<T> {
+  readonly value: T;
+}
+
+type DesignerTracePendingInsert<T> = T | DesignerTraceInserted<T>;
+
 export interface DesignerTraceBatch {
   batchId(): string;
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T>;
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle;
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): DesignerTracePendingInsert<T>;
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): DesignerTraceWriteHandle | void;
+  commit(): DesignerTraceWriteHandle;
 }
 
 export interface DesignerTraceDb {
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T>;
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): WriteHandle;
   beginDirectBatch<T, Init>(table: TableProxy<T, Init>): DesignerTraceBatch;
 }
 
@@ -718,88 +733,99 @@ export interface DesignerTraceControlPlaneOptions {
 
 export interface TelemetryEventWrite {
   batchId: string;
-  event: InsertHandle<DesignerTraceEventRow>;
-  objectRefs: InsertHandle<DesignerObjectRefRow>[];
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  commit: DesignerTraceWriteHandle;
+  event: DesignerTraceInserted<DesignerTraceEventRow>;
+  objectRefs: DesignerTraceInserted<DesignerObjectRefRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface CodebaseIndexSnapshotWrite {
   batchId: string;
-  snapshot: InsertHandle<DesignerCodebaseIndexSnapshotRow>;
+  commit: DesignerTraceWriteHandle;
+  snapshot: DesignerTraceInserted<DesignerCodebaseIndexSnapshotRow>;
   objectRefs: {
-    manifest?: InsertHandle<DesignerObjectRefRow>;
-    delta?: InsertHandle<DesignerObjectRefRow>;
-    latest?: InsertHandle<DesignerObjectRefRow>;
+    manifest?: DesignerTraceInserted<DesignerObjectRefRow>;
+    delta?: DesignerTraceInserted<DesignerObjectRefRow>;
+    latest?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface AgentTurnWrite {
   batchId: string;
-  turn: InsertHandle<DesignerAgentTurnRow>;
+  commit: DesignerTraceWriteHandle;
+  turn: DesignerTraceInserted<DesignerAgentTurnRow>;
   objectRefs: {
-    transcript?: InsertHandle<DesignerObjectRefRow>;
+    transcript?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface ToolInvocationWrite {
   batchId: string;
-  invocation: InsertHandle<DesignerToolInvocationRow>;
+  commit: DesignerTraceWriteHandle;
+  invocation: DesignerTraceInserted<DesignerToolInvocationRow>;
   objectRefs: {
-    stdout?: InsertHandle<DesignerObjectRefRow>;
-    stderr?: InsertHandle<DesignerObjectRefRow>;
+    stdout?: DesignerTraceInserted<DesignerObjectRefRow>;
+    stderr?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface VcsOperationWrite {
   batchId: string;
-  operation: InsertHandle<DesignerVcsOperationRow>;
+  commit: DesignerTraceWriteHandle;
+  operation: DesignerTraceInserted<DesignerVcsOperationRow>;
   objectRefs: {
-    diff?: InsertHandle<DesignerObjectRefRow>;
+    diff?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface WorkspaceWorktreeWrite {
   batchId: string;
-  worktree: InsertHandle<DesignerWorkspaceWorktreeRow>;
+  commit: DesignerTraceWriteHandle;
+  worktree: DesignerTraceInserted<DesignerWorkspaceWorktreeRow>;
 }
 
 export interface WorkspaceMergeAttemptWrite {
   batchId: string;
-  mergeAttempt: InsertHandle<DesignerWorkspaceMergeAttemptRow>;
+  commit: DesignerTraceWriteHandle;
+  mergeAttempt: DesignerTraceInserted<DesignerWorkspaceMergeAttemptRow>;
   objectRefs: {
-    diff?: InsertHandle<DesignerObjectRefRow>;
+    diff?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface WorkspaceConflictWrite {
   batchId: string;
-  conflict: InsertHandle<DesignerWorkspaceConflictRow>;
+  commit: DesignerTraceWriteHandle;
+  conflict: DesignerTraceInserted<DesignerWorkspaceConflictRow>;
   objectRefs: {
-    marker?: InsertHandle<DesignerObjectRefRow>;
-    diff?: InsertHandle<DesignerObjectRefRow>;
+    marker?: DesignerTraceInserted<DesignerObjectRefRow>;
+    diff?: DesignerTraceInserted<DesignerObjectRefRow>;
   };
-  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+  uploadJobs: DesignerTraceInserted<DesignerUploadJobRow>[];
 }
 
 export interface AutonomyDecisionWrite {
   batchId: string;
-  decision: InsertHandle<DesignerAutonomyDecisionRow>;
+  commit: DesignerTraceWriteHandle;
+  decision: DesignerTraceInserted<DesignerAutonomyDecisionRow>;
 }
 
 export interface UploadReceiptWrite {
   batchId: string;
-  receipt: InsertHandle<DesignerUploadReceiptRow>;
-  uploadJobUpdate?: WriteHandle;
+  commit: DesignerTraceWriteHandle;
+  receipt: DesignerTraceInserted<DesignerUploadReceiptRow>;
+  uploadJobUpdate?: DesignerTraceWriteHandle;
 }
 
 export interface UploadJobUpdateWrite {
   batchId: string;
-  uploadJobUpdate: WriteHandle;
+  commit: DesignerTraceWriteHandle;
+  uploadJobUpdate: DesignerTraceWriteHandle;
 }
 
 export interface ProcessUploadJobWrite {
@@ -814,6 +840,61 @@ function makeTable<Row, Init>(table: string): TableProxy<Row, Init> {
     _rowType: undefined as unknown as Row,
     _initType: undefined as unknown as Init,
   };
+}
+
+function isDesignerTraceInserted<T>(
+  value: DesignerTracePendingInsert<T>,
+): value is DesignerTraceInserted<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "value" in value &&
+    "batchId" in value &&
+    "wait" in value &&
+    typeof (value as { wait?: unknown }).wait === "function"
+  );
+}
+
+function insertedValue<T>(value: DesignerTracePendingInsert<T>): T {
+  return isDesignerTraceInserted(value) ? value.value : value;
+}
+
+function optionalInsertedValue<T>(value: DesignerTracePendingInsert<T> | undefined): T | undefined {
+  return value === undefined ? undefined : insertedValue(value);
+}
+
+function completeInserted<T>(
+  value: DesignerTracePendingInsert<T>,
+  batchId: string,
+  commit: DesignerTraceWriteHandle,
+): DesignerTraceInserted<T> {
+  if (isDesignerTraceInserted(value)) {
+    return value;
+  }
+  return {
+    value,
+    batchId,
+    async wait(options) {
+      await commit.wait(options);
+      return value;
+    },
+  };
+}
+
+function completeOptionalInserted<T>(
+  value: DesignerTracePendingInsert<T> | undefined,
+  batchId: string,
+  commit: DesignerTraceWriteHandle,
+): DesignerTraceInserted<T> | undefined {
+  return value === undefined ? undefined : completeInserted(value, batchId, commit);
+}
+
+function completeInsertedList<T>(
+  values: DesignerTracePendingInsert<T>[],
+  batchId: string,
+  commit: DesignerTraceWriteHandle,
+): DesignerTraceInserted<T>[] {
+  return values.map((value) => completeInserted(value, batchId, commit));
 }
 
 export const designerTraceTables = {
@@ -879,7 +960,7 @@ export function createDesignerTraceControlPlane(
     input: DesignerObjectRefInput,
     role: DesignerObjectRefRole,
     workspaceId = session.workspaceId,
-  ): InsertHandle<DesignerObjectRefRow> => {
+  ): DesignerTracePendingInsert<DesignerObjectRefRow> => {
     assertObjectRefInput(input);
     const createdAt = now();
     const row: DesignerObjectRefInit = {
@@ -908,13 +989,13 @@ export function createDesignerTraceControlPlane(
 
   const insertUploadJob = (
     batch: DesignerTraceBatch,
-    objectRef: InsertHandle<DesignerObjectRefRow>,
+    objectRef: DesignerTracePendingInsert<DesignerObjectRefRow>,
     targetKind: string,
     targetId: string,
     uploadBackend: string,
     workspaceId = session.workspaceId,
-  ): InsertHandle<DesignerUploadJobRow> => {
-    const objectRow = objectRef.value;
+  ): DesignerTracePendingInsert<DesignerUploadJobRow> => {
+    const objectRow = insertedValue(objectRef);
     const createdAt = now();
     const row: DesignerUploadJobInit = {
       upload_job_id: idFactory("upload-job"),
@@ -1036,23 +1117,26 @@ export function createDesignerTraceControlPlane(
       metadata_json: input.metadata ?? {},
     };
     const receipt = batch.insert(designerTraceTables.uploadReceipts, row);
-    const uploadJobUpdate = input.uploadJobRowId
-      ? batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
-          status: "uploaded",
-          last_error: null,
-          next_retry_at: null,
-          claimed_by: null,
-          lease_expires_at: null,
-          last_heartbeat_at: null,
-          completed_at: row.received_at,
-          failed_at: null,
-          updated_at: row.received_at,
-        })
-      : undefined;
+    if (input.uploadJobRowId) {
+      batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
+        status: "uploaded",
+        last_error: null,
+        next_retry_at: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        last_heartbeat_at: null,
+        completed_at: row.received_at,
+        failed_at: null,
+        updated_at: row.received_at,
+      });
+    }
+    const batchId = batch.batchId();
+    const commit = batch.commit();
     return {
-      batchId: batch.batchId(),
-      receipt,
-      uploadJobUpdate,
+      batchId,
+      commit,
+      receipt: completeInserted(receipt, batchId, commit),
+      uploadJobUpdate: input.uploadJobRowId ? commit : undefined,
     };
   };
 
@@ -1069,7 +1153,7 @@ export function createDesignerTraceControlPlane(
       const uploadJobs = objectRefs.map((objectRef) =>
         insertUploadJob(batch, objectRef, "trace_event", eventId, uploadBackend),
       );
-      const objectRefIds = objectRefs.map((objectRef) => objectRef.value.object_ref_id);
+      const objectRefIds = objectRefs.map((objectRef) => insertedValue(objectRef).object_ref_id);
       const refsJson: DesignerTraceJson = {
         ...(input.refs ?? {}),
         ...(objectRefIds.length > 0 ? { object_ref_ids: objectRefIds } : {}),
@@ -1102,11 +1186,15 @@ export function createDesignerTraceControlPlane(
         payload_json: payloadJson,
         refs_json: refsJson,
       };
+      const event = batch.insert(designerTraceTables.traceEvents, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        event: batch.insert(designerTraceTables.traceEvents, row),
-        objectRefs,
-        uploadJobs,
+        batchId,
+        commit,
+        event: completeInserted(event, batchId, commit),
+        objectRefs: completeInsertedList(objectRefs, batchId, commit),
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1129,7 +1217,10 @@ export function createDesignerTraceControlPlane(
           : undefined,
       };
       const uploadJobs = [objectRefs.manifest, objectRefs.delta, objectRefs.latest]
-        .filter((handle): handle is InsertHandle<DesignerObjectRefRow> => handle !== undefined)
+        .filter(
+          (handle): handle is DesignerTracePendingInsert<DesignerObjectRefRow> =>
+            handle !== undefined,
+        )
         .map((objectRef) =>
           insertUploadJob(
             batch,
@@ -1140,6 +1231,9 @@ export function createDesignerTraceControlPlane(
             workspaceId,
           ),
         );
+      const manifestObjectRef = optionalInsertedValue(objectRefs.manifest);
+      const deltaObjectRef = optionalInsertedValue(objectRefs.delta);
+      const latestObjectRef = optionalInsertedValue(objectRefs.latest);
       const row: DesignerCodebaseIndexSnapshotInit = {
         snapshot_id: snapshotId,
         session_id: session.sessionId,
@@ -1151,21 +1245,29 @@ export function createDesignerTraceControlPlane(
         project_hash: input.projectHash ?? null,
         file_count: input.fileCount,
         changed_path_count: input.changedPathCount ?? 0,
-        manifest_object_ref_id: objectRefs.manifest?.value.object_ref_id ?? null,
-        manifest_object_ref_row_id: objectRefs.manifest?.value.id ?? null,
-        delta_object_ref_id: objectRefs.delta?.value.object_ref_id ?? null,
-        delta_object_ref_row_id: objectRefs.delta?.value.id ?? null,
-        latest_object_ref_id: objectRefs.latest?.value.object_ref_id ?? null,
-        latest_object_ref_row_id: objectRefs.latest?.value.id ?? null,
+        manifest_object_ref_id: manifestObjectRef?.object_ref_id ?? null,
+        manifest_object_ref_row_id: manifestObjectRef?.id ?? null,
+        delta_object_ref_id: deltaObjectRef?.object_ref_id ?? null,
+        delta_object_ref_row_id: deltaObjectRef?.id ?? null,
+        latest_object_ref_id: latestObjectRef?.object_ref_id ?? null,
+        latest_object_ref_row_id: latestObjectRef?.id ?? null,
         access_policy_json: accessPolicy(input.accessPolicy, workspaceId),
         metadata_json: input.metadata ?? {},
         captured_at: input.capturedAt ?? now(),
       };
+      const snapshot = batch.insert(designerTraceTables.codebaseIndexSnapshots, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        snapshot: batch.insert(designerTraceTables.codebaseIndexSnapshots, row),
-        objectRefs,
-        uploadJobs,
+        batchId,
+        commit,
+        snapshot: completeInserted(snapshot, batchId, commit),
+        objectRefs: {
+          manifest: completeOptionalInserted(objectRefs.manifest, batchId, commit),
+          delta: completeOptionalInserted(objectRefs.delta, batchId, commit),
+          latest: completeOptionalInserted(objectRefs.latest, batchId, commit),
+        },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1180,6 +1282,7 @@ export function createDesignerTraceControlPlane(
       const uploadJobs = transcript
         ? [insertUploadJob(batch, transcript, "agent_turn", turnId, uploadBackend, workspaceId)]
         : [];
+      const transcriptObjectRef = optionalInsertedValue(transcript);
       const row: DesignerAgentTurnInit = {
         turn_id: turnId,
         session_id: session.sessionId,
@@ -1193,18 +1296,22 @@ export function createDesignerTraceControlPlane(
         repo_root: input.repoRoot ?? null,
         branch_name: input.branchName ?? null,
         model: input.model ?? null,
-        transcript_object_ref_id: transcript?.value.object_ref_id ?? null,
-        transcript_object_ref_row_id: transcript?.value.id ?? null,
+        transcript_object_ref_id: transcriptObjectRef?.object_ref_id ?? null,
+        transcript_object_ref_row_id: transcriptObjectRef?.id ?? null,
         status: input.status ?? "running",
         started_at: input.startedAt ?? now(),
         completed_at: input.completedAt ?? null,
         metadata_json: input.metadata ?? {},
       };
+      const turn = batch.insert(designerTraceTables.agentTurns, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        turn: batch.insert(designerTraceTables.agentTurns, row),
-        objectRefs: { transcript },
-        uploadJobs,
+        batchId,
+        commit,
+        turn: completeInserted(turn, batchId, commit),
+        objectRefs: { transcript: completeOptionalInserted(transcript, batchId, commit) },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1219,10 +1326,15 @@ export function createDesignerTraceControlPlane(
         ? insertObjectRef(batch, input.stderrObjectRef, "tool_stderr")
         : undefined;
       const uploadJobs = [stdout, stderr]
-        .filter((handle): handle is InsertHandle<DesignerObjectRefRow> => handle !== undefined)
+        .filter(
+          (handle): handle is DesignerTracePendingInsert<DesignerObjectRefRow> =>
+            handle !== undefined,
+        )
         .map((objectRef) =>
           insertUploadJob(batch, objectRef, "tool_invocation", invocationId, uploadBackend),
         );
+      const stdoutObjectRef = optionalInsertedValue(stdout);
+      const stderrObjectRef = optionalInsertedValue(stderr);
       const row: DesignerToolInvocationInit = {
         invocation_id: invocationId,
         session_id: session.sessionId,
@@ -1243,17 +1355,24 @@ export function createDesignerTraceControlPlane(
         completed_at: input.completedAt ?? null,
         exit_code: input.exitCode ?? null,
         status: input.status ?? "running",
-        stdout_object_ref_id: stdout?.value.object_ref_id ?? null,
-        stdout_object_ref_row_id: stdout?.value.id ?? null,
-        stderr_object_ref_id: stderr?.value.object_ref_id ?? null,
-        stderr_object_ref_row_id: stderr?.value.id ?? null,
+        stdout_object_ref_id: stdoutObjectRef?.object_ref_id ?? null,
+        stdout_object_ref_row_id: stdoutObjectRef?.id ?? null,
+        stderr_object_ref_id: stderrObjectRef?.object_ref_id ?? null,
+        stderr_object_ref_row_id: stderrObjectRef?.id ?? null,
         metadata_json: input.metadata ?? {},
       };
+      const invocation = batch.insert(designerTraceTables.toolInvocations, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        invocation: batch.insert(designerTraceTables.toolInvocations, row),
-        objectRefs: { stdout, stderr },
-        uploadJobs,
+        batchId,
+        commit,
+        invocation: completeInserted(invocation, batchId, commit),
+        objectRefs: {
+          stdout: completeOptionalInserted(stdout, batchId, commit),
+          stderr: completeOptionalInserted(stderr, batchId, commit),
+        },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1267,6 +1386,7 @@ export function createDesignerTraceControlPlane(
       const uploadJobs = diff
         ? [insertUploadJob(batch, diff, "vcs_operation", vcsOperationId, uploadBackend)]
         : [];
+      const diffObjectRef = optionalInsertedValue(diff);
       const row: DesignerVcsOperationInit = {
         vcs_operation_id: vcsOperationId,
         session_id: session.sessionId,
@@ -1288,18 +1408,22 @@ export function createDesignerTraceControlPlane(
         trace_refs_json: input.traceRefs ?? [],
         jj_operation_id: input.jjOperationId ?? null,
         git_reflog_selector: input.gitReflogSelector ?? null,
-        diff_object_ref_id: diff?.value.object_ref_id ?? null,
-        diff_object_ref_row_id: diff?.value.id ?? null,
+        diff_object_ref_id: diffObjectRef?.object_ref_id ?? null,
+        diff_object_ref_row_id: diffObjectRef?.id ?? null,
         status: input.status ?? "observed",
         started_at: input.startedAt ?? now(),
         completed_at: input.completedAt ?? null,
         metadata_json: input.metadata ?? {},
       };
+      const operation = batch.insert(designerTraceTables.vcsOperations, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        operation: batch.insert(designerTraceTables.vcsOperations, row),
-        objectRefs: { diff },
-        uploadJobs,
+        batchId,
+        commit,
+        operation: completeInserted(operation, batchId, commit),
+        objectRefs: { diff: completeOptionalInserted(diff, batchId, commit) },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1329,9 +1453,13 @@ export function createDesignerTraceControlPlane(
         created_at: createdAt,
         updated_at: input.updatedAt ?? createdAt,
       };
+      const worktree = batch.insert(designerTraceTables.workspaceWorktrees, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        worktree: batch.insert(designerTraceTables.workspaceWorktrees, row),
+        batchId,
+        commit,
+        worktree: completeInserted(worktree, batchId, commit),
       };
     },
 
@@ -1362,6 +1490,7 @@ export function createDesignerTraceControlPlane(
             ),
           ]
         : [];
+      const diffObjectRef = optionalInsertedValue(diff);
       const row: DesignerWorkspaceMergeAttemptInit = {
         merge_attempt_id: mergeAttemptId,
         session_id: session.sessionId,
@@ -1384,17 +1513,21 @@ export function createDesignerTraceControlPlane(
         target_after_oid: input.targetAfterOid ?? null,
         result_status: input.status ?? "started",
         conflict_count: conflictCount,
-        diff_object_ref_id: diff?.value.object_ref_id ?? null,
-        diff_object_ref_row_id: diff?.value.id ?? null,
+        diff_object_ref_id: diffObjectRef?.object_ref_id ?? null,
+        diff_object_ref_row_id: diffObjectRef?.id ?? null,
         started_at: input.startedAt ?? now(),
         completed_at: input.completedAt ?? null,
         metadata_json: input.metadata ?? {},
       };
+      const mergeAttempt = batch.insert(designerTraceTables.workspaceMergeAttempts, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        mergeAttempt: batch.insert(designerTraceTables.workspaceMergeAttempts, row),
-        objectRefs: { diff },
-        uploadJobs,
+        batchId,
+        commit,
+        mergeAttempt: completeInserted(mergeAttempt, batchId, commit),
+        objectRefs: { diff: completeOptionalInserted(diff, batchId, commit) },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1411,7 +1544,10 @@ export function createDesignerTraceControlPlane(
         ? insertObjectRef(batch, input.diffObjectRef, "workspace_conflict_diff", workspaceId)
         : undefined;
       const uploadJobs = [marker, diff]
-        .filter((handle): handle is InsertHandle<DesignerObjectRefRow> => handle !== undefined)
+        .filter(
+          (handle): handle is DesignerTracePendingInsert<DesignerObjectRefRow> =>
+            handle !== undefined,
+        )
         .map((objectRef) =>
           insertUploadJob(
             batch,
@@ -1422,6 +1558,8 @@ export function createDesignerTraceControlPlane(
             workspaceId,
           ),
         );
+      const markerObjectRef = optionalInsertedValue(marker);
+      const diffObjectRef = optionalInsertedValue(diff);
       const row: DesignerWorkspaceConflictInit = {
         conflict_id: conflictId,
         session_id: session.sessionId,
@@ -1439,19 +1577,26 @@ export function createDesignerTraceControlPlane(
         base_oid: input.baseOid ?? null,
         ours_oid: input.oursOid ?? null,
         theirs_oid: input.theirsOid ?? null,
-        marker_object_ref_id: marker?.value.object_ref_id ?? null,
-        marker_object_ref_row_id: marker?.value.id ?? null,
-        diff_object_ref_id: diff?.value.object_ref_id ?? null,
-        diff_object_ref_row_id: diff?.value.id ?? null,
+        marker_object_ref_id: markerObjectRef?.object_ref_id ?? null,
+        marker_object_ref_row_id: markerObjectRef?.id ?? null,
+        diff_object_ref_id: diffObjectRef?.object_ref_id ?? null,
+        diff_object_ref_row_id: diffObjectRef?.id ?? null,
         metadata_json: input.metadata ?? {},
         created_at: input.createdAt ?? now(),
         resolved_at: input.resolvedAt ?? null,
       };
+      const conflict = batch.insert(designerTraceTables.workspaceConflicts, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        conflict: batch.insert(designerTraceTables.workspaceConflicts, row),
-        objectRefs: { marker, diff },
-        uploadJobs,
+        batchId,
+        commit,
+        conflict: completeInserted(conflict, batchId, commit),
+        objectRefs: {
+          marker: completeOptionalInserted(marker, batchId, commit),
+          diff: completeOptionalInserted(diff, batchId, commit),
+        },
+        uploadJobs: completeInsertedList(uploadJobs, batchId, commit),
       };
     },
 
@@ -1482,9 +1627,13 @@ export function createDesignerTraceControlPlane(
         decided_at: input.decidedAt ?? now(),
         metadata_json: input.metadata ?? {},
       };
+      const decision = batch.insert(designerTraceTables.autonomyDecisions, row);
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        decision: batch.insert(designerTraceTables.autonomyDecisions, row),
+        batchId,
+        commit,
+        decision: completeInserted(decision, batchId, commit),
       };
     },
 
@@ -1497,16 +1646,19 @@ export function createDesignerTraceControlPlane(
       const leaseExpiresAt = input.leaseExpiresAt ?? new Date(claimedAt.getTime() + defaultLeaseMs);
       assertFutureLease(claimedAt, leaseExpiresAt);
       const batch = db.beginDirectBatch(designerTraceTables.uploadJobs);
-      const uploadJobUpdate = batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
+      batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
         status: "queued",
         claimed_by: input.workerId,
         lease_expires_at: leaseExpiresAt,
         last_heartbeat_at: claimedAt,
         updated_at: claimedAt,
       });
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        uploadJobUpdate,
+        batchId,
+        commit,
+        uploadJobUpdate: commit,
       };
     },
 
@@ -1516,15 +1668,18 @@ export function createDesignerTraceControlPlane(
         input.leaseExpiresAt ?? new Date(heartbeatAt.getTime() + defaultLeaseMs);
       assertFutureLease(heartbeatAt, leaseExpiresAt);
       const batch = db.beginDirectBatch(designerTraceTables.uploadJobs);
-      const uploadJobUpdate = batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
+      batch.update(designerTraceTables.uploadJobs, input.uploadJobRowId, {
         claimed_by: input.workerId,
         lease_expires_at: leaseExpiresAt,
         last_heartbeat_at: heartbeatAt,
         updated_at: heartbeatAt,
       });
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        uploadJobUpdate,
+        batchId,
+        commit,
+        uploadJobUpdate: commit,
       };
     },
 
@@ -1604,7 +1759,7 @@ export function createDesignerTraceControlPlane(
       }
       const failedAt = input.failedAt ?? now();
       const batch = db.beginDirectBatch(designerTraceTables.uploadJobs);
-      const uploadJobUpdate = batch.update(designerTraceTables.uploadJobs, input.uploadJob.id, {
+      batch.update(designerTraceTables.uploadJobs, input.uploadJob.id, {
         status: "failed",
         attempt_count: input.uploadJob.attempt_count + 1,
         last_error: formatUploadError(input.error),
@@ -1616,9 +1771,12 @@ export function createDesignerTraceControlPlane(
         failed_at: failedAt,
         updated_at: failedAt,
       });
+      const batchId = batch.batchId();
+      const commit = batch.commit();
       return {
-        batchId: batch.batchId(),
-        uploadJobUpdate,
+        batchId,
+        commit,
+        uploadJobUpdate: commit,
       };
     },
   };
