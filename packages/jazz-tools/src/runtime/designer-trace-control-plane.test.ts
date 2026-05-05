@@ -5,6 +5,7 @@ import {
   DesignerTraceAccessPolicyError,
   DesignerTraceUploadError,
   createDesignerTraceControlPlane,
+  designerTraceTables,
   hashDesignerTraceContent,
   type DesignerTraceBatch,
   type DesignerTraceControlPlaneOptions,
@@ -32,7 +33,7 @@ class FakeDb implements DesignerTraceDb {
   #nextBatchId = 1;
   readonly #client = {
     waitForPersistedBatch: async () => {},
-  } as JazzClient;
+  } as unknown as JazzClient;
 
   beginDirectBatch<T, Init>(_table: TableProxy<T, Init>): DesignerTraceBatch {
     const batchId = `direct-batch-${this.#nextBatchId++}`;
@@ -80,10 +81,7 @@ class FakeDb implements DesignerTraceDb {
   }
 }
 
-function createControlPlane(
-  db: FakeDb,
-  overrides: Partial<DesignerTraceControlPlaneOptions> = {},
-) {
+function createControlPlane(db: FakeDb, overrides: Partial<DesignerTraceControlPlaneOptions> = {}) {
   const base: DesignerTraceControlPlaneOptions = {
     session: {
       sessionId: "session-1",
@@ -292,6 +290,189 @@ describe("designer trace control plane", () => {
     ]);
   });
 
+  it("records turn, command, VCS, and autonomy provenance for empty-commit investigations", () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+
+    const turnWrite = controlPlane.recordAgentTurn({
+      turnId: "codex-turn-49",
+      provider: "codex",
+      providerSessionId: "019df058-869b-7f71-aae8-f36fec2ffd7a",
+      providerTurnOrdinal: 49,
+      cwd: "/Users/nikitavoloboev/work/codex-launch-zed-60464684-20260504001650",
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      branchName: "live",
+      model: "gpt-5.5",
+      status: "completed",
+      transcriptObjectRef: {
+        objectRefId: "object-transcript-turn-49",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "codex/019df058/turn-49.jsonl",
+        contentHash: "sha256:transcript",
+        contentType: "application/x-jsonlines",
+      },
+      metadata: {
+        startUserOrdinal: 49,
+      },
+    });
+
+    const commandWrite = controlPlane.recordToolInvocation({
+      invocationId: "tool-git-empty-commit",
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      toolName: "exec_command",
+      commandSummary: "git commit --allow-empty",
+      cwd: "/Users/nikitavoloboev/code/prom",
+      status: "success",
+      exitCode: 0,
+      stdoutObjectRef: {
+        objectRefId: "object-git-stdout",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "codex/019df058/tool-git-empty-commit/stdout.txt",
+        contentHash: "sha256:stdout",
+        contentType: "text/plain",
+      },
+      metadata: {
+        argv: ["git", "commit", "--allow-empty"],
+      },
+    });
+
+    const vcsWrite = controlPlane.recordVcsOperation({
+      vcsOperationId: "vcs-empty-commit-71fc8bc9",
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      toolInvocationId: commandWrite.invocation.value.invocation_id,
+      toolInvocationRowId: commandWrite.invocation.value.id,
+      repoRoot: "/Users/nikitavoloboev/code/prom",
+      vcsKind: "git",
+      operationKind: "commit",
+      refName: "refs/heads/nikiv-live",
+      beforeOid: "45f510b058e2",
+      afterOid: "71fc8bc9f177",
+      commitOid: "71fc8bc9f177",
+      treeOid: "tree-same-as-parent",
+      parentOids: ["45f510b058e2"],
+      isEmptyCommit: true,
+      traceRefs: [],
+      status: "created",
+      metadata: {
+        committedAt: "2026-05-05T07:36:52.000Z",
+        stamped: false,
+      },
+    });
+
+    const autonomyWrite = controlPlane.recordAutonomyDecision({
+      decisionId: "autonomy-empty-commit-allowed",
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      toolInvocationId: commandWrite.invocation.value.invocation_id,
+      toolInvocationRowId: commandWrite.invocation.value.id,
+      daemonRunId: "prom-tip-sync-daemon-20260505",
+      decisionKind: "commit-turn-gate",
+      decision: "allowed",
+      resourceKind: "git-ref",
+      resourceId: "refs/heads/nikiv-live",
+      ownerSessionId: "019df058-869b-7f71-aae8-f36fec2ffd7a",
+      status: "missed-invariant",
+      reason: "empty commit without trace ref was not rejected",
+      resource: {
+        refName: "refs/heads/nikiv-live",
+        beforeOid: "45f510b058e2",
+        afterOid: "71fc8bc9f177",
+      },
+      invariant: {
+        requireTraceRef: true,
+        rejectEmptyCommit: true,
+      },
+      outcome: {
+        repaired: false,
+      },
+    });
+
+    expect(db.inserts.map((insert) => insert.table)).toEqual([
+      "object_refs",
+      "upload_jobs",
+      "agent_turns",
+      "object_refs",
+      "upload_jobs",
+      "tool_invocations",
+      "vcs_operations",
+      "autonomy_decisions",
+    ]);
+    expect(Object.keys(designerTraceTables.agentTurns._schema)).toEqual(
+      expect.arrayContaining([
+        "agent_turns",
+        "tool_invocations",
+        "vcs_operations",
+        "autonomy_decisions",
+      ]),
+    );
+    expect(turnWrite.turn.value).toMatchObject({
+      turn_id: "codex-turn-49",
+      provider: "codex",
+      provider_session_id: "019df058-869b-7f71-aae8-f36fec2ffd7a",
+      provider_turn_ordinal: 49,
+      workspace_id: "workspace-1",
+      transcript_object_ref_id: "object-transcript-turn-49",
+      transcript_object_ref_row_id: "object_refs-row-1",
+      metadata_json: {
+        startUserOrdinal: 49,
+      },
+    });
+    expect(commandWrite.invocation.value).toMatchObject({
+      invocation_id: "tool-git-empty-commit",
+      agent_turn_id: "codex-turn-49",
+      agent_turn_row_id: "agent_turns-row-3",
+      command_summary: "git commit --allow-empty",
+      command_hash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      stdout_object_ref_id: "object-git-stdout",
+      stdout_object_ref_row_id: "object_refs-row-4",
+      exit_code: 0,
+      status: "success",
+    });
+    expect(vcsWrite.operation.value).toMatchObject({
+      vcs_operation_id: "vcs-empty-commit-71fc8bc9",
+      agent_turn_id: "codex-turn-49",
+      tool_invocation_id: "tool-git-empty-commit",
+      repo_root: "/Users/nikitavoloboev/code/prom",
+      vcs_kind: "git",
+      operation_kind: "commit",
+      ref_name: "refs/heads/nikiv-live",
+      before_oid: "45f510b058e2",
+      after_oid: "71fc8bc9f177",
+      commit_oid: "71fc8bc9f177",
+      parent_oids_json: ["45f510b058e2"],
+      is_empty_commit: true,
+      trace_refs_json: [],
+      metadata_json: {
+        committedAt: "2026-05-05T07:36:52.000Z",
+        stamped: false,
+      },
+    });
+    expect(autonomyWrite.decision.value).toMatchObject({
+      decision_id: "autonomy-empty-commit-allowed",
+      agent_turn_id: "codex-turn-49",
+      tool_invocation_id: "tool-git-empty-commit",
+      daemon_run_id: "prom-tip-sync-daemon-20260505",
+      decision_kind: "commit-turn-gate",
+      decision: "allowed",
+      resource_kind: "git-ref",
+      resource_id: "refs/heads/nikiv-live",
+      owner_session_id: "019df058-869b-7f71-aae8-f36fec2ffd7a",
+      status: "missed-invariant",
+      reason: "empty commit without trace ref was not rejected",
+      invariant_json: {
+        requireTraceRef: true,
+        rejectEmptyCommit: true,
+      },
+      outcome_json: {
+        repaired: false,
+      },
+    });
+  });
+
   it("requires a live access proof when policies require explicit proof", () => {
     const db = new FakeDb();
     const controlPlane = createControlPlane(db, { accessProof: undefined });
@@ -436,7 +617,7 @@ describe("designer trace control plane", () => {
   it("processes an upload job through an object storage provider and records the receipt", async () => {
     const db = new FakeDb();
     const controlPlane = createControlPlane(db);
-    const content = "{\"files\":[\"src/index.ts\"]}";
+    const content = '{"files":["src/index.ts"]}';
     const write = controlPlane.recordTelemetryEvent({
       eventId: "event-with-payload",
       kind: "designer.telemetry.payload.ready",
