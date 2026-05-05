@@ -1,32 +1,22 @@
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
-// Resolve jazz-wasm from the consumer's project root. jazz-wasm is an optional
-// peer dependency: if the consumer hasn't installed it, the bare `jazz-wasm`
-// specifier inside jazz-tools won't resolve at build time and Vite emits a
-// generic "Failed to resolve import" — the friendly runtime error in
-// loadWasmModule never gets a chance to fire. Surface a clear install message
-// here, before the bundler runs.
-export function assertJazzWasmInstalled(consumerRoot: string = process.cwd()): void {
-  // createRequire requires an absolute path or file URL, but a caller (e.g.
-  // a Vite config setting `root` to a relative path) may legitimately pass
-  // a relative root. Anchor it to cwd so resolution still works.
-  const absoluteRoot = isAbsolute(consumerRoot) ? consumerRoot : resolve(consumerRoot);
+// jazz-tools contains a dynamic `import("jazz-wasm")` that we intentionally
+// keep out of Vite's dep optimizer (wasm-bindgen output breaks esbuild's
+// pre-bundling). With pnpm's strict install layout, a bare `jazz-wasm`
+// specifier left in a consumer bundle won't resolve at runtime because the
+// package isn't hoisted to the project root. We resolve jazz-wasm from this
+// module's location — where it IS a direct dependency of jazz-tools — and
+// return it as an absolute path, so the plugin can alias the bare specifier
+// without forcing the consumer to add jazz-wasm to their own package.json.
+export function resolveJazzWasmEntry(): string | null {
   try {
-    createRequire(join(absoluteRoot, "package.json")).resolve("jazz-wasm/package.json");
-  } catch (err) {
-    throw new Error(
-      `[jazz] The "jazz-wasm" peer dependency is required but is not installed in this project.\n` +
-        `Install it alongside jazz-tools, e.g.:\n` +
-        `  npm install jazz-wasm\n` +
-        `  pnpm add jazz-wasm\n` +
-        `  yarn add jazz-wasm`,
-      { cause: err },
-    );
+    return createRequire(import.meta.url).resolve("jazz-wasm");
+  } catch {
+    return null;
   }
 }
 
@@ -88,13 +78,12 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
     name: "jazz",
 
     config(config: {
-      root?: string;
       ssr?: { external?: true | string[] };
       optimizeDeps?: { exclude?: string[] };
     }) {
-      assertJazzWasmInstalled(config.root);
       const existingSsr = config.ssr?.external;
       const existingExclude = config.optimizeDeps?.exclude ?? [];
+      const jazzWasmEntry = resolveJazzWasmEntry();
       // `ssr.external: true` means "externalize everything", so jazz-napi is
       // already covered — preserve the bool rather than coercing to an array.
       const ssrExternal: true | string[] =
@@ -103,6 +92,9 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         worker: { format: "es" as const },
         optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
         ssr: { external: ssrExternal },
+        ...(jazzWasmEntry
+          ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
+          : {}),
       };
     },
 

@@ -10,8 +10,7 @@
     "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
-    "jazz-tools": "workspace:*",
-    "jazz-wasm": "workspace:*"
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@vitest/browser": "catalog:default",

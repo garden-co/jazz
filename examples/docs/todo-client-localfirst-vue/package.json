@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "vue": "^3.5.22"
   },
   "devDependencies": {

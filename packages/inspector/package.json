@@ -16,7 +16,6 @@
   "dependencies": {
     "@tanstack/react-table": "^8.21.3",
     "jazz-tools": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "react": "^19.2.0",
     "react-data-grid": "7.0.0-beta.59",
     "react-dom": "^19.2.0",
