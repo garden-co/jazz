@@ -831,30 +831,83 @@ function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
   );
 }
 
-type RunAndCommitResult<TResult> =
+type RunInBatchResult<TResult> =
   TResult extends PromiseLike<unknown>
     ? Promise<WriteResult<Awaited<TResult>>>
     : WriteResult<TResult>;
 
-export function runInBatch<TBatchOrTx extends { commit(): WriteHandle }, TResult>(
+type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
+
+function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
+  return new Proxy(batchOrTx, {
+    get(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return undefined;
+      }
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    has(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return false;
+      }
+
+      return Reflect.has(target, property);
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+  }) as Scoped<TBatchOrTx>;
+}
+
+function rollbackIfAvailable(batchOrTx: { rollback?: () => void }): void {
+  try {
+    batchOrTx.rollback?.();
+  } catch {
+    // Preserve the original callback error.
+  }
+}
+
+export function runInBatch<
+  TBatchOrTx extends { commit(): WriteHandle; rollback?: () => void },
+  TResult,
+>(
   batchOrTx: TBatchOrTx,
-  callback: (target: TBatchOrTx) => TResult,
+  callback: (target: Scoped<TBatchOrTx>) => TResult,
   client: JazzClient | (() => JazzClient),
-): RunAndCommitResult<TResult> {
-  const value = callback(batchOrTx);
+): RunInBatchResult<TResult> {
+  let value: TResult;
+  try {
+    const scope = createBatchScope(batchOrTx);
+    value = callback(scope);
+  } catch (error) {
+    rollbackIfAvailable(batchOrTx);
+    throw error;
+  }
   const resultClient = typeof client === "function" ? client : () => client;
   if (isPromiseLike(value)) {
-    return value.then((resolvedValue) => {
-      const committed = batchOrTx.commit();
-      return new WriteResult(resolvedValue as Awaited<TResult>, committed.batchId, resultClient());
-    }) as RunAndCommitResult<TResult>;
+    return value.then(
+      (resolvedValue) => {
+        const committed = batchOrTx.commit();
+        return new WriteResult(
+          resolvedValue as Awaited<TResult>,
+          committed.batchId,
+          resultClient(),
+        );
+      },
+      (error) => {
+        rollbackIfAvailable(batchOrTx);
+        throw error;
+      },
+    ) as RunInBatchResult<TResult>;
   }
   const committed = batchOrTx.commit();
-  return new WriteResult(value, committed.batchId, resultClient()) as RunAndCommitResult<TResult>;
+  return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
 export class Transaction {
-  private committedHandle: WriteHandle | null = null;
+  private transactionStatus: "active" | "committed" | "rolledBack" = "active";
   private readonly touchedRowIds = new Set<string>();
 
   constructor(
@@ -864,13 +917,12 @@ export class Transaction {
     private readonly attribution?: string,
   ) {}
 
-  private get committed(): boolean {
-    return this.committedHandle !== null;
-  }
-
   private ensureActive(): void {
-    if (this.committed) {
+    if (this.transactionStatus === "committed") {
       throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    }
+    if (this.transactionStatus === "rolledBack") {
+      throw new Error(`Transaction ${this.batchContext.batchId} has already been rolled back`);
     }
   }
 
@@ -895,12 +947,15 @@ export class Transaction {
   }
 
   commit(): WriteHandle {
-    if (this.committedHandle) {
-      return this.committedHandle;
-    }
+    this.ensureActive();
     const handle = this.client.sealBatch(this.batchId());
-    this.committedHandle = handle;
+    this.transactionStatus = "committed";
     return handle;
+  }
+
+  rollback(): void {
+    this.ensureActive();
+    this.transactionStatus = "rolledBack";
   }
 
   create(table: string, values: InsertValues, options?: CreateOptions): Row {
@@ -970,7 +1025,7 @@ export class Transaction {
 /**
  * Transaction object available inside {@link JazzClient.transaction}'s callback.
  */
-export type TransactionScope = Omit<Transaction, "commit">;
+export type TransactionScope = Scoped<Transaction>;
 
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
@@ -1058,7 +1113,7 @@ export class DirectBatch {
 /**
  * Batch object available inside {@link JazzClient.batch}'s callback.
  */
-export type BatchScope = Omit<DirectBatch, "commit">;
+export type BatchScope = Scoped<DirectBatch>;
 
 /**
  * Session-scoped client for backend operations.
