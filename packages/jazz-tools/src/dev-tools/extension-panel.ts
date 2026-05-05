@@ -13,7 +13,6 @@ import {
   SubscriptionCallback,
   UpdateOptions,
   Value,
-  WasmModule,
   WasmSchema,
 } from "../index.js";
 import { DirectInsertResult, DirectMutationResult } from "../runtime/client.js";
@@ -425,7 +424,7 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
 
 export async function createDbFromInspectedPage(): Promise<DevToolsDb> {
   const bootstrap = await waitForDevToolsBootstrap();
-  return new DevToolsDb(bootstrap.dbConfig, null);
+  return new DevToolsDb(bootstrap.dbConfig);
 }
 
 export function getRegisteredWasmSchema(): WasmSchema | null {
@@ -469,8 +468,8 @@ export function onActiveQuerySubscriptionsChange(
 }
 
 class DevToolsDb extends Db {
-  constructor(config: DbConfig, wasmModule: WasmModule | null) {
-    super(config, wasmModule);
+  constructor(config: DbConfig) {
+    super(config, null);
   }
 
   async connectProxyRuntime(): Promise<DevToolsBootstrap> {

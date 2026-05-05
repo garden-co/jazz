@@ -1,4 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { JazzClient } from "./client.js";
+import { Db, type DbConfig } from "./db.js";
+import {
+  DbRuntimeModule,
+  type DbRuntimeClientContext,
+  type DbRuntimeTelemetryContext,
+} from "./db-runtime-module.js";
 
 const TELEMETRY_ENV_KEYS = [
   "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
@@ -7,79 +14,70 @@ const TELEMETRY_ENV_KEYS = [
   "EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 ] as const;
 
-async function loadDbWithTelemetryMocks(wasmModule: unknown = {}) {
-  vi.resetModules();
+class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
+  readonly installTelemetryMock = vi.fn(
+    (_context: DbRuntimeTelemetryContext<DbConfig>) => this.disposeTelemetry,
+  );
 
-  const loadWasmModuleMock = vi.fn().mockResolvedValue(wasmModule);
-  const disposeWasmTelemetryMock = vi.fn();
-  const installWasmTelemetryMock = vi.fn(() => disposeWasmTelemetryMock);
+  constructor(private readonly disposeTelemetry?: () => void) {
+    super();
+  }
 
-  vi.doMock("./client.js", async (importOriginal) => {
-    const actual = await importOriginal<typeof import("./client.js")>();
-    return {
-      ...actual,
-      loadWasmModule: loadWasmModuleMock,
-    };
-  });
+  protected override async loadRuntime(): Promise<void> {
+    return;
+  }
 
-  vi.doMock("./sync-telemetry.js", () => ({
-    installWasmTelemetry: installWasmTelemetryMock,
-    resolveTelemetryCollectorUrlFromEnv: vi.fn(() => undefined),
-  }));
+  override createClient(_context: DbRuntimeClientContext<DbConfig>): JazzClient {
+    throw new Error("createClient should not be called by telemetry tests");
+  }
 
-  const { Db } = await import("./db.js");
-  return {
-    Db,
-    disposeWasmTelemetryMock,
-    installWasmTelemetryMock,
-    loadWasmModuleMock,
-  };
+  override installTelemetry(context: DbRuntimeTelemetryContext<DbConfig>): (() => void) | null {
+    return this.installTelemetryMock(context) ?? null;
+  }
+}
+
+async function createTestDb(config: DbConfig, runtimeModule: TestRuntimeModule): Promise<Db> {
+  await runtimeModule.load(config);
+  return Db.create(config, runtimeModule);
 }
 
 afterEach(() => {
-  vi.doUnmock("./client.js");
-  vi.doUnmock("./sync-telemetry.js");
   vi.restoreAllMocks();
   for (const key of TELEMETRY_ENV_KEYS) {
     delete process.env[key];
   }
 });
 
-describe("Db WASM telemetry", () => {
+describe("Db runtime telemetry", () => {
   it("does not start main-thread telemetry when telemetry is disabled", async () => {
-    const { Db, installWasmTelemetryMock } = await loadDbWithTelemetryMocks();
-    const db = await Db.create({ appId: "main-no-telemetry" });
+    const runtimeModule = new TestRuntimeModule();
+    const db = await createTestDb({ appId: "main-no-telemetry" }, runtimeModule);
 
     (db as any).installMainThreadWasmTelemetry();
 
-    expect(installWasmTelemetryMock).not.toHaveBeenCalled();
+    expect(runtimeModule.installTelemetryMock).not.toHaveBeenCalled();
     await db.shutdown();
   });
 
   it("starts main-thread telemetry only when a collector URL exists", async () => {
-    const wasmModule = {
-      setTraceEntryCollectionEnabled: vi.fn(),
-      drainTraceEntries: vi.fn(),
-      subscribeTraceEntries: vi.fn(() => vi.fn()),
-    };
-    const { Db, disposeWasmTelemetryMock, installWasmTelemetryMock } =
-      await loadDbWithTelemetryMocks(wasmModule);
-    const db = await Db.create({
+    const disposeTelemetryMock = vi.fn();
+    const runtimeModule = new TestRuntimeModule(disposeTelemetryMock);
+    const config = {
       appId: "main-with-telemetry",
       telemetryCollectorUrl: "http://127.0.0.1:54418",
-    });
+    };
+    const db = await createTestDb(config, runtimeModule);
 
     (db as any).installMainThreadWasmTelemetry();
 
-    expect(installWasmTelemetryMock).toHaveBeenCalledTimes(1);
-    expect(installWasmTelemetryMock).toHaveBeenCalledWith({
-      wasmModule,
+    expect(runtimeModule.installTelemetryMock).toHaveBeenCalledTimes(1);
+    expect(runtimeModule.installTelemetryMock).toHaveBeenCalledWith({
+      config,
       collectorUrl: "http://127.0.0.1:54418",
-      appId: "main-with-telemetry",
       runtimeThread: "main",
     });
 
     await db.shutdown();
-    expect(disposeWasmTelemetryMock).toHaveBeenCalledTimes(1);
+    expect(disposeTelemetryMock).toHaveBeenCalledTimes(1);
   });
 });
