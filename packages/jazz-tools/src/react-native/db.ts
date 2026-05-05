@@ -1,10 +1,13 @@
-import { createDbWithRuntimeModule, Db } from "../runtime/db.js";
-import { ReactNativeRuntimeModule, type ReactNativeRuntimeDbConfig } from "./runtime-module.js";
+import { createDb as createCoreDb, Db } from "../runtime/db.js";
+import { ReactNativeBackendModule, type ReactNativeBackendDbConfig } from "./backend-module.js";
 
 export { Db };
 
-export interface DbConfig extends ReactNativeRuntimeDbConfig {}
+export interface DbConfig extends ReactNativeBackendDbConfig {}
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeModule(config, new ReactNativeRuntimeModule());
+  return await createCoreDb({
+    ...config,
+    runtime: new ReactNativeBackendModule(),
+  });
 }

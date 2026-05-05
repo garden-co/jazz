@@ -1,12 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
 import { JazzClient, WriteResult, type DirectInsertResult } from "./client.js";
-import { createDbWithRuntimeModule, Db, type DbConfig } from "./db.js";
+import { createDb, Db, type DbConfig } from "./db.js";
 import {
-  DbRuntimeModule,
-  type DbRuntimeClientContext,
-  type RuntimeTokenOptions,
-} from "./db-runtime-module.js";
+  type BackendTokenOptions,
+  DbBackendModule,
+  type DbBackendClientContext,
+} from "./db-backend.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 class TestDb extends Db {
@@ -14,17 +14,17 @@ class TestDb extends Db {
 
   constructor(
     config: DbConfig,
-    runtimeModule: DbRuntimeModule<DbConfig> = new TestDirectRuntimeModule(),
+    backend: DbBackendModule<DbConfig> = new TestDirectBackendModule(),
   ) {
-    super(config, runtimeModule);
+    super(config, backend);
   }
   public exposeGetClient(schema: WasmSchema): JazzClient {
     return this.getClient(schema);
   }
 }
 
-class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
-  protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
+class TestDirectBackendModule extends DbBackendModule<DbConfig> {
+  protected override async loadResources(): Promise<typeof TestDb.runtime> {
     return TestDb.runtime;
   }
 
@@ -35,7 +35,7 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
     useBinaryEncoding,
     onAuthFailure,
     onRejectedBatchAcknowledged,
-  }: DbRuntimeClientContext<DbConfig>): JazzClient {
+  }: DbBackendClientContext<DbConfig>): JazzClient {
     return JazzClient.connectSync(
       TestDb.runtime as never,
       {
@@ -177,7 +177,7 @@ describe("runtime/Db direct path upstream wiring", () => {
   it("DBRT-U03b preserves local policies when the runtime does not support policy bypass", () => {
     const client = makeClientStub();
     const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
-    class PolicyEvaluatingRuntimeModule extends TestDirectRuntimeModule {
+    class PolicyEvaluatingBackendModule extends TestDirectBackendModule {
       override readonly supportsPolicyBypass = false;
     }
     const schema: WasmSchema = {
@@ -200,7 +200,7 @@ describe("runtime/Db direct path upstream wiring", () => {
         adminSecret: "admin-y",
         driver: { type: "memory" },
       },
-      new PolicyEvaluatingRuntimeModule(),
+      new PolicyEvaluatingBackendModule(),
     );
     db.exposeGetClient(schema);
 
@@ -215,10 +215,10 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U04 routes Db runtime wiring through an injected runtime module", async () => {
+  it("DBRT-U04 routes Db client wiring through an injected backend module", async () => {
     const app = makeTodosApp();
     const schema = app.todos._schema;
-    const loadedRuntime = { kind: "test-runtime" };
+    const loadedResources = { kind: "test-backend-resources" };
     const runtimeRow: DirectInsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
@@ -235,30 +235,28 @@ describe("runtime/Db direct path upstream wiring", () => {
       shutdown: ReturnType<typeof vi.fn>;
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
-    class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
-      readonly loadRuntimeMock = vi.fn(async (_config: DbConfig) => loadedRuntime);
+    class TestBackendModule extends DbBackendModule<DbConfig> {
+      readonly loadResourcesMock = vi.fn(async (_config: DbConfig) => loadedResources);
       override readonly createClient = vi.fn(
-        (_context: DbRuntimeClientContext<DbConfig>) => client,
+        (_context: DbBackendClientContext<DbConfig>) => client,
       );
       override readonly mintLocalFirstToken = vi.fn(
-        (options: RuntimeTokenOptions) =>
+        (options: BackendTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
       );
 
-      protected override async loadRuntime(config: DbConfig): Promise<typeof loadedRuntime> {
-        return await this.loadRuntimeMock(config);
+      protected override async loadResources(config: DbConfig): Promise<typeof loadedResources> {
+        return await this.loadResourcesMock(config);
       }
     }
-    const runtimeModule = new TestRuntimeModule();
+    const runtime = new TestBackendModule();
 
-    const db = await createDbWithRuntimeModule(
-      {
-        appId: "facade-app",
-        secret: "alice-secret",
-        serverUrl: "https://example.test",
-      },
-      runtimeModule,
-    );
+    const db = await createDb({
+      appId: "facade-app",
+      secret: "alice-secret",
+      serverUrl: "https://example.test",
+      runtime,
+    });
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
     db.updateAuthToken("fresh-jwt");
@@ -269,15 +267,15 @@ describe("runtime/Db direct path upstream wiring", () => {
     await db.shutdown();
 
     expect(inserted.value).toEqual({ id: "todo-1", title: "Buy milk" });
-    expect(runtimeModule.loadRuntimeMock).toHaveBeenCalledTimes(1);
-    expect(runtimeModule.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(runtime.loadResourcesMock).toHaveBeenCalledTimes(1);
+    expect(runtime.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "facade-app",
         ttlSeconds: 3600,
       }),
     );
-    expect(runtimeModule.createClient).toHaveBeenCalledWith(
+    expect(runtime.createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
         hasWorker: false,
@@ -291,9 +289,9 @@ describe("runtime/Db direct path upstream wiring", () => {
         onRejectedBatchAcknowledged: expect.any(Function),
       }),
     );
-    const createClientContext = runtimeModule.createClient.mock.calls[0]?.[0];
+    const createClientContext = runtime.createClient.mock.calls[0]?.[0];
     expect(createClientContext).toBeDefined();
-    expect("loadedRuntime" in createClientContext!).toBe(false);
+    expect("loadedResources" in createClientContext!).toBe(false);
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
     expect(proof).toBe("jwt:alice-secret:proof-audience:7");
     expect(client.shutdown).toHaveBeenCalledTimes(1);
