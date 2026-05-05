@@ -148,6 +148,7 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     onSyncMessageToSend: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
+    batchedTick: vi.fn(),
     flushWal: vi.fn(),
     free: vi.fn(),
   });
@@ -233,6 +234,7 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
 
     const result = await waitForMessage("shutdown-ok");
     expect(result).toBeDefined();
+    expect(runtime.batchedTick).toHaveBeenCalledBefore(runtime.flushWal);
     expect(runtime.flushWal).toHaveBeenCalledBefore(runtime.free);
   });
 });

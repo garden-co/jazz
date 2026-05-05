@@ -828,6 +828,13 @@ impl WasmRuntime {
         Ok(())
     }
 
+    /// Drive the runtime's batched receive/apply/send loop immediately.
+    #[wasm_bindgen(js_name = batchedTick)]
+    pub fn batched_tick(&self) {
+        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
+        self.core.borrow_mut().batched_tick();
+    }
+
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
         if let Some(json) = payload.as_string() {
             SyncPayload::from_json(&json)

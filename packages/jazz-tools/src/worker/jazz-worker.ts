@@ -464,6 +464,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
     }
+    if (bufferedSyncMessages.length > 0 || bufferedPeerSyncMessages.length > 0) {
+      runtime.batchedTick?.();
+    }
 
     // Bootstrap catalogue-only sync from worker to main runtime.
     // This sends persisted schema/lens objects (including rehydrated ones)
@@ -548,6 +551,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         for (const payload of payloads) {
           runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
         }
+        runtime.batchedTick?.();
       } else {
         pendingSyncMessages.push(...payloads);
       }
@@ -576,6 +580,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       for (const payload of msg.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+      runtime.batchedTick?.();
       break;
     }
 
@@ -623,6 +628,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       disposeWasmTelemetry?.();
       disposeWasmTelemetry = null;
       if (runtime) {
+        runtime.batchedTick?.();
         runtime.flushWal?.();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
