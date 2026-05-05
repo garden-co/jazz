@@ -97,7 +97,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
         OutboxEntry {
             destination: Destination::Server(id),
             payload: SyncPayload::RowBatchCreated { row, metadata, .. },
-        } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_none()
+        } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_some()
     ));
 }
 

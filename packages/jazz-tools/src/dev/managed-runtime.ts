@@ -3,12 +3,37 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
+import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
 }
 
 const LOG_PREFIX = "[jazz]";
+
+function isSchemaPushNetworkError(error: unknown): boolean {
+  return error instanceof TypeError && error.message === "fetch failed";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function warnInitialSchemaPushSkipped(opts: {
+  serverUrl: string;
+  envServerUrlKey: string | null;
+  error: unknown;
+}): void {
+  const fallback =
+    opts.envServerUrlKey === null
+      ? "remove the remote server URL option"
+      : `comment out ${opts.envServerUrlKey}`;
+  console.warn(
+    `${LOG_PREFIX} schema auto-push skipped because ${opts.serverUrl} is unreachable (${errorMessage(
+      opts.error,
+    )}). The dev server will keep using this app and server URL. To use a local Jazz dev server while offline, ${fallback}. Save schema.ts/permissions.ts or restart after reconnecting to publish again.`,
+  );
+}
 
 function toRelativePath(absPath: string): string {
   const rel = relative(process.cwd(), absPath);
@@ -58,6 +83,7 @@ export type ManagedRuntime = {
   serverUrl: string;
   adminSecret: string;
   backendSecret?: string;
+  telemetryCollectorUrl?: string;
 };
 
 type ManagedRuntimeConfig = {
@@ -67,11 +93,14 @@ type ManagedRuntimeConfig = {
   appId: string | null;
   publicServerUrl: string | null;
   publicAppId: string | null;
+  publicTelemetryCollectorUrl: string | null;
+  telemetry: TelemetryOptions | null;
 };
 
 export interface ManagedRuntimeEnvKeys {
   appId: string;
   serverUrl: string;
+  telemetryCollectorUrl: string;
 }
 
 function normalizeServerOption(
@@ -119,8 +148,8 @@ export interface InitializeOptions extends JazzPluginOptions {
   envDir?: string;
   /** Called when a schema watch push fails after initialisation. Use this to forward errors to e.g. Vite's HMR overlay. */
   onSchemaError?: (error: Error) => void;
-  /** Called when the schema watcher successfully pushes an updated schema. Use this to e.g. trigger a Vite full-reload. */
-  onSchemaPush?: (hash: string) => void;
+  /** Called when the schema watcher successfully pushes an updated schema. Use this to e.g. trigger a Vite full-reload. The initial dev-server push awaits this callback so plugins can write generated artefacts before the host bundler starts compiling. */
+  onSchemaPush?: (hash: string) => void | Promise<void>;
 }
 
 export class ManagedDevRuntime {
@@ -143,6 +172,8 @@ export class ManagedDevRuntime {
       appId: options.appId ?? null,
       publicServerUrl: process.env[this.envKeys.serverUrl] ?? null,
       publicAppId: process.env[this.envKeys.appId] ?? null,
+      publicTelemetryCollectorUrl: process.env[this.envKeys.telemetryCollectorUrl] ?? null,
+      telemetry: options.telemetry ?? null,
     };
   }
 
@@ -214,6 +245,11 @@ export class ManagedDevRuntime {
       let serverUrl: string;
       let adminSecret: string;
       let appId: string;
+      let usesExistingServer = false;
+      let existingServerEnvKey: string | null = null;
+      const telemetryCollectorUrl =
+        process.env[this.envKeys.telemetryCollectorUrl] ??
+        resolveTelemetryCollectorUrl(options.telemetry);
 
       try {
         if (serverOpt === false) {
@@ -221,6 +257,8 @@ export class ManagedDevRuntime {
         }
 
         if (process.env[this.envKeys.serverUrl]) {
+          usesExistingServer = true;
+          existingServerEnvKey = this.envKeys.serverUrl;
           serverUrl = process.env[this.envKeys.serverUrl]!;
           adminSecret = options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET ?? "";
           appId = process.env[this.envKeys.appId] ?? options.appId ?? "";
@@ -237,6 +275,7 @@ export class ManagedDevRuntime {
           console.log(`${LOG_PREFIX} using server from env: ${serverUrl}`);
           console.log(`${LOG_PREFIX} app id: ${appId}`);
         } else if (typeof serverOpt === "string") {
+          usesExistingServer = true;
           serverUrl = serverOpt;
           adminSecret = options.adminSecret ?? "";
           appId = options.appId ?? "";
@@ -285,6 +324,7 @@ export class ManagedDevRuntime {
             catalogueAuthority: serverConfig.catalogueAuthority,
             catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
             catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
+            telemetryCollectorUrl,
           });
 
           serverUrl = this.serverHandle.url;
@@ -297,10 +337,31 @@ export class ManagedDevRuntime {
         }
 
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
+        if (telemetryCollectorUrl) {
+          console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
+        }
 
         const { pushSchemaCatalogue } = await import("./dev-server.js");
-        await pushSchemaCatalogue({ serverUrl, appId, adminSecret, schemaDir });
-        console.log(`${LOG_PREFIX} schema published`);
+        try {
+          const initialPush = await pushSchemaCatalogue({
+            serverUrl,
+            appId,
+            adminSecret,
+            schemaDir,
+          });
+          console.log(`${LOG_PREFIX} schema published`);
+          await options.onSchemaPush?.(initialPush.hash);
+        } catch (error) {
+          if (usesExistingServer && isSchemaPushNetworkError(error)) {
+            warnInitialSchemaPushSkipped({
+              serverUrl,
+              envServerUrlKey: existingServerEnvKey,
+              error,
+            });
+          } else {
+            throw error;
+          }
+        }
 
         const { watchSchema } = await import("./schema-watcher.js");
         this.watcher = watchSchema({
@@ -308,9 +369,9 @@ export class ManagedDevRuntime {
           serverUrl,
           appId,
           adminSecret,
-          onPush: (hash) => {
+          onPush: async (hash) => {
             console.log(`${LOG_PREFIX} schema updated (${hash.slice(0, 12)})`);
-            options.onSchemaPush?.(hash);
+            await options.onSchemaPush?.(hash);
           },
           onError: (error) => {
             console.error(`${LOG_PREFIX} schema push failed:`, error.message);
@@ -324,11 +385,14 @@ export class ManagedDevRuntime {
 
         process.env[this.envKeys.appId] = appId;
         process.env[this.envKeys.serverUrl] = serverUrl;
+        if (telemetryCollectorUrl) {
+          process.env[this.envKeys.telemetryCollectorUrl] = telemetryCollectorUrl;
+        }
         if (backendSecret) {
           process.env.BACKEND_SECRET = backendSecret;
         }
 
-        this.runtime = { appId, serverUrl, adminSecret, backendSecret };
+        this.runtime = { appId, serverUrl, adminSecret, backendSecret, telemetryCollectorUrl };
         this.runtimeConfigSignature = this.serializeConfig(this.getManagedRuntimeConfig(options));
         return this.runtime;
       } catch (error) {

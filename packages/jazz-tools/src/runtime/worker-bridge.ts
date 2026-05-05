@@ -11,7 +11,9 @@ import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 import type {
   InitMessage,
+  LocalBatchRecordsSyncMessage,
   SequencedSyncPayload,
+  MutationErrorReplayMessage,
   WorkerLifecycleEvent,
   WorkerToMainMessage,
 } from "../worker/worker-protocol.js";
@@ -32,6 +34,7 @@ export interface WorkerBridgeOptions {
   runtimeSources?: RuntimeSourcesConfig;
   fallbackWasmUrl?: string;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  telemetryCollectorUrl?: string;
 }
 
 export interface PeerSyncBatch {
@@ -60,6 +63,10 @@ interface WorkerBridgeState {
   syncBatchFlushQueued: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   authFailureListener: ((reason: AuthFailureReason) => void) | null;
+  localBatchRecordsSyncListener:
+    | ((batches: LocalBatchRecordsSyncMessage["batches"]) => void)
+    | null;
+  mutationErrorReplayListener: ((batch: MutationErrorReplayMessage["batch"]) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
@@ -103,6 +110,8 @@ export class WorkerBridge {
       syncBatchFlushQueued: false,
       peerSyncListener: null,
       authFailureListener: null,
+      localBatchRecordsSyncListener: null,
+      mutationErrorReplayListener: null,
       serverPayloadForwarder: null,
     };
 
@@ -121,6 +130,10 @@ export class WorkerBridge {
         this.markUpstreamServerDisconnected();
       } else if (msg.type === "auth-failed") {
         this.state.authFailureListener?.(msg.reason);
+      } else if (msg.type === "local-batch-records-sync") {
+        this.state.localBatchRecordsSyncListener?.(msg.batches);
+      } else if (msg.type === "mutation-error-replay") {
+        this.state.mutationErrorReplayListener?.(msg.batch);
       } else if (msg.type === "peer-sync") {
         this.state.peerSyncListener?.({
           peerId: msg.peerId,
@@ -180,9 +193,9 @@ export class WorkerBridge {
       runtimeSources: options.runtimeSources,
       fallbackWasmUrl: options.fallbackWasmUrl,
       logLevel: options.logLevel,
+      telemetryCollectorUrl: options.telemetryCollectorUrl,
       clientId: "", // Worker generates its own client ID for main thread
     };
-
     this.state.expectsUpstreamServer = Boolean(options.serverUrl);
     if (!this.state.expectsUpstreamServer) {
       this.markUpstreamServerConnected();
@@ -316,12 +329,27 @@ export class WorkerBridge {
     this.worker.postMessage({ type: "reconnect-upstream" });
   }
 
+  acknowledgeRejectedBatch(batchId: string): void {
+    if (this.isDisposedLike()) return;
+    this.worker.postMessage({ type: "acknowledge-rejected-batch", batchId });
+  }
+
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
   }
 
   onAuthFailure(listener: (reason: AuthFailureReason) => void): void {
     this.state.authFailureListener = listener;
+  }
+
+  onLocalBatchRecordsSync(
+    listener: (batches: LocalBatchRecordsSyncMessage["batches"]) => void,
+  ): void {
+    this.state.localBatchRecordsSyncListener = listener;
+  }
+
+  onMutationErrorReplay(listener: (batch: MutationErrorReplayMessage["batch"]) => void): void {
+    this.state.mutationErrorReplayListener = listener;
   }
 
   openPeer(peerId: string): void {
@@ -441,6 +469,8 @@ export class WorkerBridge {
     this.state.pendingSyncPayloadsForWorker = [];
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
+    this.state.localBatchRecordsSyncListener = null;
+    this.state.mutationErrorReplayListener = null;
     this.state.syncBatchFlushQueued = false;
     this.runtime.onSyncMessageToSend?.(() => undefined);
   }

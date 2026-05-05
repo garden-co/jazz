@@ -39,25 +39,22 @@ describe("isQuerySupported", () => {
         nullable: true,
       },
       {
+        name: "session_expires_at",
+        column_type: { type: "Timestamp" },
+        nullable: false,
+      },
+      {
+        name: "last_seen_at",
+        column_type: { type: "Timestamp" },
+        nullable: true,
+      },
+      {
         name: "uuid_col",
         column_type: { type: "Uuid" },
         nullable: false,
       },
     ],
   } satisfies WasmSchema[string];
-
-  const resolveStoredFieldName = (field: string) => {
-    switch (field) {
-      case "email":
-        return "email_address";
-      case "ownerId":
-        return "owner_id";
-      case "uuidCol":
-        return "uuid_col";
-      default:
-        return field;
-    }
-  };
 
   it("supports row id comparisons and supported primitive operators", () => {
     const where: CleanedWhere[] = [
@@ -69,18 +66,45 @@ describe("isQuerySupported", () => {
     expect(isQuerySupported(tableSchema, where)).toBe(true);
   });
 
-  it.fails("supports nullable reference equality with null but rejects ne null", () => {
+  it("allows null only on nullable columns", () => {
     expect(
       isQuerySupported(tableSchema, [
-        { field: "ownerId", operator: "eq", value: null, connector: "AND" },
+        { field: "last_seen_at", operator: "eq", value: null, connector: "AND" },
       ]),
     ).toBe(true);
 
     expect(
       isQuerySupported(tableSchema, [
-        { field: "ownerId", operator: "ne", value: null, connector: "AND" },
+        { field: "session_expires_at", operator: "eq", value: null, connector: "AND" },
       ]),
     ).toBe(false);
+  });
+
+  it("rejects ne null on reference and id fields", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "owner_id", operator: "ne", value: null, connector: "AND" },
+      ]),
+    ).toBe(false);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "id", operator: "ne", value: null, connector: "AND" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("supports not-equals filters on timestamp columns", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        {
+          field: "session_expires_at",
+          operator: "ne",
+          value: new Date("2026-01-01T00:00:00.000Z"),
+          connector: "AND",
+        },
+      ]),
+    ).toBe(true);
   });
 
   it("rejects OR connectors and unsupported operators", () => {
