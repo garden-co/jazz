@@ -108,13 +108,7 @@ impl SyncMessage {
 
     /// True if this is a durability-state payload.
     pub fn is_persistence_ack(&self) -> bool {
-        matches!(
-            self.payload,
-            SyncPayload::RowBatchStateChanged {
-                confirmed_tier: Some(_),
-                ..
-            }
-        )
+        matches!(self.payload, SyncPayload::BatchSettlement { .. })
     }
 
     /// True if this is a `QuerySubscription` payload.
@@ -138,7 +132,16 @@ impl SyncMessage {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
-            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::BatchSettlement { settlement } => match settlement {
+                crate::batch_fate::BatchSettlement::DurableDirect {
+                    visible_members, ..
+                }
+                | crate::batch_fate::BatchSettlement::AcceptedTransaction {
+                    visible_members, ..
+                } => visible_members.first().map(|member| member.object_id),
+                crate::batch_fate::BatchSettlement::Missing { .. }
+                | crate::batch_fate::BatchSettlement::Rejected { .. } => None,
+            },
             _ => None,
         }
     }
@@ -159,7 +162,7 @@ impl SyncMessage {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 vec![row.batch_id()]
             }
-            SyncPayload::RowBatchStateChanged { batch_id, .. } => vec![*batch_id],
+            SyncPayload::BatchSettlement { settlement } => vec![settlement.batch_id()],
             _ => vec![],
         }
     }
@@ -876,20 +879,6 @@ impl<'a> Normalizer<'a> {
                     self.batch(&row.batch_id()),
                 )
             }
-            SyncPayload::RowBatchStateChanged {
-                row_id,
-                branch_name,
-                batch_id,
-                state,
-                confirmed_tier,
-            } => {
-                format!(
-                    "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
-                    self.object(row_id),
-                    self.branch(branch_name),
-                    self.batch(batch_id),
-                )
-            }
             SyncPayload::BatchSettlement { settlement } => self.format_settlement(settlement),
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
                 let batches = batch_ids
@@ -1075,20 +1064,6 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 entry.object_type().unwrap_or("unknown"),
             )
         }
-        SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state,
-            confirmed_tier,
-        } => {
-            format!(
-                "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
-                names.object(row_id),
-                branch_name,
-                names.batch(batch_id),
-            )
-        }
         SyncPayload::BatchSettlement { settlement } => format_settlement_details(settlement, names),
         SyncPayload::BatchSettlementNeeded { batch_ids } => {
             let batches = batch_ids
@@ -1268,7 +1243,6 @@ mod tests {
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
         assert_eq!(tracer.of_type("RowBatchCreated").len(), 2);
-        assert_eq!(tracer.of_type("RowBatchStateChanged").len(), 0);
     }
 
     #[test]
@@ -1281,12 +1255,16 @@ mod tests {
             metadata: None,
             row: row.clone(),
         };
-        let incoming = SyncPayload::RowBatchStateChanged {
-            row_id: row.row_id,
-            branch_name: "main".into(),
-            batch_id: row.batch_id,
-            state: None,
-            confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        let incoming = SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: row.batch_id,
+                confirmed_tier: crate::sync_manager::DurabilityTier::EdgeServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row.row_id,
+                    branch_name: "main".into(),
+                    batch_id: row.batch_id,
+                }],
+            },
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &outgoing);

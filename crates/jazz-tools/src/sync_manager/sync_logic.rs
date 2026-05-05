@@ -245,32 +245,25 @@ impl SyncManager {
         });
     }
 
-    pub(super) fn queue_initial_sync_to_client_with_storage<H: Storage + ?Sized>(
+    pub(super) fn queue_initial_row_to_client_with_storage<H: Storage + ?Sized>(
         &mut self,
         storage: &H,
         client_id: ClientId,
         object_id: ObjectId,
         branch_name: BranchName,
         force_resend: bool,
-    ) {
-        let Some(row_locator) = storage.load_row_locator(object_id).ok().flatten() else {
-            return;
-        };
+    ) -> Option<BatchId> {
+        let row_locator = storage.load_row_locator(object_id).ok().flatten()?;
         let metadata = metadata_from_row_locator(&row_locator);
         if let Some(row) =
             self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
+            let batch_id = row.batch_id;
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
+            return Some(batch_id);
         }
 
-        if let Some(settlement) = self.load_current_batch_settlement_from_storage(
-            storage,
-            object_id,
-            &branch_name,
-            &row_locator,
-        ) {
-            self.queue_batch_settlement_to_client(client_id, settlement);
-        }
+        None
     }
 
     pub(super) fn queue_row_to_client(

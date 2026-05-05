@@ -52,8 +52,7 @@ fn transactional_row_from_client_stays_staged_until_batch_is_sealed() {
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::BatchSettlement { .. }
-                | SyncPayload::RowBatchStateChanged { .. },
+                SyncPayload::BatchSettlement { .. },
         } if id == client_id
     )));
 }
@@ -104,8 +103,7 @@ fn direct_batch_from_client_sends_one_settlement_on_seal() {
         OutboxEntry {
             destination: Destination::Client(id),
             payload:
-                SyncPayload::BatchSettlement { .. }
-                | SyncPayload::RowBatchStateChanged { .. },
+                SyncPayload::BatchSettlement { .. },
         } if id == client_id
     )));
 
@@ -143,14 +141,6 @@ fn direct_batch_from_client_sends_one_settlement_on_seal() {
         })
         .collect::<Vec<_>>();
     assert_eq!(settlements.len(), 1);
-    assert!(outbox.iter().all(|entry| !matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Client(id),
-            payload: SyncPayload::RowBatchStateChanged { .. },
-        } if *id == client_id
-    )));
-
     let BatchSettlement::DurableDirect {
         batch_id: settled_batch_id,
         confirmed_tier,
@@ -410,17 +400,18 @@ fn seal_batch_collapses_same_row_to_latest_visible_member() {
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::RowBatchStateChanged {
-                row_id: changed_row_id,
-                branch_name,
-                batch_id: changed_batch_id,
-                state: Some(crate::row_histories::RowState::VisibleTransactional),
-                confirmed_tier: Some(DurabilityTier::Local),
+            payload: SyncPayload::BatchSettlement {
+                settlement: BatchSettlement::AcceptedTransaction {
+                    batch_id: changed_batch_id,
+                    confirmed_tier: DurabilityTier::Local,
+                    visible_members,
+                },
             },
         } if *id == client_id
-            && *changed_row_id == row_id
-            && *branch_name == BranchName::new("main")
             && *changed_batch_id == batch_id
+            && visible_members.iter().any(|member| member.object_id == row_id
+                && member.branch_name == BranchName::new("main")
+                && member.batch_id == batch_id)
     )));
     assert!(!outbox.iter().any(|entry| matches!(
         entry,

@@ -25,17 +25,17 @@ fn row_batch_created_from_user_with_exact_history_match_skips_permission_check()
     );
     sm.take_outbox();
 
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
             row: row.clone(),
         },
-    );
+    });
+    sm.process_inbox(&mut io);
 
     let pending = sm.take_pending_permission_checks();
     assert!(
@@ -237,17 +237,17 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
     );
     sm.take_outbox();
 
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
             row: older_row.clone(),
         },
-    );
+    });
+    sm.process_inbox(&mut io);
 
     let pending = sm.take_pending_permission_checks();
     assert!(
