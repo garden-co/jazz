@@ -16,10 +16,6 @@ vi.mock("jazz-rn", () => ({
   },
 }));
 
-vi.mock("react-native", () => ({
-  Platform: { OS: "ios" },
-}));
-
 class TestDb extends Db {
   public exposeGetClient(schema: WasmSchema): JazzClient {
     return this.getClient(schema);
