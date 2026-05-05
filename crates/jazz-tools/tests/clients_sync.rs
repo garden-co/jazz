@@ -10,7 +10,7 @@ use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
-use support::wait_for_query;
+use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 
 fn test_schema() -> jazz_tools::Schema {
@@ -217,8 +217,15 @@ async fn jazz_tools_cli_two_clients_sync_values() {
 
 #[tokio::test]
 async fn caller_supplied_uuid_is_used_for_created_row() {
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
     let client = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect writer");
@@ -266,8 +273,15 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
 
 #[tokio::test]
 async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
     let client = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect writer");
@@ -334,8 +348,15 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
 
 #[tokio::test]
 async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
-    let server = TestingServer::start().await;
     let schema = test_schema();
+    let server = TestingServer::start_with_schema(schema.clone()).await;
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
     let client = JazzClient::connect(server.make_client_context(schema.clone()))
         .await
         .expect("connect writer");

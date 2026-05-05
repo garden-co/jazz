@@ -47,6 +47,7 @@ data-multi/
 .turbo/
 
 .claude/*
+!.claude/CLAUDE.md
 !.claude/commands
 !.claude/skills
 

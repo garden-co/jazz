@@ -170,6 +170,59 @@ describe("Db transactions", () => {
     expect(tx.acknowledgeRejectedBatch()).toBe(false);
   });
 
+  it("uses declared schemas for transaction writes without fetching runtime schema", () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-tx-fast-path",
+      values: [
+        { type: "Text", value: "Fast transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-tx-fast-path",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-tx-fast-path"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      upsert: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-tx-fast-path").handle),
+      localBatchRecord: vi.fn((batchId = "batch-tx-fast-path") => makeLocalBatchRecord(batchId)),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-tx-fast-path")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const getSchema = vi.fn(() => new Map(Object.entries(todoSchema())));
+    const getSchemaHash = vi.fn(() => "schema-hash");
+    const client = {
+      getSchema,
+      getSchemaHash,
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const tx = db.beginTransaction();
+
+    tx.insert(table, { title: "Fast transaction", done: false });
+    tx.upsert(table, { title: "Fast transaction upsert" }, { id: "todo-tx-fast-path" });
+    tx.update(table, "todo-tx-fast-path", { done: true });
+
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
+    expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Fast transaction" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(runtimeTransaction.upsert).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "Fast transaction upsert" } },
+      { id: "todo-tx-fast-path" },
+    );
+    expect(runtimeTransaction.update).toHaveBeenCalledWith("todo-tx-fast-path", {
+      done: { type: "Boolean", value: true },
+    });
+  });
+
   it("threads session-backed db transactions through beginTransactionInternal", async () => {
     const table = todoTable();
     const session: Session = {
@@ -644,6 +697,61 @@ describe("Db transactions", () => {
     });
     expect(batch.localBatchRecords()).toEqual([makeLocalBatchRecord("batch-direct", "direct")]);
     expect(batch.acknowledgeRejectedBatch()).toBe(false);
+  });
+
+  it("uses declared schemas for direct batch writes without fetching runtime schema", () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-batch-fast-path",
+      values: [
+        { type: "Text", value: "Fast batch" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-direct-fast-path",
+    } as Row;
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-fast-path"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(() => undefined),
+      upsert: vi.fn(() => undefined),
+      delete: vi.fn(() => undefined),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-fast-path", "direct").handle),
+      localBatchRecord: vi.fn((batchId = "batch-direct-fast-path") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-direct-fast-path", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const getSchema = vi.fn(() => new Map(Object.entries(todoSchema())));
+    const getSchemaHash = vi.fn(() => "schema-hash");
+    const client = {
+      getSchema,
+      getSchemaHash,
+      beginBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const batch = db.beginBatch();
+
+    batch.insert(table, { title: "Fast batch", done: false });
+    batch.upsert(table, { title: "Fast batch upsert" }, { id: "todo-batch-fast-path" });
+    batch.update(table, "todo-batch-fast-path", { done: true });
+
+    expect(getSchema).not.toHaveBeenCalled();
+    expect(getSchemaHash).not.toHaveBeenCalled();
+    expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Fast batch" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(runtimeBatch.upsert).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "Fast batch upsert" } },
+      { id: "todo-batch-fast-path" },
+    );
+    expect(runtimeBatch.update).toHaveBeenCalledWith("todo-batch-fast-path", {
+      done: { type: "Boolean", value: true },
+    });
   });
 
   it("commits a callback batch and returns the callback result handle", async () => {

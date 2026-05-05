@@ -153,6 +153,10 @@ harness = false
 name = "limit_offset_benchmark"
 harness = false
 
+[[bench]]
+name = "server_authorization_scope_benchmark"
+harness = false
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]

@@ -83,6 +83,87 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
 }
 
 #[test]
+fn rc_worker_peer_relays_rejected_batch_settlement_to_downstream_peer() {
+    let mut s = create_3tier_rc();
+
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let batch_id =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()[0]
+            .batch_id;
+    let branch_name = s.a.schema_manager().branch_name();
+
+    pump_a_to_b(&mut s);
+
+    s.b.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.c_server_for_b),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lacks publish rights".to_string(),
+            },
+        },
+    });
+    s.b.immediate_tick();
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(Err(crate::runtime_core::PersistedWriteRejection {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        }))),
+        "worker peers should relay rejected settlements back to downstream persisted waits"
+    );
+    assert_eq!(
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap(),
+        None,
+        "downstream peer should retract the optimistic visible row after rejection"
+    );
+}
+
+#[test]
+fn rc_worker_peer_retains_replayable_batch_record_for_downstream_direct_write() {
+    let mut s = create_3tier_rc();
+
+    let ((row_id, _row_values), _receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+
+    let batch_id =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()[0]
+            .batch_id;
+
+    pump_a_to_b(&mut s);
+
+    let record = s.b.storage().load_local_batch_record(batch_id).unwrap();
+    assert!(
+        record.is_some(),
+        "worker peers should retain a replayable local batch record for downstream direct writes"
+    );
+}
+
+#[test]
 fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_server() {
     // alice -> worker
     //   alice stages one transactional batch locally
@@ -452,6 +533,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
+    alice.seal_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     let worker_outbox = worker.sync_sender().take();
@@ -566,6 +648,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
+    alice.seal_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     for entry in worker.sync_sender().take() {
@@ -664,6 +747,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     assert_eq!(history_rows.len(), 1);
     let batch_id = history_rows[0].batch_id;
 
+    alice.seal_batch(batch_id).unwrap();
     pump_client_messages_to_server(&mut alice, &mut worker, server_id, client_id);
 
     for entry in worker.sync_sender().take() {

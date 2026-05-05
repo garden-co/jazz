@@ -557,15 +557,6 @@ export class DbTransaction {
     }
   }
 
-  private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    const { client } = this.bindTable(table, "DbTransaction");
-    return resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-  }
-
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbTransactionBinding {
     const existingBinding = dbTransactionBindings.get(this);
     if (existingBinding) {
@@ -609,8 +600,9 @@ export class DbTransaction {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeTransaction = this.requireRuntimeTransaction("insert");
     const row = options
       ? runtimeTransaction.create(table._table, values, options)
@@ -626,8 +618,9 @@ export class DbTransaction {
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeTransaction("upsert").upsert(table._table, values, options);
   }
 
@@ -639,8 +632,9 @@ export class DbTransaction {
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
+    this.bindTable(table, "DbTransaction");
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeTransaction("update").update(id, updates);
   }
 
@@ -731,15 +725,6 @@ export class DbDirectBatch {
     private readonly beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
   ) {}
 
-  private resolveInputSchema<T, Init>(table: TableProxy<T, Init>): WasmSchema {
-    const { client } = this.bindTable(table, "DbDirectBatch");
-    return resolveSchemaWithTable(
-      table._schema,
-      normalizeRuntimeSchema(client.getSchema()),
-      table._table,
-    );
-  }
-
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbDirectBatchBinding {
     const existingBinding = dbDirectBatchBindings.get(this);
     if (existingBinding) {
@@ -784,8 +769,9 @@ export class DbDirectBatch {
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     const runtimeBatch = this.requireRuntimeBatch("insert");
     const row = options
       ? runtimeBatch.create(table._table, values, options)
@@ -795,15 +781,17 @@ export class DbDirectBatch {
 
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeBatch("upsert").upsert(table._table, values, options);
   }
 
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     this.ensureActive();
+    this.bindTable(table, "DbDirectBatch");
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, this.resolveInputSchema(table), table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     this.requireRuntimeBatch("update").update(id, updates);
   }
 
@@ -1057,6 +1045,7 @@ export class Db {
    * Unsubscribers for {@link Db.clients}'s {@link JazzClient.onMutationError} listeners
    */
   private readonly clientMutationErrorUnsubscribers = new Map<JazzClient, () => void>();
+  private readonly pendingWorkerMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   private readonly onSyncChannelMessage = (event: MessageEvent): void => {
     this.handleSyncChannelMessage(event.data);
@@ -1306,15 +1295,17 @@ export class Db {
           onAuthFailure: (reason) => {
             this.markUnauthenticated(reason);
           },
+          onRejectedBatchAcknowledged: (batchId) => {
+            this.workerBridge?.acknowledgeRejectedBatch(batchId);
+          },
         },
       );
 
+      this.attachMutationErrorHandler(client);
       // In worker mode, set up the bridge for this client
       if (this.worker && !this.workerBridge) {
         this.attachWorkerBridge(key, client);
       }
-
-      this.attachMutationErrorHandler(client);
       // Direct (non-worker) clients with a serverUrl must open their own
       // Rust transport — the worker bridge is not doing it for them.
       if (!this.worker && this.config.serverUrl) {
@@ -1323,8 +1314,6 @@ export class Db {
           admin_secret: this.config.adminSecret,
         });
       }
-
-      this.attachMutationErrorHandler(client);
       this.clients.set(key, client);
     }
 
@@ -1348,6 +1337,7 @@ export class Db {
         for (const listener of this.mutationErrorListeners) {
           listener(event);
         }
+        this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
       }),
     );
   }
@@ -1362,15 +1352,32 @@ export class Db {
     }
   }
 
-  protected async ensureQueryReady(options?: QueryOptions): Promise<void> {
+  protected async ensureQueryReady(options?: QueryOptions, client?: JazzClient): Promise<void> {
     await this.ensureBridgeReady();
     if (!this.workerBridge || !this.config.serverUrl) {
       return;
     }
     if (!options?.tier || options.tier === "local") {
+      if (client?.hasPendingHydratedBatchReconciliation("edge")) {
+        await this.workerBridge.waitForUpstreamServerConnection();
+        await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
+      }
       return;
     }
     await this.workerBridge.waitForUpstreamServerConnection();
+  }
+
+  private async waitForHydratedWorkerBatchReconciliation(
+    client: JazzClient,
+    tier: DurabilityTier,
+  ): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (client.hasPendingHydratedBatchReconciliation(tier)) {
+      if (Date.now() >= deadline) {
+        return;
+      }
+      await sleep(20);
+    }
   }
 
   private attachWorkerBridge(schemaJson: string, client: JazzClient): void {
@@ -1386,6 +1393,35 @@ export class Db {
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     bridge.onAuthFailure((reason) => {
       this.markUnauthenticated(reason);
+    });
+    bridge.onLocalBatchRecordsSync((batches) => {
+      client.hydrateLocalBatchRecords(batches);
+    });
+    bridge.onMutationErrorReplay((batch) => {
+      const existingRecord = client.localBatchRecord(batch.batchId);
+      const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
+      client.replayRejectedBatchRecord(batch);
+      if (existingRecord && !replayableFromWorker) {
+        return;
+      }
+      client.markReplayedRejectedBatchDelivered(batch.batchId);
+      const settlement = batch.latestSettlement;
+      if (!settlement || settlement.kind !== "rejected") {
+        return;
+      }
+      const event: MutationErrorEvent = {
+        code: settlement.code,
+        reason: settlement.reason,
+        batch,
+      };
+      if (this.mutationErrorListeners.size === 0) {
+        this.pendingWorkerMutationErrorEvents.push(event);
+        return;
+      }
+      for (const listener of this.mutationErrorListeners) {
+        listener(event);
+      }
+      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -2340,6 +2376,14 @@ export class Db {
     for (const client of this.clients.values()) {
       this.attachMutationErrorHandler(client);
     }
+    while (this.pendingWorkerMutationErrorEvents.length > 0) {
+      const event = this.pendingWorkerMutationErrorEvents.shift()!;
+      listener(event);
+      for (const client of this.clients.values()) {
+        client.markReplayedRejectedBatchDelivered(event.batch.batchId);
+      }
+      this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
+    }
     return () => {
       this.mutationErrorListeners.delete(listener);
       if (this.mutationErrorListeners.size > 0) {
@@ -2591,7 +2635,7 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
+    await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const rows = await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
@@ -2959,12 +3003,8 @@ class ClientBackedDb extends Db {
     data: Init,
     options?: CreateOptions,
   ): WriteResult<T> {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformInsertInput(table, data);
-    const values = toInsertRecord(transformedData, inputSchema, table._table);
+    const values = toInsertRecord(transformedData, table._schema, table._table);
     return this.runtimeClient
       .createHandleInternal(table._table, values, this.session, this.attribution, options)
       .mapValue((row) => transformOutputRow(table, transformRow(row, table._schema, table._table)));
@@ -2975,12 +3015,8 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options: UpsertOptions,
   ): WriteHandle {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformUpdateInput(table, data);
-    const values = toUpdateRecord(transformedData, inputSchema, table._table);
+    const values = toUpdateRecord(transformedData, table._schema, table._table);
     return this.runtimeClient.upsertHandleInternal(
       table._table,
       values,
@@ -2997,12 +3033,8 @@ class ClientBackedDb extends Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(this.runtimeClient.getSchema()),
-    );
-    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema.get, table._table);
     const transformedData = transformUpdateInput(table, data);
-    const updates = toUpdateRecord(transformedData, inputSchema, table._table);
+    const updates = toUpdateRecord(transformedData, table._schema, table._table);
     return this.runtimeClient.updateHandleInternal(
       id,
       updates,
@@ -3075,7 +3107,7 @@ class ClientBackedDb extends Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
     const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureQueryReady(queryOptions);
+    await this.ensureQueryReady(queryOptions, this.runtimeClient);
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
@@ -3127,6 +3159,7 @@ class ClientBackedDb extends Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const queryOptions = ordinaryDbQueryOptions(options);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
@@ -3135,7 +3168,7 @@ class ClientBackedDb extends Db {
         callback(typedDelta);
       },
       this.session,
-      ordinaryDbQueryOptions(options),
+      queryOptions,
       runtimeSchema.peek(),
     );
 

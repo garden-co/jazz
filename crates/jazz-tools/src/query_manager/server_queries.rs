@@ -131,7 +131,7 @@ impl QueryManager {
 
         for (hash, schema) in self.known_schemas.iter() {
             if *hash != full_hash {
-                schema_context.add_pending_schema(schema.clone());
+                schema_context.add_pending_schema_with_hash(*hash, schema.clone());
             }
         }
 
@@ -160,10 +160,10 @@ impl QueryManager {
     }
 
     pub(super) fn authorization_schema_for_context(
-        &self,
+        &mut self,
         env: &str,
         user_branch: &str,
-    ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+    ) -> Option<(Arc<Schema>, Arc<crate::schema_manager::SchemaContext>)> {
         if self.authorization_schema_required && self.authorization_schema.is_none() {
             return None;
         }
@@ -172,6 +172,11 @@ impl QueryManager {
             .authorization_schema
             .clone()
             .or_else(|| (!self.schema.is_empty()).then(|| self.schema.clone()))?;
+
+        let cache_key = (env.to_string(), user_branch.to_string());
+        if let Some(context) = self.authorization_context_cache.get(&cache_key) {
+            return Some((schema, context.clone()));
+        }
 
         let mut schema_context =
             crate::schema_manager::SchemaContext::new((*schema).clone(), env, user_branch);
@@ -182,19 +187,23 @@ impl QueryManager {
 
         for (hash, known_schema) in self.known_schemas.iter() {
             if *hash != schema_context.current_hash {
-                schema_context.add_pending_schema(known_schema.clone());
+                schema_context.add_pending_schema_with_hash(*hash, known_schema.clone());
             }
         }
 
         schema_context.try_activate_pending();
 
+        let schema_context = Arc::new(schema_context);
+        self.authorization_context_cache
+            .insert(cache_key, schema_context.clone());
+
         Some((schema, schema_context))
     }
 
     pub(super) fn authorization_schema_for_branch(
-        &self,
+        &mut self,
         branch_name: &BranchName,
-    ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+    ) -> Option<(Arc<Schema>, Arc<crate::schema_manager::SchemaContext>)> {
         if let Some(composed) = ComposedBranchName::parse(branch_name) {
             if let Some(parts) =
                 self.authorization_schema_for_context(&composed.env, &composed.user_branch)
@@ -220,22 +229,21 @@ impl QueryManager {
 
             for (hash, known_schema) in self.known_schemas.iter() {
                 if *hash != full_hash {
-                    schema_context.add_pending_schema(known_schema.clone());
+                    schema_context.add_pending_schema_with_hash(*hash, known_schema.clone());
                 }
             }
 
             schema_context.try_activate_pending();
 
-            return Some((Arc::new(target_schema), schema_context));
+            return Some((Arc::new(target_schema), Arc::new(schema_context)));
         }
 
         if self.schema_context.is_initialized() {
+            let env = self.schema_context.env.clone();
+            let user_branch = self.schema_context.user_branch.clone();
             return self
-                .authorization_schema_for_context(
-                    &self.schema_context.env,
-                    &self.schema_context.user_branch,
-                )
-                .or_else(|| Some((self.schema.clone(), self.schema_context.clone())));
+                .authorization_schema_for_context(&env, &user_branch)
+                .or_else(|| Some((self.schema.clone(), Arc::new(self.schema_context.clone()))));
         }
 
         None
@@ -532,17 +540,6 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
     ) -> Option<HashSet<(ObjectId, BranchName)>> {
-        match self.authorized_tuples_from_graph_result(
-            storage,
-            graph,
-            schema_context,
-            source_branch_schema_map,
-            session,
-        ) {
-            AuthorizedTuplesResult::Ready(_) => {}
-            AuthorizedTuplesResult::PermissionsUnavailable => return None,
-        }
-
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
@@ -914,11 +911,19 @@ impl QueryManager {
                 );
             }
 
-            let settled_tier = self
-                .sync_manager
-                .max_local_durability_tier()
-                .unwrap_or(DurabilityTier::Local);
-            settled_notifications.push((sub.client_id, sub.query_id, settled_tier));
+            let settled_once = scope.is_some();
+            if let Some(scope) = scope.as_ref() {
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                settled_notifications.push((
+                    sub.client_id,
+                    sub.query_id,
+                    settled_tier,
+                    scope.clone(),
+                ));
+            }
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
@@ -944,7 +949,7 @@ impl QueryManager {
                     policy_context_tables: sub.policy_context_tables,
                     last_scope: scope.unwrap_or_default(),
                     needs_recompile: false,
-                    settled_once: true,
+                    settled_once,
                     propagation: sub.propagation,
                     reported_schema_warnings,
                 },
@@ -955,9 +960,9 @@ impl QueryManager {
             self.sync_manager.emit_schema_warning(client_id, warning);
         }
 
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -1003,7 +1008,12 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
-        let mut settled_notifications: Vec<(ClientId, QueryId, DurabilityTier)> = Vec::new();
+        let mut settled_notifications: Vec<(
+            ClientId,
+            QueryId,
+            DurabilityTier,
+            HashSet<(ObjectId, BranchName)>,
+        )> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -1054,16 +1064,6 @@ impl QueryManager {
                         .map(|warning| (client_id, warning)),
                 );
 
-                // Emit QuerySettled on first settlement
-                if !sub.settled_once {
-                    sub.settled_once = true;
-                    let settled_tier = self
-                        .sync_manager
-                        .max_local_durability_tier()
-                        .unwrap_or(DurabilityTier::Local);
-                    settled_notifications.push((client_id, query_id, settled_tier));
-                }
-
                 // Check if scope changed
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
@@ -1093,11 +1093,50 @@ impl QueryManager {
                     )
                 }
             };
-            if let Some(new_scope) = new_scope
-                && new_scope != sub.last_scope
-            {
-                scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
-                sub.last_scope = new_scope;
+            let scope_unavailable = new_scope.is_none();
+            if let Some(new_scope) = new_scope {
+                let scope_changed = new_scope != sub.last_scope;
+                if scope_changed {
+                    scope_updates.push((
+                        client_id,
+                        query_id,
+                        new_scope.clone(),
+                        sub.session.clone(),
+                    ));
+                    sub.last_scope = new_scope.clone();
+                }
+
+                // Emit an authoritative QuerySettled once the scope for this
+                // settled frame has been computed. A computed empty scope is
+                // authoritative; missing permissions/schema context returns None
+                // and must keep the subscription unsettled.
+                if !sub.settled_once {
+                    sub.settled_once = true;
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((client_id, query_id, settled_tier, new_scope));
+                } else if scope_changed {
+                    let settled_tier = self
+                        .sync_manager
+                        .max_local_durability_tier()
+                        .unwrap_or(DurabilityTier::Local);
+                    settled_notifications.push((
+                        client_id,
+                        query_id,
+                        settled_tier,
+                        sub.last_scope.clone(),
+                    ));
+                }
+            }
+
+            if scope_unavailable {
+                tracing::trace!(
+                    ?query_id,
+                    %client_id,
+                    "server subscription scope unavailable; holding QuerySettled"
+                );
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
@@ -1115,9 +1154,9 @@ impl QueryManager {
         }
 
         // Emit QuerySettled notifications
-        for (client_id, query_id, tier) in settled_notifications {
+        for (client_id, query_id, tier, scope) in settled_notifications {
             self.sync_manager
-                .emit_query_settled(client_id, query_id, tier);
+                .emit_query_settled(client_id, query_id, tier, &scope);
         }
     }
 

@@ -784,6 +784,26 @@ fn row_descriptor_content_hash() {
     );
 }
 
+#[test]
+fn cloned_row_descriptor_recomputes_content_hash_after_mutation() {
+    let desc = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Uuid),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let original_hash = desc.content_hash();
+
+    let mut cloned = desc.clone();
+    cloned
+        .columns
+        .push(ColumnDescriptor::new("$canEdit", ColumnType::Boolean));
+
+    assert_ne!(
+        original_hash,
+        cloned.content_hash(),
+        "A cloned descriptor must not reuse a stale cached hash after its columns change"
+    );
+}
+
 // ========================================================================
 // ComposedBranchName Tests
 // ========================================================================

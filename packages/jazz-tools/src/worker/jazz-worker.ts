@@ -7,7 +7,12 @@
  * `runtime.connect()` — no HTTP/SSE code lives here.
  */
 
-import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
+import type {
+  InitMessage,
+  MainToWorkerMessage,
+  SequencedSyncPayload,
+  WorkerToMainMessage,
+} from "./worker-protocol.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 import { mapAuthReason } from "../runtime/auth-state.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
@@ -59,8 +64,9 @@ let initComplete = false;
 let wasmInitialized = false;
 let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init completes
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
-let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
+let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
+let rejectedBatchReplayQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
@@ -70,6 +76,47 @@ let currentAuth: Record<string, string> = {};
 let disposeWasmTelemetry: (() => void) | null = null;
 // Stored after init so reconnect-upstream can re-establish the WS.
 let currentWsUrl: string | null = null;
+
+function syncRetainedLocalBatchRecordsToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batches = runtime.loadLocalBatchRecords?.() ?? [];
+    post({ type: "local-batch-records-sync", batches });
+  } catch (error) {
+    console.warn("[worker] loadLocalBatchRecords failed:", error);
+  }
+}
+
+function replayNewlyRejectedBatchesToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
+    for (const batchId of batchIds) {
+      const batch = runtime.loadLocalBatchRecord?.(batchId);
+      if (batch?.latestSettlement?.kind !== "rejected") {
+        continue;
+      }
+      post({ type: "mutation-error-replay", batch });
+    }
+  } catch (error) {
+    console.warn("[worker] drainRejectedBatchIds failed:", error);
+  }
+}
+
+function queueRejectedBatchReplayToMain(): void {
+  if (rejectedBatchReplayQueued) {
+    return;
+  }
+  rejectedBatchReplayQueued = true;
+  queueMicrotask(() => {
+    rejectedBatchReplayQueued = false;
+    replayNewlyRejectedBatchesToMain();
+  });
+}
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -155,8 +202,8 @@ async function ensureWorkerWasmInitialized(
   wasmInitialized = true;
 }
 
-function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
-  pendingSyncPayloadsForMain.push(payload);
+function enqueueSyncMessageForMain(payload: Uint8Array | string, sequence?: number | null): void {
+  pendingSyncPayloadsForMain.push(typeof sequence === "number" ? { payload, sequence } : payload);
   if (syncBatchFlushQueued) return;
 
   syncBatchFlushQueued = true;
@@ -177,14 +224,27 @@ function post(msg: WorkerToMainMessage): void {
   self.postMessage(msg, transfer);
 }
 
-function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
+function collectPayloadTransferables(
+  payloads: (Uint8Array | string | SequencedSyncPayload)[],
+): Transferable[] {
   const transferables = [];
-  for (const payload of payloads) {
+  for (const entry of payloads) {
+    const payload = isSequencedSyncPayload(entry) ? entry.payload : entry;
     if (payload instanceof Uint8Array) {
       transferables.push(payload.buffer);
     }
   }
   return transferables;
+}
+
+function isSequencedSyncPayload(value: unknown): value is SequencedSyncPayload {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "payload" in value &&
+    "sequence" in value &&
+    typeof (value as { sequence?: unknown }).sequence === "number"
+  );
 }
 
 // ============================================================================
@@ -350,12 +410,14 @@ async function handleInit(msg: InitMessage): Promise<void> {
         destinationId: string,
         payload: Uint8Array | string,
         isCatalogue: boolean,
+        sequence?: number | null,
       ) => {
         if (destinationKind === "client") {
           const destinationClientId = destinationId;
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
-            enqueueSyncMessageForMain(payload);
+            enqueueSyncMessageForMain(payload, sequence);
+            queueRejectedBatchReplayToMain();
             return;
           }
 
@@ -374,7 +436,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
         } else if (destinationKind === "server") {
           if (bootstrapCatalogueForwarding) {
             if (isCatalogue) {
-              enqueueSyncMessageForMain(payload);
+              enqueueSyncMessageForMain(payload, sequence);
             }
           }
           // Server-bound payloads are delivered by the Rust transport; no TS action needed.
@@ -413,6 +475,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
     } finally {
       bootstrapCatalogueForwarding = false;
     }
+
+    syncRetainedLocalBatchRecordsToMain();
+    queueRejectedBatchReplayToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 
@@ -567,6 +632,14 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
+      break;
+
+    case "acknowledge-rejected-batch":
+      try {
+        runtime?.acknowledgeRejectedBatch?.(msg.batchId);
+      } catch (error) {
+        console.warn("[worker] acknowledgeRejectedBatch failed:", error);
+      }
       break;
 
     case "simulate-crash":

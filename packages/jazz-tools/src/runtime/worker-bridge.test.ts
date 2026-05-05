@@ -48,17 +48,20 @@ type SendSyncPayloadCallback = (
   destinationId: string,
   payload: Uint8Array,
   isCatalogue: boolean,
+  sequence?: number | null,
 ) => void;
 
 function createRuntimeMock(): {
   runtime: Runtime;
   emitSyncPayload: SendSyncPayloadCallback;
   receivedFromWorker: Uint8Array[];
+  receivedSequences: Array<number | null | undefined>;
   addServerCalls: { count: number };
   removeServerCalls: { count: number };
 } {
   let onSyncToSend: SendSyncPayloadCallback | null = null;
   const receivedFromWorker: Uint8Array[] = [];
+  const receivedSequences: Array<number | null | undefined> = [];
   const addServerCalls = { count: 0 };
   const removeServerCalls = { count: 0 };
 
@@ -77,10 +80,11 @@ function createRuntimeMock(): {
     unsubscribe: () => undefined,
     createSubscription: () => 1,
     executeSubscription: () => undefined,
-    onSyncMessageReceived: (payload: Uint8Array | string) => {
+    onSyncMessageReceived: (payload: Uint8Array | string, seq?: number | null) => {
       receivedFromWorker.push(
         typeof payload === "string" ? new TextEncoder().encode(payload) : payload,
       );
+      receivedSequences.push(seq);
     },
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
@@ -103,13 +107,15 @@ function createRuntimeMock(): {
       destinationId: string,
       payload: Uint8Array,
       isCatalogue = false,
+      sequence?: number | null,
     ) => {
       if (!onSyncToSend) {
         throw new Error("onSyncMessageToSend callback not registered");
       }
-      onSyncToSend(destinationKind, destinationId, payload, isCatalogue);
+      onSyncToSend(destinationKind, destinationId, payload, isCatalogue, sequence);
     },
     receivedFromWorker,
+    receivedSequences,
     addServerCalls,
     removeServerCalls,
   };
@@ -132,6 +138,24 @@ describe("WorkerBridge", () => {
     });
 
     expect(runtimeMock.receivedFromWorker).toEqual([enc({ id: 1 }), enc({ id: 2 })]);
+  });
+
+  it("forwards worker sync stream sequences to the runtime", () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+
+    new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    worker.emitFromWorker({
+      type: "sync",
+      payload: [
+        { payload: enc({ id: 1 }), sequence: 7 },
+        { payload: enc({ id: 2 }), sequence: 8 },
+      ],
+    });
+
+    expect(runtimeMock.receivedFromWorker).toEqual([enc({ id: 1 }), enc({ id: 2 })]);
+    expect(runtimeMock.receivedSequences).toEqual([7, 8]);
   });
 
   it("batches server-bound runtime payloads into one worker sync message", async () => {
