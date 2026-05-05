@@ -90,6 +90,9 @@ export type DesignerObjectRefRole =
   | "tool_stdout"
   | "tool_stderr"
   | "vcs_diff"
+  | "workspace_merge_diff"
+  | "workspace_conflict_marker"
+  | "workspace_conflict_diff"
   | (string & {});
 
 export interface DesignerObjectRefRow {
@@ -270,6 +273,91 @@ export interface DesignerVcsOperationRow {
 }
 
 export type DesignerVcsOperationInit = Omit<DesignerVcsOperationRow, "id">;
+
+export interface DesignerWorkspaceWorktreeRow {
+  id: string;
+  worktree_id: string;
+  session_id: string;
+  session_row_id: string;
+  workspace_id: string;
+  writer_id: string;
+  owner_kind: string;
+  local_path: string;
+  remote_path?: string | null;
+  repo_root: string;
+  vcs_kind: string;
+  branch_name: string;
+  live_branch_name: string;
+  base_oid?: string | null;
+  head_oid?: string | null;
+  status: string;
+  metadata_json: DesignerTraceJson;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export type DesignerWorkspaceWorktreeInit = Omit<DesignerWorkspaceWorktreeRow, "id">;
+
+export interface DesignerWorkspaceMergeAttemptRow {
+  id: string;
+  merge_attempt_id: string;
+  session_id: string;
+  session_row_id: string;
+  workspace_id: string;
+  agent_turn_id?: string | null;
+  agent_turn_row_id?: string | null;
+  vcs_operation_id?: string | null;
+  vcs_operation_row_id?: string | null;
+  source_worktree_id?: string | null;
+  source_worktree_row_id?: string | null;
+  source_writer_id: string;
+  source_branch_name: string;
+  source_worktree_path: string;
+  target_branch_name: string;
+  target_worktree_path: string;
+  base_oid?: string | null;
+  source_oid?: string | null;
+  target_before_oid?: string | null;
+  target_after_oid?: string | null;
+  result_status: string;
+  conflict_count: number;
+  diff_object_ref_id?: string | null;
+  diff_object_ref_row_id?: string | null;
+  started_at: Date;
+  completed_at?: Date | null;
+  metadata_json: DesignerTraceJson;
+}
+
+export type DesignerWorkspaceMergeAttemptInit = Omit<DesignerWorkspaceMergeAttemptRow, "id">;
+
+export interface DesignerWorkspaceConflictRow {
+  id: string;
+  conflict_id: string;
+  session_id: string;
+  session_row_id: string;
+  workspace_id: string;
+  merge_attempt_id: string;
+  merge_attempt_row_id?: string | null;
+  agent_turn_id?: string | null;
+  agent_turn_row_id?: string | null;
+  path: string;
+  conflict_kind: string;
+  resolution_status: string;
+  live_branch_name: string;
+  source_branch_name: string;
+  base_oid?: string | null;
+  ours_oid?: string | null;
+  theirs_oid?: string | null;
+  marker_object_ref_id?: string | null;
+  marker_object_ref_row_id?: string | null;
+  diff_object_ref_id?: string | null;
+  diff_object_ref_row_id?: string | null;
+  metadata_json: DesignerTraceJson;
+  created_at: Date;
+  resolved_at?: Date | null;
+}
+
+export type DesignerWorkspaceConflictInit = Omit<DesignerWorkspaceConflictRow, "id">;
 
 export interface DesignerAutonomyDecisionRow {
   id: string;
@@ -479,6 +567,75 @@ export interface RecordVcsOperationInput {
   uploadBackend?: string;
 }
 
+export interface RecordWorkspaceWorktreeInput {
+  worktreeId?: string;
+  workspaceId?: string;
+  writerId?: string;
+  ownerKind: string;
+  localPath: string;
+  remotePath?: string | null;
+  repoRoot: string;
+  vcsKind: string;
+  branchName: string;
+  liveBranchName?: string;
+  baseOid?: string | null;
+  headOid?: string | null;
+  status?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+  metadata?: DesignerTraceJson;
+}
+
+export interface RecordWorkspaceMergeAttemptInput {
+  mergeAttemptId?: string;
+  workspaceId?: string;
+  agentTurnId?: string | null;
+  agentTurnRowId?: string | null;
+  vcsOperationId?: string | null;
+  vcsOperationRowId?: string | null;
+  sourceWorktreeId?: string | null;
+  sourceWorktreeRowId?: string | null;
+  sourceWriterId: string;
+  sourceBranchName: string;
+  sourceWorktreePath: string;
+  targetBranchName?: string;
+  targetWorktreePath: string;
+  baseOid?: string | null;
+  sourceOid?: string | null;
+  targetBeforeOid?: string | null;
+  targetAfterOid?: string | null;
+  status?: string;
+  conflictCount?: number;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  diffObjectRef?: DesignerObjectRefInput;
+  metadata?: DesignerTraceJson;
+  uploadBackend?: string;
+}
+
+export interface RecordWorkspaceConflictInput {
+  conflictId?: string;
+  workspaceId?: string;
+  mergeAttemptId: string;
+  mergeAttemptRowId?: string | null;
+  agentTurnId?: string | null;
+  agentTurnRowId?: string | null;
+  path: string;
+  conflictKind: string;
+  resolutionStatus?: string;
+  liveBranchName?: string;
+  sourceBranchName: string;
+  baseOid?: string | null;
+  oursOid?: string | null;
+  theirsOid?: string | null;
+  markerObjectRef?: DesignerObjectRefInput;
+  diffObjectRef?: DesignerObjectRefInput;
+  metadata?: DesignerTraceJson;
+  createdAt?: Date;
+  resolvedAt?: Date | null;
+  uploadBackend?: string;
+}
+
 export interface RecordAutonomyDecisionInput {
   decisionId?: string;
   agentTurnId?: string | null;
@@ -605,6 +762,30 @@ export interface VcsOperationWrite {
   uploadJobs: InsertHandle<DesignerUploadJobRow>[];
 }
 
+export interface WorkspaceWorktreeWrite {
+  batchId: string;
+  worktree: InsertHandle<DesignerWorkspaceWorktreeRow>;
+}
+
+export interface WorkspaceMergeAttemptWrite {
+  batchId: string;
+  mergeAttempt: InsertHandle<DesignerWorkspaceMergeAttemptRow>;
+  objectRefs: {
+    diff?: InsertHandle<DesignerObjectRefRow>;
+  };
+  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+}
+
+export interface WorkspaceConflictWrite {
+  batchId: string;
+  conflict: InsertHandle<DesignerWorkspaceConflictRow>;
+  objectRefs: {
+    marker?: InsertHandle<DesignerObjectRefRow>;
+    diff?: InsertHandle<DesignerObjectRefRow>;
+  };
+  uploadJobs: InsertHandle<DesignerUploadJobRow>[];
+}
+
 export interface AutonomyDecisionWrite {
   batchId: string;
   decision: InsertHandle<DesignerAutonomyDecisionRow>;
@@ -649,6 +830,16 @@ export const designerTraceTables = {
     "tool_invocations",
   ),
   vcsOperations: makeTable<DesignerVcsOperationRow, DesignerVcsOperationInit>("vcs_operations"),
+  workspaceWorktrees: makeTable<DesignerWorkspaceWorktreeRow, DesignerWorkspaceWorktreeInit>(
+    "workspace_worktrees",
+  ),
+  workspaceMergeAttempts: makeTable<
+    DesignerWorkspaceMergeAttemptRow,
+    DesignerWorkspaceMergeAttemptInit
+  >("workspace_merge_attempts"),
+  workspaceConflicts: makeTable<DesignerWorkspaceConflictRow, DesignerWorkspaceConflictInit>(
+    "workspace_conflicts",
+  ),
   autonomyDecisions: makeTable<DesignerAutonomyDecisionRow, DesignerAutonomyDecisionInit>(
     "autonomy_decisions",
   ),
@@ -1101,6 +1292,158 @@ export function createDesignerTraceControlPlane(
         batchId: batch.batchId(),
         operation: batch.insert(designerTraceTables.vcsOperations, row),
         objectRefs: { diff },
+        uploadJobs,
+      };
+    },
+
+    recordWorkspaceWorktree(input: RecordWorkspaceWorktreeInput): WorkspaceWorktreeWrite {
+      const worktreeId = input.worktreeId ?? idFactory("workspace-worktree");
+      const workspaceId = input.workspaceId ?? session.workspaceId;
+      const createdAt = input.createdAt ?? now();
+      accessPolicy(undefined, workspaceId);
+      const batch = db.beginDirectBatch(designerTraceTables.workspaceWorktrees);
+      const row: DesignerWorkspaceWorktreeInit = {
+        worktree_id: worktreeId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        workspace_id: workspaceId,
+        writer_id: input.writerId ?? session.writerId,
+        owner_kind: input.ownerKind,
+        local_path: input.localPath,
+        remote_path: input.remotePath ?? null,
+        repo_root: input.repoRoot,
+        vcs_kind: input.vcsKind,
+        branch_name: input.branchName,
+        live_branch_name: input.liveBranchName ?? "live",
+        base_oid: input.baseOid ?? null,
+        head_oid: input.headOid ?? null,
+        status: input.status ?? "active",
+        metadata_json: input.metadata ?? {},
+        created_at: createdAt,
+        updated_at: input.updatedAt ?? createdAt,
+      };
+      return {
+        batchId: batch.batchId(),
+        worktree: batch.insert(designerTraceTables.workspaceWorktrees, row),
+      };
+    },
+
+    recordWorkspaceMergeAttempt(
+      input: RecordWorkspaceMergeAttemptInput,
+    ): WorkspaceMergeAttemptWrite {
+      const mergeAttemptId = input.mergeAttemptId ?? idFactory("workspace-merge-attempt");
+      const workspaceId = input.workspaceId ?? session.workspaceId;
+      const uploadBackend = input.uploadBackend ?? defaultUploadBackend;
+      const conflictCount = input.conflictCount ?? 0;
+      if (conflictCount < 0) {
+        throw new DesignerTraceControlPlaneError("merge attempt conflict count cannot be negative");
+      }
+      accessPolicy(undefined, workspaceId);
+      const batch = db.beginDirectBatch(designerTraceTables.workspaceMergeAttempts);
+      const diff = input.diffObjectRef
+        ? insertObjectRef(batch, input.diffObjectRef, "workspace_merge_diff", workspaceId)
+        : undefined;
+      const uploadJobs = diff
+        ? [
+            insertUploadJob(
+              batch,
+              diff,
+              "workspace_merge_attempt",
+              mergeAttemptId,
+              uploadBackend,
+              workspaceId,
+            ),
+          ]
+        : [];
+      const row: DesignerWorkspaceMergeAttemptInit = {
+        merge_attempt_id: mergeAttemptId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        workspace_id: workspaceId,
+        agent_turn_id: input.agentTurnId ?? null,
+        agent_turn_row_id: input.agentTurnRowId ?? null,
+        vcs_operation_id: input.vcsOperationId ?? null,
+        vcs_operation_row_id: input.vcsOperationRowId ?? null,
+        source_worktree_id: input.sourceWorktreeId ?? null,
+        source_worktree_row_id: input.sourceWorktreeRowId ?? null,
+        source_writer_id: input.sourceWriterId,
+        source_branch_name: input.sourceBranchName,
+        source_worktree_path: input.sourceWorktreePath,
+        target_branch_name: input.targetBranchName ?? "live",
+        target_worktree_path: input.targetWorktreePath,
+        base_oid: input.baseOid ?? null,
+        source_oid: input.sourceOid ?? null,
+        target_before_oid: input.targetBeforeOid ?? null,
+        target_after_oid: input.targetAfterOid ?? null,
+        result_status: input.status ?? "started",
+        conflict_count: conflictCount,
+        diff_object_ref_id: diff?.value.object_ref_id ?? null,
+        diff_object_ref_row_id: diff?.value.id ?? null,
+        started_at: input.startedAt ?? now(),
+        completed_at: input.completedAt ?? null,
+        metadata_json: input.metadata ?? {},
+      };
+      return {
+        batchId: batch.batchId(),
+        mergeAttempt: batch.insert(designerTraceTables.workspaceMergeAttempts, row),
+        objectRefs: { diff },
+        uploadJobs,
+      };
+    },
+
+    recordWorkspaceConflict(input: RecordWorkspaceConflictInput): WorkspaceConflictWrite {
+      const conflictId = input.conflictId ?? idFactory("workspace-conflict");
+      const workspaceId = input.workspaceId ?? session.workspaceId;
+      const uploadBackend = input.uploadBackend ?? defaultUploadBackend;
+      accessPolicy(undefined, workspaceId);
+      const batch = db.beginDirectBatch(designerTraceTables.workspaceConflicts);
+      const marker = input.markerObjectRef
+        ? insertObjectRef(batch, input.markerObjectRef, "workspace_conflict_marker", workspaceId)
+        : undefined;
+      const diff = input.diffObjectRef
+        ? insertObjectRef(batch, input.diffObjectRef, "workspace_conflict_diff", workspaceId)
+        : undefined;
+      const uploadJobs = [marker, diff]
+        .filter((handle): handle is InsertHandle<DesignerObjectRefRow> => handle !== undefined)
+        .map((objectRef) =>
+          insertUploadJob(
+            batch,
+            objectRef,
+            "workspace_conflict",
+            conflictId,
+            uploadBackend,
+            workspaceId,
+          ),
+        );
+      const row: DesignerWorkspaceConflictInit = {
+        conflict_id: conflictId,
+        session_id: session.sessionId,
+        session_row_id: session.sessionRowId,
+        workspace_id: workspaceId,
+        merge_attempt_id: input.mergeAttemptId,
+        merge_attempt_row_id: input.mergeAttemptRowId ?? null,
+        agent_turn_id: input.agentTurnId ?? null,
+        agent_turn_row_id: input.agentTurnRowId ?? null,
+        path: input.path,
+        conflict_kind: input.conflictKind,
+        resolution_status: input.resolutionStatus ?? "unresolved",
+        live_branch_name: input.liveBranchName ?? "live",
+        source_branch_name: input.sourceBranchName,
+        base_oid: input.baseOid ?? null,
+        ours_oid: input.oursOid ?? null,
+        theirs_oid: input.theirsOid ?? null,
+        marker_object_ref_id: marker?.value.object_ref_id ?? null,
+        marker_object_ref_row_id: marker?.value.id ?? null,
+        diff_object_ref_id: diff?.value.object_ref_id ?? null,
+        diff_object_ref_row_id: diff?.value.id ?? null,
+        metadata_json: input.metadata ?? {},
+        created_at: input.createdAt ?? now(),
+        resolved_at: input.resolvedAt ?? null,
+      };
+      return {
+        batchId: batch.batchId(),
+        conflict: batch.insert(designerTraceTables.workspaceConflicts, row),
+        objectRefs: { marker, diff },
         uploadJobs,
       };
     },

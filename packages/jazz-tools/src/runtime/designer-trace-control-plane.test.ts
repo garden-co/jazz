@@ -473,6 +473,224 @@ describe("designer trace control plane", () => {
     });
   });
 
+  it("records shared workspace worktrees, live merge attempts, and conflict artifacts", () => {
+    const db = new FakeDb();
+    const controlPlane = createControlPlane(db);
+
+    const sourceWorktreePath = "/Users/nikitavoloboev/spaces/workspace-1/work/writer-1";
+    const targetWorktreePath = "/Users/nikitavoloboev/spaces/workspace-1/work";
+
+    const worktreeWrite = controlPlane.recordWorkspaceWorktree({
+      worktreeId: "worktree-writer-1",
+      ownerKind: "codex-agent",
+      localPath: sourceWorktreePath,
+      remotePath: "/spaces/workspace-1/work/writer-1",
+      repoRoot: `${sourceWorktreePath}/gumyr/build123d`,
+      vcsKind: "jj",
+      branchName: "writer/writer-1",
+      liveBranchName: "live",
+      baseOid: "base-oid",
+      headOid: "writer-head-oid",
+      metadata: {
+        cadDemo: true,
+      },
+    });
+
+    const turnWrite = controlPlane.recordAgentTurn({
+      turnId: "codex-turn-cad-7",
+      provider: "codex",
+      providerSessionId: "019df90e-6250-7e40-9d3d-233764578375",
+      cwd: `${sourceWorktreePath}/gumyr/build123d`,
+      repoRoot: `${sourceWorktreePath}/gumyr/build123d`,
+      branchName: "writer/writer-1",
+      status: "completed",
+    });
+
+    const vcsWrite = controlPlane.recordVcsOperation({
+      vcsOperationId: "vcs-merge-cad-step-7",
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      repoRoot: `${targetWorktreePath}/gumyr/build123d`,
+      vcsKind: "jj",
+      operationKind: "merge-into-live",
+      refName: "live",
+      beforeOid: "live-before-oid",
+      afterOid: null,
+      commitOid: null,
+      parentOids: ["live-before-oid", "writer-head-oid"],
+      jjOperationId: "jj-op-cad-step-7",
+      status: "conflicted",
+      diffObjectRef: {
+        objectRefId: "object-vcs-merge-diff",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "spaces/workspace-1/merge/vcs-merge-cad-step-7.diff",
+        contentHash: "sha256:vcs-merge-diff",
+        contentType: "text/x-diff",
+      },
+    });
+
+    const mergeWrite = controlPlane.recordWorkspaceMergeAttempt({
+      mergeAttemptId: "merge-cad-step-7",
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      vcsOperationId: vcsWrite.operation.value.vcs_operation_id,
+      vcsOperationRowId: vcsWrite.operation.value.id,
+      sourceWorktreeId: worktreeWrite.worktree.value.worktree_id,
+      sourceWorktreeRowId: worktreeWrite.worktree.value.id,
+      sourceWriterId: "writer-1",
+      sourceBranchName: "writer/writer-1",
+      sourceWorktreePath,
+      targetBranchName: "live",
+      targetWorktreePath,
+      baseOid: "base-oid",
+      sourceOid: "writer-head-oid",
+      targetBeforeOid: "live-before-oid",
+      targetAfterOid: null,
+      status: "conflicted",
+      conflictCount: 1,
+      diffObjectRef: {
+        objectRefId: "object-workspace-merge-diff",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "spaces/workspace-1/merge/merge-cad-step-7.diff",
+        contentHash: "sha256:workspace-merge-diff",
+        contentType: "text/x-diff",
+      },
+      metadata: {
+        stepId: "cad-step-7",
+      },
+    });
+
+    const conflictWrite = controlPlane.recordWorkspaceConflict({
+      conflictId: "conflict-gear-profile",
+      mergeAttemptId: mergeWrite.mergeAttempt.value.merge_attempt_id,
+      mergeAttemptRowId: mergeWrite.mergeAttempt.value.id,
+      agentTurnId: turnWrite.turn.value.turn_id,
+      agentTurnRowId: turnWrite.turn.value.id,
+      path: "parts/gear.build123d.py",
+      conflictKind: "conflict-markers",
+      resolutionStatus: "unresolved",
+      liveBranchName: "live",
+      sourceBranchName: "writer/writer-1",
+      baseOid: "base-oid",
+      oursOid: "live-before-oid",
+      theirsOid: "writer-head-oid",
+      markerObjectRef: {
+        objectRefId: "object-conflict-marker",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "spaces/workspace-1/conflicts/conflict-gear-profile.py",
+        contentHash: "sha256:conflict-marker",
+        contentType: "text/x-python",
+      },
+      diffObjectRef: {
+        objectRefId: "object-conflict-diff",
+        provider: "s3",
+        bucket: "designer-trace",
+        key: "spaces/workspace-1/conflicts/conflict-gear-profile.diff",
+        contentHash: "sha256:conflict-diff",
+        contentType: "text/x-diff",
+      },
+      metadata: {
+        cadEntityPath: "Assembly/Gear",
+      },
+    });
+
+    expect(db.inserts.map((insert) => insert.table)).toEqual([
+      "workspace_worktrees",
+      "agent_turns",
+      "object_refs",
+      "upload_jobs",
+      "vcs_operations",
+      "object_refs",
+      "upload_jobs",
+      "workspace_merge_attempts",
+      "object_refs",
+      "object_refs",
+      "upload_jobs",
+      "upload_jobs",
+      "workspace_conflicts",
+    ]);
+    expect(Object.keys(designerTraceTables.workspaceWorktrees._schema)).toEqual(
+      expect.arrayContaining([
+        "workspace_worktrees",
+        "workspace_merge_attempts",
+        "workspace_conflicts",
+      ]),
+    );
+    expect(worktreeWrite.worktree.value).toMatchObject({
+      worktree_id: "worktree-writer-1",
+      workspace_id: "workspace-1",
+      writer_id: "writer-1",
+      owner_kind: "codex-agent",
+      local_path: sourceWorktreePath,
+      remote_path: "/spaces/workspace-1/work/writer-1",
+      branch_name: "writer/writer-1",
+      live_branch_name: "live",
+      status: "active",
+      metadata_json: {
+        cadDemo: true,
+      },
+    });
+    expect(mergeWrite.mergeAttempt.value).toMatchObject({
+      merge_attempt_id: "merge-cad-step-7",
+      workspace_id: "workspace-1",
+      agent_turn_id: "codex-turn-cad-7",
+      agent_turn_row_id: "agent_turns-row-2",
+      vcs_operation_id: "vcs-merge-cad-step-7",
+      vcs_operation_row_id: "vcs_operations-row-5",
+      source_worktree_id: "worktree-writer-1",
+      source_worktree_row_id: "workspace_worktrees-row-1",
+      source_writer_id: "writer-1",
+      source_branch_name: "writer/writer-1",
+      target_branch_name: "live",
+      result_status: "conflicted",
+      conflict_count: 1,
+      diff_object_ref_id: "object-workspace-merge-diff",
+      diff_object_ref_row_id: "object_refs-row-6",
+      metadata_json: {
+        stepId: "cad-step-7",
+      },
+    });
+    expect(conflictWrite.conflict.value).toMatchObject({
+      conflict_id: "conflict-gear-profile",
+      workspace_id: "workspace-1",
+      merge_attempt_id: "merge-cad-step-7",
+      merge_attempt_row_id: "workspace_merge_attempts-row-8",
+      agent_turn_id: "codex-turn-cad-7",
+      path: "parts/gear.build123d.py",
+      conflict_kind: "conflict-markers",
+      resolution_status: "unresolved",
+      live_branch_name: "live",
+      source_branch_name: "writer/writer-1",
+      marker_object_ref_id: "object-conflict-marker",
+      marker_object_ref_row_id: "object_refs-row-9",
+      diff_object_ref_id: "object-conflict-diff",
+      diff_object_ref_row_id: "object_refs-row-10",
+      metadata_json: {
+        cadEntityPath: "Assembly/Gear",
+      },
+    });
+    expect(mergeWrite.uploadJobs[0]?.value).toMatchObject({
+      target_kind: "workspace_merge_attempt",
+      target_id: "merge-cad-step-7",
+      object_ref_id: "object-workspace-merge-diff",
+    });
+    expect(conflictWrite.uploadJobs.map((handle) => handle.value)).toEqual([
+      expect.objectContaining({
+        target_kind: "workspace_conflict",
+        target_id: "conflict-gear-profile",
+        object_ref_id: "object-conflict-marker",
+      }),
+      expect.objectContaining({
+        target_kind: "workspace_conflict",
+        target_id: "conflict-gear-profile",
+        object_ref_id: "object-conflict-diff",
+      }),
+    ]);
+  });
+
   it("requires a live access proof when policies require explicit proof", () => {
     const db = new FakeDb();
     const controlPlane = createControlPlane(db, { accessProof: undefined });
