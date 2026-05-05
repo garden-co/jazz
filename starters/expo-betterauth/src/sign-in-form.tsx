@@ -68,6 +68,8 @@ export function SignInForm() {
         onPress={handleSubmit}
         disabled={isPending}
         style={[styles.primary, isPending && styles.disabled]}
+        accessibilityLabel={mode === "signup" ? "Submit create account" : "Submit sign in"}
+        accessibilityRole="button"
       >
         <Text style={styles.primaryText}>{mode === "signup" ? "Create account" : "Sign in"}</Text>
       </Pressable>

@@ -79,6 +79,8 @@ export function SignUpForm({ onToggle }: { onToggle: () => void }) {
         onPress={handleSubmit}
         disabled={isPending}
         style={[styles.primary, isPending && styles.disabled]}
+        accessibilityLabel="Submit create account"
+        accessibilityRole="button"
       >
         <Text style={styles.primaryText}>
           {isPending ? "Creating account..." : "Create account"}

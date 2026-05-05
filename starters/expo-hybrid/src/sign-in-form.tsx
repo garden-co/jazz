@@ -48,6 +48,8 @@ export function SignInForm({ onToggle }: { onToggle: () => void }) {
         onPress={handleSubmit}
         disabled={isPending}
         style={[styles.primary, isPending && styles.disabled]}
+        accessibilityLabel="Submit sign in"
+        accessibilityRole="button"
       >
         <Text style={styles.primaryText}>Sign in</Text>
       </Pressable>

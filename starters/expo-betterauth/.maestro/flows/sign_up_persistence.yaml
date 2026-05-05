@@ -18,10 +18,7 @@ appId: dev.jazz.starter.expobetterauth
 - inputText: ${output.email}
 - tapOn: "Password"
 - inputText: "testpassword"
-- hideKeyboard
-- tapOn:
-    text: "Create account"
-    index: 1
+- tapOn: "Submit create account"
 
 - extendedWaitUntil:
     visible: "Your todos"
@@ -29,7 +26,6 @@ appId: dev.jazz.starter.expobetterauth
 
 - tapOn: "New todo"
 - inputText: "Persistent todo"
-- hideKeyboard
 - tapOn: "Add todo"
 - assertNotVisible: "No todos yet."
 - assertVisible: "Persistent todo"
@@ -43,10 +39,7 @@ appId: dev.jazz.starter.expobetterauth
 - inputText: ${output.email}
 - tapOn: "Password"
 - inputText: "testpassword"
-- hideKeyboard
-- tapOn:
-    text: "Sign in"
-    index: 1
+- tapOn: "Submit sign in"
 
 - extendedWaitUntil:
     visible: "Your todos"

@@ -9,7 +9,6 @@ appId: dev.jazz.starter.expolocalfirst
 
 - tapOn: "New todo"
 - inputText: "Buy milk"
-- hideKeyboard
 - tapOn: "Add todo"
 
 - assertNotVisible: "No todos yet."
@@ -17,7 +16,6 @@ appId: dev.jazz.starter.expolocalfirst
 
 - tapOn: "New todo"
 - inputText: "Pay rent"
-- hideKeyboard
 - tapOn: "Add todo"
 
 - assertVisible: "Pay rent"
