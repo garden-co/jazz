@@ -108,6 +108,7 @@ declare module "jazz-wasm" {
     onSyncMessageToSend(callback: SyncOutboxCallback): void;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
+    batchedTick?(): void;
     addClient(): string;
     getSchema(): unknown;
     getSchemaHash(): string;
