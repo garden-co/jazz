@@ -241,7 +241,7 @@ describe("runtime/Db direct path upstream wiring", () => {
         (_context: DbRuntimeClientContext<DbConfig>) => client,
       );
       override readonly mintLocalFirstToken = vi.fn(
-        async (options: RuntimeTokenOptions) =>
+        (options: RuntimeTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
       );
 
@@ -262,7 +262,7 @@ describe("runtime/Db direct path upstream wiring", () => {
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
     db.updateAuthToken("fresh-jwt");
-    const proof = await db.getLocalFirstIdentityProof({
+    const proof = db.getLocalFirstIdentityProof({
       audience: "proof-audience",
       ttlSeconds: 7,
     });
