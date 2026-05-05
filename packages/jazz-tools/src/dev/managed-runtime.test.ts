@@ -16,6 +16,7 @@ function makeRuntime(): ManagedDevRuntime {
   return new ManagedDevRuntime({
     appId: "VITE_JAZZ_APP_ID",
     serverUrl: "VITE_JAZZ_SERVER_URL",
+    telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
   });
 }
 

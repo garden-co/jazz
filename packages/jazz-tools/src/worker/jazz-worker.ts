@@ -21,6 +21,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
+import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
 import { httpUrlToWs } from "../runtime/url.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -72,6 +73,7 @@ let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
 let currentAuth: Record<string, string> = {};
+let disposeWasmTelemetry: (() => void) | null = null;
 // Stored after init so reconnect-upstream can re-establish the WS.
 let currentWsUrl: string | null = null;
 
@@ -345,6 +347,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
     const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     await ensureWorkerWasmInitialized(wasmModule, msg);
+    disposeWasmTelemetry?.();
+    disposeWasmTelemetry = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: msg.telemetryCollectorUrl,
+      appId: msg.appId,
+      runtimeThread: "worker",
+    });
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     currentAuth = {};
@@ -611,6 +620,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "shutdown":
       initComplete = false;
+      disposeWasmTelemetry?.();
+      disposeWasmTelemetry = null;
       if (runtime) {
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
@@ -636,6 +647,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       // This simulates a crash where writes reached the WAL but no
       // clean checkpoint happened. Recovery must replay the WAL.
       initComplete = false;
+      disposeWasmTelemetry?.();
+      disposeWasmTelemetry = null;
       if (runtime) {
         runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
         runtime.free(); // Drop → releases OPFS exclusive handles
