@@ -1633,6 +1633,31 @@ impl SyncManager {
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), false)
                 {
                     self.retain_client_local_batch_row(storage, &applied.metadata, &applied.row);
+                    let accepted_direct_settlement =
+                        if matches!(applied.row.state, RowState::VisibleDirect)
+                            && let Some(confirmed_tier) = self.max_local_durability_tier()
+                        {
+                            let settlement = BatchSettlement::DurableDirect {
+                                batch_id,
+                                confirmed_tier,
+                                visible_members: vec![VisibleBatchMember {
+                                    object_id,
+                                    branch_name,
+                                    batch_id,
+                                }],
+                            };
+                            if self
+                                .persist_authoritative_batch_settlement(storage, &settlement)
+                                .is_ok()
+                            {
+                                self.pending_batch_settlements.push(settlement.clone());
+                                Some(settlement)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
                     self.forward_row_batch_to_servers(
                         storage,
                         object_id,
@@ -1651,6 +1676,25 @@ impl SyncManager {
                             branch_name,
                             client_id,
                         );
+                    }
+                    if let Some(settlement) = accepted_direct_settlement {
+                        let scoped_clients = self
+                            .clients
+                            .iter()
+                            .filter_map(|(candidate_client_id, client)| {
+                                client
+                                    .is_in_scope(object_id, &branch_name)
+                                    .then_some(*candidate_client_id)
+                            })
+                            .collect::<Vec<_>>();
+                        for scoped_client_id in scoped_clients {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(scoped_client_id),
+                                payload: SyncPayload::BatchSettlement {
+                                    settlement: settlement.clone(),
+                                },
+                            });
+                        }
                     }
                 }
                 self.try_accept_completed_sealed_batch_from_client(storage, client_id, batch_id);

@@ -1139,6 +1139,7 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
+            let had_dirty_graph = sub.graph.has_dirty_nodes();
 
             // Row loader for this subscription
             let new_scope = {
@@ -1270,7 +1271,7 @@ impl QueryManager {
                         "[jazz timing] server active subscription first QuerySettled queued"
                     );
                     settled_notifications.push((client_id, query_id, settled_tier, new_scope));
-                } else if scope_changed {
+                } else if scope_changed || had_dirty_graph {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
@@ -1680,7 +1681,7 @@ impl QueryManager {
     fn evaluate_update_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
         request: UpdatePermissionRequest<'_>,
     ) {
         let UpdatePermissionRequest {
@@ -1699,6 +1700,19 @@ impl QueryManager {
             self.sync_manager
                 .reject_permission_check(storage, check, err.to_string());
             return;
+        }
+
+        if check
+            .old_content
+            .as_ref()
+            .is_none_or(|content| content.is_empty())
+            && let Ok(Some(previous_row)) = storage.load_visible_region_row(
+                table_name.as_str(),
+                branch_name.as_str(),
+                object_id,
+            )
+        {
+            check.old_content = Some(previous_row.data.to_vec());
         }
 
         let Some(table_schema) = auth_schema.get(&table_name) else {
