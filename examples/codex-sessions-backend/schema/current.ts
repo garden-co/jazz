@@ -99,6 +99,27 @@ table("codex_stream_events", {
   observed_at: col.timestamp(),
 });
 
+table("project_context_entries", {
+  context_id: col.string(),
+  project_root: col.string(),
+  provider: col.string(),
+  session_id: col.string(),
+  turn_id: col.string().optional(),
+  cwd: col.string().optional(),
+  repo_root: col.string().optional(),
+  source_kind: col.string(),
+  source_watermark: col.string(),
+  summary: col.string(),
+  body: col.string().optional(),
+  status: col.string(),
+  score: col.float().optional(),
+  confidence: col.string().optional(),
+  metadata_json: col.json().optional(),
+  created_at: col.timestamp(),
+  updated_at: col.timestamp(),
+  expires_at: col.timestamp().optional(),
+});
+
 table("j_agent_definitions", {
   definition_id: col.string(),
   name: col.string(),

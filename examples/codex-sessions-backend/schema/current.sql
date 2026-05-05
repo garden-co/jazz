@@ -97,6 +97,27 @@ CREATE TABLE codex_stream_events (
     observed_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE project_context_entries (
+    context_id TEXT NOT NULL,
+    project_root TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    turn_id TEXT,
+    cwd TEXT,
+    repo_root TEXT,
+    source_kind TEXT NOT NULL,
+    source_watermark TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    body TEXT,
+    status TEXT NOT NULL,
+    score REAL,
+    confidence TEXT,
+    metadata_json JSON,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP
+);
+
 CREATE TABLE j_agent_definitions (
     definition_id TEXT NOT NULL,
     name TEXT NOT NULL,

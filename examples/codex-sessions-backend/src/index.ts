@@ -11,6 +11,7 @@ export {
   type CodexTurnProjection,
   type JAgentRunSummary,
   type ListCodexStreamEventsOptions,
+  type ListProjectContextEntriesOptions,
   type RecordJAgentArtifactInput,
   type RecordJAgentAttemptCompletedInput,
   type RecordJAgentAttemptStartedInput,
@@ -22,6 +23,7 @@ export {
   type RecordJAgentStepStartedInput,
   type RecordJAgentWaitResolvedInput,
   type RecordJAgentWaitStartedInput,
+  type RecordProjectContextInput,
   type UpsertJAgentDefinitionInput,
 } from "./store.js";
 export {

@@ -15,6 +15,7 @@ import type {
   JAgentStep,
   JAgentWait,
   JsonValue,
+  ProjectContextEntry,
 } from "../schema/app.js";
 import {
   type BindJAgentSessionInput,
@@ -33,6 +34,7 @@ import {
   type RecordJAgentStepStartedInput,
   type RecordJAgentWaitResolvedInput,
   type RecordJAgentWaitStartedInput,
+  type RecordProjectContextInput,
   type UpsertJAgentDefinitionInput,
 } from "./store.js";
 import {
@@ -287,6 +289,27 @@ interface JAgentArtifactRow {
   textPreview: string | null;
   metadataJson: unknown | null;
   createdAt: string;
+}
+
+interface ProjectContextEntryRow {
+  contextId: string;
+  projectRoot: string;
+  provider: string;
+  sessionId: string;
+  turnId: string | null;
+  cwd: string | null;
+  repoRoot: string | null;
+  sourceKind: string;
+  sourceWatermark: string;
+  summary: string;
+  body: string | null;
+  status: string;
+  score: number | null;
+  confidence: string | null;
+  metadataJson: unknown | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
 }
 
 interface JAgentRunSummaryRow {
@@ -680,6 +703,46 @@ function normalizeRecordCodexStreamEventInput(input: Record<string, unknown>): R
     schemaHash: stringField(input, "schemaHash", "schema_hash"),
     createdAt: timestampField(input, "createdAt", "created_at"),
     observedAt: timestampField(input, "observedAt", "observed_at"),
+  };
+}
+
+function normalizeProjectContextInput(input: Record<string, unknown>): RecordProjectContextInput {
+  const projectRoot = stringField(input, "projectRoot", "project_root");
+  const provider = stringField(input, "provider");
+  const sessionId = stringField(input, "sessionId", "session_id");
+  const summary = stringField(input, "summary");
+  if (!projectRoot) {
+    throw new Error("record-project-context requires projectRoot");
+  }
+  if (!provider) {
+    throw new Error("record-project-context requires provider");
+  }
+  if (!sessionId) {
+    throw new Error("record-project-context requires sessionId");
+  }
+  if (!summary) {
+    throw new Error("record-project-context requires summary");
+  }
+
+  return {
+    contextId: stringField(input, "contextId", "context_id"),
+    projectRoot: expandHomePath(projectRoot),
+    provider,
+    sessionId,
+    turnId: stringField(input, "turnId", "turn_id"),
+    cwd: normalizeOptionalPath(stringField(input, "cwd")),
+    repoRoot: normalizeOptionalPath(stringField(input, "repoRoot", "repo_root")),
+    sourceKind: stringField(input, "sourceKind", "source_kind"),
+    sourceWatermark: stringField(input, "sourceWatermark", "source_watermark"),
+    summary,
+    body: stringField(input, "body"),
+    status: stringField(input, "status"),
+    score: numberField(input, "score"),
+    confidence: stringField(input, "confidence"),
+    metadataJson: jsonField(input, "metadataJson", "metadata_json"),
+    createdAt: timestampField(input, "createdAt", "created_at"),
+    updatedAt: timestampField(input, "updatedAt", "updated_at"),
+    expiresAt: timestampField(input, "expiresAt", "expires_at"),
   };
 }
 
@@ -1450,6 +1513,29 @@ function toJAgentArtifactRow(artifact: JAgentArtifact): JAgentArtifactRow {
   };
 }
 
+function toProjectContextEntryRow(entry: ProjectContextEntry): ProjectContextEntryRow {
+  return {
+    contextId: entry.context_id,
+    projectRoot: entry.project_root,
+    provider: entry.provider,
+    sessionId: entry.session_id,
+    turnId: nullish(entry.turn_id),
+    cwd: nullish(entry.cwd),
+    repoRoot: nullish(entry.repo_root),
+    sourceKind: entry.source_kind,
+    sourceWatermark: entry.source_watermark,
+    summary: entry.summary,
+    body: nullish(entry.body),
+    status: entry.status,
+    score: nullish(entry.score),
+    confidence: nullish(entry.confidence),
+    metadataJson: nullish(entry.metadata_json),
+    createdAt: asIsoString(entry.created_at),
+    updatedAt: asIsoString(entry.updated_at),
+    expiresAt: asNullableIsoString(entry.expires_at),
+  };
+}
+
 function toJAgentRunSummaryRow(summary: JAgentRunSummary): JAgentRunSummaryRow {
   return {
     definition: toJAgentDefinitionRow(summary.definition),
@@ -2085,6 +2171,23 @@ async function dispatchSessionServiceRequest(
         limit: request.limit ?? 50,
       });
       return completions.map(asJsonLine);
+    }
+    case "record-project-context": {
+      const input = normalizeProjectContextInput(
+        request.payload as Record<string, unknown>,
+      );
+      const entry = await store.recordProjectContext(input);
+      return toProjectContextEntryRow(entry);
+    }
+    case "list-project-context": {
+      if (!request.projectRoot) {
+        throw new Error("list-project-context requires projectRoot");
+      }
+      const entries = await store.listProjectContextEntries({
+        projectRoot: expandHomePath(request.projectRoot),
+        limit: request.limit ?? 50,
+      });
+      return entries.map(toProjectContextEntryRow);
     }
     case "list-rollout-events": {
       if (!request.sessionId && !request.absolutePath) {
@@ -3833,6 +3936,29 @@ async function main(): Promise<void> {
       );
       const event = await store.recordCodexStreamEvent(input);
       console.log(JSON.stringify(asStreamEventJsonLine(event)));
+      return;
+    }
+
+    if (command === "record-project-context") {
+      const input = normalizeProjectContextInput(
+        readJsonInput<Record<string, unknown>>(command),
+      );
+      const entry = await store.recordProjectContext(input);
+      console.log(JSON.stringify(toProjectContextEntryRow(entry)));
+      return;
+    }
+
+    if (command === "list-project-context") {
+      const projectRoot = readFlag("--project-root");
+      if (!projectRoot) {
+        throw new Error("list-project-context requires --project-root");
+      }
+      const limit = Number(readFlag("--limit") ?? "50");
+      const entries = await store.listProjectContextEntries({
+        projectRoot: expandHomePath(projectRoot),
+        limit,
+      });
+      console.log(JSON.stringify(entries.map(toProjectContextEntryRow)));
       return;
     }
 

@@ -223,6 +223,87 @@ describe("CodexSessionStore", () => {
     });
   });
 
+  it("records project context entries for prompt-time cache materialization", async () => {
+    const first = await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "codex",
+      sessionId: "019df3bb",
+      turnId: "turn-1",
+      summary: "Initial Designer context handoff",
+      body: "The work is about project-scoped context sync.",
+      updatedAt: "2026-05-04T12:00:00.000Z",
+    });
+    await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "claude",
+      sessionId: "claude-1",
+      turnId: "turn-2",
+      summary: "Claude reviewer context",
+      updatedAt: "2026-05-04T12:02:00.000Z",
+    });
+    await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "codex",
+      sessionId: "019df3bb",
+      turnId: "turn-1",
+      summary: "Updated Designer context handoff",
+      body: "End-of-turn writes are durable; prompt-time reads use a cache.",
+      updatedAt: "2026-05-04T12:03:00.000Z",
+    });
+    await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "cursor",
+      sessionId: "cursor-1",
+      summary: "Archived context",
+      status: "archived",
+      updatedAt: "2026-05-04T12:04:00.000Z",
+    });
+    await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "codex",
+      sessionId: "expired",
+      summary: "Expired context",
+      updatedAt: "2026-05-04T12:05:00.000Z",
+      expiresAt: "2026-05-04T12:06:00.000Z",
+    });
+    await store.recordProjectContext({
+      projectRoot: "/Users/nikitavoloboev/repos/openai/codex",
+      provider: "codex",
+      sessionId: "other-project",
+      summary: "Other project context",
+      updatedAt: "2026-05-04T12:06:00.000Z",
+    });
+
+    const entries = await store.listProjectContextEntries({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      limit: 10,
+    });
+    const replacement = entries.find((entry) => entry.provider === "codex");
+
+    expect(entries.map((entry) => entry.summary)).toEqual([
+      "Updated Designer context handoff",
+      "Claude reviewer context",
+    ]);
+    expect(replacement?.id).toBe(first.id);
+    expect(replacement?.context_id).toBe(first.context_id);
+    expect(replacement?.body).toBe(
+      "End-of-turn writes are durable; prompt-time reads use a cache.",
+    );
+
+    const allEntries = await store.listProjectContextEntries({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      includeInactive: true,
+      includeExpired: true,
+      limit: 10,
+    });
+    expect(allEntries.map((entry) => entry.summary)).toEqual([
+      "Expired context",
+      "Archived context",
+      "Updated Designer context handoff",
+      "Claude reviewer context",
+    ]);
+  });
+
   it("creates a native Jazz run binding for every projected codex session", async () => {
     await store.replaceSessionProjection(
       {
