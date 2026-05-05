@@ -22,7 +22,7 @@ export async function loadJazzRn(): Promise<JazzRnDefault> {
   try {
     mod = await importJazzRn();
   } catch (err) {
-    if (!isModuleNotFoundError(err)) throw err;
+    if (!isModuleNotFoundError(err, "jazz-rn")) throw err;
     throw makeMissingError(err);
   }
   cached = mod.default;
