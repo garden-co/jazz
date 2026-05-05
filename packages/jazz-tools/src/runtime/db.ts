@@ -888,15 +888,9 @@ export class Db {
     }
   }
 
-  private mintLocalFirstToken(
-    secret: string,
-    audience: string,
-    ttlSeconds: number,
-  ): string {
+  private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
     if (!this.runtimeModule) {
-      throw new Error(
-        "Db runtime module is not initialized for this Db implementation",
-      );
+      throw new Error("Db runtime module is not initialized for this Db implementation");
     }
 
     return this.runtimeModule.mintLocalFirstToken({
@@ -1664,10 +1658,7 @@ export class Db {
    * Mint a short-lived local-first JWT proving possession of the current identity.
    * Returns `null` if the current session is not local-first.
    */
-  getLocalFirstIdentityProof(options?: {
-    ttlSeconds?: number;
-    audience?: string;
-  }): string | null {
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
       return null;
     }
