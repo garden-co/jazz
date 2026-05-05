@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
@@ -65,8 +65,10 @@ const runtime = new ManagedDevRuntime({
 async function copyWasmToPublic(appRoot: string): Promise<void> {
   // Resolve from the consumer's project root: jazz-wasm is an optional peer
   // dependency installed by the consumer, so under pnpm it isn't visible from
-  // jazz-tools' own isolated node_modules scope.
-  const require = createRequire(join(appRoot, "package.json"));
+  // jazz-tools' own isolated node_modules scope. createRequire requires an
+  // absolute path, so anchor a relative `appRoot` to cwd first.
+  const absoluteAppRoot = isAbsolute(appRoot) ? appRoot : resolve(appRoot);
+  const require = createRequire(join(absoluteAppRoot, "package.json"));
   let pkgJsonPath: string;
   try {
     pkgJsonPath = require.resolve("jazz-wasm/package.json");
@@ -81,7 +83,7 @@ async function copyWasmToPublic(appRoot: string): Promise<void> {
     );
   }
   const wasmSource = join(dirname(pkgJsonPath), "pkg", "jazz_wasm_bg.wasm");
-  const wasmDest = join(appRoot, "public", PUBLIC_WASM_SUBPATH);
+  const wasmDest = join(absoluteAppRoot, "public", PUBLIC_WASM_SUBPATH);
   await mkdir(dirname(wasmDest), { recursive: true });
   await copyFile(wasmSource, wasmDest);
 }
