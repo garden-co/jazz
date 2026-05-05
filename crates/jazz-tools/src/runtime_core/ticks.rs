@@ -1,6 +1,6 @@
 use super::*;
 use crate::batch_fate::LocalBatchMember;
-use crate::row_histories::RowState;
+use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -253,7 +253,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             ));
         }
 
-        for (table, _, _, _, _, _, _) in &cleared_rows {
+        for (table, _, _, _, _, _, was_visible) in &cleared_rows {
+            if *was_visible {
+                continue;
+            }
             batch_patch_succeeded_by_table
                 .entry(table.clone())
                 .or_insert_with(|| {
@@ -272,7 +275,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         for (table, schema_hash, branch, row_id, member_batch_id, row_data, was_visible) in
             cleared_rows
         {
-            if !batch_patch_succeeded_by_table
+            if was_visible {
+                let branch_name = crate::object::BranchName::new(&branch);
+                let _ = patch_row_batch_state(
+                    &mut self.storage,
+                    row_id,
+                    &branch_name,
+                    member_batch_id,
+                    Some(RowState::Rejected),
+                    None,
+                );
+            } else if !batch_patch_succeeded_by_table
                 .get(&table)
                 .copied()
                 .unwrap_or(false)
@@ -288,19 +301,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 );
             }
             if was_visible {
-                let _ = self
+                match self
                     .storage
-                    .delete_visible_region_row(&table, &branch, row_id);
-            }
-            if was_visible {
-                query_manager.retract_local_rejected_row(
-                    &mut self.storage,
-                    &table,
-                    &branch,
-                    row_id,
-                    &row_data,
-                    true,
-                );
+                    .load_visible_region_row(&table, &branch, row_id)
+                {
+                    Ok(Some(_)) => {
+                        query_manager.clear_local_pending_row_overlay(&table, row_id);
+                    }
+                    _ => {
+                        let _ = self
+                            .storage
+                            .delete_visible_region_row(&table, &branch, row_id);
+                        query_manager.retract_local_rejected_row(
+                            &mut self.storage,
+                            &table,
+                            &branch,
+                            row_id,
+                            &row_data,
+                            true,
+                        );
+                    }
+                }
             } else {
                 query_manager.retract_local_pending_transaction_row(
                     &mut self.storage,

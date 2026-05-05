@@ -1092,6 +1092,16 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_settlement_members(&mut self) {
+        for subscription in self.subscriptions.values_mut() {
+            subscription.needs_visibility_recompute = true;
+            subscription.graph.mark_all_dirty();
+        }
+        for subscription in self.server_subscriptions.values_mut() {
+            subscription.graph.mark_all_dirty();
+        }
+    }
+
     pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
         &mut self,
         confirmed_tier: DurabilityTier,
@@ -1155,6 +1165,9 @@ impl QueryManager {
         }
         let batch_settlements = self.sync_manager.pending_batch_settlements().to_vec();
         for settlement in &batch_settlements {
+            if !settlement.visible_members().is_empty() {
+                self.mark_subscriptions_visibility_recompute_for_settlement_members();
+            }
             if let Some(confirmed_tier) = settlement.confirmed_tier() {
                 self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
             }
@@ -1208,6 +1221,18 @@ impl QueryManager {
 
         // 4b. Settle policy graphs and finalize completed checks
         self.settle_policy_checks(storage);
+
+        let post_permission_row_visibility_changes =
+            self.sync_manager.take_pending_row_visibility_changes();
+        if !post_permission_row_visibility_changes.is_empty() {
+            tracing::debug!(
+                count = post_permission_row_visibility_changes.len(),
+                "processing row visibility changes from accepted permission checks"
+            );
+        }
+        for update in post_permission_row_visibility_changes {
+            self.handle_row_update(storage, update);
+        }
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
         // sequenced sync updates. Watermarked settlements stay queued for
