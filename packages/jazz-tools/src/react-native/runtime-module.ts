@@ -13,15 +13,6 @@ export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
   tier?: DurabilityTier;
 }
 
-type ReactNativeIdentityBinding = {
-  mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: bigint): string;
-  mintAnonymousToken(seedB64: string, audience: string, ttlSeconds: bigint): string;
-};
-
-function identityBinding(): ReactNativeIdentityBinding {
-  return jazzRn.jazz_rn as ReactNativeIdentityBinding;
-}
-
 export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntimeDbConfig> {
   override readonly supportsBrowserWorker = false;
   override readonly supportsPolicyBypass = false;
@@ -65,7 +56,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
   }
 
   override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return identityBinding().mintLocalFirstToken(
+    return jazzRn.jazz_rn.mintLocalFirstToken(
       options.secret,
       options.audience,
       BigInt(options.ttlSeconds),
@@ -73,7 +64,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
   }
 
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return identityBinding().mintAnonymousToken(
+    return jazzRn.jazz_rn.mintAnonymousToken(
       options.secret,
       options.audience,
       BigInt(options.ttlSeconds),
