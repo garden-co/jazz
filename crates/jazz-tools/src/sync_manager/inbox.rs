@@ -1714,18 +1714,12 @@ impl SyncManager {
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
                     self.retain_client_local_batch_row(storage, &applied.metadata, &applied.row);
-                    if let Some(table) = applied.metadata.get(MetadataKey::Table.as_str()).cloned()
-                    {
-                        self.forward_row_batch_to_servers_with_storage(
-                            storage,
-                            table.as_str(),
-                            object_id,
-                            applied.metadata.clone(),
-                            row,
-                        );
-                    } else {
-                        self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
-                    }
+                    self.forward_row_batch_to_servers(
+                        storage,
+                        object_id,
+                        applied.metadata.clone(),
+                        row,
+                    );
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
