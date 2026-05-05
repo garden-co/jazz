@@ -77,6 +77,13 @@ export function resolveDbAuthConfig<RuntimeConfig extends DbConfig>(
   };
 }
 
+/**
+ * Manages the in-memory token lifecycle for a Db created with a local-first secret.
+ *
+ * The manager does not persist, load, or rotate the secret itself. It only keeps
+ * the resolved secret available for identity proofs and periodically mints a
+ * fresh app auth token before the current one expires.
+ */
 export class LocalFirstAuthManager<RuntimeConfig extends DbConfig = DbConfig> {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly ttlSeconds: number;
