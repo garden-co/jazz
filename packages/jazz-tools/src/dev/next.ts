@@ -63,8 +63,23 @@ const runtime = new ManagedDevRuntime({
 });
 
 async function copyWasmToPublic(appRoot: string): Promise<void> {
-  const require = createRequire(import.meta.url);
-  const pkgJsonPath = require.resolve("jazz-wasm/package.json");
+  // Resolve from the consumer's project root: jazz-wasm is an optional peer
+  // dependency installed by the consumer, so under pnpm it isn't visible from
+  // jazz-tools' own isolated node_modules scope.
+  const require = createRequire(join(appRoot, "package.json"));
+  let pkgJsonPath: string;
+  try {
+    pkgJsonPath = require.resolve("jazz-wasm/package.json");
+  } catch (err) {
+    throw new Error(
+      `[jazz] The "jazz-wasm" peer dependency is required but is not installed in this project.\n` +
+        `Install it alongside jazz-tools, e.g.:\n` +
+        `  npm install jazz-wasm\n` +
+        `  pnpm add jazz-wasm\n` +
+        `  yarn add jazz-wasm`,
+      { cause: err },
+    );
+  }
   const wasmSource = join(dirname(pkgJsonPath), "pkg", "jazz_wasm_bg.wasm");
   const wasmDest = join(appRoot, "public", PUBLIC_WASM_SUBPATH);
   await mkdir(dirname(wasmDest), { recursive: true });

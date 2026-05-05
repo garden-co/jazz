@@ -13,7 +13,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "jazz-napi": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-tools": "workspace:*",
+    "jazz-wasm": "workspace:*"
   },
   "devDependencies": {
     "@hono/node-server": "^1.19.11",

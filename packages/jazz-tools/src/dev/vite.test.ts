@@ -79,21 +79,6 @@ describe("jazzPlugin", () => {
     expect(result.optimizeDeps?.exclude).toContain("some-dep");
   });
 
-  // Without this alias, a Vite consumer installed via pnpm hits
-  // "Failed to resolve import 'jazz-wasm'" at runtime — the bare specifier
-  // in jazz-tools' chunk can't be found unless jazz-wasm is hoisted or a
-  // direct dep. The alias resolves it from the plugin's own location.
-  it("config hook aliases jazz-wasm to an absolute path", () => {
-    const plugin = jazzPlugin();
-    const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
-    const result = config!({}) as {
-      resolve?: { alias?: { find: RegExp | string; replacement: string }[] };
-    };
-    const alias = result.resolve?.alias?.find((a) => String(a.find) === "/^jazz-wasm$/");
-    expect(alias).toBeDefined();
-    expect(alias!.replacement).toMatch(/jazz_wasm\.js$/);
-  });
-
   it("starts a server and pushes schema via configureServer hook", async () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
