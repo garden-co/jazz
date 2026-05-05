@@ -62,6 +62,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The capabilities the {@link StorageResetCoordinator} needs from its embedding
+ * runtime (the `Db`) to drive a cross-tab OPFS reset: tab/leader state, the
+ * sync channel for tab-to-tab messages, and lifecycle hooks to shut down and
+ * resume the worker around the destructive delete.
+ */
 export interface StorageResetHost {
   isShuttingDown(): boolean;
   getTabId(): string | null;
@@ -77,6 +83,19 @@ export interface StorageResetHost {
   resumeWorker(): Promise<void>;
 }
 
+/**
+ * Coordinates a browser storage (OPFS) reset across all open tabs of the same
+ * origin so the destructive delete only happens while every tab has released
+ * its worker.
+ *
+ * The leader tab runs the protocol: it broadcasts `storage-reset-begin`, waits
+ * for each follower's `storage-reset-ack` with its current namespace, deletes
+ * the matching OPFS files once the channel goes quiet, and broadcasts
+ * `storage-reset-finished` so all tabs resume their workers in lockstep.
+ * Non-leader tabs send `storage-reset-request` to the leader and otherwise
+ * follow the leader's messages. With no sync channel (single-tab fallback)
+ * the local tab plays both roles.
+ */
 export class StorageResetCoordinator {
   private active: StorageResetContext | null = null;
   private coordinator: CoordinatorState | null = null;
