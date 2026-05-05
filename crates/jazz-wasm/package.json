@@ -26,6 +26,7 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "wasm-pack build --target web --profiling"
+    "build": "wasm-pack build --target web --release",
+    "build:profiling": "wasm-pack build --target web --profiling"
   }
 }
