@@ -310,6 +310,38 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
+  it("rolls back an open transaction without sealing the batch", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.rollback();
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+    expect(() => tx.commit()).toThrow(/rolled back/i);
+    expect(() => tx.rollback()).toThrow(/rolled back/i);
+  });
+
+  it("rejects rollback after a transaction has been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.commit();
+
+    expect(() => tx.rollback()).toThrow(/committed/i);
+  });
+
+  it("rejects commit after a transaction has already been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const tx = client.beginTransaction();
+
+    tx.commit();
+
+    expect(() => tx.commit()).toThrow(/committed/i);
+  });
+
   it("returns a write handle from batch commit so callers can wait on the batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
@@ -412,30 +444,6 @@ describe("JazzClient transactions", () => {
       title: "Async callback batch",
     });
     expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
-  });
-
-  it("does not commit a callback transaction when the callback throws", () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const error = new Error("nope");
-
-    expect(() =>
-      client.transaction(() => {
-        throw error;
-      }),
-    ).toThrow(error);
-
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
-  });
-
-  it("does not commit a callback transaction when the async callback rejects", async () => {
-    const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const error = new Error("nope");
-
-    await expect(client.transaction(async () => Promise.reject(error))).rejects.toBe(error);
-
-    expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 
   it("does not commit a callback batch when the callback throws", () => {

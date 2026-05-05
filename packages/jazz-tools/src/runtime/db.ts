@@ -482,19 +482,10 @@ function transformInputColumns(
  * accepted by the authority.
  */
 export class DbTransaction {
-  private committed = false;
-
   constructor(
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
   ) {}
-
-  private ensureActive(): void {
-    if (this.committed) {
-      const batchId = dbTransactionBindings.get(this)?.runtimeTransaction.batchId() ?? "unbound";
-      throw new Error(`Transaction ${batchId} is already committed`);
-    }
-  }
 
   private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbTransactionBinding {
     const existingBinding = dbTransactionBindings.get(this);
@@ -526,9 +517,20 @@ export class DbTransaction {
    * Commit the transaction. Data will be globally visible once it's accepted by the authority.
    */
   commit(): WriteHandle {
-    const runtimeTransaction = this.requireRuntimeTransaction("commit");
-    this.committed = true;
-    return runtimeTransaction.commit();
+    return this.requireRuntimeTransaction("commit").commit();
+  }
+
+  /**
+   * Roll back this transaction locally.
+   *
+   * Pending rows remain pending, but this transaction handle can no longer be committed.
+   *
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, throw an error inside the callback
+   * to roll back the transaction.
+   */
+  rollback(): void {
+    this.requireRuntimeTransaction("rollback").rollback();
   }
 
   /**
@@ -538,7 +540,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    this.ensureActive();
     this.bindTable(table, "DbTransaction");
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
@@ -556,7 +557,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    this.ensureActive();
     this.bindTable(table, "DbTransaction");
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
@@ -570,7 +570,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.ensureActive();
     this.bindTable(table, "DbTransaction");
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
@@ -584,7 +583,6 @@ export class DbTransaction {
    * once it's committed with {@link DbTransaction.commit}.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    this.ensureActive();
     const { runtimeTransaction } = this.bindTable(table, "DbTransaction");
     runtimeTransaction.delete(id);
   }
@@ -595,7 +593,6 @@ export class DbTransaction {
    * Read data is scoped to this transaction.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    this.ensureActive();
     const { client, runtimeTransaction } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
@@ -648,7 +645,7 @@ export class DbTransaction {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Omit<DbTransaction, "commit">;
+export type DbTransactionScope = Omit<DbTransaction, "commit" | "rollback">;
 
 /**
  * Direct batches group a set of writes that should settle immediately, without an authority,
@@ -696,6 +693,10 @@ export class DbDirectBatch {
   /**
    * Commit the direct batch. Data is visible optimistically immediately and can
    * be waited on through the returned handle.
+   *
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, the transaction is committed automatically
+   * once the callback finishes running.
    */
   commit(): WriteHandle {
     if (this.committedHandle) {
