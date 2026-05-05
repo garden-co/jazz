@@ -2,6 +2,7 @@ import * as React from "react";
 import {
   ActivityIndicator,
   Image,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -73,7 +74,6 @@ function HybridProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (isPending) return;
     let cancelled = false;
-    setConfig(null);
 
     (async () => {
       const next = authenticated ? await buildJwtConfig() : await buildLocalFirstConfig();
@@ -170,6 +170,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#f4f4f4",
+    paddingTop: Platform.OS === "android" ? (StatusBar.currentHeight ?? 0) : 0,
   },
   content: {
     paddingHorizontal: 16,
