@@ -165,7 +165,7 @@ pub fn run(command: DbCommand) -> Result<(), String> {
         DbAction::Insert { table, args, input } => {
             let db = open_db(&args)?;
             let values = parse_value_map(&input.read_required("insert values")?)?;
-            let (object_id, row_values) = db
+            let (object_id, row_values, _batch_id) = db
                 .runtime
                 .insert(&table, values, None)
                 .map_err(|err| format!("insert failed: {err}"))?;
@@ -659,6 +659,7 @@ pub(crate) fn value_json(value: &Value, column_type: Option<&ColumnType>) -> Jso
         (Value::Text(v), _) => json!(v),
         (Value::Timestamp(v), _) => json!(v),
         (Value::Uuid(v), _) => json!(v.to_string()),
+        (Value::BatchId(v), _) => json!(hex::encode(v)),
         (Value::Bytea(bytes), _) => json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
         (Value::Array(items), Some(ColumnType::Array { element })) => JsonValue::Array(
             items

@@ -90,6 +90,7 @@ CREATE TABLE codex_stream_events (
     source_host TEXT,
     source_path TEXT,
     text_delta TEXT,
+    payload_read_cursor_key TEXT,
     payload_json JSON,
     raw_json JSON,
     schema_hash TEXT,

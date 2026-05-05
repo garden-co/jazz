@@ -109,6 +109,7 @@ export interface CodexStreamEvent {
   source_host?: string;
   source_path?: string;
   text_delta?: string;
+  payload_read_cursor_key?: string;
   payload_json?: JsonValue;
   raw_json?: JsonValue;
   schema_hash?: string;
@@ -353,6 +354,7 @@ export interface CodexStreamEventInit {
   source_host?: string | null;
   source_path?: string | null;
   text_delta?: string | null;
+  payload_read_cursor_key?: string | null;
   payload_json?: JsonValue | null;
   raw_json?: JsonValue | null;
   schema_hash?: string | null;
@@ -606,6 +608,7 @@ export interface CodexStreamEventWhereInput {
   source_host?: string | { eq?: string; ne?: string; contains?: string };
   source_path?: string | { eq?: string; ne?: string; contains?: string };
   text_delta?: string | { eq?: string; ne?: string; contains?: string };
+  payload_read_cursor_key?: string | { eq?: string; ne?: string; contains?: string };
   payload_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
   raw_json?: JsonValue | { eq?: JsonValue; ne?: JsonValue; in?: JsonValue[] };
   schema_hash?: string | { eq?: string; ne?: string; contains?: string };
@@ -2104,6 +2107,13 @@ export const wasmSchema: WasmSchema = {
       },
       {
         "name": "text_delta",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "payload_read_cursor_key",
         "column_type": {
           "type": "Text"
         },

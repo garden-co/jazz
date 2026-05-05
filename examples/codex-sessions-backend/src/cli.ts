@@ -127,6 +127,9 @@ interface SessionServiceRequest {
   afterLineNumber?: number;
   afterByteOffset?: number;
   afterSequence?: number;
+  eventKind?: string;
+  sourceId?: string;
+  payloadReadCursorKey?: string;
   follow?: boolean;
   idleTimeoutMs?: number;
   pollIntervalMs?: number;
@@ -2033,9 +2036,12 @@ async function dispatchSessionServiceRequest(
     return (await getStreamStore().listCodexStreamEvents({
       sessionId: request.sessionId,
       turnId: request.turnId,
+      eventKind: request.eventKind,
+      sourceId: request.sourceId,
       afterSequence: request.afterSequence,
       limit: request.limit ?? 200,
       latest: request.latest,
+      payloadReadCursorKey: request.payloadReadCursorKey,
     })).map((event) => asStreamEventJsonLine(event, {
       includePayload: request.includePayload !== false,
     }));
@@ -2962,6 +2968,7 @@ function asStreamEventJsonLine(
     sourceHost: event.source_host,
     sourcePath: event.source_path,
     textDelta: event.text_delta,
+    payloadReadCursorKey: event.payload_read_cursor_key,
     schemaHash: event.schema_hash,
     createdAt: event.created_at.toISOString(),
     observedAt: event.observed_at.toISOString(),
@@ -3596,9 +3603,12 @@ async function main(): Promise<void> {
         const events = await streamStore.listCodexStreamEvents({
           sessionId: readFlag("--session-id"),
           turnId: readFlag("--turn-id"),
+          eventKind: readFlag("--event-kind"),
+          sourceId: readFlag("--source-id"),
           afterSequence: readOptionalNumberFlag("--after-sequence"),
           limit: readOptionalNumberFlag("--limit") ?? 200,
           latest: readBooleanFlag("--latest", false),
+          payloadReadCursorKey: readFlag("--payload-read-cursor-key"),
         });
         console.log(JSON.stringify(events.map((event) => asStreamEventJsonLine(event, {
           includePayload,
@@ -3833,9 +3843,12 @@ async function main(): Promise<void> {
       const events = await store.listCodexStreamEvents({
         sessionId: readFlag("--session-id"),
         turnId: readFlag("--turn-id"),
+        eventKind: readFlag("--event-kind"),
+        sourceId: readFlag("--source-id"),
         afterSequence: readOptionalNumberFlag("--after-sequence"),
         limit: readOptionalNumberFlag("--limit") ?? 200,
         latest: readBooleanFlag("--latest", false),
+        payloadReadCursorKey: readFlag("--payload-read-cursor-key"),
       });
       console.log(JSON.stringify(events.map((event) => asStreamEventJsonLine(event, {
         includePayload,

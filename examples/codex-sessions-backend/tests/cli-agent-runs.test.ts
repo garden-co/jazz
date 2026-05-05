@@ -471,6 +471,80 @@ describe("codex-sessions CLI agent-run commands", () => {
     ]);
     expect(latest[0].payloadJson).toBeUndefined();
     expect(latest[0].rawJson).toBeUndefined();
+
+    runCliJson("record-event", {
+      sessionId: "session-parent",
+      sequence: 10,
+      eventKind: "tail_context_receipt",
+      eventType: "read",
+      sourceId: "codex-tail-context-hook",
+      payloadJson: {
+        readCursorKey: "cursor-shared",
+        targetSession: "codex:target",
+        rolloutPath: "/tmp/target.jsonl",
+        readToByte: 1024,
+        readToLine: 12,
+      },
+      createdAt: "2026-05-02T12:00:10.000Z",
+      observedAt: "2026-05-02T12:00:10.010Z",
+    });
+    runCliJson("record-event", {
+      sessionId: "session-parent",
+      sequence: 11,
+      eventKind: "tail_context_receipt",
+      eventType: "read",
+      sourceId: "codex-tail-context-hook",
+      payloadJson: {
+        readCursorKey: "cursor-shared",
+        targetSession: "codex:target",
+        rolloutPath: "/tmp/target.jsonl",
+        readToByte: 2048,
+        readToLine: 18,
+      },
+      createdAt: "2026-05-02T12:00:11.000Z",
+      observedAt: "2026-05-02T12:00:11.010Z",
+    });
+    runCliJson("record-event", {
+      sessionId: "session-parent",
+      sequence: 12,
+      eventKind: "tail_context_receipt",
+      eventType: "read",
+      sourceId: "codex-tail-context-hook",
+      payloadJson: {
+        readCursorKey: "cursor-other",
+        targetSession: "codex:target",
+        rolloutPath: "/tmp/target.jsonl",
+        readToByte: 4096,
+      },
+      createdAt: "2026-05-02T12:00:12.000Z",
+      observedAt: "2026-05-02T12:00:12.010Z",
+    });
+    const cursorEvents = runCliJson("list-stream-events", undefined, [
+      "--session-id",
+      "session-parent",
+      "--event-kind",
+      "tail_context_receipt",
+      "--source-id",
+      "codex-tail-context-hook",
+      "--payload-read-cursor-key",
+      "cursor-shared",
+      "--latest",
+      "true",
+      "--limit",
+      "1",
+    ]);
+    expect(cursorEvents).toHaveLength(1);
+    expect(cursorEvents[0]).toMatchObject({
+      sequence: 11,
+      eventKind: "tail_context_receipt",
+      sourceId: "codex-tail-context-hook",
+      payloadReadCursorKey: "cursor-shared",
+      payloadJson: {
+        readCursorKey: "cursor-shared",
+        readToByte: 2048,
+        readToLine: 18,
+      },
+    });
   }, 15_000);
 
   it("replicates appended rollout events into the durable stream table", async () => {

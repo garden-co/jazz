@@ -15,6 +15,7 @@ import {
   type CodexSessionPresenceInit,
   type CodexStreamEvent,
   type CodexStreamEventInit,
+  type CodexStreamEventWhereInput,
   type CodexSyncState,
   type CodexSyncStateInit,
   type CodexTurn,
@@ -169,9 +170,12 @@ export interface RecordCodexStreamEventInput {
 export interface ListCodexStreamEventsOptions {
   sessionId?: string;
   turnId?: string;
+  eventKind?: string;
+  sourceId?: string;
   afterSequence?: number;
   limit?: number;
   latest?: boolean;
+  payloadReadCursorKey?: string;
 }
 
 export interface RecordProjectContextInput {
@@ -387,6 +391,14 @@ function nullable<T>(value: T | undefined): T | null {
   return value ?? null;
 }
 
+function streamPayloadReadCursorKey(payload: JsonValue | null | undefined): string | undefined {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return undefined;
+  }
+  const value = (payload as Record<string, unknown>).readCursorKey;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 function sessionPreview(projection: CodexSessionProjection): string | undefined {
   return (
     projection.latestPreview ??
@@ -525,6 +537,24 @@ function deterministicProjectContextEntryId(input: {
     .digest("hex")
     .slice(0, 32);
   return `project-context:${digest}`;
+}
+
+function deterministicUuid(input: string): string {
+  const bytes = Buffer.from(createHash("sha256").update(input).digest().subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+function deterministicProjectContextRowId(contextId: string): string {
+  return deterministicUuid(`project-context-entry\0${contextId}`);
 }
 
 function terminalActivityState(input: RecordCodexTerminalPresenceInput): string {
@@ -831,6 +861,7 @@ export class CodexSessionStore {
         source_host: nullable(input.sourceHost?.trim() || undefined),
         source_path: nullable(input.sourcePath?.trim() || undefined),
         text_delta: nullable(input.textDelta),
+        payload_read_cursor_key: nullable(streamPayloadReadCursorKey(input.payloadJson)),
         payload_json: nullable(input.payloadJson),
         raw_json: nullable(input.rawJson),
         schema_hash: nullable(input.schemaHash?.trim() || undefined),
@@ -858,13 +889,21 @@ export class CodexSessionStore {
     session?: Session,
   ): Promise<CodexStreamEvent[]> {
     const limit = clampLimit(options.limit, 200);
+    const where: CodexStreamEventWhereInput = pruneUndefined({
+      session_id: options.sessionId,
+      event_kind: options.eventKind,
+      source_id: options.sourceId,
+      payload_read_cursor_key: options.payloadReadCursorKey,
+    });
+    const hasClientFilters = options.turnId !== undefined || options.afterSequence !== undefined;
     const scanLimit = options.afterSequence === undefined
-      ? limit
-      : clampLimit(Math.max(limit * 4, 200));
+      ? (hasClientFilters ? clampLimit(Math.max(limit * 20, 200)) : limit)
+      : clampLimit(Math.max(limit * 20, 200));
     const scanLatest = options.latest === true || options.afterSequence !== undefined;
-    const query = options.sessionId
-      ? app.codex_stream_events.where({ session_id: options.sessionId }).orderBy("sequence", scanLatest ? "desc" : "asc")
-      : app.codex_stream_events.orderBy("created_at", scanLatest ? "desc" : "asc");
+    const baseQuery = Object.keys(where).length > 0
+      ? app.codex_stream_events.where(where)
+      : app.codex_stream_events;
+    const query = baseQuery.orderBy(options.sessionId ? "sequence" : "created_at", scanLatest ? "desc" : "asc");
     const rows = await this.getDb(session).all(query.limit(scanLimit));
     const filtered = rows
       .filter((row) => options.turnId === undefined || row.turn_id === options.turnId)
@@ -921,13 +960,10 @@ export class CodexSessionStore {
       };
 
       const existing = await db.one(app.project_context_entries.where({ context_id: payload.context_id }));
-      if (existing) {
-        await this.updateRow(db, app.project_context_entries, existing.id, payload);
-      } else {
-        await this.insertRow(db, app.project_context_entries, payload);
-      }
+      const rowId = existing?.id ?? deterministicProjectContextRowId(payload.context_id);
+      await db.upsert(app.project_context_entries, payload, { id: rowId }).wait({ tier: this.writeTier });
 
-      const entry = await db.one(app.project_context_entries.where({ context_id: payload.context_id }));
+      const entry = await db.one(app.project_context_entries.where({ id: rowId }));
       if (!entry) {
         throw new Error(`project context entry ${payload.context_id} missing after record`);
       }

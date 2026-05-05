@@ -304,6 +304,42 @@ describe("CodexSessionStore", () => {
     ]);
   });
 
+  it("uses deterministic Jazz row ids for project context entries", async () => {
+    const first = await store.recordProjectContext({
+      contextId: "designer:codex:turn-1",
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "codex",
+      sessionId: "019df3bb",
+      turnId: "turn-1",
+      summary: "Initial Designer handoff",
+      updatedAt: "2026-05-04T12:00:00.000Z",
+    });
+    const second = await store.recordProjectContext({
+      contextId: "designer:codex:turn-1",
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      provider: "codex",
+      sessionId: "019df4ed",
+      turnId: "turn-review",
+      summary: "Reviewed Designer handoff",
+      updatedAt: "2026-05-04T12:05:00.000Z",
+    });
+
+    const entries = await store.listProjectContextEntries({
+      projectRoot: "/Users/nikitavoloboev/code/prom/ide/designer",
+      limit: 10,
+    });
+
+    expect(first.id).toBe("91b36ae1-48d8-5eb4-b779-155475370aa4");
+    expect(second.id).toBe(first.id);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: first.id,
+      context_id: "designer:codex:turn-1",
+      session_id: "019df4ed",
+      summary: "Reviewed Designer handoff",
+    });
+  });
+
   it("creates a native Jazz run binding for every projected codex session", async () => {
     await store.replaceSessionProjection(
       {

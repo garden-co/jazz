@@ -1114,6 +1114,7 @@ fn update_row(
 ) -> Result<(), String> {
     db.runtime
         .update(object_id, updates.into_iter().collect(), None)
+        .map(|_| ())
         .map_err(|err| err.to_string())
 }
 

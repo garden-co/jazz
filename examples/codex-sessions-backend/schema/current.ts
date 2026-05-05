@@ -92,6 +92,7 @@ table("codex_stream_events", {
   source_host: col.string().optional(),
   source_path: col.string().optional(),
   text_delta: col.string().optional(),
+  payload_read_cursor_key: col.string().optional(),
   payload_json: col.json().optional(),
   raw_json: col.json().optional(),
   schema_hash: col.string().optional(),
