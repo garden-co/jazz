@@ -40,7 +40,7 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
       case "Double":
         return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
       case "Timestamp":
-        return new Set(["eq", "gt", "gte", "lt", "lte"]);
+        return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
       case "Bytea":
         return new Set(["eq", "ne"]);
       case "Enum":
@@ -69,8 +69,16 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
       return false;
     }
 
-    if (condition.operator === "ne" && condition.value === null) {
-      return false;
+    if (condition.value === null) {
+      const column = columnByName.get(condition.field);
+
+      if (!column?.nullable) {
+        return false;
+      }
+
+      if (condition.operator === "ne" && column.references) {
+        return false;
+      }
     }
   }
 
