@@ -1337,7 +1337,11 @@ pub fn init_diagnostic_logging(filter: String) {
     if LOGGING_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let filter_directive = if filter.is_empty() { "info".to_string() } else { filter };
+    let filter_directive = if filter.is_empty() {
+        "info".to_string()
+    } else {
+        filter
+    };
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter_directive)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
