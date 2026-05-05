@@ -148,6 +148,8 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     onSyncMessageToSend: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
+    flushWal: vi.fn(),
+    free: vi.fn(),
   });
 
   beforeEach(() => {
@@ -218,5 +220,19 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     const result = await waitForMessage("error");
     expect(result).toBeDefined();
     expect(openEphemeralMock).toHaveBeenCalledOnce();
+  });
+
+  it("flushes WAL before freeing the runtime on clean shutdown", async () => {
+    const runtime = fakeRuntime();
+    openPersistentMock.mockReturnValue(runtime);
+
+    sendInit("clean-shutdown-flush-test");
+    await waitForMessage("init-ok");
+
+    fakeSelf().onmessage(new MessageEvent("message", { data: { type: "shutdown" } }));
+
+    const result = await waitForMessage("shutdown-ok");
+    expect(result).toBeDefined();
+    expect(runtime.flushWal).toHaveBeenCalledBefore(runtime.free);
   });
 });
