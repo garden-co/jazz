@@ -556,6 +556,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1728,6 +1737,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "jazz-tools",
+ "mimalloc-safe",
  "napi",
  "napi-build",
  "napi-derive",
@@ -1959,6 +1969,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "libmimalloc-sys2"
+version = "0.1.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8cac9b2d60928163027249a1ebd0ec8e6c58b66dca93cccf58ee618e66fc062"
+dependencies = [
+ "cc",
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "librocksdb-sys"
 version = "0.18.0+10.7.5"
 dependencies = [
@@ -2059,6 +2089,24 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
+name = "mimalloc-safe"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8bf95a709c09e85ae74e77b2413cbb11a1b8f2f3d11e23b3751382467c9c15c"
+dependencies = [
+ "libmimalloc-sys2",
+]
 
 [[package]]
 name = "mime"
@@ -3744,6 +3792,7 @@ dependencies = [
  "http-body-util",
  "jazz-tools",
  "jsonwebtoken",
+ "mimalloc",
  "reqwest",
  "reqwest-eventsource",
  "serde",
