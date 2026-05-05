@@ -2,6 +2,8 @@ class RnRuntime {}
 
 const jazz_rn = {
   RnRuntime,
+  mintLocalFirstToken: () => "local-first-token",
+  mintAnonymousToken: () => "anonymous-token",
 };
 
 async function uniffiInitAsync(): Promise<void> {
