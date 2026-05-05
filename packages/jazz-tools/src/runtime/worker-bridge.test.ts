@@ -89,6 +89,7 @@ function createRuntimeMock(): {
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
     },
+    batchedTick: () => undefined,
     addServer: () => {
       addServerCalls.count += 1;
     },
