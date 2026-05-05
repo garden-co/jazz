@@ -41,7 +41,7 @@ server = [
   "dep:bytes",
   "dep:reqwest",
 ]
-cli = ["server", "rocksdb", "dep:clap"]
+cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc"]
 test-utils = ["server", "client", "sqlite"]
 test = ["test-utils", "cli"]
 otel-core = [
@@ -101,6 +101,7 @@ async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 reqwest = { version = "0.12", default-features = false, features = [
   "json",

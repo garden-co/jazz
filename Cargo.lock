@@ -1790,6 +1790,7 @@ dependencies = [
  "internment",
  "jsonschema",
  "jsonwebtoken",
+ "mimalloc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-stdout",
