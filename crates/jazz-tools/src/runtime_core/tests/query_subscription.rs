@@ -1044,8 +1044,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
             payload @ SyncPayload::RowBatchNeeded { .. } => rows_to_a.push(payload),
-            payload @ SyncPayload::RowBatchStateChanged { .. }
-            | payload @ SyncPayload::BatchSettlement { .. } => durability_to_a.push(payload),
+            payload @ SyncPayload::BatchSettlement { .. } => durability_to_a.push(payload),
             _ => {}
         }
     }
@@ -1706,8 +1705,7 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
                 }
             }
             payload @ SyncPayload::BatchSettlement { .. }
-            | payload @ SyncPayload::QuerySettled { .. }
-            | payload @ SyncPayload::RowBatchStateChanged { .. } => {
+            | payload @ SyncPayload::QuerySettled { .. } => {
                 control_payloads.push(payload);
             }
             _ => {}

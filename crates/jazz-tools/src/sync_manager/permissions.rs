@@ -87,16 +87,6 @@ impl SyncManager {
             }
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(check.client_id),
-                payload: SyncPayload::RowBatchStateChanged {
-                    row_id: row.row_id,
-                    branch_name: crate::object::BranchName::new(&row.branch),
-                    batch_id: row.batch_id,
-                    state: Some(RowState::Rejected),
-                    confirmed_tier: None,
-                },
-            });
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(check.client_id),
                 payload: SyncPayload::BatchSettlement { settlement },
             });
             return;

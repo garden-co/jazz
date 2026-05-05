@@ -579,16 +579,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             }
         }
 
-        // 3b. Process received row-batch persistence acks — resolve matching watchers
-        let received_acks = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_received_row_batch_acks();
-        for (row_batch_key, acked_tier) in received_acks {
-            self.durability.record_ack(row_batch_key, acked_tier);
-        }
-
         // 4. Schedule batched_tick if outbound messages exist or a WAL flush
         // barrier is pending.
         if self.has_outbound() || self.storage_write_pending_flush {
