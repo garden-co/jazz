@@ -26,8 +26,6 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
-import { isModuleNotFoundError } from "./peer-dep-error.js";
-import { importJazzWasm } from "./wasm-importer.js";
 import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 /**
@@ -2755,20 +2753,7 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
  */
 export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
-  let wasmModule: any;
-  try {
-    wasmModule = await importJazzWasm();
-  } catch (err) {
-    if (!isModuleNotFoundError(err)) throw err;
-    throw new Error(
-      `[jazz-tools] The "jazz-wasm" peer dependency is required but is not installed.\n` +
-        `Install it alongside jazz-tools, e.g.:\n` +
-        `  npm install jazz-wasm\n` +
-        `  pnpm add jazz-wasm\n` +
-        `  yarn add jazz-wasm`,
-      { cause: err },
-    );
-  }
+  const wasmModule: any = await import("jazz-wasm");
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);
 
   if (syncInitInput) {

@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "svelte": "^5.0.0"
   },
   "devDependencies": {

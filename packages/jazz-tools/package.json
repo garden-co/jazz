@@ -130,6 +130,7 @@
     "@scure/bip39": "^2.0.1",
     "@standard-schema/spec": "^1.1.0",
     "esbuild": "^0.27.0",
+    "jazz-wasm": "workspace:*",
     "jose": "^6.2.1",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
@@ -149,7 +150,6 @@
     "better-auth": "^1.5.5",
     "fake-indexeddb": "^5.0.2",
     "jazz-rn": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
     "svelte": "^5.0.0",
@@ -166,7 +166,6 @@
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",
     "jazz-rn": "workspace:*",
-    "jazz-wasm": "workspace:*",
     "react": ">=19",
     "react-native": ">=0.76",
     "svelte": "^5.0.0",
@@ -186,9 +185,6 @@
       "optional": true
     },
     "jazz-rn": {
-      "optional": true
-    },
-    "jazz-wasm": {
       "optional": true
     },
     "react": {
