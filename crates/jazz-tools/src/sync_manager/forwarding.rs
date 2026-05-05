@@ -7,6 +7,70 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 impl SyncManager {
+    fn object_has_upstream_confirmation<H: Storage>(
+        &self,
+        storage: &H,
+        table: &str,
+        branch_name: &BranchName,
+        object_id: ObjectId,
+    ) -> bool {
+        let Ok(Some(visible_entry)) =
+            storage.load_visible_region_entry(table, branch_name.as_str(), object_id)
+        else {
+            return false;
+        };
+        let local_tier = self.max_local_durability_tier();
+        match local_tier {
+            None => {
+                visible_entry.current_row.confirmed_tier.is_some()
+                    || visible_entry.worker_batch_id.is_some()
+                    || visible_entry.edge_batch_id.is_some()
+                    || visible_entry.global_batch_id.is_some()
+            }
+            Some(my_tier) => {
+                visible_entry
+                    .current_row
+                    .confirmed_tier
+                    .is_some_and(|row_tier| row_tier > my_tier)
+                    || matches!(my_tier, DurabilityTier::Local)
+                        && (visible_entry.edge_batch_id.is_some()
+                            || visible_entry.global_batch_id.is_some())
+                    || matches!(my_tier, DurabilityTier::EdgeServer)
+                        && visible_entry.global_batch_id.is_some()
+            }
+        }
+    }
+
+    fn queue_row_to_server_with_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+        table: &str,
+        server_id: ServerId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowBatch,
+    ) {
+        let branch_name = BranchName::new(&row.branch);
+        let include_metadata = {
+            let Some(server) = self.servers.get(&server_id) else {
+                return;
+            };
+            let metadata_already_sent = server.sent_metadata.contains(&object_id);
+            if !metadata_already_sent {
+                true
+            } else {
+                !self.object_has_upstream_confirmation(storage, table, &branch_name, object_id)
+            }
+        };
+        self.queue_row_to_server_with_metadata(
+            server_id,
+            object_id,
+            metadata,
+            row,
+            include_metadata,
+        );
+    }
+
     pub(super) fn load_current_row_from_storage<H: crate::storage::Storage + ?Sized>(
         &self,
         storage: &H,
@@ -218,15 +282,38 @@ impl SyncManager {
             visiting.remove(&parent_batch_id);
         }
 
-        self.queue_row_to_server(server_id, object_id, metadata, row);
+        self.queue_row_to_server_with_storage(storage, table, server_id, object_id, metadata, row);
     }
 
-    pub(crate) fn forward_row_batch_to_servers(
+    pub(crate) fn forward_row_batch_to_servers<H: Storage>(
         &mut self,
+        storage: &H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         row: StoredRowBatch,
     ) {
+        let table = metadata
+            .get(crate::metadata::MetadataKey::Table.as_str())
+            .cloned()
+            .or_else(|| {
+                storage
+                    .load_row_locator(object_id)
+                    .ok()
+                    .flatten()
+                    .map(|locator| locator.table.to_string())
+            });
+
+        if let Some(table) = table {
+            self.forward_row_batch_to_servers_with_storage(
+                storage,
+                table.as_str(),
+                object_id,
+                metadata,
+                row,
+            );
+            return;
+        }
+
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         if !server_ids.is_empty() {
             tracing::trace!(
@@ -238,7 +325,17 @@ impl SyncManager {
         }
 
         for server_id in server_ids {
-            self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+            let include_metadata = self
+                .servers
+                .get(&server_id)
+                .is_some_and(|server| !server.sent_metadata.contains(&object_id));
+            self.queue_row_to_server_with_metadata(
+                server_id,
+                object_id,
+                metadata.clone(),
+                row.clone(),
+                include_metadata,
+            );
         }
     }
 
@@ -264,7 +361,13 @@ impl SyncManager {
                 }
             }
 
-            self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+            self.queue_row_to_server_with_metadata(
+                server_id,
+                object_id,
+                metadata.clone(),
+                row.clone(),
+                true,
+            );
         }
     }
 

@@ -1,5 +1,22 @@
 use super::*;
 
+fn users_delete_denied_authorization_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                        .with_delete(PolicyExpr::False),
+                ),
+        )
+        .build()
+}
+
 #[test]
 fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() {
     let mut core = create_runtime_with_boxed_storage(
@@ -592,6 +609,123 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
     assert_eq!(
         alice_history_rows[0].state,
         crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
+fn rc_worker_path_overlapping_insert_and_delete_rejects_delete() {
+    let mut s = create_3tier_rc();
+
+    s.c.schema_manager_mut()
+        .query_manager_mut()
+        .set_authorization_schema(users_delete_denied_authorization_schema());
+    s.c.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_session(s.b_client_of_c, Session::new("alice"));
+    s.c.schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(s.b_client_of_c, ClientRole::User);
+
+    let ((row_id, _row_values), mut insert_receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
+    let insert_batch_id =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()[0]
+            .batch_id;
+    let mut delete_receiver =
+        s.a.delete_persisted(row_id, None, DurabilityTier::EdgeServer)
+            .unwrap();
+    let delete_batch_id =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .iter()
+            .find(|row| row.batch_id != insert_batch_id)
+            .expect("delete should append a second history row")
+            .batch_id;
+
+    pump_a_to_b(&mut s);
+
+    let b_out = s.b.sync_sender().take();
+    assert!(
+        b_out.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::RowBatchCreated { row, .. },
+            } if *server_id == s.c_server_for_b && row.batch_id == delete_batch_id && row.is_deleted
+        )),
+        "worker should forward the delete tombstone upstream when insert and delete overlap",
+    );
+    for entry in b_out {
+        match &entry.destination {
+            Destination::Client(cid) if *cid == s.a_client_of_b => {
+                s.a.park_sync_message(InboxEntry {
+                    source: Source::Server(s.b_server_for_a),
+                    payload: entry.payload,
+                });
+            }
+            Destination::Server(server_id) if *server_id == s.c_server_for_b => {
+                s.c.park_sync_message(InboxEntry {
+                    source: Source::Client(s.b_client_of_c),
+                    payload: entry.payload,
+                });
+            }
+            _ => {}
+        }
+    }
+    s.c.batched_tick();
+    s.c.immediate_tick();
+
+    let c_out = s.c.sync_sender().take();
+    assert!(
+        c_out.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id, .. },
+                },
+            } if *client_id == s.b_client_of_c && *batch_id == delete_batch_id
+        )),
+        "edge should reject the overlapping delete batch, got {c_out:?}",
+    );
+    for entry in c_out {
+        if entry.destination == Destination::Client(s.b_client_of_c) {
+            s.b.park_sync_message(InboxEntry {
+                source: Source::Server(s.c_server_for_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.batched_tick();
+    s.b.immediate_tick();
+    pump_b_to_a(&mut s);
+
+    assert_eq!(
+        insert_receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "insert waiter should resolve once the edge accepts the base row"
+    );
+    let rejection = delete_receiver
+        .try_recv()
+        .expect("delete wait should settle after edge permission evaluation")
+        .expect("delete wait should produce a settlement result")
+        .expect_err("delete wait should reject under edge delete-denied policy");
+    assert_eq!(rejection.code, "permission_denied");
+    assert!(
+        rejection.reason.contains("Delete denied"),
+        "expected delete rejection reason, got {:?}",
+        rejection.reason
     );
 }
 

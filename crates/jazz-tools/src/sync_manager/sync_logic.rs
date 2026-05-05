@@ -186,12 +186,13 @@ impl SyncManager {
         }
     }
 
-    pub(super) fn queue_row_to_server(
+    pub(super) fn queue_row_to_server_with_metadata(
         &mut self,
         server_id: ServerId,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         row: StoredRowBatch,
+        include_metadata: bool,
     ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -203,18 +204,15 @@ impl SyncManager {
 
         let branch_name = BranchName::new(&row.branch);
         let batch_id = row.batch_id;
-
-        let (include_metadata, already_sent) = {
+        let already_sent = {
             let Some(server) = self.servers.get(&server_id) else {
                 return;
             };
-            let include_metadata = !server.sent_metadata.contains(&object_id);
-            let already_sent = server
+            server
                 .sent_batch_ids
                 .get(&(object_id, branch_name))
                 .cloned()
-                .unwrap_or_default();
-            (include_metadata, already_sent)
+                .unwrap_or_default()
         };
 
         if already_sent.contains(&batch_id) && !include_metadata {
