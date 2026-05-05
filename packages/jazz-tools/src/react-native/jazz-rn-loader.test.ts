@@ -9,8 +9,10 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function moduleNotFound(code: string): Error & { code: string } {
-  const err = new Error("Cannot find module 'jazz-rn'") as Error & { code: string };
+function moduleNotFound(code: string, specifier = "jazz-rn"): Error & { code: string } {
+  const err = new Error(`Cannot find module '${specifier}'`) as Error & {
+    code: string;
+  };
   err.code = code;
   return err;
 }
@@ -45,6 +47,16 @@ describe("loadJazzRn", () => {
 
     const { loadJazzRn } = await import("./jazz-rn-loader.js");
     await expect(loadJazzRn()).rejects.toBe(initFailure);
+  });
+
+  it("RNLD-U03b rethrows when a transitive dep of jazz-rn is missing", async () => {
+    // jazz-rn itself resolved, but it imports something that doesn't exist.
+    // The original error must surface so users see the real missing module.
+    const transitive = moduleNotFound("ERR_MODULE_NOT_FOUND", "react-native-mmkv");
+    mockImportJazzRn.mockImplementation(() => Promise.reject(transitive));
+
+    const { loadJazzRn } = await import("./jazz-rn-loader.js");
+    await expect(loadJazzRn()).rejects.toBe(transitive);
   });
 
   it("RNLD-U04 caches and returns the default export on success", async () => {
