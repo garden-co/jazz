@@ -31,7 +31,7 @@ import {
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
 } from "./client.js";
-import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
+import { type DbRuntimeModule } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import type { AuthFailureReason } from "./sync-transport.js";
@@ -68,6 +68,7 @@ import {
   type TabSyncMessage,
 } from "./tab-sync-protocol.js";
 import { StorageResetCoordinator, type StorageResetHost } from "./storage-reset-coordinator.js";
+import { LocalFirstAuthManager, resolveDbAuthConfig, validateDbAuthConfig } from "./db-auth.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyDbRuntimeModule = DbRuntimeModule<any>;
@@ -800,8 +801,7 @@ export class Db {
   private activeRemoteLeaderTabId: string | null = null;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private storageReset: StorageResetCoordinator | null = null;
-  private _localFirstSecret: string | null = null;
-  private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private localFirstAuth: LocalFirstAuthManager | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
   private lifecycleHooksAttached = false;
@@ -854,51 +854,17 @@ export class Db {
     this.authStateStore = createAuthStateStore(config, authStateOptions);
   }
 
-  /** @internal Store the seed used for local-first auth and schedule token refresh. */
-  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
-    this._localFirstSecret = seed;
-    this.scheduleLocalFirstRefresh(ttlSeconds);
-  }
-
-  private scheduleLocalFirstRefresh(ttlSeconds: number): void {
-    if (this.localFirstRefreshTimer) {
-      clearTimeout(this.localFirstRefreshTimer);
-    }
-    // Refresh at 80% of TTL
-    const refreshMs = ttlSeconds * 800; // 80% of TTL in ms
-    this.localFirstRefreshTimer = setTimeout(() => {
-      this.refreshLocalFirstToken();
-    }, refreshMs);
-  }
-
-  private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.isShuttingDown) return;
-
-    try {
-      const ttlSeconds = 3600;
-      const newToken = this.mintLocalFirstToken(
-        this._localFirstSecret,
-        this.config.appId,
-        ttlSeconds,
-      );
-      this.updateAuthToken(newToken);
-      this.scheduleLocalFirstRefresh(ttlSeconds);
-    } catch (e) {
-      console.error("Failed to refresh local-first token:", e);
-    }
-  }
-
-  private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
-    }
-
-    return this.runtimeModule.mintLocalFirstToken({
+  /** @internal Attach local-first auth state and schedule token refresh. */
+  initLocalFirstAuth(secret: string, runtimeModule: AnyDbRuntimeModule): void {
+    this.localFirstAuth?.stop();
+    this.localFirstAuth = new LocalFirstAuthManager({
+      appId: this.config.appId,
       secret,
-      audience,
-      ttlSeconds,
-      nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
+      runtimeModule,
+      applyToken: (jwtToken) => this.updateAuthToken(jwtToken),
+      isShuttingDown: () => this.isShuttingDown,
     });
+    this.localFirstAuth.start();
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
@@ -1659,13 +1625,7 @@ export class Db {
    * Returns `null` if the current session is not local-first.
    */
   getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
-    if (!this._localFirstSecret) {
-      return null;
-    }
-
-    const ttl = options?.ttlSeconds ?? 60;
-    const audience = options?.audience ?? this.config.appId;
-    return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+    return this.localFirstAuth?.getIdentityProof(options) ?? null;
   }
 
   onAuthChanged(listener: (state: AuthState) => void): () => void {
@@ -2126,10 +2086,8 @@ export class Db {
 
   private async runShutdown(): Promise<void> {
     this.isShuttingDown = true;
-    if (this.localFirstRefreshTimer) {
-      clearTimeout(this.localFirstRefreshTimer);
-      this.localFirstRefreshTimer = null;
-    }
+    this.localFirstAuth?.stop();
+    this.localFirstAuth = null;
     this.clearActiveQuerySubscriptionTraces();
     this.sendFollowerClose(this.activeRemoteLeaderTabId, this.currentLeaderTerm);
     this.activeRemoteLeaderTabId = null;
@@ -2505,20 +2463,6 @@ function isBrowser(): boolean {
 }
 
 /**
- * Generate a 32-byte ephemeral seed for anonymous auth.
- *
- * Uses `globalThis.crypto.getRandomValues`, which is available in all
- * supported environments (browser, Node ≥15, React Native, edge workers).
- */
-function generateEphemeralSeedBase64Url(): string {
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-/**
  * Create a new Db instance with the given configuration.
  *
  * This is an **async** factory function that pre-loads the runtime module.
@@ -2539,53 +2483,13 @@ function generateEphemeralSeedBase64Url(): string {
  * });
  * ```
  */
-function createRuntimeTokenOptions(
-  secret: string,
-  audience: string,
-  ttlSeconds: number,
-): RuntimeTokenOptions {
-  return {
-    secret,
-    audience,
-    ttlSeconds,
-    nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
-  };
-}
-
 export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeModule: DbRuntimeModule<RuntimeConfig>,
 ): Promise<Db> {
-  if (config.secret && (config.jwtToken || config.cookieSession)) {
-    throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
-  }
-  if (config.jwtToken && config.cookieSession) {
-    throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
-  }
-
-  let resolvedConfig = { ...config };
+  validateDbAuthConfig(config);
   await runtimeModule.load(config);
-
-  // Local-first auth: resolve seed and mint a JWT
-  let localFirstSecret: string | null = null;
-  if (config.secret) {
-    const secret = config.secret;
-    localFirstSecret = secret;
-
-    const jwtToken = runtimeModule.mintLocalFirstToken(
-      createRuntimeTokenOptions(secret, config.appId, 3600),
-    );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
-  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
-    // Anonymous: mint an ephemeral keypair + anonymous JWT.
-    // Admin-secret clients intentionally stay sessionless so local policy
-    // evaluation does not preempt backend-authorized transport writes.
-    const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = runtimeModule.mintAnonymousToken(
-      createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
-    );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
-  }
+  const { config: resolvedConfig, localFirstSecret } = resolveDbAuthConfig(config, runtimeModule);
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
 
@@ -2605,7 +2509,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   if (localFirstSecret) {
-    db.initLocalFirstAuth(localFirstSecret, 3600);
+    db.initLocalFirstAuth(localFirstSecret, runtimeModule as AnyDbRuntimeModule);
   }
 
   return db;
