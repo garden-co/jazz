@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
+import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 function defaultPersistentDataDir(projectRoot: string): string {
   return join(projectRoot, "node_modules", ".cache", "jazz-dev-server");
@@ -82,6 +83,7 @@ export type ManagedRuntime = {
   serverUrl: string;
   adminSecret: string;
   backendSecret?: string;
+  telemetryCollectorUrl?: string;
 };
 
 type ManagedRuntimeConfig = {
@@ -91,11 +93,14 @@ type ManagedRuntimeConfig = {
   appId: string | null;
   publicServerUrl: string | null;
   publicAppId: string | null;
+  publicTelemetryCollectorUrl: string | null;
+  telemetry: TelemetryOptions | null;
 };
 
 export interface ManagedRuntimeEnvKeys {
   appId: string;
   serverUrl: string;
+  telemetryCollectorUrl: string;
 }
 
 function normalizeServerOption(
@@ -167,6 +172,8 @@ export class ManagedDevRuntime {
       appId: options.appId ?? null,
       publicServerUrl: process.env[this.envKeys.serverUrl] ?? null,
       publicAppId: process.env[this.envKeys.appId] ?? null,
+      publicTelemetryCollectorUrl: process.env[this.envKeys.telemetryCollectorUrl] ?? null,
+      telemetry: options.telemetry ?? null,
     };
   }
 
@@ -240,6 +247,9 @@ export class ManagedDevRuntime {
       let appId: string;
       let usesExistingServer = false;
       let existingServerEnvKey: string | null = null;
+      const telemetryCollectorUrl =
+        process.env[this.envKeys.telemetryCollectorUrl] ??
+        resolveTelemetryCollectorUrl(options.telemetry);
 
       try {
         if (serverOpt === false) {
@@ -314,6 +324,7 @@ export class ManagedDevRuntime {
             catalogueAuthority: serverConfig.catalogueAuthority,
             catalogueAuthorityUrl: serverConfig.catalogueAuthorityUrl,
             catalogueAuthorityAdminSecret: serverConfig.catalogueAuthorityAdminSecret,
+            telemetryCollectorUrl,
           });
 
           serverUrl = this.serverHandle.url;
@@ -326,6 +337,9 @@ export class ManagedDevRuntime {
         }
 
         await persistAppIdToEnv(envPath, this.envKeys.appId, appId);
+        if (telemetryCollectorUrl) {
+          console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
+        }
 
         const { pushSchemaCatalogue } = await import("./dev-server.js");
         try {
@@ -371,11 +385,14 @@ export class ManagedDevRuntime {
 
         process.env[this.envKeys.appId] = appId;
         process.env[this.envKeys.serverUrl] = serverUrl;
+        if (telemetryCollectorUrl) {
+          process.env[this.envKeys.telemetryCollectorUrl] = telemetryCollectorUrl;
+        }
         if (backendSecret) {
           process.env.BACKEND_SECRET = backendSecret;
         }
 
-        this.runtime = { appId, serverUrl, adminSecret, backendSecret };
+        this.runtime = { appId, serverUrl, adminSecret, backendSecret, telemetryCollectorUrl };
         this.runtimeConfigSignature = this.serializeConfig(this.getManagedRuntimeConfig(options));
         return this.runtime;
       } catch (error) {
