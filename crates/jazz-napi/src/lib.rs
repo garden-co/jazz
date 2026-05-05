@@ -10,6 +10,22 @@
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Server sync uses the Rust-owned WebSocket transport via `connect()`
+//!
+//! # Allocator
+//!
+//! This crate uses `mimalloc-safe` (napi-rs–maintained mimalloc fork) as Rust's
+//! `#[global_allocator]`. It does NOT override the host process's `malloc`/`free` —
+//! Node.js / V8 keep their own allocator. The two coexist safely as long as
+//! memory crosses the FFI boundary **by copy**, which is what napi-rs does today
+//! for Vec/String/Buffer returns.
+//!
+//! Footgun: never `Vec::leak` / `Box::into_raw` an allocation across FFI and let
+//! the host call `free()` on it — that mixes allocators and corrupts the heap.
+//! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
+//! callback that frees through mimalloc instead.
+
+#[global_allocator]
+static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
