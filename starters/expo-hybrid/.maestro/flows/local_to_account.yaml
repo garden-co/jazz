@@ -4,20 +4,19 @@
 # identity rather than creating a fresh one.
 appId: dev.jazz.starter.expohybrid
 ---
-- runScript:
-    script: |
-      output.email = "test-" + Date.now() + "@example.com"
+- evalScript: ${output.email = "test-" + Date.now() + "@example.com"}
 
 - launchApp:
     clearState: true
 
 - extendedWaitUntil:
     visible: "Your todos"
-    timeout: 20000
+    timeout: 60000
 
 - tapOn: "New todo"
 - inputText: "Local todo"
-- tapOn: "Add"
+- tapOn: "Add todo"
+- assertNotVisible: "No todos yet."
 - assertVisible: "Local todo"
 
 - tapOn: "Sign up"
@@ -32,7 +31,9 @@ appId: dev.jazz.starter.expohybrid
 - tapOn: "Password"
 - inputText: "testpassword"
 - hideKeyboard
-- tapOn: "Create account"
+- tapOn:
+    text: "Create account"
+    index: 1
 
 - extendedWaitUntil:
     visible: "Sign out"

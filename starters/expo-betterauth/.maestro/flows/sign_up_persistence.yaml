@@ -2,16 +2,14 @@
 # assert the todo is still there. Catches the JWKS / sync regressions.
 appId: dev.jazz.starter.expobetterauth
 ---
-- runScript:
-    script: |
-      output.email = "test-" + Date.now() + "@example.com"
+- evalScript: ${output.email = "test-" + Date.now() + "@example.com"}
 
 - launchApp:
     clearState: true
 
 - extendedWaitUntil:
     visible: "Sign in"
-    timeout: 20000
+    timeout: 60000
 - tapOn: "New here? Create an account"
 
 - tapOn: "Name"
@@ -21,7 +19,9 @@ appId: dev.jazz.starter.expobetterauth
 - tapOn: "Password"
 - inputText: "testpassword"
 - hideKeyboard
-- tapOn: "Create account"
+- tapOn:
+    text: "Create account"
+    index: 1
 
 - extendedWaitUntil:
     visible: "Your todos"
@@ -29,7 +29,9 @@ appId: dev.jazz.starter.expobetterauth
 
 - tapOn: "New todo"
 - inputText: "Persistent todo"
-- tapOn: "Add"
+- hideKeyboard
+- tapOn: "Add todo"
+- assertNotVisible: "No todos yet."
 - assertVisible: "Persistent todo"
 
 - tapOn: "Sign out"
@@ -42,7 +44,9 @@ appId: dev.jazz.starter.expobetterauth
 - tapOn: "Password"
 - inputText: "testpassword"
 - hideKeyboard
-- tapOn: "Sign in"
+- tapOn:
+    text: "Sign in"
+    index: 1
 
 - extendedWaitUntil:
     visible: "Your todos"

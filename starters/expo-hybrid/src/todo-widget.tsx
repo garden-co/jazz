@@ -28,7 +28,12 @@ export function TodoWidget() {
           onSubmitEditing={add}
           accessibilityLabel="New todo"
         />
-        <Pressable onPress={add} style={styles.addButton}>
+        <Pressable
+          onPress={add}
+          style={styles.addButton}
+          accessibilityLabel="Add todo"
+          accessibilityRole="button"
+        >
           <Text style={styles.addButtonText}>Add</Text>
         </Pressable>
       </View>

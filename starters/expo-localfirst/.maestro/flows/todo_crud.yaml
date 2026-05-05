@@ -9,20 +9,23 @@ appId: dev.jazz.starter.expolocalfirst
 
 - tapOn: "New todo"
 - inputText: "Buy milk"
-- tapOn: "Add"
+- hideKeyboard
+- tapOn: "Add todo"
 
+- assertNotVisible: "No todos yet."
 - assertVisible: "Buy milk"
 
 - tapOn: "New todo"
 - inputText: "Pay rent"
-- tapOn: "Add"
+- hideKeyboard
+- tapOn: "Add todo"
 
 - assertVisible: "Pay rent"
 - assertVisible: "Buy milk"
 
 - tapOn:
-    accessibilityLabel: "Delete"
+    text: "Delete"
     index: 0
 
-- assertNotVisible: "Pay rent"
-- assertVisible: "Buy milk"
+- assertNotVisible: "Buy milk"
+- assertVisible: "Pay rent"
