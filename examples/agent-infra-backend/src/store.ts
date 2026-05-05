@@ -958,18 +958,38 @@ export interface ListTaskRecordsInput {
   limit?: number;
 }
 
+export const CURSOR_REVIEW_OPERATION_TYPES = [
+  "prepare-branch-review",
+  "focus-branch-review",
+  "refresh-branch-review",
+  "copy-branch-review-prompt",
+  "open-branch-review-chat",
+  "open-branch-workspace",
+  "open-branch-commit-chat",
+  "show-branch-diff",
+  "delete-branch-path",
+  "open-branch-file",
+  "open-branch-file-diff",
+  "open-review-context-file",
+  "paste-review-context-file",
+  "open-review-context-chat",
+  "tail-review-sessions",
+] as const;
+
 export type CursorReviewOperationType =
-  | "prepare-branch-review"
-  | "focus-branch-review"
-  | "refresh-branch-review"
-  | "copy-branch-review-prompt"
-  | "open-branch-review-chat"
-  | "open-branch-workspace"
-  | "open-branch-commit-chat"
-  | "show-branch-diff"
-  | "delete-branch-path"
-  | "open-branch-file"
-  | "open-branch-file-diff";
+  (typeof CURSOR_REVIEW_OPERATION_TYPES)[number];
+
+const CURSOR_REVIEW_OPERATION_TYPE_SET: ReadonlySet<string> = new Set(
+  CURSOR_REVIEW_OPERATION_TYPES,
+);
+
+function isCursorReviewOperationType(
+  value: string | undefined,
+): value is CursorReviewOperationType {
+  return (
+    value !== undefined && CURSOR_REVIEW_OPERATION_TYPE_SET.has(value)
+  );
+}
 
 export type CursorReviewOperationResultStatus =
   | "completed"
@@ -5935,19 +5955,7 @@ export class AgentDataStore {
     const operationId =
       readObjectString(payload, "operationId") ?? event.event_id;
     const operationType = readObjectString(payload, "operationType");
-    if (
-      operationType !== "prepare-branch-review" &&
-      operationType !== "focus-branch-review" &&
-      operationType !== "refresh-branch-review" &&
-      operationType !== "copy-branch-review-prompt" &&
-      operationType !== "open-branch-review-chat" &&
-      operationType !== "open-branch-workspace" &&
-      operationType !== "open-branch-commit-chat" &&
-      operationType !== "show-branch-diff" &&
-      operationType !== "delete-branch-path" &&
-      operationType !== "open-branch-file" &&
-      operationType !== "open-branch-file-diff"
-    ) {
+    if (!isCursorReviewOperationType(operationType)) {
       return null;
     }
     return {
