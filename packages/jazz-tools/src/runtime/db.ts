@@ -585,6 +585,10 @@ export class DbTransaction {
    * Roll back this transaction locally.
    *
    * Pending rows remain pending, but this transaction handle can no longer be committed.
+   *
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, throw an error inside the callback
+   * to roll back the transaction.
    */
   rollback(): void {
     this.requireRuntimeTransaction("rollback").rollback();
@@ -702,7 +706,7 @@ export class DbTransaction {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Omit<DbTransaction, "commit">;
+export type DbTransactionScope = Omit<DbTransaction, "commit" | "rollback">;
 
 /**
  * Direct batches group a set of writes that should settle immediately, without an authority,
@@ -750,6 +754,10 @@ export class DbDirectBatch {
   /**
    * Commit the direct batch. Data is visible optimistically immediately and can
    * be waited on through the returned handle.
+   *
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, the transaction is committed automatically
+   * once the callback finishes running.
    */
   commit(): WriteHandle {
     if (this.committedHandle) {

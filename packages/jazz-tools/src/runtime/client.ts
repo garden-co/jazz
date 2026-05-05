@@ -831,10 +831,35 @@ function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
   );
 }
 
-type RunAndCommitResult<TResult> =
+type RunInBatchResult<TResult> =
   TResult extends PromiseLike<unknown>
     ? Promise<WriteResult<Awaited<TResult>>>
     : WriteResult<TResult>;
+
+type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
+
+function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
+  return new Proxy(batchOrTx, {
+    get(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return undefined;
+      }
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    has(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return false;
+      }
+
+      return Reflect.has(target, property);
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+  }) as Scoped<TBatchOrTx>;
+}
 
 function rollbackIfAvailable(batchOrTx: { rollback?: () => void }): void {
   try {
@@ -849,12 +874,13 @@ export function runInBatch<
   TResult,
 >(
   batchOrTx: TBatchOrTx,
-  callback: (target: TBatchOrTx) => TResult,
+  callback: (target: Scoped<TBatchOrTx>) => TResult,
   client: JazzClient | (() => JazzClient),
-): RunAndCommitResult<TResult> {
+): RunInBatchResult<TResult> {
   let value: TResult;
   try {
-    value = callback(batchOrTx);
+    const scope = createBatchScope(batchOrTx);
+    value = callback(scope);
   } catch (error) {
     rollbackIfAvailable(batchOrTx);
     throw error;
@@ -874,10 +900,10 @@ export function runInBatch<
         rollbackIfAvailable(batchOrTx);
         throw error;
       },
-    ) as RunAndCommitResult<TResult>;
+    ) as RunInBatchResult<TResult>;
   }
   const committed = batchOrTx.commit();
-  return new WriteResult(value, committed.batchId, resultClient()) as RunAndCommitResult<TResult>;
+  return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
 export class Transaction {
@@ -999,7 +1025,7 @@ export class Transaction {
 /**
  * Transaction object available inside {@link JazzClient.transaction}'s callback.
  */
-export type TransactionScope = Omit<Transaction, "commit">;
+export type TransactionScope = Scoped<Transaction>;
 
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
@@ -1087,7 +1113,7 @@ export class DirectBatch {
 /**
  * Batch object available inside {@link JazzClient.batch}'s callback.
  */
-export type BatchScope = Omit<DirectBatch, "commit">;
+export type BatchScope = Scoped<DirectBatch>;
 
 /**
  * Session-scoped client for backend operations.

@@ -339,6 +339,46 @@ describe("Db transactions", () => {
     expect(client.waitForPersistedBatch).toHaveBeenCalledWith("batch-callback", "global");
   });
 
+  it("cannot commit a callback transaction by calling commit()", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-callback-rejected",
+      values: [
+        { type: "Text", value: "Rejected callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-callback-rejected",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-callback-rejected"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-callback-rejected") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-callback-rejected")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    await expect(
+      db.transaction(async (tx) => {
+        tx.insert(table, { title: "Rejected callback transaction", done: false });
+        // @ts-expect-error - commit is not available on DbTransactionScope
+        return tx.commit();
+      }),
+    ).rejects.toEqual(new TypeError("tx.commit is not a function"));
+  });
+
   it("rolls back a callback transaction when the callback throws", () => {
     const table = todoTable();
     const runtimeRow: Row = {
@@ -421,6 +461,46 @@ describe("Db transactions", () => {
 
     expect(runtimeTransaction.commit).not.toHaveBeenCalled();
     expect(runtimeTransaction.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("cannot roll back a callback transaction by calling rollback()", async () => {
+    const table = todoTable();
+    const runtimeRow: Row = {
+      id: "todo-callback-rejected",
+      values: [
+        { type: "Text", value: "Rejected callback transaction" },
+        { type: "Boolean", value: false },
+      ],
+      batchId: "batch-callback-rejected",
+    } as Row;
+    const runtimeTransaction = {
+      batchId: vi.fn(() => "batch-callback-rejected"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(),
+      delete: vi.fn(),
+      commit: vi.fn(() => makeWriteHandle("batch-callback-rejected").handle),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-callback-rejected") =>
+        makeLocalBatchRecord(batchId),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-callback-rejected")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginTransactionInternal: vi.fn(() => runtimeTransaction),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId)),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    await expect(
+      db.transaction(async (tx) => {
+        tx.insert(table, { title: "Rejected callback transaction", done: false });
+        // @ts-expect-error - rollback is not available on DbTransactionScope
+        return tx.rollback();
+      }),
+    ).rejects.toEqual(new TypeError("tx.rollback is not a function"));
   });
 
   it("routes typed transaction upserts through the runtime transaction", () => {
