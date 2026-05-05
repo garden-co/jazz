@@ -1,5 +1,8 @@
 use super::*;
-use crate::batch_fate::{BatchSettlement, SealedBatchSubmission, VisibleBatchMember};
+use crate::batch_fate::{
+    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchSubmission,
+    VisibleBatchMember,
+};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -22,6 +25,93 @@ enum SealedBatchMode {
 }
 
 impl SyncManager {
+    fn client_batch_mode(row: &StoredRowBatch) -> BatchMode {
+        match row.state {
+            RowState::StagingPending | RowState::VisibleTransactional => BatchMode::Transactional,
+            RowState::Superseded | RowState::Rejected | RowState::VisibleDirect => {
+                BatchMode::Direct
+            }
+        }
+    }
+
+    fn retain_client_local_batch_row<H: Storage>(
+        &self,
+        storage: &mut H,
+        metadata: &HashMap<String, String>,
+        row: &StoredRowBatch,
+    ) {
+        let Some(table_name) = metadata
+            .get(MetadataKey::Table.as_str())
+            .cloned()
+            .or_else(|| {
+                storage
+                    .load_row_locator(row.row_id)
+                    .ok()
+                    .flatten()
+                    .map(|locator| locator.table.to_string())
+            })
+        else {
+            return;
+        };
+
+        let Some(schema_hash) = storage
+            .load_history_row_batch_table_locator(row.branch.as_str(), row.row_id, row.batch_id)
+            .ok()
+            .flatten()
+            .map(|locator| locator.schema_hash)
+            .or_else(|| {
+                storage
+                    .load_row_locator(row.row_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|locator| locator.origin_schema_hash)
+            })
+        else {
+            return;
+        };
+
+        let mut record = match storage.load_local_batch_record(row.batch_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                LocalBatchRecord::new(row.batch_id, Self::client_batch_mode(row), false, None)
+            }
+            Err(_) => return,
+        };
+        record.upsert_member(LocalBatchMember {
+            object_id: row.row_id,
+            table_name,
+            branch_name: BranchName::new(&row.branch),
+            schema_hash,
+            row_digest: row.content_digest(),
+        });
+        let _ = storage.upsert_local_batch_record(&record);
+    }
+
+    fn retain_client_batch_settlement<H: Storage>(
+        &self,
+        storage: &mut H,
+        settlement: &BatchSettlement,
+    ) {
+        let batch_id = settlement.batch_id();
+        let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) else {
+            return;
+        };
+        record.apply_settlement(settlement.clone());
+        let _ = storage.upsert_local_batch_record(&record);
+    }
+
+    fn retain_client_sealed_batch_submission<H: Storage>(
+        &self,
+        storage: &mut H,
+        submission: &SealedBatchSubmission,
+    ) {
+        let Ok(Some(mut record)) = storage.load_local_batch_record(submission.batch_id) else {
+            return;
+        };
+        record.mark_sealed(submission.clone());
+        let _ = storage.upsert_local_batch_record(&record);
+    }
+
     fn validate_sealed_batch_submission(
         &self,
         submission: &SealedBatchSubmission,
@@ -532,6 +622,41 @@ impl SyncManager {
             BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
                 Some(settlement.clone())
             }
+        }
+    }
+
+    fn interested_clients_for_batch_settlement<H: Storage>(
+        &self,
+        _storage: &H,
+        settlement: &BatchSettlement,
+    ) -> HashSet<ClientId> {
+        match settlement {
+            BatchSettlement::DurableDirect {
+                visible_members, ..
+            }
+            | BatchSettlement::AcceptedTransaction {
+                visible_members, ..
+            } => {
+                let mut interested = HashSet::new();
+                for member in visible_members {
+                    let key =
+                        RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
+                    if let Some(clients) = self.row_batch_interest.get(&key) {
+                        interested.extend(clients.iter().copied());
+                    }
+                }
+                interested
+            }
+            BatchSettlement::Rejected { batch_id, .. } => {
+                let mut interested = HashSet::new();
+                for (key, clients) in &self.row_batch_interest {
+                    if key.batch_id == *batch_id {
+                        interested.extend(clients.iter().copied());
+                    }
+                }
+                interested
+            }
+            BatchSettlement::Missing { .. } => HashSet::new(),
         }
     }
 
@@ -1131,30 +1256,7 @@ impl SyncManager {
                     return;
                 }
                 self.pending_batch_settlements.push(settlement.clone());
-                let interested: HashSet<ClientId> = match &settlement {
-                    BatchSettlement::DurableDirect {
-                        visible_members, ..
-                    }
-                    | BatchSettlement::AcceptedTransaction {
-                        visible_members, ..
-                    } => {
-                        let mut interested = HashSet::new();
-                        for member in visible_members {
-                            let key = RowBatchKey::new(
-                                member.object_id,
-                                member.branch_name,
-                                member.batch_id,
-                            );
-                            if let Some(clients) = self.row_batch_interest.get(&key) {
-                                interested.extend(clients.iter().copied());
-                            }
-                        }
-                        interested
-                    }
-                    BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
-                        HashSet::new()
-                    }
-                };
+                let interested = self.interested_clients_for_batch_settlement(storage, &settlement);
                 for cid in interested {
                     if let Some(settlement) = self.batch_settlement_for_client(cid, &settlement) {
                         self.outbox.push(OutboxEntry {
@@ -1611,18 +1713,13 @@ impl SyncManager {
                     .insert(client_id);
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    if let Some(table) = applied.metadata.get(MetadataKey::Table.as_str()).cloned()
-                    {
-                        self.forward_row_batch_to_servers_with_storage(
-                            storage,
-                            table.as_str(),
-                            object_id,
-                            applied.metadata.clone(),
-                            row,
-                        );
-                    } else {
-                        self.forward_row_batch_to_servers(object_id, applied.metadata.clone(), row);
-                    }
+                    self.retain_client_local_batch_row(storage, &applied.metadata, &applied.row);
+                    self.forward_row_batch_to_servers(
+                        storage,
+                        object_id,
+                        applied.metadata.clone(),
+                        row,
+                    );
                     if !matches!(
                         applied.row.state,
                         RowState::StagingPending | RowState::Superseded
@@ -1683,6 +1780,7 @@ impl SyncManager {
                 {
                     return;
                 }
+                self.retain_client_sealed_batch_submission(storage, &submission);
                 self.seal_batch_to_servers(submission.clone());
                 self.try_accept_completed_sealed_batch_from_client(
                     storage,
@@ -1691,6 +1789,7 @@ impl SyncManager {
                 );
             }
             SyncPayload::BatchSettlement { settlement } => {
+                self.retain_client_batch_settlement(storage, &settlement);
                 self.pending_batch_settlements.push(settlement);
             }
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
