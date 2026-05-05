@@ -271,6 +271,7 @@ export class WorkerBridge {
   async shutdown(worker: Worker): Promise<void> {
     if (this.isDisposedLike()) return;
 
+    this.runtime.batchedTick?.();
     this.flushPendingSyncToWorker();
     this.transition({ type: "SHUTDOWN_CALLED" });
 
