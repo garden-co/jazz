@@ -554,6 +554,136 @@ describe("remote autonomy gateway", () => {
     ]);
   });
 
+  it("records Designer space files with object refs and worker jobs", async () => {
+    await requestJson("POST", "/v1/spaces", {
+      slug: "remote-cad-space",
+      title: "Remote CAD Space",
+    });
+
+    const recorded = await requestJson("POST", "/v1/spaces/remote-cad-space/files", {
+      path: "parts/gear.build123d.py",
+      contentHash: "sha256:gear-v1",
+      sizeBytes: 4096,
+      contentType: "text/x-python",
+      revisionId: "rev-gear-1",
+      writerId: "designer-user",
+      sourceSession: "codex-session-1",
+    });
+
+    expect(recorded).toMatchObject({
+      ok: true,
+      file: {
+        spaceSlug: "remote-cad-space",
+        path: "parts/gear.build123d.py",
+        localPath: join(tempDir, "spaces", "remote-cad-space", "parts", "gear.build123d.py"),
+        remotePath: "/users/nikiv/spaces/remote-cad-space/parts/gear.build123d.py",
+        contentHash: "sha256:gear-v1",
+        sizeBytes: 4096,
+        contentType: "text/x-python",
+        revisionId: "rev-gear-1",
+        writerId: "designer-user",
+        sourceSession: "codex-session-1",
+        objectStorage: {
+          provider: "oci",
+          region: "us-dallas-1",
+          bucket: "reactron-updates-dev",
+          key: "x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
+          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
+        },
+      },
+      uploadJob: {
+        kind: "space-file-object-upload",
+        status: "queued",
+        dedupeKey:
+          "space-file-object-upload:remote-cad-space:parts/gear.build123d.py:sha256:gear-v1",
+      },
+      materializeJob: {
+        kind: "space-file-materialize",
+        status: "queued",
+        dedupeKey:
+          "space-file-materialize:remote-cad-space:parts/gear.build123d.py:sha256:gear-v1:local",
+      },
+    });
+
+    const listed = await requestJson("GET", "/v1/spaces/remote-cad-space/files");
+    expect(listed.files).toEqual([
+      expect.objectContaining({
+        path: "parts/gear.build123d.py",
+        objectRefId: recorded.file.objectRefId,
+        uploadJobId: recorded.uploadJob.jobId,
+        materializeJobId: recorded.materializeJob.jobId,
+      }),
+    ]);
+
+    const jobs = await requestJson("GET", "/v1/sync/jobs?kind=space-file-object-upload");
+    expect(jobs.jobs).toEqual([
+      expect.objectContaining({
+        jobId: recorded.uploadJob.jobId,
+        payloadJson: expect.objectContaining({
+          file: expect.objectContaining({
+            path: "parts/gear.build123d.py",
+            contentHash: "sha256:gear-v1",
+          }),
+          objectStorage: expect.objectContaining({
+            key: "x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it("rejects unsafe Designer space file paths", async () => {
+    await requestJson("POST", "/v1/spaces", {
+      slug: "remote-cad-space",
+    });
+
+    const rejected = await requestJsonWithStatus("POST", "/v1/spaces/remote-cad-space/files", 400, {
+      path: "../private-key",
+      contentHash: "sha256:bad",
+    });
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: "invalid Designer space file path ../private-key",
+    });
+  });
+
+  it("queues explicit Designer space sync jobs for pull and push", async () => {
+    await requestJson("POST", "/v1/spaces", {
+      slug: "collab-cad-space",
+    });
+
+    const pull = await requestJson("POST", "/v1/spaces/collab-cad-space/sync", {
+      direction: "pull",
+      sourceSession: "codex-session-1",
+    });
+    const push = await requestJson("POST", "/v1/spaces/collab-cad-space/sync", {
+      direction: "push",
+      sourceSession: "codex-session-2",
+    });
+
+    expect(pull.job).toMatchObject({
+      kind: "space-rsync-mirror",
+      dedupeKey: "space-rsync-mirror:collab-cad-space:pull",
+      payloadJson: {
+        direction: "pull",
+        sourcePath: "/users/nikiv/spaces/collab-cad-space",
+        targetPath: join(tempDir, "spaces", "collab-cad-space"),
+        transport: "rsync",
+      },
+    });
+    expect(push.job).toMatchObject({
+      kind: "space-rsync-mirror",
+      dedupeKey: "space-rsync-mirror:collab-cad-space:push",
+      payloadJson: {
+        direction: "push",
+        sourcePath: join(tempDir, "spaces", "collab-cad-space"),
+        targetPath: "/users/nikiv/spaces/collab-cad-space",
+        transport: "rsync",
+      },
+    });
+  });
+
   it("ignores malformed legacy space jobs when listing spaces", async () => {
     await requestJson("POST", "/v1/sync/jobs", {
       kind: "space-rsync-mirror",
