@@ -11,6 +11,7 @@ import {
   type JobRecord,
   type JobStatus,
   type JsonValue as AgentJsonValue,
+  type SemanticEvent,
 } from "../../agent-infra-backend/src/index.js";
 import {
   type CodexStreamEvent,
@@ -126,11 +127,12 @@ export function createRemoteAutonomyGateway(
     eventType: string,
     summaryText: string,
     payloadJson: JsonObject,
+    eventId?: string,
   ) => {
     await ensureControlRun();
-    await agentStore.appendSemanticEvent({
+    return await agentStore.appendSemanticEvent({
       runId: CONTROL_RUN_ID,
-      eventId: `${eventType}:${randomUUID()}`,
+      eventId: eventId ?? `${eventType}:${randomUUID()}`,
       eventType,
       summaryText,
       payloadJson: payloadJson as AgentJsonValue,
@@ -189,6 +191,7 @@ export function createRemoteAutonomyGateway(
         codexPresence: "/v1/codex/presence",
         codexSessions: "/v1/codex/sessions",
         codexStreamEvents: "/v1/codex/stream-events",
+        executorTraces: "/v1/executor/traces",
         syncJobs: "/v1/sync/jobs",
         syncReceipts: "/v1/sync/receipts",
         claims: "/v1/claims",
@@ -288,6 +291,58 @@ export function createRemoteAutonomyGateway(
       return {
         ok: true,
         events: events.map(serializeStreamEvent),
+      };
+    })
+    .post("/v1/executor/traces", async ({ body }) => {
+      const payload = objectBody(body);
+      const traceId =
+        optionalString(payload, "trace_id") ??
+        optionalString(payload, "traceId") ??
+        optionalString(payload, "correlation_id") ??
+        optionalString(payload, "correlationId") ??
+        randomUUID();
+      const executor = optionalString(payload, "executor") ?? "unknown";
+      const eventType = optionalString(payload, "eventType") ?? "executor_trace";
+      const status = optionalString(payload, "status") ?? "unknown";
+      const event = await recordGatewayEvent(
+        eventType,
+        `${executor} executor trace ${status}`,
+        {
+          ...payload,
+          traceId,
+          executor,
+          status,
+          hostId: resolved.hostId,
+          receivedAt: new Date().toISOString(),
+        },
+        `${eventType}:${executor}:${traceId}`,
+      );
+      return {
+        ok: true,
+        traceId,
+        event: serializeSemanticEvent(event),
+      };
+    })
+    .get("/v1/executor/traces", async ({ query }) => {
+      const summary = await agentStore.getRunSummary(CONTROL_RUN_ID);
+      const eventType = optionalQueryString(query.eventType);
+      const executor = optionalQueryString(query.executor);
+      const traceId = optionalQueryString(query.traceId) ?? optionalQueryString(query.trace_id);
+      const limit = intQuery(query.limit, 50);
+      const events = (summary?.semanticEvents ?? [])
+        .filter((event) => !eventType || event.event_type === eventType)
+        .filter((event) => {
+          const payload = jsonObject(event.payload_json);
+          if (!executor && !traceId) return true;
+          if (executor && payload?.executor !== executor) return false;
+          if (traceId && payload?.traceId !== traceId && payload?.trace_id !== traceId) return false;
+          return true;
+        })
+        .slice(-Math.max(0, limit))
+        .reverse();
+      return {
+        ok: true,
+        events: events.map(serializeSemanticEvent),
       };
     })
     .get("/v1/codex/sessions", async ({ query }) => {
@@ -830,6 +885,18 @@ function serializeStreamEvent(event: CodexStreamEvent) {
     schemaHash: event.schema_hash,
     createdAt: event.created_at.toISOString(),
     observedAt: event.observed_at.toISOString(),
+  };
+}
+
+function serializeSemanticEvent(event: SemanticEvent) {
+  return {
+    eventId: event.event_id,
+    runId: event.run_id,
+    itemId: event.item_id ?? null,
+    eventType: event.event_type,
+    summaryText: event.summary_text ?? null,
+    payloadJson: event.payload_json ?? null,
+    occurredAt: event.occurred_at.toISOString(),
   };
 }
 

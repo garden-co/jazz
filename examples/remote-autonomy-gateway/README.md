@@ -19,6 +19,10 @@ of what happened.
   remote replication through Jazz2.
 - `GET /v1/codex/stream-events?sessionId=...` lists replicated Codex stream
   events by session and sequence cursor.
+- `POST /v1/executor/traces` records a Nullclaw/Codex/worker executor result as
+  an idempotent Jazz2 semantic event.
+- `GET /v1/executor/traces?executor=...&traceId=...` lists retained executor
+  traces for ORACLE review.
 - `POST /v1/sync/jobs` creates idempotent `rsync`, `git-sync`, or worker jobs.
 - `POST /v1/sync/jobs/:jobId/claim` claims a queued job for a worker.
 - `POST /v1/sync/jobs/:jobId/status` updates job state.
@@ -64,8 +68,10 @@ By default the local Jazz2 stores connect to the configured sync server. Set
    --follow true ...` so local rollout appends are recorded into
    `codex_stream_events` with Jazz sync durability.
 4. Mac or server workers create `/v1/sync/jobs` for `git-sync` and `rsync`.
-5. Workers claim jobs, run the transport, then write `/v1/sync/receipts`.
-6. Review/promotion automation reads `/v1/state` and the Jazz2 records instead
+5. Executor workers write `/v1/executor/traces` for every model/tool result
+   packet they produce.
+6. Workers claim jobs, run the transport, then write `/v1/sync/receipts`.
+7. Review/promotion automation reads `/v1/state` and the Jazz2 records instead
    of scraping logs.
 
 ## Designer Spaces

@@ -55,12 +55,66 @@ describe("remote autonomy gateway", () => {
         state: "/v1/state",
         codexPresence: "/v1/codex/presence",
         codexStreamEvents: "/v1/codex/stream-events",
+        executorTraces: "/v1/executor/traces",
         syncJobs: "/v1/sync/jobs",
         spaces: "/v1/spaces",
       },
       syncServer: {
         url: "https://jazz2.example.test",
         appId: "test-app-id",
+      },
+    });
+  });
+
+  it("records executor traces as durable semantic events", async () => {
+    const recorded = await requestJson("POST", "/v1/executor/traces", {
+      schemaVersion: 1,
+      kind: "nullclaw.worker.result",
+      executor: "nullclaw",
+      eventType: "nullclaw_worker_trace",
+      trace_id: "trace-123",
+      run_id: "run-123",
+      task_id: "step-1",
+      session_key: "agent:coder:worker:run-123",
+      status: "ok",
+      thread_events: [{ type: "tool_summary", total: 1, failed: 0 }],
+    });
+
+    expect(recorded).toMatchObject({
+      ok: true,
+      traceId: "trace-123",
+      event: {
+        eventId: "nullclaw_worker_trace:nullclaw:trace-123",
+        eventType: "nullclaw_worker_trace",
+        payloadJson: {
+          traceId: "trace-123",
+          executor: "nullclaw",
+          status: "ok",
+          hostId: "mac-test",
+        },
+      },
+    });
+
+    const duplicate = await requestJson("POST", "/v1/executor/traces", {
+      executor: "nullclaw",
+      eventType: "nullclaw_worker_trace",
+      traceId: "trace-123",
+      status: "skipped",
+    });
+    expect(duplicate.event.eventId).toBe(recorded.event.eventId);
+    expect(duplicate.event.payloadJson.status).toBe("skipped");
+
+    const listed = await requestJson(
+      "GET",
+      "/v1/executor/traces?eventType=nullclaw_worker_trace&executor=nullclaw&traceId=trace-123",
+    );
+    expect(listed.events).toHaveLength(1);
+    expect(listed.events[0]).toMatchObject({
+      eventId: "nullclaw_worker_trace:nullclaw:trace-123",
+      eventType: "nullclaw_worker_trace",
+      payloadJson: {
+        traceId: "trace-123",
+        status: "skipped",
       },
     });
   });
