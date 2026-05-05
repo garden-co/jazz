@@ -7,6 +7,13 @@
 //! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
 //! ```
 
+// mimalloc replaces the system allocator for ~12-26% throughput on the server's
+// allocation-heavy paths (query/insert/observer). The global allocator is a
+// per-binary choice; library code in `jazz-tools` does not declare one so that
+// consumers (jazz-napi, todo-server, third-party embedders) keep theirs.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod commands;
 
 use clap::{Parser, Subcommand};
