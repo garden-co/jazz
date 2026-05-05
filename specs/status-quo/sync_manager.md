@@ -16,7 +16,14 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row batch entries, explicit batch seals, replayable batch fate, and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch entries, explicit batch seals, replayable batch fate, and
+query subscriptions so the server can build the same relational view and answer
+forwarded queries.
+
+Catalogue updates use the same sync payload lane, but publication authority is
+core-only in edge deployments. Edges receive schema, migration, and permissions
+catalogue entries from core; they do not accept local admin catalogue writes and
+proxy them upstream.
 
 ### Downward, toward clients
 
@@ -54,7 +61,11 @@ Admin writes can take the direct server-side path.
 
 ### Peer
 
-Peer is used for trusted runtime-to-runtime links such as browser main-thread to worker or server-to-server communication.
+Peer is used for trusted runtime-to-runtime links such as browser main-thread to
+worker or server-to-server communication. Server-to-server WebSocket links use
+the peer-secret handshake and are registered as `ClientRole::Peer`, preserving
+the normal sync state for the connection while allowing trusted catalogue and
+row sync payloads.
 
 ## What Moves Over Sync
 
@@ -82,6 +93,25 @@ That payload set matches the table-first runtime model:
 - replayable whole-batch fate travels separately from concrete row entries
 - row-state and durability progression travel as row-state changes
 - schemas and lenses travel as catalogue entries
+- permissions bundles and permissions heads travel as catalogue entries
+
+## Server Tiers
+
+Server durability identity is configured by topology:
+
+- a server without an upstream URL is the core/global node and owns
+  `GlobalServer`
+- a server with an upstream URL is an edge node and owns `EdgeServer`
+
+Because `GlobalServer` is higher than `EdgeServer`, the core can satisfy both
+global-tier and edge-tier durability. An edge can satisfy edge-tier work locally
+after it has durable edge state, but global-tier writes and global-tier query
+settlement continue upstream to the core.
+
+Edges connect to core as peer clients over the existing WebSocket transport.
+That means reconnect/backoff, active subscription replay, batch-settlement
+replay, and catalogue-digest optimization all stay inside the same transport
+and SyncManager paths used by other runtime links.
 
 ## A Typical Flow
 
@@ -152,6 +182,11 @@ main thread subscribes
 
 The key point is that row delivery and "safe to publish first snapshot" are related, but not identical.
 
+For an edge client requesting `GlobalServer`, the first snapshot is not released
+just because the edge has a local answer. The edge forwards the subscription
+upstream and relays `QuerySettled(GlobalServer)` only after the core settles the
+query at the global tier.
+
 ## Reconnect Behavior
 
 Active query subscriptions are treated as desired state.
@@ -161,6 +196,8 @@ When an upstream server is re-added:
 - the Sync Manager records the new link
 - the Query Manager replays active forwarded subscriptions
 - the server rebuilds scope and resends the rows the client still needs
+- pending batch-settlement requests and catalogue state are replayed or skipped
+  according to the upstream connection state and catalogue digest
 
 This is what makes reconnect feel reliable without every app having to remember which queries to resubscribe manually.
 

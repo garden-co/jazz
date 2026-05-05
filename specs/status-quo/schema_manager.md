@@ -95,6 +95,16 @@ When the Schema Manager can resolve both the structural schema and the current
 permissions bundle, it merges them into an authorization schema and installs
 that into `QueryManager`.
 
+In an edge/core deployment, catalogue authority is core-only. Schemas,
+permissions, and migrations are published to the core server. Edge servers learn
+those catalogue entries through server-to-server sync and install them locally
+once they arrive. Edge admin catalogue publish endpoints reject writes instead
+of proxying them upstream, so publication tools have one authoritative target.
+
+That same catalogue lane carries permission changes. When the core receives a
+new permissions head, connected edges receive the bundle/head pair through sync;
+active edge subscriptions are re-filtered once the authorization schema changes.
+
 ## Client Mode and Server Mode
 
 ### Client mode
@@ -118,6 +128,19 @@ Dynamic servers boot in fail-closed mode even before they have learned the
 current permissions head. Once they receive a permissions head and its bundle,
 they keep enforcing with that authorization schema. An empty loaded bundle is
 still distinct from "no bundle loaded" and still means explicit grants only.
+
+Core and edge servers use the same dynamic schema machinery, but with different
+catalogue authority:
+
+- core servers accept admin catalogue publishes and replicate catalogue state to
+  connected edges
+- edge servers receive catalogue state from core and wait when a requested
+  schema or permission head has not arrived yet
+
+This means an edge that sees row data before it has the matching schema or
+authorization bundle does not guess. It holds the affected query/write work
+until catalogue state catches up, then retries through the normal
+SchemaManager/QueryManager process path.
 
 The JS/native runtime schema wire payload now carries that loaded-bundle bit so
 an empty loaded bundle stays distinguishable from a structural-schema-only boot.
