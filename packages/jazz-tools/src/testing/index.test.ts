@@ -366,5 +366,35 @@ describe("createPolicyTestApp", () => {
     } finally {
       await policyTestApp.shutdown();
     }
-  }, 30_000);
+  }, 10_000);
+
+  it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+
+      alice.expectAllowed((db) => {
+        db.insert(testApp.todos, {
+          title: "Alice can insert her own todo",
+          done: false,
+          ownerId: "alice",
+        });
+      });
+
+      bob.expectDenied((db) => {
+        db.insert(testApp.todos, {
+          title: "Bob cannot insert Alice's todo",
+          done: false,
+          ownerId: "alice",
+        });
+      });
+
+      await expect(alice.all(testApp.todos)).resolves.toEqual([]);
+      await expect(bob.all(testApp.todos)).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
 });

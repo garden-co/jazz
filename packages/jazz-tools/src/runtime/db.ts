@@ -784,9 +784,9 @@ export type DbBatchScope = Omit<DbDirectBatch, "commit">;
  */
 export class Db {
   private clients = new Map<string, JazzClient>();
-  private config: DbConfig;
-  private wasmModule: WasmModule | null;
-  private readonly authStateStore;
+  protected config: DbConfig;
+  protected wasmModule: WasmModule | null;
+  protected readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private disposeWasmTelemetry: (() => void) | null = null;
@@ -846,7 +846,7 @@ export class Db {
   };
 
   /**
-   * Protected constructor - use createDb() in regular app code.
+   * Protected constructor - use {@link createDb} in regular app code.
    */
   protected constructor(
     config: DbConfig,
@@ -966,7 +966,7 @@ export class Db {
    * The worker runs a persistent WASM runtime (OPFS).
    * WorkerBridge wires them together via postMessage.
    *
-   * @internal Use createDb() instead — it auto-detects browser.
+   * @internal Use {@link createDb} instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
     const wasmModule = await loadWasmModule(config.runtimeSources);
