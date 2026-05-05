@@ -24,7 +24,16 @@ type TestDbMethodCallback = (db: DbTransactionScope) => unknown;
  * helpers to test write operations without producing side effects on the test database.
  */
 export type TestDb = Db & {
+  /**
+   * Assert that the callback does not throw a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
   expectAllowed(callback: TestDbMethodCallback): void;
+
+  /**
+   * Assert that the callback throws a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
   expectDenied(callback: TestDbMethodCallback): void;
 };
 

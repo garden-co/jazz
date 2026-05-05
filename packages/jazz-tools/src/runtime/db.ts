@@ -784,9 +784,9 @@ export type DbBatchScope = Omit<DbDirectBatch, "commit">;
  */
 export class Db {
   private clients = new Map<string, JazzClient>();
-  protected config: DbConfig;
-  protected wasmModule: WasmModule | null;
-  protected readonly authStateStore;
+  private config: DbConfig;
+  private wasmModule: WasmModule | null;
+  private readonly authStateStore;
   private workerBridge: WorkerBridge | null = null;
   private worker: Worker | null = null;
   private disposeWasmTelemetry: (() => void) | null = null;
