@@ -21,6 +21,7 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
+import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
 import { httpUrlToWs } from "../runtime/url.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -65,14 +66,57 @@ let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init c
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
+let rejectedBatchReplayQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
 let currentAuth: Record<string, string> = {};
+let disposeWasmTelemetry: (() => void) | null = null;
 // Stored after init so reconnect-upstream can re-establish the WS.
 let currentWsUrl: string | null = null;
+
+function syncRetainedLocalBatchRecordsToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batches = runtime.loadLocalBatchRecords?.() ?? [];
+    post({ type: "local-batch-records-sync", batches });
+  } catch (error) {
+    console.warn("[worker] loadLocalBatchRecords failed:", error);
+  }
+}
+
+function replayNewlyRejectedBatchesToMain(): void {
+  if (!runtime) {
+    return;
+  }
+  try {
+    const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
+    for (const batchId of batchIds) {
+      const batch = runtime.loadLocalBatchRecord?.(batchId);
+      if (batch?.latestSettlement?.kind !== "rejected") {
+        continue;
+      }
+      post({ type: "mutation-error-replay", batch });
+    }
+  } catch (error) {
+    console.warn("[worker] drainRejectedBatchIds failed:", error);
+  }
+}
+
+function queueRejectedBatchReplayToMain(): void {
+  if (rejectedBatchReplayQueued) {
+    return;
+  }
+  rejectedBatchReplayQueued = true;
+  queueMicrotask(() => {
+    rejectedBatchReplayQueued = false;
+    replayNewlyRejectedBatchesToMain();
+  });
+}
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
   const origin = self.location?.origin;
@@ -303,6 +347,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
     const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     await ensureWorkerWasmInitialized(wasmModule, msg);
+    disposeWasmTelemetry?.();
+    disposeWasmTelemetry = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: msg.telemetryCollectorUrl,
+      appId: msg.appId,
+      runtimeThread: "worker",
+    });
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     currentAuth = {};
@@ -366,6 +417,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
             enqueueSyncMessageForMain(payload, sequence);
+            queueRejectedBatchReplayToMain();
             return;
           }
 
@@ -423,6 +475,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
     } finally {
       bootstrapCatalogueForwarding = false;
     }
+
+    syncRetainedLocalBatchRecordsToMain();
+    queueRejectedBatchReplayToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 
@@ -565,6 +620,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "shutdown":
       initComplete = false;
+      disposeWasmTelemetry?.();
+      disposeWasmTelemetry = null;
       if (runtime) {
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
@@ -577,11 +634,21 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       self.close();
       break;
 
+    case "acknowledge-rejected-batch":
+      try {
+        runtime?.acknowledgeRejectedBatch?.(msg.batchId);
+      } catch (error) {
+        console.warn("[worker] acknowledgeRejectedBatch failed:", error);
+      }
+      break;
+
     case "simulate-crash":
       // Flush WAL buffer to OPFS but do NOT write snapshot.
       // This simulates a crash where writes reached the WAL but no
       // clean checkpoint happened. Recovery must replay the WAL.
       initComplete = false;
+      disposeWasmTelemetry?.();
+      disposeWasmTelemetry = null;
       if (runtime) {
         runtime.flushWal(); // WAL buffer → OPFS, but no snapshot
         runtime.free(); // Drop → releases OPFS exclusive handles

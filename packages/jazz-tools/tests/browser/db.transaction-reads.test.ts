@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
@@ -43,28 +43,21 @@ function makeTodoQuery(
   };
 }
 
-const dbs: Db[] = [];
+let db: Db;
 
-function track(db: Db): Db {
-  dbs.push(db);
-  return db;
-}
+beforeEach(async () => {
+  db = await createDb({
+    appId: "db-transaction-reads-test",
+    driver: { type: "persistent", dbName: uniqueDbName("db-transaction-reads-test") },
+  });
+});
 
 afterEach(async () => {
-  for (const db of dbs.splice(0).reverse()) {
-    await db.shutdown();
-  }
+  await db.shutdown();
 });
 
 describe("db transaction reads browser integration", () => {
   it("shows only the current transaction's staged inserts through tx.all", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-transaction-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-insert-reads") },
-      }),
-    );
-
     const aliceTx = db.beginTransaction();
     const bobTx = db.beginTransaction();
 
@@ -82,13 +75,6 @@ describe("db transaction reads browser integration", () => {
   });
 
   it("keeps same-row staged updates isolated to the transaction that issued them", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-transaction-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-update-reads") },
-      }),
-    );
-
     const { value: base } = db.insert(todos, { title: "Shared", done: false });
 
     const aliceTx = db.beginTransaction();
@@ -112,13 +98,6 @@ describe("db transaction reads browser integration", () => {
   });
 
   it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-transaction-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-commit-reads") },
-      }),
-    );
-
     const tx = db.beginTransaction();
     const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
 
@@ -131,14 +110,16 @@ describe("db transaction reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
-  it("supports custom ids and upserts inside transactions", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-transaction-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-write-api-parity") },
-      }),
-    );
+  it("changes from rolled-back transactions are not visible globally", async () => {
+    const tx = db.beginTransaction();
+    tx.insert(todos, { title: "Batch", done: false });
 
+    tx.rollback();
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+  });
+
+  it("supports custom ids and upserts inside transactions", async () => {
     const { value: existingTodo } = db.insert(todos, {
       title: "Bob drafted release notes",
       done: false,
@@ -186,13 +167,6 @@ describe("db transaction reads browser integration", () => {
   });
 
   it("rejects partial upserts for missing rows inside transactions", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-transaction-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-partial-upsert-missing") },
-      }),
-    );
-
     const tx = db.beginTransaction();
 
     expect(() =>
@@ -200,52 +174,33 @@ describe("db transaction reads browser integration", () => {
     ).toThrow("missing required field `title`");
   });
 
-  it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
-      }),
-    );
+  describe("db.transaction(cb)", () => {
+    it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
+      const txResult = db.transaction((tx) => {
+        return tx.insert(todos, { title: "Batch", done: false });
+      });
+      // No need to wait in this case, because the Db is not connected to a server
+      // await txResult.wait({ tier: "global" });
+      const insertedTodo = txResult.value;
 
-    const txResult = db.transaction((tsx) => {
-      return tsx.insert(todos, { title: "Batch", done: false });
+      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
     });
-    // No need to wait in this case, because the Db is not connected to a server
-    // await txResult.wait({ tier: "global" });
-    const insertedTodo = txResult.value;
 
-    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
-  });
+    it("does not commit changes if the callback rejects", async () => {
+      expect(() =>
+        db.transaction((tx) => {
+          tx.insert(todos, { title: "Batch", done: false });
+          throw new Error("callback failed");
+        }),
+      ).toThrow("callback failed");
 
-  it("does not commit changes if the callback rejects", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
-      }),
-    );
-
-    expect(() =>
-      db.transaction((tsx) => {
-        tsx.insert(todos, { title: "Batch", done: false });
-        throw new Error("callback failed");
-      }),
-    ).toThrow("callback failed");
-
-    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+      expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+    });
   });
 });
 
 describe("db batch reads browser integration", () => {
   it("changes in an uncommited batch are visible globally", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
-      }),
-    );
-
     const batch = db.beginBatch();
     const insertedTodo = batch.insert(todos, { title: "Batch", done: false });
 
@@ -254,30 +209,7 @@ describe("db batch reads browser integration", () => {
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
-  it("commits changes once the callback resolves", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
-      }),
-    );
-
-    const batchResult = db.batch((batch) => {
-      return batch.insert(todos, { title: "Batch", done: false });
-    });
-    const insertedTodo = batchResult.value;
-
-    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
-  });
-
   it("supports custom ids and upserts inside direct batches", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("batch-write-api-parity") },
-      }),
-    );
-
     const { value: existingTodo } = db.insert(todos, {
       title: "Bob queued docs review",
       done: false,
@@ -323,13 +255,6 @@ describe("db batch reads browser integration", () => {
   });
 
   it("rejects partial upserts for missing rows inside direct batches", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("batch-partial-upsert-missing") },
-      }),
-    );
-
     const batch = db.beginBatch();
 
     expect(() =>
@@ -337,24 +262,28 @@ describe("db batch reads browser integration", () => {
     ).toThrow("missing required field `title`");
   });
 
-  it("does not rollback changes if the callback rejects", async () => {
-    const db = track(
-      await createDb({
-        appId: "db-batch-reads-test",
-        driver: { type: "persistent", dbName: uniqueDbName("tx-batch-reads") },
-      }),
-    );
+  describe("db.batch(cb)", () => {
+    it("commits changes once the callback resolves", async () => {
+      const batchResult = db.batch((batch) => {
+        return batch.insert(todos, { title: "Batch", done: false });
+      });
+      const insertedTodo = batchResult.value;
 
-    let insertedTodo: Todo | undefined;
-    expect(() =>
-      db.batch((batch) => {
-        insertedTodo = batch.insert(todos, { title: "Batch", done: false });
-        throw new Error("callback failed");
-      }),
-    ).toThrow("callback failed");
+      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+    });
 
-    const globalTodo = await db.one<Todo>(makeTodoQuery());
-    expect(globalTodo).toBeDefined();
-    expect(globalTodo).toEqual(insertedTodo);
+    it("does not rollback changes if the callback rejects", async () => {
+      let insertedTodo: Todo | undefined;
+      expect(() =>
+        db.batch((batch) => {
+          insertedTodo = batch.insert(todos, { title: "Batch", done: false });
+          throw new Error("callback failed");
+        }),
+      ).toThrow("callback failed");
+
+      const globalTodo = await db.one<Todo>(makeTodoQuery());
+      expect(globalTodo).toBeDefined();
+      expect(globalTodo).toEqual(insertedTodo);
+    });
   });
 });

@@ -149,6 +149,9 @@ protected:
                                                     const jsi::Value &thisVal,
                                                     const jsi::Value *args,
                                                     size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_func_mint_anonymous_token(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_func_mint_local_first_token(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -156,6 +159,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_func_generate_id(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_func_mint_anonymous_token(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_func_mint_local_first_token(
