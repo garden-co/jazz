@@ -30,7 +30,7 @@ appId: dev.jazz.starter.expohybrid
 - inputText: ${output.email}
 - tapOn: "Password"
 - inputText: "testpassword"
-- tapOn: "Submit create account"
+- pressKey: "Enter"
 
 - extendedWaitUntil:
     visible: "Sign out"

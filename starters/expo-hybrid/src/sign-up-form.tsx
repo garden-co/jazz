@@ -72,6 +72,8 @@ export function SignUpForm({ onToggle }: { onToggle: () => void }) {
           style={styles.input}
           secureTextEntry
           accessibilityLabel="Password"
+          returnKeyType="go"
+          onSubmitEditing={handleSubmit}
         />
       </View>
       {error ? <Text style={styles.error}>{error}</Text> : null}

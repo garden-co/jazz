@@ -18,7 +18,7 @@ appId: dev.jazz.starter.expobetterauth
 - inputText: ${output.email}
 - tapOn: "Password"
 - inputText: "testpassword"
-- tapOn: "Submit create account"
+- pressKey: "Enter"
 
 - extendedWaitUntil:
     visible: "Your todos"
@@ -39,7 +39,7 @@ appId: dev.jazz.starter.expobetterauth
 - inputText: ${output.email}
 - tapOn: "Password"
 - inputText: "testpassword"
-- tapOn: "Submit sign in"
+- pressKey: "Enter"
 
 - extendedWaitUntil:
     visible: "Your todos"
