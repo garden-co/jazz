@@ -2,6 +2,7 @@ import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import type {
   DirectInsertResult,
   DirectMutationResult,
+  DurabilityTier,
   LocalBatchRecord,
   Runtime,
 } from "../runtime/client.js";
@@ -30,10 +31,29 @@ export interface JazzRnRuntimeBinding {
   updateAuth(authJson: string): void;
   onAuthFailure(callback: { onFailure(reason: string): void }): void;
   delete_(objectId: string): string;
+  deletePersisted?(objectId: string, tier: string): string;
+  deletePersistedWithSession?(
+    objectId: string,
+    writeContextJson: string | undefined,
+    tier: string,
+  ): string;
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): string;
   flush(): void;
   getSchemaHash(): string;
   insert(table: string, valuesJson: string, objectId: string | undefined): string;
+  insertPersisted?(
+    table: string,
+    valuesJson: string,
+    tier: string,
+    objectId: string | undefined,
+  ): string;
+  insertPersistedWithSession?(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+    tier: string,
+    objectId: string | undefined,
+  ): string;
   insertWithSession?(
     table: string,
     valuesJson: string,
@@ -69,6 +89,13 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): string;
+  updatePersisted?(objectId: string, valuesJson: string, tier: string): string;
+  updatePersistedWithSession?(
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+    tier: string,
+  ): string;
   updateWithSession?(
     objectId: string,
     valuesJson: string,
@@ -170,6 +197,22 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
   }
 
+  private requirePersistedWriteMethod<
+    T extends
+      | "insertPersisted"
+      | "insertPersistedWithSession"
+      | "updatePersisted"
+      | "updatePersistedWithSession"
+      | "deletePersisted"
+      | "deletePersistedWithSession",
+  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
+    const runtimeMethod = this.binding[method];
+    if (!runtimeMethod) {
+      throw new Error(`${method} is not supported by this RN runtime binding`);
+    }
+    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
+  }
+
   private requireBatchRecordMethod<
     T extends
       | "loadLocalBatchRecord"
@@ -217,6 +260,48 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  insertPersisted(
+    table: string,
+    values: InsertValues,
+    tier: DurabilityTier,
+    object_id?: string | null,
+  ): ReturnType<NonNullable<Runtime["insertPersisted"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("insertPersisted")(
+        table,
+        encodeFFIRecordToJson(values),
+        tier,
+        object_id ?? undefined,
+      );
+      return JSON.parse(resultJson) as ReturnType<NonNullable<Runtime["insertPersisted"]>>;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  insertPersistedWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
+    tier: DurabilityTier,
+    object_id?: string | null,
+  ): ReturnType<NonNullable<Runtime["insertPersistedWithSession"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("insertPersistedWithSession")(
+        table,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+        tier,
+        object_id ?? undefined,
+      );
+      return JSON.parse(resultJson) as ReturnType<
+        NonNullable<Runtime["insertPersistedWithSession"]>
+      >;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   update(object_id: string, values: Record<string, Value>): DirectMutationResult {
     try {
       const resultJson = this.binding.update(object_id, encodeFFIRecordToJson(values));
@@ -243,10 +328,79 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  updatePersisted(
+    object_id: string,
+    values: Record<string, Value>,
+    tier: DurabilityTier,
+  ): ReturnType<NonNullable<Runtime["updatePersisted"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("updatePersisted")(
+        object_id,
+        encodeFFIRecordToJson(values),
+        tier,
+      );
+      return JSON.parse(resultJson) as ReturnType<NonNullable<Runtime["updatePersisted"]>>;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  updatePersistedWithSession(
+    object_id: string,
+    values: Record<string, Value>,
+    write_context_json: string | null | undefined,
+    tier: DurabilityTier,
+  ): ReturnType<NonNullable<Runtime["updatePersistedWithSession"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("updatePersistedWithSession")(
+        object_id,
+        encodeFFIRecordToJson(values),
+        write_context_json ?? undefined,
+        tier,
+      );
+      return JSON.parse(resultJson) as ReturnType<
+        NonNullable<Runtime["updatePersistedWithSession"]>
+      >;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   delete(object_id: string): DirectMutationResult {
     try {
       const resultJson = this.binding.delete_(object_id);
       return JSON.parse(resultJson) as DirectMutationResult;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  deletePersisted(
+    object_id: string,
+    tier: DurabilityTier,
+  ): ReturnType<NonNullable<Runtime["deletePersisted"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("deletePersisted")(object_id, tier);
+      return JSON.parse(resultJson) as ReturnType<NonNullable<Runtime["deletePersisted"]>>;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  deletePersistedWithSession(
+    object_id: string,
+    write_context_json: string | null | undefined,
+    tier: DurabilityTier,
+  ): ReturnType<NonNullable<Runtime["deletePersistedWithSession"]>> {
+    try {
+      const resultJson = this.requirePersistedWriteMethod("deletePersistedWithSession")(
+        object_id,
+        write_context_json ?? undefined,
+        tier,
+      );
+      return JSON.parse(resultJson) as ReturnType<
+        NonNullable<Runtime["deletePersistedWithSession"]>
+      >;
     } catch (error) {
       throw normalizeJazzRnError(error);
     }

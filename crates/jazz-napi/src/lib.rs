@@ -24,11 +24,12 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
-    generate_id as generate_binding_id, parse_batch_id_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_runtime_schema_input, parse_session_input, parse_write_context_input,
+    delete_persisted_result_to_json, generate_id as generate_binding_id,
+    insert_persisted_result_to_json, parse_batch_id_input,
+    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_object_id_input,
+    parse_query_input, parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
-    subscription_delta_to_json,
+    subscription_delta_to_json, update_persisted_result_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -749,6 +750,146 @@ impl NapiRuntime {
         Ok(serde_json::json!({
             "batchId": batch_id.to_string(),
         }))
+    }
+
+    #[napi(js_name = "insertPersisted", ts_return_type = "any")]
+    pub fn insert_persisted(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        tier: String,
+        object_id: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        insert_persisted_result_to_json(
+            &mut core,
+            Some(&self.declared_schema),
+            &table,
+            values.0,
+            object_id,
+            None,
+            persistence_tier,
+        )
+        .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))
+    }
+
+    #[napi(js_name = "insertPersistedWithSession", ts_return_type = "any")]
+    pub fn insert_persisted_with_session(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
+        write_context_json: Option<String>,
+        tier: String,
+        object_id: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let object_id =
+            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        insert_persisted_result_to_json(
+            &mut core,
+            Some(&self.declared_schema),
+            &table,
+            values.0,
+            object_id,
+            write_context.as_ref(),
+            persistence_tier,
+        )
+        .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))
+    }
+
+    #[napi(js_name = "updatePersisted", ts_return_type = "any")]
+    pub fn update_persisted(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let oid = parse_object_id_input(&object_id).map_err(napi::Error::from_reason)?;
+        let updates = convert_updates(values.0);
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        update_persisted_result_to_json(&mut core, oid, updates, None, persistence_tier)
+            .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))
+    }
+
+    #[napi(js_name = "updatePersistedWithSession", ts_return_type = "any")]
+    pub fn update_persisted_with_session(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let oid = parse_object_id_input(&object_id).map_err(napi::Error::from_reason)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+        let updates = convert_updates(values.0);
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        update_persisted_result_to_json(
+            &mut core,
+            oid,
+            updates,
+            write_context.as_ref(),
+            persistence_tier,
+        )
+        .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))
+    }
+
+    #[napi(js_name = "deletePersisted", ts_return_type = "any")]
+    pub fn delete_persisted(
+        &self,
+        object_id: String,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let oid = parse_object_id_input(&object_id).map_err(napi::Error::from_reason)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        delete_persisted_result_to_json(&mut core, oid, None, persistence_tier)
+            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))
+    }
+
+    #[napi(js_name = "deletePersistedWithSession", ts_return_type = "any")]
+    pub fn delete_persisted_with_session(
+        &self,
+        object_id: String,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let oid = parse_object_id_input(&object_id).map_err(napi::Error::from_reason)?;
+        let write_context = parse_write_context_json(write_context_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        delete_persisted_result_to_json(&mut core, oid, write_context.as_ref(), persistence_tier)
+            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))
     }
 
     #[napi(js_name = "loadLocalBatchRecord", ts_return_type = "any | null")]

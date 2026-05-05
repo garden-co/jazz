@@ -15,10 +15,12 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema,
     current_timestamp_ms as binding_current_timestamp_ms,
     default_read_durability_options as default_binding_read_durability_options,
-    generate_id as generate_binding_id, parse_batch_id_input,
-    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
-    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_local_batch_record, serialize_local_batch_records, subscription_delta_to_json,
+    delete_persisted_result_to_json, generate_id as generate_binding_id,
+    insert_persisted_result_to_json, parse_batch_id_input,
+    parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_object_id_input,
+    parse_query_input, parse_session_input, parse_write_context_input,
+    query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
+    subscription_delta_to_json, update_persisted_result_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -572,6 +574,168 @@ impl RnRuntime {
             }))
             .map_err(|e| JazzRnError::Internal {
                 message: format!("delete serialization failed: {e}"),
+            })
+        })
+    }
+
+    pub fn insert_persisted(
+        &self,
+        table: String,
+        values_json: String,
+        tier: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("insert_persisted", || {
+            let named_values = convert_insert_values(&values_json)?;
+            let persistence_tier = parse_tier(&tier)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload = insert_persisted_result_to_json(
+                &mut core,
+                Some(&self.declared_schema),
+                &table,
+                named_values,
+                object_id,
+                None,
+                persistence_tier,
+            )
+            .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("insert persisted serialization failed: {e}"),
+            })
+        })
+    }
+
+    pub fn insert_persisted_with_session(
+        &self,
+        table: String,
+        values_json: String,
+        write_context_json: Option<String>,
+        tier: String,
+        object_id: Option<String>,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("insert_persisted_with_session", || {
+            let named_values = convert_insert_values(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let persistence_tier = parse_tier(&tier)?;
+            let object_id = parse_external_object_id(object_id.as_deref())
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload = insert_persisted_result_to_json(
+                &mut core,
+                Some(&self.declared_schema),
+                &table,
+                named_values,
+                object_id,
+                write_context.as_ref(),
+                persistence_tier,
+            )
+            .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("insert persisted serialization failed: {e}"),
+            })
+        })
+    }
+
+    pub fn update_persisted(
+        &self,
+        object_id: String,
+        values_json: String,
+        tier: String,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("update_persisted", || {
+            let oid = parse_object_id_input(&object_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let updates = convert_updates(&values_json)?;
+            let persistence_tier = parse_tier(&tier)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload =
+                update_persisted_result_to_json(&mut core, oid, updates, None, persistence_tier)
+                    .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("update persisted serialization failed: {e}"),
+            })
+        })
+    }
+
+    pub fn update_persisted_with_session(
+        &self,
+        object_id: String,
+        values_json: String,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("update_persisted_with_session", || {
+            let oid = parse_object_id_input(&object_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let updates = convert_updates(&values_json)?;
+            let write_context = parse_write_context(write_context_json)?;
+            let persistence_tier = parse_tier(&tier)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload = update_persisted_result_to_json(
+                &mut core,
+                oid,
+                updates,
+                write_context.as_ref(),
+                persistence_tier,
+            )
+            .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("update persisted serialization failed: {e}"),
+            })
+        })
+    }
+
+    #[uniffi::method(name = "deletePersisted")]
+    pub fn delete_persisted(&self, object_id: String, tier: String) -> Result<String, JazzRnError> {
+        with_panic_boundary("delete_persisted", || {
+            let oid = parse_object_id_input(&object_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let persistence_tier = parse_tier(&tier)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload = delete_persisted_result_to_json(&mut core, oid, None, persistence_tier)
+                .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("delete persisted serialization failed: {e}"),
+            })
+        })
+    }
+
+    #[uniffi::method(name = "deletePersistedWithSession")]
+    pub fn delete_persisted_with_session(
+        &self,
+        object_id: String,
+        write_context_json: Option<String>,
+        tier: String,
+    ) -> Result<String, JazzRnError> {
+        with_panic_boundary("delete_persisted_with_session", || {
+            let oid = parse_object_id_input(&object_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let write_context = parse_write_context(write_context_json)?;
+            let persistence_tier = parse_tier(&tier)?;
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            let payload = delete_persisted_result_to_json(
+                &mut core,
+                oid,
+                write_context.as_ref(),
+                persistence_tier,
+            )
+            .map_err(runtime_err)?;
+            serde_json::to_string(&payload).map_err(|e| JazzRnError::Internal {
+                message: format!("delete persisted serialization failed: {e}"),
             })
         })
     }

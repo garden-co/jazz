@@ -18,7 +18,10 @@ use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
-use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
+use crate::runtime_core::{
+    ReadDurabilityOptions, RuntimeCore, RuntimeError, Scheduler, SubscriptionDelta,
+};
+use crate::storage::Storage;
 use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -444,8 +447,73 @@ pub fn subscription_delta_to_json(
     serde_json::Value::Array(delta_obj)
 }
 
+fn persisted_mutation_result_to_json(batch_id: BatchId) -> JsonValue {
+    json!({
+        "batchId": batch_id.to_string(),
+    })
+}
+
+pub fn insert_persisted_result_to_json<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    declared_schema: Option<&Schema>,
+    table: &str,
+    values: HashMap<String, Value>,
+    object_id: Option<ObjectId>,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> Result<JsonValue, RuntimeError> {
+    let ((object_id, row_values), batch_id, _receiver) =
+        core.insert_persisted_with_id_and_batch_id(table, values, object_id, write_context, tier)?;
+    let table_name = TableName::new(table);
+    let row_values = match declared_schema {
+        Some(declared_schema) => align_row_values_to_declared_schema(
+            declared_schema,
+            core.current_schema(),
+            &table_name,
+            row_values,
+        ),
+        None => row_values,
+    };
+
+    Ok(json!({
+        "batchId": batch_id.to_string(),
+        "row": {
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        },
+    }))
+}
+
+pub fn update_persisted_result_to_json<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    object_id: ObjectId,
+    updates: Vec<(String, Value)>,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> Result<JsonValue, RuntimeError> {
+    let (batch_id, _receiver) =
+        core.update_persisted_with_batch_id(object_id, updates, write_context, tier)?;
+    Ok(persisted_mutation_result_to_json(batch_id))
+}
+
+pub fn delete_persisted_result_to_json<S: Storage, Sch: Scheduler>(
+    core: &mut RuntimeCore<S, Sch>,
+    object_id: ObjectId,
+    write_context: Option<&WriteContext>,
+    tier: DurabilityTier,
+) -> Result<JsonValue, RuntimeError> {
+    let (batch_id, _receiver) =
+        core.delete_persisted_with_batch_id(object_id, write_context, tier)?;
+    Ok(persisted_mutation_result_to_json(batch_id))
+}
+
 pub fn generate_id() -> String {
     ObjectId::new().uuid().to_string()
+}
+
+pub fn parse_object_id_input(object_id: &str) -> Result<ObjectId, String> {
+    let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
+    Ok(ObjectId::from_uuid(uuid))
 }
 
 pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<ObjectId>, String> {
@@ -453,8 +521,7 @@ pub fn parse_external_object_id(object_id: Option<&str>) -> Result<Option<Object
         return Ok(None);
     };
 
-    let uuid = Uuid::parse_str(object_id).map_err(|err| format!("Invalid ObjectId: {err}"))?;
-    Ok(Some(ObjectId::from_uuid(uuid)))
+    parse_object_id_input(object_id).map(Some)
 }
 
 pub fn current_timestamp_ms() -> i64 {

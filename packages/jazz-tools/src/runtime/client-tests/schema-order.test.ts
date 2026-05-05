@@ -9,10 +9,17 @@ import {
 
 describe("JazzClient schema order", () => {
   it("passes create values through in the declared schema order", async () => {
-    const insert = vi.fn(() => mockRow());
+    const insertPersisted = vi.fn(() => ({
+      batchId: "batch-id",
+      row: {
+        id: "todo-1",
+        values: [],
+      },
+    }));
     const runtime: Runtime = {
       ...runtimeBatchRecordStubs,
-      insert,
+      insert: () => mockRow(),
+      insertPersisted,
       update: () => ({
         batchId: "batch-id",
       }),
@@ -76,10 +83,15 @@ describe("JazzClient schema order", () => {
       done: { type: "Boolean", value: false },
     });
 
-    expect(insert).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Buy milk" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(insertPersisted).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Buy milk" },
+        done: { type: "Boolean", value: false },
+      },
+      "local",
+      undefined,
+    );
   });
 
   it("aligns create result rows from declared schema context without runtime schema hashing", async () => {
@@ -98,6 +110,16 @@ describe("JazzClient schema order", () => {
           { type: "Boolean", value: false },
         ],
         batchId: "batch-id",
+      }),
+      insertPersisted: () => ({
+        batchId: "batch-id",
+        row: {
+          id: "todo-1",
+          values: [
+            { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: false },
+          ],
+        },
       }),
       update: () => ({
         batchId: "batch-id",

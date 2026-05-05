@@ -440,6 +440,26 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
+        let (result, _batch_id, receiver) = self.insert_persisted_with_id_and_batch_id(
+            table,
+            values,
+            object_id,
+            write_context,
+            tier,
+        )?;
+        Ok((result, receiver))
+    }
+
+    /// Compatibility shim for bindings that need both an explicit row id and
+    /// the logical persisted batch id.
+    pub fn insert_persisted_with_id_and_batch_id(
+        &mut self,
+        table: &str,
+        values: HashMap<String, Value>,
+        object_id: Option<ObjectId>,
+        write_context: Option<&WriteContext>,
+        tier: DurabilityTier,
+    ) -> Result<(InsertedRow, BatchId, oneshot::Receiver<PersistedWriteAck>), RuntimeError> {
         self.ensure_batch_is_writable(write_context)?;
         let result = self
             .schema_manager
@@ -484,7 +504,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         self.mark_storage_write_pending_flush();
         self.immediate_tick();
-        Ok(((row_id, row_values), receiver))
+        Ok(((row_id, row_values), batch_id, receiver))
     }
 
     /// Insert a row and return the logical batch id plus a receiver that

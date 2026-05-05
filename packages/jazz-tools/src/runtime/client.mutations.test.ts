@@ -13,9 +13,20 @@ function response(ok: boolean, statusText: string, body: unknown = {}): Response
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
+  const insertPersistedCalls: Array<[string, Record<string, unknown>, string, string | undefined]> =
+    [];
+  const insertPersistedWithSessionCalls: Array<
+    [string, Record<string, unknown>, string | undefined, string, string | undefined]
+  > = [];
   const updateWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
+  const updatePersistedCalls: Array<[string, Record<string, unknown>, string]> = [];
+  const updatePersistedWithSessionCalls: Array<
+    [string, Record<string, unknown>, string | undefined, string]
+  > = [];
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
   const deleteWithSessionCalls: Array<[string, string | undefined]> = [];
+  const deletePersistedCalls: Array<[string, string]> = [];
+  const deletePersistedWithSessionCalls: Array<[string, string | undefined, string]> = [];
   const deleteCalls: string[] = [];
 
   const runtimeBase: Runtime = {
@@ -41,6 +52,43 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
         batchId: "insert-with-session-batch-id",
       };
     },
+    insertPersisted: (
+      table: string,
+      values: Record<string, unknown>,
+      tier: string,
+      objectId?: string | null,
+    ) => {
+      insertPersistedCalls.push([table, values, tier, objectId ?? undefined]);
+      return {
+        batchId: "insert-persisted-batch-id",
+        row: {
+          id: objectId ?? "00000000-0000-0000-0000-000000000001",
+          values: [],
+        },
+      };
+    },
+    insertPersistedWithSession: (
+      table: string,
+      values: Record<string, unknown>,
+      writeContextJson: string | null | undefined,
+      tier: string,
+      objectId?: string | null,
+    ) => {
+      insertPersistedWithSessionCalls.push([
+        table,
+        values,
+        writeContextJson ?? undefined,
+        tier,
+        objectId ?? undefined,
+      ]);
+      return {
+        batchId: "insert-persisted-with-session-batch-id",
+        row: {
+          id: objectId ?? "00000000-0000-0000-0000-000000000001",
+          values: [],
+        },
+      };
+    },
     update: (objectId: string, updates: Record<string, unknown>) => {
       updateCalls.push([objectId, updates]);
       return { batchId: "update-batch-id" };
@@ -53,6 +101,24 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       updateWithSessionCalls.push([objectId, updates, writeContextJson ?? undefined]);
       return { batchId: "update-with-session-batch-id" };
     },
+    updatePersisted: (objectId: string, updates: Record<string, unknown>, tier: string) => {
+      updatePersistedCalls.push([objectId, updates, tier]);
+      return { batchId: "update-persisted-batch-id" };
+    },
+    updatePersistedWithSession: (
+      objectId: string,
+      updates: Record<string, unknown>,
+      writeContextJson: string | null | undefined,
+      tier: string,
+    ) => {
+      updatePersistedWithSessionCalls.push([
+        objectId,
+        updates,
+        writeContextJson ?? undefined,
+        tier,
+      ]);
+      return { batchId: "update-persisted-with-session-batch-id" };
+    },
     delete: (objectId: string) => {
       deleteCalls.push(objectId);
       return { batchId: "delete-batch-id" };
@@ -60,6 +126,18 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     deleteWithSession: (objectId: string, writeContextJson?: string | null) => {
       deleteWithSessionCalls.push([objectId, writeContextJson ?? undefined]);
       return { batchId: "delete-with-session-batch-id" };
+    },
+    deletePersisted: (objectId: string, tier: string) => {
+      deletePersistedCalls.push([objectId, tier]);
+      return { batchId: "delete-persisted-batch-id" };
+    },
+    deletePersistedWithSession: (
+      objectId: string,
+      writeContextJson: string | null | undefined,
+      tier: string,
+    ) => {
+      deletePersistedWithSessionCalls.push([objectId, writeContextJson ?? undefined, tier]);
+      return { batchId: "delete-persisted-with-session-batch-id" };
     },
     query: async () => [],
     subscribe: () => 0,
@@ -97,16 +175,22 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     runtime,
     insertCalls,
     insertWithSessionCalls,
+    insertPersistedCalls,
+    insertPersistedWithSessionCalls,
     updateCalls,
     updateWithSessionCalls,
+    updatePersistedCalls,
+    updatePersistedWithSessionCalls,
     deleteCalls,
     deleteWithSessionCalls,
+    deletePersistedCalls,
+    deletePersistedWithSessionCalls,
   };
 }
 
 describe("JazzClient mutation durability split", () => {
-  it("keeps Bytea mutations as Uint8Array at the runtime boundary", () => {
-    const { client, insertCalls, updateCalls } = makeClient();
+  it("keeps Bytea mutations as Uint8Array at the native sealed write boundary", () => {
+    const { client, insertPersistedCalls, updatePersistedCalls } = makeClient();
     const payload = new Uint8Array([1, 2, 3]);
     const insertValues = {
       payload: { type: "Bytea" as const, value: payload },
@@ -118,15 +202,15 @@ describe("JazzClient mutation durability split", () => {
     client.create("todos", insertValues);
     client.update("row-1", updateValues);
 
-    expect(insertCalls).toHaveLength(1);
-    expect(updateCalls).toHaveLength(1);
-    expect(insertCalls[0]?.[1]).toBe(insertValues);
-    expect(updateCalls[0]?.[1]).toBe(updateValues);
+    expect(insertPersistedCalls).toHaveLength(1);
+    expect(updatePersistedCalls).toHaveLength(1);
+    expect(insertPersistedCalls[0]).toEqual(["todos", insertValues, "local", undefined]);
+    expect(updatePersistedCalls[0]).toEqual(["row-1", updateValues, "local"]);
 
-    const insertPayload = insertCalls[0]?.[1].payload as
+    const insertPayload = insertPersistedCalls[0]?.[1].payload as
       | { type: "Bytea"; value: Uint8Array }
       | undefined;
-    const updatePayload = updateCalls[0]?.[1].payload as
+    const updatePayload = updatePersistedCalls[0]?.[1].payload as
       | { type: "Bytea"; value: Uint8Array }
       | undefined;
 
@@ -144,10 +228,10 @@ describe("JazzClient mutation durability split", () => {
     const insertError = new Error("Insert failed: indexed value too large");
     const updateError = new Error("Update failed: indexed value too large");
     const { client } = makeClient({
-      insert: () => {
+      insertPersisted: () => {
         throw insertError;
       },
-      update: () => {
+      updatePersisted: () => {
         throw updateError;
       },
     });
@@ -158,26 +242,30 @@ describe("JazzClient mutation durability split", () => {
     ).toThrow(updateError);
   });
 
-  it("routes update/delete through the synchronous runtime methods", () => {
-    const { client, runtime, updateCalls, deleteCalls } = makeClient();
+  it("routes standalone update/delete through native sealed runtime methods", () => {
+    const { client, runtime, updatePersistedCalls, deletePersistedCalls } = makeClient();
     const updates = { done: { type: "Boolean" as const, value: true } };
 
     expect(client.update("row-1", updates)).toEqual({
-      batchId: "update-batch-id",
+      batchId: "update-persisted-batch-id",
     });
     expect(client.delete("row-1")).toEqual({
-      batchId: "delete-batch-id",
+      batchId: "delete-persisted-batch-id",
     });
 
-    expect(updateCalls).toEqual([["row-1", updates]]);
-    expect(deleteCalls).toEqual(["row-1"]);
-    expect(runtime.sealBatch).toHaveBeenCalledWith("update-batch-id");
-    expect(runtime.sealBatch).toHaveBeenCalledWith("delete-batch-id");
+    expect(updatePersistedCalls).toEqual([["row-1", updates, "local"]]);
+    expect(deletePersistedCalls).toEqual([["row-1", "local"]]);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 
-  it("routes attributed writes through session-aware runtime methods", async () => {
-    const { client, insertWithSessionCalls, updateWithSessionCalls, deleteWithSessionCalls } =
-      makeClient();
+  it("routes attributed standalone writes through native sealed session-aware methods", async () => {
+    const {
+      client,
+      insertPersistedWithSessionCalls,
+      updatePersistedWithSessionCalls,
+      deletePersistedWithSessionCalls,
+      runtime,
+    } = makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
     const updates = { done: { type: "Boolean" as const, value: true } };
     const attributedContext = JSON.stringify({ attribution: "alice" });
@@ -186,38 +274,46 @@ describe("JazzClient mutation durability split", () => {
     client.updateInternal("row-1", updates, undefined, "alice");
     client.deleteInternal("row-1", undefined, "alice");
 
-    expect(insertWithSessionCalls).toEqual([["todos", insertValues, attributedContext]]);
-    expect(updateWithSessionCalls).toEqual([["row-1", updates, attributedContext]]);
-    expect(deleteWithSessionCalls).toEqual([["row-1", attributedContext]]);
+    expect(insertPersistedWithSessionCalls).toEqual([
+      ["todos", insertValues, attributedContext, "local", undefined],
+    ]);
+    expect(updatePersistedWithSessionCalls).toEqual([
+      ["row-1", updates, attributedContext, "local"],
+    ]);
+    expect(deletePersistedWithSessionCalls).toEqual([["row-1", attributedContext, "local"]]);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 
-  it("forwards caller-supplied create ids to runtime insert methods", async () => {
+  it("forwards caller-supplied create ids to native sealed insert methods", async () => {
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
-    const insert = vi.fn(
-      (table: string, values: Record<string, unknown>, objectId?: string | null) => {
-        return { id: objectId ?? "generated-id", values: [], batchId: "batch-1" };
+    const insertPersisted = vi.fn(
+      (table: string, values: Record<string, unknown>, tier: string, objectId?: string | null) => {
+        return {
+          batchId: "batch-1",
+          row: { id: objectId ?? "generated-id", values: [] },
+        };
       },
     );
-    const { client, runtime } = makeClient({ insert });
+    const { client, runtime } = makeClient({ insertPersisted });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
 
     const created = client.create("todos", insertValues, { id: externalId });
 
-    expect(insert).toHaveBeenCalledWith("todos", insertValues, externalId);
+    expect(insertPersisted).toHaveBeenCalledWith("todos", insertValues, "local", externalId);
     expect(created.value.id).toBe(externalId);
-    expect(runtime.sealBatch).toHaveBeenCalledWith("batch-1");
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
   });
 
-  it("falls back to update when upsert sees an existing object id", async () => {
+  it("falls back to native sealed update when upsert sees an existing object id", async () => {
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const insertError = new Error(`encoding error: object already exists: ${externalId}`);
-    const insert = vi.fn(() => {
+    const insertPersisted = vi.fn(() => {
       throw insertError;
     });
-    const update = vi.fn(() => ({ batchId: "fallback-update-batch" }));
+    const updatePersisted = vi.fn(() => ({ batchId: "fallback-update-batch" }));
     const { client } = makeClient({
-      insert,
-      update,
+      insertPersisted,
+      updatePersisted,
     });
     const values = { title: { type: "Text" as const, value: "Updated title" } };
 
@@ -225,16 +321,18 @@ describe("JazzClient mutation durability split", () => {
       batchId: "fallback-update-batch",
     });
 
-    expect(insert).toHaveBeenCalledWith("todos", values, externalId);
-    expect(update).toHaveBeenCalledWith(externalId, values);
+    expect(insertPersisted).toHaveBeenCalledWith("todos", values, "local", externalId);
+    expect(updatePersisted).toHaveBeenCalledWith(externalId, values, "local");
   });
 
   it("returns the inserted batch id when upsert creates a new row", () => {
     const { client } = makeClient({
-      insert: () => ({
-        id: "00000000-0000-0000-0000-000000000001",
-        values: [],
+      insertPersisted: () => ({
         batchId: "batch-created-via-upsert",
+        row: {
+          id: "00000000-0000-0000-0000-000000000001",
+          values: [],
+        },
       }),
     });
     const values = { title: { type: "Text" as const, value: "New todo" } };
@@ -246,11 +344,11 @@ describe("JazzClient mutation durability split", () => {
 
   it("does not fall back to update when upsert insert shape validation fails", () => {
     const validationError = new Error("encoding error: missing required column title");
-    const insert = vi.fn(() => {
+    const insertPersisted = vi.fn(() => {
       throw validationError;
     });
-    const update = vi.fn(() => ({ batchId: "should-not-update" }));
-    const { client } = makeClient({ insert, update });
+    const updatePersisted = vi.fn(() => ({ batchId: "should-not-update" }));
+    const { client } = makeClient({ insertPersisted, updatePersisted });
 
     expect(() =>
       client.upsert(
@@ -260,11 +358,11 @@ describe("JazzClient mutation durability split", () => {
       ),
     ).toThrow(validationError);
 
-    expect(update).not.toHaveBeenCalled();
+    expect(updatePersisted).not.toHaveBeenCalled();
   });
 
   it("encodes session and attribution together when both are provided", () => {
-    const { client, insertWithSessionCalls } = makeClient();
+    const { client, insertPersistedWithSessionCalls } = makeClient();
     const session: Session = {
       user_id: "backend-user",
       claims: { role: "admin" },
@@ -274,7 +372,7 @@ describe("JazzClient mutation durability split", () => {
 
     client.createInternal("todos", insertValues, session, "alice");
 
-    expect(insertWithSessionCalls).toEqual([
+    expect(insertPersistedWithSessionCalls).toEqual([
       [
         "todos",
         insertValues,
@@ -282,27 +380,34 @@ describe("JazzClient mutation durability split", () => {
           session,
           attribution: "alice",
         }),
+        "local",
+        undefined,
       ],
     ]);
   });
 
   it("encodes custom updated_at overrides for create and update mutation options", async () => {
-    const insertWithSession = vi.fn(
+    const insertPersistedWithSession = vi.fn(
       (
         table: string,
         values: Record<string, unknown>,
         _writeContextJson?: string | null,
+        tier?: string,
         objectId?: string | null,
       ) => ({
-        id: objectId ?? "generated-id",
-        values: [],
         batchId: "generated-batch-id",
+        row: {
+          id: objectId ?? "generated-id",
+          values: [],
+        },
       }),
     );
-    const updateWithSession = vi.fn(() => ({ batchId: "generated-update-batch-id" }));
+    const updatePersistedWithSession = vi.fn(() => ({
+      batchId: "generated-update-batch-id",
+    }));
     const { client } = makeClient({
-      insertWithSession,
-      updateWithSession,
+      insertPersistedWithSession,
+      updatePersistedWithSession,
     });
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
     const updates = { done: { type: "Boolean" as const, value: true } };
@@ -312,20 +417,33 @@ describe("JazzClient mutation durability split", () => {
     client.create("todos", insertValues, { updatedAt });
     client.update("row-1", updates, { updatedAt });
 
-    expect(insertWithSession).toHaveBeenCalledWith("todos", insertValues, updatedAtContext);
-    expect(updateWithSession).toHaveBeenCalledWith("row-1", updates, updatedAtContext);
+    expect(insertPersistedWithSession).toHaveBeenCalledWith(
+      "todos",
+      insertValues,
+      updatedAtContext,
+      "local",
+      undefined,
+    );
+    expect(updatePersistedWithSession).toHaveBeenCalledWith(
+      "row-1",
+      updates,
+      updatedAtContext,
+      "local",
+    );
   });
 
   it("preserves custom updated_at overrides when upsert falls back to update", async () => {
     const externalId = "01963f3e-5cbe-7a62-8d7c-123456789abc";
     const insertError = new Error(`encoding error: object already exists: ${externalId}`);
-    const insertWithSession = vi.fn(() => {
+    const insertPersistedWithSession = vi.fn(() => {
       throw insertError;
     });
-    const updateWithSession = vi.fn(() => ({ batchId: "fallback-update-session-batch" }));
+    const updatePersistedWithSession = vi.fn(() => ({
+      batchId: "fallback-update-session-batch",
+    }));
     const { client } = makeClient({
-      insertWithSession,
-      updateWithSession,
+      insertPersistedWithSession,
+      updatePersistedWithSession,
     });
     const values = { title: { type: "Text" as const, value: "Updated title" } };
     const updatedAt = 1_764_000_000_000_000;
@@ -335,8 +453,19 @@ describe("JazzClient mutation durability split", () => {
       batchId: "fallback-update-session-batch",
     });
 
-    expect(insertWithSession).toHaveBeenCalledWith("todos", values, updatedAtContext, externalId);
-    expect(updateWithSession).toHaveBeenCalledWith(externalId, values, updatedAtContext);
+    expect(insertPersistedWithSession).toHaveBeenCalledWith(
+      "todos",
+      values,
+      updatedAtContext,
+      "local",
+      externalId,
+    );
+    expect(updatePersistedWithSession).toHaveBeenCalledWith(
+      externalId,
+      values,
+      updatedAtContext,
+      "local",
+    );
   });
 
   it("uses the same conflict-only upsert fallback in transactions and direct batches", () => {

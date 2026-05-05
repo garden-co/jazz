@@ -78,6 +78,32 @@ declare module "jazz-wasm" {
     ): { batchId: string };
     delete(objectId: string): { batchId: string };
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
+    insertPersisted(
+      table: string,
+      values: InsertValues,
+      tier: string,
+      objectId?: string | null,
+    ): { batchId: string; row: { id: string; values: any[] } };
+    insertPersistedWithSession(
+      table: string,
+      values: InsertValues,
+      sessionJson: string | null | undefined,
+      tier: string,
+      objectId?: string | null,
+    ): { batchId: string; row: { id: string; values: any[] } };
+    updatePersisted(objectId: string, values: unknown, tier: string): { batchId: string };
+    updatePersistedWithSession(
+      objectId: string,
+      values: unknown,
+      sessionJson: string | null | undefined,
+      tier: string,
+    ): { batchId: string };
+    deletePersisted(objectId: string, tier: string): { batchId: string };
+    deletePersistedWithSession(
+      objectId: string,
+      sessionJson: string | null | undefined,
+      tier: string,
+    ): { batchId: string };
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     loadLocalBatchRecords(): LocalBatchRecord[];
     drainRejectedBatchIds(): string[];

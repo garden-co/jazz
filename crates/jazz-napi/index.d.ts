@@ -22,6 +22,12 @@ export declare class NapiRuntime {
   updateWithSession(objectId: string, values: any, writeContextJson?: string | undefined | null): any
   delete(objectId: string): any
   deleteWithSession(objectId: string, writeContextJson?: string | undefined | null): any
+  insertPersisted(table: string, values: Record<string, unknown>, tier: string, objectId?: string | undefined | null): any
+  insertPersistedWithSession(table: string, values: Record<string, unknown>, writeContextJson: string | undefined | null, tier: string, objectId?: string | undefined | null): any
+  updatePersisted(objectId: string, values: any, tier: string): any
+  updatePersistedWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): any
+  deletePersisted(objectId: string, tier: string): any
+  deletePersistedWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): any
   loadLocalBatchRecord(batchId: string): any | null
   loadLocalBatchRecords(): any[]
   drainRejectedBatchIds(): string[]

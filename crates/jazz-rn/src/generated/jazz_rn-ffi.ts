@@ -83,6 +83,19 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletepersisted(
+    ptr: bigint,
+    objectId: Uint8Array,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletepersistedwithsession(
+    ptr: bigint,
+    objectId: Uint8Array,
+    writeContextJson: Uint8Array,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
     ptr: bigint,
     objectId: Uint8Array,
@@ -115,6 +128,23 @@ interface NativeModuleInterface {
     ptr: bigint,
     table: Uint8Array,
     valuesJson: Uint8Array,
+    objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_persisted(
+    ptr: bigint,
+    table: Uint8Array,
+    valuesJson: Uint8Array,
+    tier: Uint8Array,
+    objectId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_persisted_with_session(
+    ptr: bigint,
+    table: Uint8Array,
+    valuesJson: Uint8Array,
+    writeContextJson: Uint8Array,
+    tier: Uint8Array,
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
@@ -202,6 +232,21 @@ interface NativeModuleInterface {
     authJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_persisted(
+    ptr: bigint,
+    objectId: Uint8Array,
+    valuesJson: Uint8Array,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_persisted_with_session(
+    ptr: bigint,
+    objectId: Uint8Array,
+    valuesJson: Uint8Array,
+    writeContextJson: Uint8Array,
+    tier: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     ptr: bigint,
     objectId: Uint8Array,
@@ -241,6 +286,8 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_connect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_create_subscription(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_delete(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletepersisted(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletepersistedwithsession(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_deletewithsession(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(): number;
@@ -248,6 +295,8 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_flush(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_get_schema_hash(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_persisted(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_persisted_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_insert_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_record(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_load_local_batch_records(): number;
@@ -263,6 +312,8 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_auth(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_persisted(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_persisted_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new(): number;
   ubrn_uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure(): number;

@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::Once;
 
-use jazz_tools::binding_support::parse_external_object_id;
 use js_sys::Function;
 use js_sys::Uint8Array;
 use serde::Serialize;
@@ -81,7 +80,9 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
+    delete_persisted_result_to_json, insert_persisted_result_to_json, parse_batch_id_input,
+    parse_external_object_id, parse_object_id_input, serialize_local_batch_record,
+    serialize_local_batch_records, update_persisted_result_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -1101,23 +1102,23 @@ impl WasmRuntime {
         table: &str,
         values: JsValue,
         tier: &str,
+        object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
-        let ((object_id, row_values), batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.insert_persisted_with_batch_id(table, named_values, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
-        };
-
-        let payload = serde_json::json!({
-            "batchId": batch_id.to_string(),
-            "row": SubscriptionRow {
-                id: object_id.uuid().to_string(),
-                values: row_values,
-            }
-        });
+        let payload = insert_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            None,
+            table,
+            named_values,
+            object_id,
+            None,
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
         serde_wasm_bindgen::to_value(&payload)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1132,29 +1133,24 @@ impl WasmRuntime {
         values: JsValue,
         write_context_json: Option<String>,
         tier: &str,
+        object_id: Option<String>,
     ) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
         let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let write_context = parse_write_context_json(write_context_json)?;
+        let object_id = parse_external_object_id(object_id.as_deref())
+            .map_err(|message| JsError::new(&message))?;
 
-        let ((object_id, row_values), batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.insert_persisted_with_batch_id(
-                table,
-                named_values,
-                write_context.as_ref(),
-                persistence_tier,
-            )
-            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
-        };
-
-        let payload = serde_json::json!({
-            "batchId": batch_id.to_string(),
-            "row": SubscriptionRow {
-                id: object_id.uuid().to_string(),
-                values: row_values,
-            }
-        });
+        let payload = insert_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            None,
+            table,
+            named_values,
+            object_id,
+            write_context.as_ref(),
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
         serde_wasm_bindgen::to_value(&payload)
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
@@ -1170,23 +1166,21 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(object_id).map_err(|message| JsError::new(&message))?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
-        let (batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.update_persisted_with_batch_id(oid, updates, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Update failed: {e}")))?
-        };
-
-        serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+        let payload = update_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            oid,
+            updates,
+            None,
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+        serde_wasm_bindgen::to_value(&payload)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Update a row immediately, returning the logical batch id that tracks
@@ -1202,29 +1196,22 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(object_id).map_err(|message| JsError::new(&message))?;
         let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
-        let (batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.update_persisted_with_batch_id(
-                oid,
-                updates,
-                write_context.as_ref(),
-                persistence_tier,
-            )
-            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
-        };
-
-        serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+        let payload = update_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            oid,
+            updates,
+            write_context.as_ref(),
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
+        serde_wasm_bindgen::to_value(&payload)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Delete a row immediately, returning the logical batch id that tracks
@@ -1233,20 +1220,16 @@ impl WasmRuntime {
     pub fn delete_persisted(&self, object_id: &str, tier: &str) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let (batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.delete_persisted_with_batch_id(oid, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
-        };
-
-        serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+        let oid = parse_object_id_input(object_id).map_err(|message| JsError::new(&message))?;
+        let payload = delete_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            oid,
+            None,
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        serde_wasm_bindgen::to_value(&payload)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     /// Delete a row immediately, returning the logical batch id that tracks
@@ -1261,21 +1244,18 @@ impl WasmRuntime {
     ) -> Result<JsValue, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let uuid = uuid::Uuid::parse_str(object_id)
-            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
+        let oid = parse_object_id_input(object_id).map_err(|message| JsError::new(&message))?;
         let write_context = parse_write_context_json(write_context_json)?;
 
-        let (batch_id, _receiver) = {
-            let mut core = self.core.borrow_mut();
-            core.delete_persisted_with_batch_id(oid, write_context.as_ref(), persistence_tier)
-                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
-        };
-
-        serde_wasm_bindgen::to_value(&serde_json::json!({
-            "batchId": batch_id.to_string(),
-        }))
-        .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+        let payload = delete_persisted_result_to_json(
+            &mut self.core.borrow_mut(),
+            oid,
+            write_context.as_ref(),
+            persistence_tier,
+        )
+        .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        serde_wasm_bindgen::to_value(&payload)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
     #[wasm_bindgen(js_name = loadLocalBatchRecord)]

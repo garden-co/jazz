@@ -25,7 +25,6 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
 import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 /**
@@ -61,25 +60,31 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
+  insertPersisted?(
+    table: string,
+    values: InsertValues,
+    tier: DurabilityTier,
+    object_id?: string | null,
+  ): PersistedInsertResult;
   insertPersistedWithSession?(
     table: string,
     values: InsertValues,
     write_context_json: string | null | undefined,
-    tier: string,
+    tier: DurabilityTier,
+    object_id?: string | null,
   ): PersistedInsertResult;
-  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
+  updatePersisted?(object_id: string, values: any, tier: DurabilityTier): PersistedMutationResult;
   updatePersistedWithSession?(
     object_id: string,
     values: any,
     write_context_json: string | null | undefined,
-    tier: string,
+    tier: DurabilityTier,
   ): PersistedMutationResult;
-  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
+  deletePersisted?(object_id: string, tier: DurabilityTier): PersistedMutationResult;
   deletePersistedWithSession?(
     object_id: string,
     write_context_json: string | null | undefined,
-    tier: string,
+    tier: DurabilityTier,
   ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
@@ -157,6 +162,7 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+const DIRECT_WRITE_DURABILITY_TIER: DurabilityTier = "local";
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -1760,6 +1766,24 @@ export class JazzClient {
     return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
   }
 
+  private requirePersistedWriteMethod<
+    T extends keyof Pick<
+      Runtime,
+      | "insertPersisted"
+      | "insertPersistedWithSession"
+      | "updatePersisted"
+      | "updatePersistedWithSession"
+      | "deletePersisted"
+      | "deletePersistedWithSession"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
@@ -1980,9 +2004,6 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): WriteResult<Row> {
     const row = this.createInternal(table, values, session, attribution, options, batchContext);
-    if (!batchContext) {
-      this.sealBatch(row.batchId);
-    }
     return new WriteResult(row, row.batchId, this);
   }
 
@@ -2018,9 +2039,6 @@ export class JazzClient {
       updatedAt,
       batchContext,
     );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -2037,36 +2055,39 @@ export class JazzClient {
     batchContext?: BatchWriteContext,
   ): DirectInsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const row =
-      effectiveSession ||
-      attribution !== undefined ||
-      batchContext ||
-      options?.updatedAt !== undefined
-        ? options?.id
-          ? this.requireSessionWriteMethod("insertWithSession")(
+    const writeContextJson = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      options?.updatedAt,
+    );
+    const row: DirectInsertResult = batchContext
+      ? this.requireSessionWriteMethod("insertWithSession")(
+          table,
+          values,
+          writeContextJson,
+          options?.id,
+        )
+      : writeContextJson !== undefined
+        ? (() => {
+            const result = this.requirePersistedWriteMethod("insertPersistedWithSession")(
               table,
               values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options.updatedAt,
-              ),
-              options.id,
-            )
-          : this.requireSessionWriteMethod("insertWithSession")(
+              writeContextJson,
+              DIRECT_WRITE_DURABILITY_TIER,
+              options?.id,
+            );
+            return { ...result.row, batchId: result.batchId };
+          })()
+        : (() => {
+            const result = this.requirePersistedWriteMethod("insertPersisted")(
               table,
               values,
-              this.encodeWriteContext(
-                effectiveSession,
-                attribution,
-                batchContext,
-                options?.updatedAt,
-              ),
-            )
-        : options?.id
-          ? this.runtime.insert(table, values, options.id)
-          : this.runtime.insert(table, values);
+              DIRECT_WRITE_DURABILITY_TIER,
+              options?.id,
+            );
+            return { ...result.row, batchId: result.batchId };
+          })();
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(
@@ -2185,9 +2206,6 @@ export class JazzClient {
       batchContext,
       updatedAt,
     );
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -2204,14 +2222,32 @@ export class JazzClient {
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
+    const writeContextJson = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      updatedAt,
+    );
+    if (batchContext) {
       return this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+        writeContextJson,
       );
     }
-    return this.runtime.update(objectId, updates);
+    if (writeContextJson !== undefined) {
+      return this.requirePersistedWriteMethod("updatePersistedWithSession")(
+        objectId,
+        updates,
+        writeContextJson,
+        DIRECT_WRITE_DURABILITY_TIER,
+      );
+    }
+    return this.requirePersistedWriteMethod("updatePersisted")(
+      objectId,
+      updates,
+      DIRECT_WRITE_DURABILITY_TIER,
+    );
   }
 
   /**
@@ -2229,9 +2265,6 @@ export class JazzClient {
     updatedAt?: number,
   ): WriteHandle {
     const result = this.deleteInternal(objectId, session, attribution, batchContext, updatedAt);
-    if (!batchContext) {
-      this.sealBatch(result.batchId);
-    }
     return new WriteHandle(result.batchId, this);
   }
 
@@ -2247,13 +2280,26 @@ export class JazzClient {
     updatedAt?: number,
   ): DirectMutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    if (effectiveSession || attribution !== undefined || batchContext || updatedAt !== undefined) {
-      return this.requireSessionWriteMethod("deleteWithSession")(
+    const writeContextJson = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      batchContext,
+      updatedAt,
+    );
+    if (batchContext) {
+      return this.requireSessionWriteMethod("deleteWithSession")(objectId, writeContextJson);
+    }
+    if (writeContextJson !== undefined) {
+      return this.requirePersistedWriteMethod("deletePersistedWithSession")(
         objectId,
-        this.encodeWriteContext(effectiveSession, attribution, batchContext, updatedAt),
+        writeContextJson,
+        DIRECT_WRITE_DURABILITY_TIER,
       );
     }
-    return this.runtime.delete(objectId);
+    return this.requirePersistedWriteMethod("deletePersisted")(
+      objectId,
+      DIRECT_WRITE_DURABILITY_TIER,
+    );
   }
 
   /**

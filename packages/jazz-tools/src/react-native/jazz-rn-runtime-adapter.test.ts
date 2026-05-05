@@ -14,12 +14,25 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onAuthFailure: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
+    deletePersisted: vi.fn(() => JSON.stringify({ batchId: "batch-delete-persisted" })),
+    deletePersistedWithSession: vi.fn(() =>
+      JSON.stringify({ batchId: "batch-delete-persisted-session" }),
+    ),
     deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-1" }),
+    ),
+    insertPersisted: vi.fn((_table, _valuesJson) =>
+      JSON.stringify({ batchId: "batch-insert-persisted", row: { id: "row-1", values: [] } }),
+    ),
+    insertPersistedWithSession: vi.fn((_table, _valuesJson) =>
+      JSON.stringify({
+        batchId: "batch-insert-persisted-session",
+        row: { id: "row-1", values: [] },
+      }),
     ),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
       JSON.stringify({ id: "row-1", values: [], batchId: "batch-2" }),
@@ -33,6 +46,10 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
+    updatePersisted: vi.fn(() => JSON.stringify({ batchId: "batch-update-persisted" })),
+    updatePersistedWithSession: vi.fn(() =>
+      JSON.stringify({ batchId: "batch-update-persisted-session" }),
+    ),
     updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
   };
@@ -91,6 +108,74 @@ describe("JazzRnRuntimeAdapter", () => {
         data: { type: "Bytea", value: "0102ff" },
       }),
       undefined,
+    );
+  });
+
+  it("serializes native sealed persisted mutations with tier and optional id", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+    const values = { title: { type: "Text", value: "milk" } } as const;
+    const writeContextJson = JSON.stringify({ attribution: "alice" });
+
+    const row = adapter.insertPersisted("todos", values, "local", "row-1");
+    expect(row).toEqual({
+      batchId: "batch-insert-persisted",
+      row: { id: "row-1", values: [] },
+    });
+    expect(binding.insertPersisted).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify(values),
+      "local",
+      "row-1",
+    );
+
+    const scopedRow = adapter.insertPersistedWithSession(
+      "todos",
+      values,
+      writeContextJson,
+      "local",
+      "row-2",
+    );
+    expect(scopedRow).toEqual({
+      batchId: "batch-insert-persisted-session",
+      row: { id: "row-1", values: [] },
+    });
+    expect(binding.insertPersistedWithSession).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify(values),
+      writeContextJson,
+      "local",
+      "row-2",
+    );
+
+    adapter.updatePersisted("row-1", { done: { type: "Boolean", value: true } }, "local");
+    expect(binding.updatePersisted).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      "local",
+    );
+
+    adapter.updatePersistedWithSession(
+      "row-1",
+      { done: { type: "Boolean", value: true } },
+      writeContextJson,
+      "local",
+    );
+    expect(binding.updatePersistedWithSession).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      writeContextJson,
+      "local",
+    );
+
+    adapter.deletePersisted("row-1", "local");
+    expect(binding.deletePersisted).toHaveBeenCalledWith("row-1", "local");
+
+    adapter.deletePersistedWithSession("row-1", writeContextJson, "local");
+    expect(binding.deletePersistedWithSession).toHaveBeenCalledWith(
+      "row-1",
+      writeContextJson,
+      "local",
     );
   });
 
