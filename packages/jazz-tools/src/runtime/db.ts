@@ -855,12 +855,16 @@ export class Db {
   }
 
   /** @internal Attach local-first auth state and schedule token refresh. */
-  initLocalFirstAuth(secret: string, runtimeModule: AnyDbRuntimeModule): void {
+  initLocalFirstAuth(secret: string): void {
+    if (!this.runtimeModule) {
+      throw new Error("Db runtime module is not initialized for this Db implementation");
+    }
+
     this.localFirstAuth?.stop();
     this.localFirstAuth = new LocalFirstAuthManager({
       appId: this.config.appId,
       secret,
-      runtimeModule,
+      runtimeModule: this.runtimeModule,
       applyToken: (jwtToken) => this.updateAuthToken(jwtToken),
       isShuttingDown: () => this.isShuttingDown,
     });
@@ -2509,7 +2513,7 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
   }
 
   if (localFirstSecret) {
-    db.initLocalFirstAuth(localFirstSecret, runtimeModule as AnyDbRuntimeModule);
+    db.initLocalFirstAuth(localFirstSecret);
   }
 
   return db;
