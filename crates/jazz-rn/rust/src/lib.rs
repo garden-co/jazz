@@ -1224,6 +1224,39 @@ pub fn mint_local_first_token(
     audience: String,
     ttl_seconds: i64,
 ) -> Result<String, JazzRnError> {
+    mint_token(
+        seed_b64,
+        audience,
+        ttl_seconds,
+        jazz_tools::identity::LOCAL_FIRST_ISSUER,
+    )
+}
+
+/// Mint an anonymous JWT from a base64url-encoded 32-byte seed.
+///
+/// Returns a signed JWT that can be used as a bearer token for anonymous auth.
+/// `audience` should be the app ID (UUID) or a human-readable app name.
+/// `ttl_seconds` controls token lifetime (e.g. 3600 for one hour).
+#[uniffi::export]
+pub fn mint_anonymous_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: i64,
+) -> Result<String, JazzRnError> {
+    mint_token(
+        seed_b64,
+        audience,
+        ttl_seconds,
+        jazz_tools::identity::ANONYMOUS_ISSUER,
+    )
+}
+
+fn mint_token(
+    seed_b64: String,
+    audience: String,
+    ttl_seconds: i64,
+    issuer: &'static str,
+) -> Result<String, JazzRnError> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&seed_b64)
@@ -1233,11 +1266,6 @@ pub fn mint_local_first_token(
     let seed: [u8; 32] = bytes.try_into().map_err(|_| JazzRnError::Internal {
         message: "seed must be exactly 32 bytes".to_string(),
     })?;
-    jazz_tools::identity::mint_jazz_self_signed_token(
-        &seed,
-        jazz_tools::identity::LOCAL_FIRST_ISSUER,
-        &audience,
-        ttl_seconds as u64,
-    )
-    .map_err(|e| JazzRnError::Internal { message: e })
+    jazz_tools::identity::mint_jazz_self_signed_token(&seed, issuer, &audience, ttl_seconds as u64)
+        .map_err(|e| JazzRnError::Internal { message: e })
 }

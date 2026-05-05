@@ -224,6 +224,12 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_fn_func_generate_id(
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_func_mint_anonymous_token(
+    seedB64: Uint8Array,
+    audience: Uint8Array,
+    ttlSeconds: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_func_mint_local_first_token(
     seedB64: Uint8Array,
     audience: Uint8Array,
@@ -232,6 +238,7 @@ interface NativeModuleInterface {
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms(): number;
   ubrn_uniffi_jazz_rn_checksum_func_generate_id(): number;
+  ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token(): number;
   ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnruntime_add_client(): number;
