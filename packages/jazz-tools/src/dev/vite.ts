@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv } from "./env-file.js";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
@@ -12,8 +12,12 @@ import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 // loadWasmModule never gets a chance to fire. Surface a clear install message
 // here, before the bundler runs.
 export function assertJazzWasmInstalled(consumerRoot: string = process.cwd()): void {
+  // createRequire requires an absolute path or file URL, but a caller (e.g.
+  // a Vite config setting `root` to a relative path) may legitimately pass
+  // a relative root. Anchor it to cwd so resolution still works.
+  const absoluteRoot = isAbsolute(consumerRoot) ? consumerRoot : resolve(consumerRoot);
   try {
-    createRequire(join(consumerRoot, "package.json")).resolve("jazz-wasm/package.json");
+    createRequire(join(absoluteRoot, "package.json")).resolve("jazz-wasm/package.json");
   } catch (err) {
     throw new Error(
       `[jazz] The "jazz-wasm" peer dependency is required but is not installed in this project.\n` +
@@ -84,10 +88,11 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
     name: "jazz",
 
     config(config: {
+      root?: string;
       ssr?: { external?: true | string[] };
       optimizeDeps?: { exclude?: string[] };
     }) {
-      assertJazzWasmInstalled();
+      assertJazzWasmInstalled(config.root);
       const existingSsr = config.ssr?.external;
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       // `ssr.external: true` means "externalize everything", so jazz-napi is

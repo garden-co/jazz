@@ -45,8 +45,12 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   return {
     name: "jazz-sveltekit",
 
-    config(config: { ssr?: { external?: string[] }; optimizeDeps?: { exclude?: string[] } }) {
-      assertJazzWasmInstalled();
+    config(config: {
+      root?: string;
+      ssr?: { external?: string[] };
+      optimizeDeps?: { exclude?: string[] };
+    }) {
+      assertJazzWasmInstalled(config.root);
       const existingSsr = config.ssr?.external ?? [];
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       return {
