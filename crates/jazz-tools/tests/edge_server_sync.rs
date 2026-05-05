@@ -247,6 +247,13 @@ impl MultiServerCluster {
     }
 }
 
+/// Alice writes through the US edge with GlobalServer durability, and Bob reads
+/// the replicated row through the EU edge.
+///
+/// ```text
+/// alice --GlobalServer write--> edge_us --sync--> core --sync--> edge_eu
+/// bob   <--EdgeServer read--------------------------------------- edge_eu
+/// ```
 #[tokio::test]
 async fn write_through_one_edge_replica_becomes_visible_through_another_edge() {
     let cluster = MultiServerCluster::start().await;
@@ -567,10 +574,10 @@ async fn core_write_reaches_subscribed_clients_on_both_edges() {
 /// catalogue through peer sync before clients on either edge use it.
 ///
 /// ```text
-/// admin --schema + permissions----> core
-/// core  --catalogue sync----------> edge_us
-/// core  --catalogue sync----------> edge_eu
-/// alice --write-------------------> edge_us --sync--> core --sync--> edge_eu --> bob
+/// mallory --schema + permissions--> core
+/// core    --catalogue sync--------> edge_us
+/// core    --catalogue sync--------> edge_eu
+/// alice   --write-----------------> edge_us --sync--> core --sync--> edge_eu --> bob
 /// ```
 #[tokio::test]
 async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients_use_them() {
@@ -634,11 +641,11 @@ async fn core_schema_and_permissions_pushes_reach_every_edge_before_edge_clients
 /// active edge subscriptions on every edge.
 ///
 /// ```text
-/// admin --schema + allow permissions--> core --sync--> edge_us + edge_eu
+/// mallory --schema + allow permissions--> core --sync--> edge_us + edge_eu
 /// alice subscribes on edge_us
 /// bob   subscribes on edge_eu
-/// carol writes on core ----------------------sync----> both edges
-/// admin --deny select permissions----> core --sync--> both edges remove row
+/// carol writes on core ------------------------sync----> both edges
+/// mallory --deny select permissions----> core --sync--> both edges remove row
 /// ```
 #[tokio::test]
 async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge() {
