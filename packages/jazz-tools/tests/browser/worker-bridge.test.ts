@@ -9,7 +9,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
+import type { Schema, WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
@@ -107,6 +107,17 @@ const noDeletePermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.never(),
 ]);
+
+const nullableSchema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+  }),
+};
+
+type NullableSchema = s.Schema<typeof nullableSchema>;
+const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
 
 interface WorkerMessageDebugEvent {
   atMs: number;
@@ -2030,6 +2041,41 @@ describe("Worker Bridge with OPFS", () => {
       "Reopened tab and current leader should converge after re-election",
     );
   });
+
+  it("can update an optional row field to null", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "null-update-repro",
+      undefined,
+      nullableApp.wasmSchema,
+    );
+    const sharedLocalAuthToken = generateAuthSecret();
+    const db = await createSyncedDb(
+      ctx,
+      "sync-null-update-repro",
+      sharedLocalAuthToken,
+      syncServer,
+    );
+
+    const inserted = db.insert(nullableApp.todos, {
+      title: "nullable-description-repro",
+      done: false,
+      description: "server-original",
+    });
+    const insertedTodo = inserted.value;
+    await inserted.wait({ tier: "local" });
+
+    const updateResult = db.update(nullableApp.todos, insertedTodo.id, {
+      description: null,
+    });
+    await updateResult.wait({ tier: "local" });
+
+    const rowAfterNullUpdate = await db.one(nullableApp.todos.where({ id: insertedTodo.id }), {
+      tier: "local",
+      localUpdates: "immediate",
+    });
+    expect(rowAfterNullUpdate).not.toBeNull();
+    expect(rowAfterNullUpdate?.description ?? null).toBeNull();
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------
@@ -2049,13 +2095,14 @@ async function waitForTodos(
 async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
+  schema?: Schema,
 ): Promise<TestingServerInfo> {
   const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const { appId, serverUrl, adminSecret } = testingServer;
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
     appId,
     adminSecret,
-    schema: app.wasmSchema,
+    schema: schema ?? app.wasmSchema,
   });
   const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
   const permissionsToPublish = permissions ?? {
