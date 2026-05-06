@@ -75,6 +75,8 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Latest remote scope snapshots keyed by upstream server and query id.
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
+    /// Query ids whose remote scope changed since the last QueryManager process.
+    pub(super) remote_query_scope_dirty: HashSet<QueryId>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
     /// Pending query rejections waiting for QueryManager to fail local subscriptions.
@@ -217,6 +219,7 @@ impl SyncManager {
             row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
+            remote_query_scope_dirty: HashSet::new(),
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
             pending_batch_settlements: Vec::new(),
@@ -423,7 +426,14 @@ impl SyncManager {
     }
 
     pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
-        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        let now = Instant::now();
+        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
+        server_ids.extend(
+            self.pending_servers
+                .iter()
+                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
+                .map(|(server_id, _)| *server_id),
+        );
         for server_id in server_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
@@ -438,8 +448,16 @@ impl SyncManager {
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
         self.pending_servers.remove(&server_id);
+        let mut removed_query_ids = HashSet::new();
         self.remote_query_scopes
-            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
+            .retain(|(remote_server_id, query_id), _| {
+                let keep = *remote_server_id != server_id;
+                if !keep {
+                    removed_query_ids.insert(*query_id);
+                }
+                keep
+            });
+        self.remote_query_scope_dirty.extend(removed_query_ids);
     }
 
     /// Add a client connection using storage-backed catalogue replay.
@@ -635,14 +653,6 @@ impl SyncManager {
                 true,
             );
         }
-
-        self.outbox.push(OutboxEntry {
-            destination: Destination::Client(client_id),
-            payload: SyncPayload::QueryScopeSnapshot {
-                query_id,
-                scope: sorted_query_scope_snapshot(&scope),
-            },
-        });
     }
 
     /// Drop a client's query subscription state.
@@ -804,6 +814,11 @@ impl SyncManager {
             .any(|(_, remote_query_id)| *remote_query_id == query_id)
     }
 
+    /// Take query ids whose upstream scope changed since the last process pass.
+    pub fn take_remote_query_scope_dirty(&mut self) -> HashSet<QueryId> {
+        std::mem::take(&mut self.remote_query_scope_dirty)
+    }
+
     /// Take pending replayable batch settlements for RuntimeCore to process.
     pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
         std::mem::take(&mut self.pending_batch_settlements)
@@ -840,12 +855,14 @@ impl SyncManager {
         client_id: ClientId,
         query_id: QueryId,
         tier: DurabilityTier,
+        scope: &HashSet<(ObjectId, BranchName)>,
     ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::QuerySettled {
                 query_id,
                 tier,
+                scope: sorted_query_scope_snapshot(scope),
                 through_seq: 0,
             },
         });

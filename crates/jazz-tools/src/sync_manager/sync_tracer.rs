@@ -900,12 +900,18 @@ impl<'a> Normalizer<'a> {
                 format!("batch_ids:[{batches}]")
             }
             SyncPayload::SealBatch { submission } => {
+                let members = submission
+                    .members
+                    .iter()
+                    .map(|member| format!("row:{}", self.object(&member.object_id)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
-                    "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
-                    submission.batch_id,
-                    submission.target_branch_name,
-                    submission.members,
-                    submission.captured_frontier
+                    "seal batch:{} target:{} members:[{}] frontier:{}",
+                    self.batch(&submission.batch_id),
+                    self.branch(&submission.target_branch_name),
+                    members,
+                    submission.captured_frontier.len()
                 )
             }
             SyncPayload::CatalogueEntryUpdated { entry } => {
@@ -921,15 +927,18 @@ impl<'a> Normalizer<'a> {
             SyncPayload::QueryUnsubscription { query_id } => {
                 format!("query:{}", query_id.0)
             }
-            SyncPayload::QueryScopeSnapshot { query_id, scope } => {
-                format!("query:{} scope:{}", query_id.0, scope.len())
-            }
             SyncPayload::QuerySettled {
                 query_id,
+                scope,
                 through_seq,
                 ..
             } => {
-                format!("query:{} through_seq:{}", query_id.0, through_seq)
+                format!(
+                    "query:{} scope:{} through_seq:{}",
+                    query_id.0,
+                    scope.len(),
+                    through_seq
+                )
             }
             SyncPayload::SchemaWarning(w) => {
                 format!("query:{} table:{}", w.query_id.0, w.table_name)
@@ -1090,12 +1099,18 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
             format!("batch_ids:[{batches}]")
         }
         SyncPayload::SealBatch { submission } => {
+            let members = submission
+                .members
+                .iter()
+                .map(|member| format!("row:{}", names.object(&member.object_id)))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
-                "seal batch:{:?} target:{} members:{:?} frontier:{:?}",
-                submission.batch_id,
+                "seal batch:{} target:{} members:[{}] frontier:{}",
+                names.batch(&submission.batch_id),
                 submission.target_branch_name,
-                submission.members,
-                submission.captured_frontier
+                members,
+                submission.captured_frontier.len()
             )
         }
         SyncPayload::QuerySubscription { query_id, .. } => {
@@ -1104,15 +1119,18 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         SyncPayload::QueryUnsubscription { query_id } => {
             format!("query:{}", query_id.0)
         }
-        SyncPayload::QueryScopeSnapshot { query_id, scope } => {
-            format!("query:{} scope:{}", query_id.0, scope.len())
-        }
         SyncPayload::QuerySettled {
             query_id,
+            scope,
             through_seq,
             ..
         } => {
-            format!("query:{} through_seq:{}", query_id.0, through_seq)
+            format!(
+                "query:{} scope:{} through_seq:{}",
+                query_id.0,
+                scope.len(),
+                through_seq
+            )
         }
         SyncPayload::SchemaWarning(w) => {
             format!("query:{} table:{}", w.query_id.0, w.table_name)

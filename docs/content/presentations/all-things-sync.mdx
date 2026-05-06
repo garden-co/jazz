@@ -1,0 +1,1470 @@
+---
+title: All Things Sync
+description: Jazz v2 alpha in a nutshell
+---
+
+<Slide>
+# All things sync
+
+<div className="absolute top-[5vw] left-[5vw] text-right flex flex-col items-end gap-6">
+  <img
+    src="/presentations/react-miami/overlays/garden-computing-logo.svg"
+    alt="Garden Computing"
+    className="h-[3.9vw] w-auto"
+  />
+</div>
+
+<div className="absolute top-[5vw] right-[5vw] text-right flex flex-col items-end gap-6">
+Anselm Eickhoff<br/>
+@anselm_io
+
+<div className="flex flex-col items-end gap-[0.7vw]">
+  building
+  <JazzLogo className="h-[3.1vw] w-auto text-black" label="Jazz" />
+</div>
+
+</div>
+
+<Notes>
+Hey everyone! My name is Anselm. I run a little company called Garden
+Computing, and we're building a database called Jazz.
+
+The first thing you should know about me is that I believe that...
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start [&_h2]:text-[4vw] items-center">
+## Modern real&#x2011;time databases and sync engines
+
+<div className="mt-[8vw] max-w-[70vw] mx-auto flex flex-wrap items-center justify-center gap-x-[6vw] gap-y-[5vw]">
+  <img
+    src="/presentations/react-miami/vendor-logos/zero.svg"
+    alt="Zero"
+    className="h-[2.7vw] w-auto"
+  />
+  <img
+    src="/presentations/react-miami/vendor-logos/electric.svg"
+    alt="ElectricSQL"
+    className="h-[4.95vw] w-auto"
+  />
+  <img
+    src="/presentations/react-miami/vendor-logos/instantdb.svg"
+    alt="InstantDB"
+    className="h-[4.05vw] w-auto"
+  />
+  <img
+    src="/presentations/react-miami/vendor-logos/convex.svg"
+    alt="Convex"
+    className="h-[2.7vw] w-auto"
+  />
+  <img
+    src="/presentations/react-miami/vendor-logos/powersync.svg"
+    alt="PowerSync"
+    className="h-[3.6vw] w-auto"
+  />
+  <img
+    src="/presentations/react-miami/vendor-logos/turso.svg"
+    alt="Turso"
+    className="h-[4.5vw] w-auto"
+  />
+  <JazzLogo className="h-[3.75vw] w-auto text-black" label="Jazz" markColor="currentColor" />
+</div>
+
+<Notes>
+Turns out other people had similar ideas and also wanted to simplify
+the stack.
+
+This is the now well-established category of real-time databases and
+sync engines.
+
+I'll first describe what these technologies roughly have in common, because
+the most important idea is what this new general stack looks like.
+
+After that we can dive into the unique Jazz things, but for now the
+main message is: you deserve a better stack.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Metrics to judge a stack by
+
+- Lines of code
+- Layers of infra BS
+- Light-milliseconds
+
+<Notes>
+And the three metrics I want you to keep in mind when you judge a stack
+are:
+
+Lines of code, especially the lines that do not make your app unique.
+
+Layers of infra bullshit, meaning how many things you have to deploy and
+integrate with each other.
+
+And light-milliseconds that user edits have to travel before they
+become visible.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Putting your backend on ozempic
+
+<Notes>
+Now that we know the metrics, let's get to work.
+
+I'll take you on a journey where we start with a traditional stack and
+watch layer by layer get subsumed by some or all of the more modern
+alternatives.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 0
+
+<img
+  src="/presentations/react-miami/stacks/stack-0.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+This is our starting situation, and this is exactly what makes the
+backend part so unfun:
+
+_list everything in the diagram_
+
+point out "durable streams" as newest addition to the stack
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 1
+
+<img
+  src="/presentations/react-miami/stacks/stack-1.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+The first thing these modern systems usually collapse is the frontend
+sync glue.
+
+Data fetching and the websocket client disappear as concepts, and the
+query cache plus optimistic update layer start getting absorbed into
+one database-shaped client abstraction.
+
+So the first great thing is that frontend starts feeling like it
+is working with reactive data instead of orchestrating remote state.
+
+Lines of code go down immediately, and on the light-milliseconds metric
+we get the first huge win: optimistic preview goes to zero.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 2
+
+<img
+  src="/presentations/react-miami/stacks/stack-2.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Next, the backend's database access story starts simplifying too.
+
+The ORM or classic DB wrapper gets replaced by a more integrated
+DB client.
+
+This only saves a little amount of code, because
+one abstraction is replacing another, but it simplifies the shape
+of the system.
+
+You stop having one database model on the server and a completely
+different access model on the client, and it normalizes
+the idea that yes, a database client can live in the frontend too.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 3
+
+<img
+  src="/presentations/react-miami/stacks/stack-3.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Then some of the scale and performance crutches start falling off.
+
+One obvious example is the connection pooler, because traditional
+databases didn't assume lots of clients or backend function instances
+connecting directly.
+
+We're not removing much product code here,
+but we are deleting operational surface area, which matters a lot.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 4
+
+<img
+  src="/presentations/react-miami/stacks/stack-4.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Then you start seeing the messaging and fanout layer move inward too.
+
+Queues, pubsub, realtime distribution, durable streams: different
+products pick off different pieces here, but the pattern is the same.
+
+The database is no longer just passive storage. It starts being a
+real-time coordination system.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 5
+
+<img
+  src="/presentations/react-miami/stacks/stack-5.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Some systems go further and also absorb files or blob storage.
+
+Again, not every tool does every one of these steps. This is not
+a perfect consensus feature list.
+
+But the direction is that more and more of the app's data surface gets
+pulled back under one roof.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 6
+
+<img
+  src="/presentations/react-miami/stacks/stack-6.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And then permissions move inward too.
+
+Instead of auth being something the backend wraps around every query,
+the database itself starts understanding auth policies.
+
+That means a whole chunk of backend auth glue disappears, along with
+that extra auth roundtrip between the backend and the database.
+
+At this point the stack is already much cleaner than the one we
+started with.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 7
+
+<img
+  src="/presentations/react-miami/stacks/stack-7.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+So let us pause here and look at what is left.
+
+This is already pretty clean. This is roughly the shape modern
+real-time databases and sync engines are converging on.
+
+And that alone is already a huge improvement over the traditional stack.
+
+Now comes the Jazz-specific part, because our ambition is not just to
+make the backend slimmer. It is to get as close as possible to the
+feeling that `useState()` is your database.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 8
+
+<img
+  src="/presentations/react-miami/stacks/stack-8.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+The next question is: if we have already made it this far, what else can
+we do?
+
+One answer is that we can get much more aggressive about latency.
+
+So instead of a dumb cache...
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 9
+
+<img
+  src="/presentations/react-miami/stacks/stack-9.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Jazz adds built-in regional edges for caching and very low-latency
+collaboration between nearby users.
+
+That gives us another mode on the light-milliseconds metric: not just
+full remote and not just optimistic preview, but genuinely short
+regional paths.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 9
+
+<img
+  src="/presentations/react-miami/stacks/stack-9.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And unlike a normal cache bolted onto the side, this thing is aware of
+the data model and auth model, which matters because otherwise these
+low-latency layers quickly turn into yet another source of glue and
+inconsistency.
+
+You can get actually approximate this with traditional stacks,
+but only if you live in us-east-1.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## Slimming the stack 9
+
+<img
+  src="/presentations/react-miami/stacks/stack-9.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Now it gets really interesting.
+
+We stop treating the client as just a fancy cache with optimism and
+introduce a truly durable local-first database on the client.
+
+At that point the dream of `useState()` as your database starts becoming
+real in a much stronger sense: not just reactive, not just optimistic,
+but actually durable, queryable offline, and part of the real system.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Jazz the last 4 years: a fun database for simple, local-first state
+
+<Notes>
+And this is how far we got with Jazz.
+
+We found a bunch of adopters who really fell in love with Jazz
+and local-first state.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Stuff people are building
+
+<div className="relative mt-[2vh] h-[56vh] w-full">
+  <img
+    src="/presentations/react-miami/adopters/invoice-radar.webp"
+    alt="Invoice Radar"
+    className="absolute left-[2%] top-[5%] w-[31%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-7deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/opacity.webp"
+    alt="Opacity"
+    className="absolute right-[2%] top-[1%] w-[38%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[4deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/spicy-golf.webp"
+    alt="Spicy Golf"
+    className="absolute left-[34%] top-[10%] w-[29%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-1deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/learn-anything.webp"
+    alt="Learn Anything"
+    className="absolute left-[13%] bottom-[4%] w-[27%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[6deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/wageso.webp"
+    alt="Wageso"
+    className="absolute left-[39%] bottom-[7%] w-[29%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-2deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/hend.webp"
+    alt="Hend"
+    className="absolute right-[5%] bottom-[0%] w-[24%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-5deg]"
+  />
+</div>
+
+<Notes>
+And they built the coolest stuff,
+from language-learning apps
+to uber for robot teleoperation,
+to social networks
+Figma killers
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Stuff people are building
+
+<div className="relative mt-[2vh] h-[56vh] w-full">
+  <img
+    src="/presentations/react-miami/adopters/motley.webp"
+    alt="Motley"
+    className="absolute left-[38%] top-[0%] w-[28%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-2deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/alkalye.webp"
+    alt="Alkalye"
+    className="absolute left-[2%] top-[2%] w-[32%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-4deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/cuppl.webp"
+    alt="Cuppl"
+    className="absolute right-[4%] top-[4%] w-[27%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[5deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/tilly-screen.webp"
+    alt="Tilly"
+    className="absolute left-[18%] top-[18%] w-[31%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[3deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/mtor.webp"
+    alt="Mtor"
+    className="absolute left-[45%] bottom-[2%] w-[26%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[-3deg]"
+  />
+  <img
+    src="/presentations/react-miami/adopters/hifz-garden.webp"
+    alt="Hifz Garden"
+    className="absolute right-[2%] bottom-[4%] w-[28%] rounded-[0.4vw] border border-black/10 bg-white p-[0.45vw] shadow-[0_1.6vw_4vw_rgba(0,0,0,0.14)] rotate-[7deg]"
+  />
+</div>
+
+<Notes>
+and just a ton of personal software
+with insane production value for
+single devs, because they could actually
+focus on the frontend and their product
+</Notes>
+</Slide>
+
+<Slide className="overflow-hidden [&_h1]:relative [&_h1]:z-10 items-end [&_h1]:text-right [&_h1]:text-[10vw] [&_h1]:leading-[10vw]">
+# Local-first<br/>got hands
+
+<img
+  src="/presentations/react-miami/overlays/local-first-got-hands.png"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+But that is the moment where the easy story ends and the hard story begins.
+Once the database is truly local-first, a whole new class of
+problems shows up.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## What's hard about local-first
+
+- consistency and transactions?
+- permissions for local-first state?
+- schema evolution?
+
+<Notes>
+And these problems point at ways in which durable databases
+simply truly different from ephemeral local state,
+because now you've got multiple users writing to the same data.
+
+Like what if eventual consistency isn't enough and you need global
+transactions? Should you use a second database? Yuck.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## What's hard about local-first
+
+- consistency and transactions?
+- permissions for local-first state?
+- schema evolution?
+
+<Notes>
+And it's usually pretty easy to enforce permissions using a centralized
+API in front of a database, but the crazy system we came up with for
+local-first permissions was way too confusing.
+
+Same for schema evolution: changing the shape of ephemeral `useState()`
+is easy, but once data is persisted on different devices things get
+tricky unleass you're extremely careful to stay backwards compatible.
+
+</Notes>
+</Slide>
+
+<Slide>
+# It's so over.
+
+<Notes>
+And more and more our adopters kept asking us about exactly
+these challenges. And it's not like we didn't have *any* answers
+to those in our API. They just felt much worse than the how
+great the rest of our API felt.
+
+So once again I found myself in a situation where some things
+were really good, and others felt unnecessarily hard.
+
+By the end of last December it had turned into another existential
+crisis.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Time<br/>for some<br/>fresh ideas.
+
+<Notes>
+It was time for some fresh ideas again. To unreasonably ask
+for the impossible like a toddler again.
+
+And because we're all roughly equally insane, they were
+immediately on board to take a big swing.
+
+</Notes>
+</Slide>
+
+<Slide>
+# We're so back.
+
+<Notes>
+And just four months later.
+We're so back.
+
+We figured it out.
+
+And today, just for you guys, we're launching...
+
+</Notes>
+</Slide>
+
+<Slide className="justify-center items-center">
+<h1 className="flex items-center gap-[0.16em]">
+  <JazzLogo className="h-[0.98em] w-auto shrink-0 relative top-[0.14em]" />
+  <span className='text-black/60'>v2</span>
+</h1>
+
+<Notes>
+Jazz version two...
+</Notes>
+</Slide>
+
+<Slide className="justify-center items-center">
+<h1 className="flex items-center gap-[0.16em]">
+  <JazzLogo className="h-[0.98em] w-auto shrink-0 relative top-[0.14em]" />
+  <span className='text-black/60'>v2</span>
+  <sup className='text-[5vw] tracking-normal text-black/50 -mr-[17.5vw]'>(alpha)</sup>
+</h1>
+
+<Notes>
+(quietly) alpha
+</Notes>
+</Slide>
+
+<Slide className="justify-start">
+## Four fresh ideas<br/>to make local-first<br/>actually work
+
+<Notes>
+Thank you!
+Let's take a look at the four fresh ideas that went
+into Jazz v2 to actually make local-first work.
+
+You'll see that they correspond to all the ways shared state is
+actually different from local state.
+
+And I like to visualize them as new spatial dimensions that
+jazz is giving us.
+
+What do I mean by this?
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 2D: A normal database table
+
+<img
+  src="/presentations/react-miami/table-dimensions/1-2d-table.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+If you think about it, a database table is obviously
+2D: you've got rows and columns.
+
+And in a traditional database you have one instance
+of this table.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 2D: A normal database table
+
+<img
+  src="/presentations/react-miami/table-dimensions/2-2d-table-with-cloud.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+But here we have a local version of the table, maybe with a subset of
+rows that this client cares about and then a much better version of
+the table in the cloud.
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-1.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And here we get sync as our first new dimension.
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: tunable consistency
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-tunable-consistency.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And our first fresh idea is all about sync:
+it's a simple compromise. In classic Jazz we learned again
+and again through adopters that, surprisingly, eventual consistency is
+fine for 90% of interactions in most apps.
+
+It is usually OK if, for a short moment, different users see slightly
+different versions of shared data.
+
+But the exceptions matter: like only one user should be able to buy the
+last ticket for React Miami.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: tunable consistency
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-tunable-consistency.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And we don't want a whole second database just because some corners of
+the app need global consistency.
+
+So Jazz lets you choose, per table, whether **eventual** consistency is OK
+or whether it needs **global** consistency, so you can trade latency and
+offline support against consistency where it actually matters.
+
+You as the app developer know best, and you shouldn't be limited to one
+kind of consistency.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+The next idea is even more essential for making local-first work:
+permissions.
+
+In traditional backends, the boundary is clear: you enforce permissions
+at the API in front of the database.
+
+But here we have local state and direct sync, so the database itself has
+to understand permissions.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+For this we rely on a proven concept: row-level security. It lets you
+define permissions as queries that look like your normal queries, in one
+centralized, testable place.
+
+That means the database can enforce permissions at sync time. Even
+better, the local client also knows how permissions work and can preview
+what the current user can and can't do before the roundtrip.
+
+This is why I think row-level security is a good idea...
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<img
+  src="/presentations/react-miami/overlays/emergency-alert.png"
+  alt="Emergency alert: your regular take is now considered an extremely hot take."
+  className="pointer-events-none absolute top-[5vw] left-1/2 z-20 w-[84vw] -translate-x-1/2"
+/>
+
+<Notes>
+Oh wait whats this? "Emergency alert"?
+"Your normal take is now a hot take"??
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw] relative">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<img
+  src="/presentations/react-miami/overlays/emergency-alert.png"
+  alt="Emergency alert: your regular take is now considered an extremely hot take."
+  className="pointer-events-none absolute top-[5vw] left-1/2 z-20 w-[84vw] -translate-x-1/2"
+/>
+
+<div className="pointer-events-none absolute inset-0 z-30">
+  <img
+    src="/presentations/react-miami/rls-tweets/omar-rls-thread.jpg"
+    alt=""
+    className="absolute top-[10vw] left-[5vw] w-[30vw] rotate-[-3deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+</div>
+
+<Notes>
+So this happened a couple days ago. It all started with David's post.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw] relative">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<img
+  src="/presentations/react-miami/overlays/emergency-alert.png"
+  alt="Emergency alert: your regular take is now considered an extremely hot take."
+  className="pointer-events-none absolute top-[5vw] left-1/2 z-20 w-[84vw] -translate-x-1/2"
+/>
+
+<div className="pointer-events-none absolute inset-0 z-30">
+  <img
+    src="/presentations/react-miami/rls-tweets/omar-rls-thread.jpg"
+    alt=""
+    className="absolute top-[10vw] left-[5vw] w-[30vw] rotate-[-3deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+  <img
+    src="/presentations/react-miami/rls-tweets/david-rls-footgun.jpg"
+    alt=""
+    className="absolute top-[6vw] left-[36vw] w-[31vw] rotate-[-3deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+  <img
+    src="/presentations/react-miami/rls-tweets/kenn-rls-root-evil.jpg"
+    alt=""
+    className="absolute top-[4vw] right-[3vw] w-[29vw] rotate-[8deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+  <img
+    src="/presentations/react-miami/rls-tweets/jamie-rls-architecture.jpg"
+    alt=""
+    className="absolute top-[24vw] right-[10vw] w-[27vw] rotate-[5deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+  <img
+    src="/presentations/react-miami/rls-tweets/drizzle-rls.jpg"
+    alt=""
+    className="absolute bottom-[-4vw] left-[23vw] w-[26vw] rotate-[10deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+  <img
+    src="/presentations/react-miami/rls-tweets/alvin-rls-useeffect.jpg"
+    alt=""
+    className="absolute bottom-[-8vw] right-[-2vw] w-[28vw] rotate-[-8deg] rounded-[1vw] shadow-2xl ring-1 ring-black/10"
+  />
+</div>
+
+<Notes>
+But After a decade of using row-level
+security in Postgres, I learned that many people have had a much more
+mixed experience with it.
+
+A big part of that seems to be that it's hard to get right in Postgres,
+and in Supabase people often start from everything being public.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 3D: tables + sync <br/> Fresh idea: row-level security
+
+<img
+  src="/presentations/react-miami/table-dimensions/3-3d-table-with-sync-and-permissions.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Ok, I have a lot of thoughts about this.
+Expect a blog post.
+
+But the short version is that our goal
+with row-level security in Jazz is
+
+- that the policies are easy to get right
+- you have to have them, everything is locked down by default
+- they're not an afterthought, but built into all of jazz
+- and they're tightly integrated with external auth
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 4D: tables + sync + schema evolution<br/> Fresh idea: fluid migrations
+
+<img
+  src="/presentations/react-miami/table-dimensions/4-4d-table-with-schema.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Moving on, let me show you the most unique fresh idea of Jazz.
+
+This is about the hardest part of local-first data:
+changing the shape of your data as the app evolves.
+
+You can't do a good old stop-the-world migration of a central database,
+because there might still be old clients expecting the old shape.
+
+Usually backwards compatibility is the API's job. See a pattern?
+If clients sync directly to the database, the database needs to
+understand backwards compatibility too.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 4D: tables + sync + schema evolution<br/> Fresh idea: fluid migrations
+
+<img
+  src="/presentations/react-miami/table-dimensions/4-4d-table-with-schema-evolution.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+So in Jazz we turned migrations into something slightly different.
+Instead of a one-time event, migrations describe a mapping between two
+schema versions.
+
+And it's bidirectional, so we can translate both old data into the new
+shape for new clients _and_ new data into the old shape for old clients.
+
+Jazz does this just in time instead of making you stop the world.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 4D: tables + sync + schema evolution<br/> Fresh idea: fluid migrations
+
+<img
+  src="/presentations/react-miami/table-dimensions/4-4d-table-with-schema-evolution-lots.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+And then we realized something important:
+
+Bidirectional migrations are not just a solution for local-first data.
+They also make it much easier to deploy schema changes for _any_ app.
+
+This same idea lets you work on ten features at once with your horde of
+Claudes, or removes a central release bottleneck in a large company with
+many teams launching different features behind flags.
+
+Making all of that automatically compatible is suddenly much easier.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 5D What if every row...
+
+<img
+  src="/presentations/react-miami/table-dimensions/5-5d-table.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+What if every row...
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+## 5D What if every row had history
+
+<img
+  src="/presentations/react-miami/table-dimensions/5-5d-table-with-linear-history.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+...had history
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+
+## What if every row had history
+
+<img
+  src="/presentations/react-miami/table-dimensions/5-5d-table-with-linear-history.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+Because in Jazz, every row in your database actually
+has automatic history.
+
+And it auto-captures precise edit metadata of when each
+row was last updated, and by whom.
+
+This makes it much easier to build complex collaborative features while
+your UI still only does what looks like a simple local state update.
+
+But it gets even better, because each row has not just linear history...
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+
+## What if every row<br/>had _git-like_ history
+
+<img
+  src="/presentations/react-miami/table-dimensions/5-5d-table-with-branching-history.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+But branching history, like git. In the simplest case
+this makes the tricky problem of people editing data
+at the same time actually tractible.
+
+It's actually even better than git, because it lets you choose a
+precise merge strategy per column, whether that's last-writer-wins,
+a deep JSON merge, or a smart rich-text merge.
+
+Again, if you wanted any of this before, you would combine a bunch of
+collaboration libraries, each nudging you into one model. Here you get
+it in one system, and you can choose the behavior in detail.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start overflow-hidden [&_h2]:relative [&_h2]:z-10 [&_h2]:text-[3vw]">
+
+## What if every row<br/>had _git-like_ history
+
+<img
+  src="/presentations/react-miami/table-dimensions/5-5d-table-with-branching-history.svg"
+  alt=""
+  className="pointer-events-none absolute inset-0 z-0 h-full w-full object-cover"
+/>
+
+<Notes>
+But maybe people editing things at the same time in your
+app is kind of rare. Maybe it's a slower paced app where
+many people and their agents interact with shared data over
+a longer time horizon.
+
+Wouldn't it be cool if you could expose this
+"better than git" model to your users?
+
+In Jazz it's baked into the data itself. This is what I think will
+enable the most interesting new kinds of apps, and that's why this
+is my favorite dimension.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Example: Letters app
+<Notes>
+Alright, you wanna see what this looks like in action?
+Let's take a quick look at a super simple Jazz v2 app.
+Let's build a shared canvas with multiplayer cursors
+where everyone can add letters and drag them around.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+</div>
+<Notes>
+The data model is simple enough: we have canvasses,
+and then cursors and letters associated with them.
+
+And each cursor belongs to a user.
+
+Note how we don't have to add a column for that,
+We'll be able to use the built-in edit metadata
+for that.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+</div>
+
+<Notes>
+How do we render this state now? It's very simple,
+we just use the useAll hook, which reactively subscribes
+a component to a query, with some filters, like for
+the canvas we care about.
+
+Under the hood, this reads local data and triggers sync from the Jazz
+database upstream, which sends us any existing state we don't have yet
+plus live updates from other users.
+
+But to us it really just looks like reactive state.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Mutation">
+
+```ts
+const db = useDb();
+
+function addLetter(char, pos) {
+  db.insert(app.letters, {
+    canvasId,
+    char,
+    x: pos.x,
+    y: pos.y,
+  });
+}
+
+function dragLetter(letterId, pos) {
+  db.update(app.letters, letterId, pos);
+}
+
+function moveCursor(pos) {
+  db.update(app.cursors, myCursor.id, pos);
+}
+```
+
+  </SlideCodeCell>
+</div>
+
+<Notes>
+Mutation is also super simple: just get a database handle
+from useDb and then insert or update data.
+
+All of this is typesafe from our schema by the way.
+
+</Notes>
+</Slide>
+
+<Slide className="justify-start [&_h2]:text-[3vw] pt-[2vw] gap-0">
+
+<div className="mt-[0.5vw] grid grid-cols-[5fr_6fr] gap-[1.2vw]">
+  <SlideCodeCell title="Data model">
+
+```ts
+const schema = {
+  canvases: s.table({ name: s.string() }),
+  letters: s.table({
+    canvasId: s.ref("canvases"),
+    char: s.string(),
+    x: s.number(),
+    y: s.number(),
+  }),
+  cursors: s.table({
+    canvasId: s.ref("canvases"),
+    x: s.number(),
+    y: s.number(),
+  }),
+};
+
+export const app = s.defineApp(schema);
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Rendering">
+
+```tsx
+function Canvas({ canvasId }) {
+  const letters = useAll(app.letters.where({ canvasId }));
+  const cursors = useAll(app.cursors.where({ canvasId }).select("x", "y", "$createdBy"));
+
+  return (
+    <Stage>
+      {letters.map((letter) => (
+        <Letter char={letter.char} x={letter.x} y={letter.y} />
+      ))}
+      {cursors.map((cursor) => (
+        <Cursor x={cursor.x} y={cursor.y} user={cursor.$createdBy} />
+      ))}
+    </Stage>
+  );
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Mutation">
+
+```ts
+const db = useDb();
+
+function addLetter(char, pos) {
+  db.insert(app.letters, {
+    canvasId,
+    char,
+    x: pos.x,
+    y: pos.y,
+  });
+}
+
+function dragLetter(letterId, pos) {
+  db.update(app.letters, letterId, pos);
+}
+
+function moveCursor(pos) {
+  db.update(app.cursors, myCursor.id, pos);
+}
+```
+
+  </SlideCodeCell>
+
+  <SlideCodeCell title="Permissions">
+
+```ts
+export default s.definePermissions(app, ({ policy, session }) => {
+  policy.canvases.allowRead.always();
+  policy.canvases.allowInsert.always();
+
+  policy.letters.allowRead.always();
+  policy.letters.allowInsert.always();
+  policy.letters.allowUpdate.always();
+
+  policy.cursors.allowRead.always();
+  policy.cursors.allowInsert.always();
+  policy.cursors.allowUpdate.where({
+    $createdBy: session.user_id,
+  });
+});
+```
+
+  </SlideCodeCell>
+</div>
+
+<Notes>
+And last, but most importantly, we have permissions.
+
+Jazz actually makes you define them and fails closed otherwise. We also
+tried to make the DSL readable enough that you can see at a glance
+whether you set them up correctly.
+
+For our app, everyone can create a canvas. Everyone can add letters and
+move them around. But cursors can only be updated by the user that
+created them. Makes sense, right?
+
+And for more complex apps, Jazz gives you a permission testing framework
+so you can set up tricky situations and edge cases without end-to-end
+testing your whole app.
+
+</Notes>
+</Slide>
+
+<Slide>
+# Demo time
+<Notes>
+Ok! Do you actually want to try it?
+
+Here it is as an actual Jazz app.
+
+</Notes>
+</Slide>
+
+<Slide className="p-0 overflow-hidden">
+  <iframe
+    id="letter-canvas"
+    src="https://jazz-letter-canvas.vercel.app"
+    title="Jazz letter canvas demo"
+    className="h-screen w-screen border-0"
+    allow="clipboard-read; clipboard-write"
+  />
+</Slide>
+
+<Slide className="justify-center">
+<h2>What if <JazzLogo className="inline h-[0.98em] w-auto shrink-0 relative top-[0.04em]" /><br/>was your database?</h2>
+
+<Notes>
+What if *jazz* was your database?
+</Notes>
+</Slide>
+
+<Slide>
+# npm create jazz
+
+<div className="absolute [&_p]:text-[4vw] top-[5vw] right-[5vw] text-right flex flex-col gap-6">
+jazz.tools<br/>
+@jazz_tools
+
+discord.gg/jazz-tools
+
+</div>
+
+<Notes>
+The best way to find out is to
+Simply run npm create jazz.
+
+It'll scaffold an app, set up a free Jazz Cloud API key
+for you and wire everything up so you have a running,
+durable, local-first multi-user app.
+
+As easy as starting a new purely frontend project.
+
+</Notes>
+</Slide>
+
+<Slide>
+# npm create jazz
+
+<div className="absolute [&_p]:text-[4vw] top-[5vw] right-[5vw] text-right flex flex-col gap-6">
+jazz.tools<br/>
+@jazz_tools
+
+discord.gg/jazz-tools
+
+</div>
+
+<Notes>
+I really can't wait to see what you build with it
+and would love to hear what you think. Especially if
+you've got strong opinions and if you've tried some
+of the alternative and love or hate specific aspects.
+
+I'm around all day today and tomorrow and most of Saturday, as are
+Guido, Gio and Nico, who you'll recognize by their Jazz shirts.
+
+Alright, I really hope you learned something new.
+Long live React. Thank you!
+
+</Notes>
+</Slide>

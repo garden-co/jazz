@@ -1,12 +1,13 @@
-| Field            | Required | Description                                                                 |
-| ---------------- | -------- | --------------------------------------------------------------------------- |
-| `appId`          | yes      | Application identifier. Isolates storage between apps.                      |
-| `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.                    |
-| `secret`         | no       | Local-first auth secret. Jazz derives a stable identity from it.            |
-| `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration.          |
-| `adminSecret`    | no       | Admin secret for privileged sync and `/admin/*` catalogue operations.       |
-| `runtimeSources` | no       | Runtime source overrides for browser workers, Wasm URLs, or Wasm input.     |
-| `driver`         | no       | Storage driver: `{ type: "persistent" }` (default) or `{ type: "memory" }`. |
-| `dbName`         | no       | Local database name. Defaults to `appId`.                                   |
-| `env`            | no       | Environment label (for example `"dev"`, `"prod"`).                          |
-| `userBranch`     | no       | Branch name. Defaults to `"main"`.                                          |
+| Field            | Required | Description                                                                                                                                                                                 |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appId`          | yes      | Application identifier. Isolates storage between apps.                                                                                                                                      |
+| `serverUrl`      | no       | Jazz sync server URL. Omit for fully local/offline mode.                                                                                                                                    |
+| `secret`         | no       | Local-first auth secret. Jazz derives a stable identity from it. Mutually exclusive with `jwtToken` and `cookieSession`.                                                                    |
+| `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration. Mutually exclusive with `secret` and `cookieSession`.                                                                    |
+| `cookieSession`  | no       | Mirrored session for cookie-based auth, used when the browser authenticates with an HttpOnly cookie instead of a JS-readable bearer token. Mutually exclusive with `secret` and `jwtToken`. |
+| `adminSecret`    | no       | Admin secret for privileged sync and `/admin/*` catalogue operations.                                                                                                                       |
+| `runtimeSources` | no       | Runtime source overrides for browser workers, Wasm URLs, or Wasm input.                                                                                                                     |
+| `driver`         | no       | Storage driver: `{ type: "persistent" }` (default) or `{ type: "memory" }`.                                                                                                                 |
+| `dbName`         | no       | Local database name. Defaults to `appId`.                                                                                                                                                   |
+| `env`            | no       | Environment label (for example `"dev"`, `"prod"`).                                                                                                                                          |
+| `userBranch`     | no       | Branch name. Defaults to `"main"`.                                                                                                                                                          |

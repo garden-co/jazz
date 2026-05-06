@@ -1,6 +1,7 @@
 use super::*;
 use crate::batch_fate::LocalBatchMember;
 use crate::row_histories::RowState;
+use crate::row_histories::patch_row_batch_state;
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -86,6 +87,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             crate::batch_fate::BatchSettlement::Missing { .. }
         ) {
             self.retransmit_local_batch_to_servers(batch_id);
+        } else if matches!(
+            settlement,
+            crate::batch_fate::BatchSettlement::AcceptedTransaction { .. }
+        ) {
+            self.schema_manager
+                .query_manager_mut()
+                .mark_subscriptions_visibility_recompute_for_batch(batch_id);
         }
 
         if let Some(acked_tier) = settlement.confirmed_tier() {
@@ -97,6 +105,31 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     visible_members, ..
                 } => {
                     for member in visible_members {
+                        match patch_row_batch_state(
+                            &mut self.storage,
+                            member.object_id,
+                            &member.branch_name,
+                            member.batch_id,
+                            None,
+                            Some(acked_tier),
+                        ) {
+                            Ok(Some(update)) => self
+                                .schema_manager
+                                .query_manager_mut()
+                                .enqueue_row_visibility_change(update),
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::debug!(
+                                    object_id = %member.object_id,
+                                    branch_name = %member.branch_name,
+                                    batch_id = ?member.batch_id,
+                                    ?acked_tier,
+                                    ?error,
+                                    "ignoring batch settlement tier for local row batch that is not present"
+                                );
+                                continue;
+                            }
+                        }
                         self.durability.record_ack(
                             crate::sync_manager::RowBatchKey::new(
                                 member.object_id,
@@ -199,7 +232,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
+    pub(super) fn retransmit_local_batch_to_servers(
+        &mut self,
+        batch_id: crate::row_histories::BatchId,
+    ) {
         let sealed_submission = self
             .storage
             .load_local_batch_record(batch_id)

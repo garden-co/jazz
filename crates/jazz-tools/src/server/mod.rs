@@ -87,9 +87,15 @@ impl ConnectionEventHub {
             let seq = state.next_sync_seq;
             let through_seq = seq.saturating_sub(1);
             let payload = match &payload {
-                SyncPayload::QuerySettled { query_id, tier, .. } => SyncPayload::QuerySettled {
+                SyncPayload::QuerySettled {
+                    query_id,
+                    tier,
+                    scope,
+                    ..
+                } => SyncPayload::QuerySettled {
                     query_id: *query_id,
                     tier: *tier,
+                    scope: scope.clone(),
                     through_seq,
                 },
                 _ => payload.clone(),

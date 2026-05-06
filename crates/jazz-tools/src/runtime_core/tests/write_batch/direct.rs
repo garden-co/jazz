@@ -67,6 +67,47 @@ fn rc_insert_syncs_exact_row_batch_without_row_region_reads() {
 }
 
 #[test]
+fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "offline-direct-batch-replay-test",
+        Box::new(MemoryStorage::new()),
+    );
+    let server_id = ServerId::new();
+
+    let ((row_id, _row_values), batch_id) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.seal_batch(batch_id).unwrap();
+    let sealed_submission = core
+        .storage()
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("offline write should retain a local batch record")
+        .sealed_submission
+        .expect("offline direct write should still seal the local batch");
+
+    core.add_server(server_id);
+    core.batched_tick();
+
+    let outbox = core.sync_sender().take();
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::RowBatchCreated { row, .. },
+        } if *id == server_id && row.row_id == row_id && row.batch_id == batch_id
+    )));
+    assert!(outbox.iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::SealBatch { submission },
+        } if *id == server_id && *submission == sealed_submission
+    )));
+}
+
+#[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let ((id, _row_values), _) =
@@ -80,6 +121,39 @@ fn rc_update_sync() {
 
     let query = Query::new("users");
     let results = execute_query(&mut s.b, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Bob".into()));
+}
+
+#[test]
+fn rc_late_insert_settlement_does_not_hide_newer_update() {
+    let mut s = create_3tier_rc();
+    let ((id, _row_values), insert_batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+    let branch_name = s.a.schema_manager().branch_name();
+
+    s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
+        .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: insert_batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: id,
+                    branch_name,
+                    batch_id: insert_batch_id,
+                }],
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let query = Query::new("users");
+    let results = execute_query(&mut s.a, query);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[1], Value::Text("Bob".into()));
 }
@@ -144,7 +218,46 @@ fn rc_same_row_direct_batch_overwrites_in_place() {
 }
 
 #[test]
-fn rc_worker_direct_batch_retains_all_visible_members() {
+fn rc_direct_batch_reuses_loaded_local_batch_record_while_building() {
+    let calls = Arc::new(Mutex::new(RowMutationCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "direct-batch-local-record-cache-test",
+        Box::new(RowMutationObservingStorage::new(calls.clone())),
+    );
+    let batch_id = BatchId::new();
+    let write_context = WriteContext::default()
+        .with_batch_mode(crate::batch_fate::BatchMode::Direct)
+        .with_batch_id(batch_id);
+
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Bob"),
+        Some(&write_context),
+    )
+    .unwrap();
+    core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "Cleo"),
+        Some(&write_context),
+    )
+    .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().local_batch_record_get_calls,
+        1,
+        "building a direct batch should not repeatedly load and decode the growing local batch record"
+    );
+}
+
+#[test]
+fn rc_worker_direct_batch_persists_visible_members_on_seal() {
     let mut s = create_3tier_rc();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default()
@@ -168,12 +281,21 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
     assert_eq!(first_batch_id, batch_id);
     assert_eq!(second_batch_id, batch_id);
 
+    assert_eq!(
+        s.b.storage().load_local_batch_record(batch_id).unwrap(),
+        None,
+        "open direct batches should not persist replayable durability records before seal"
+    );
+
+    s.b.seal_batch(batch_id).unwrap();
+
     let branch_name = s.b.schema_manager().branch_name();
     let local_record =
         s.b.storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .expect("worker should retain one direct batch record for shared writes");
+            .expect("sealed direct batch should persist one record for shared writes");
+    assert!(local_record.sealed);
 
     match local_record.latest_settlement {
         Some(crate::batch_fate::BatchSettlement::DurableDirect {
@@ -201,6 +323,17 @@ fn rc_worker_direct_batch_retains_all_visible_members() {
         }
         other => panic!("expected durable direct settlement, got {other:?}"),
     }
+
+    let first_visible_row =
+        s.b.storage()
+            .load_visible_region_row("users", branch_name.as_str(), first_row_id)
+            .unwrap()
+            .expect("sealed direct batch member should stay visible");
+    assert_eq!(
+        first_visible_row.confirmed_tier,
+        Some(DurabilityTier::Local),
+        "sealing a direct batch should make member rows locally durable"
+    );
 }
 
 #[test]
@@ -253,7 +386,7 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
 }
 
 #[test]
-fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
+fn rc_open_direct_batch_has_no_persisted_local_batch_record() {
     let mut core = create_test_runtime();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default()
@@ -267,12 +400,11 @@ fn rc_local_batch_record_does_not_seal_current_open_direct_batch() {
     )
     .unwrap();
 
-    let record = core
-        .local_batch_record(batch_id)
-        .unwrap()
-        .expect("open direct batch should have a local record");
-    assert!(!record.sealed);
-    assert!(record.sealed_submission.is_none());
+    assert_eq!(
+        core.local_batch_record(batch_id).unwrap(),
+        None,
+        "open direct batches are in-memory builders until sealed"
+    );
 }
 
 #[test]

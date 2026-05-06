@@ -308,13 +308,8 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
-    /// Replayable scope snapshot for one query subscription.
-    QueryScopeSnapshot {
-        query_id: QueryId,
-        scope: Vec<(ObjectId, BranchName)>,
-    },
-
-    /// Query frontier settlement notification.
+    /// Query frontier settlement notification with the authoritative query scope
+    /// for the settled server result.
     ///
     /// This means the upstream server has reached a complete first frontier for the
     /// subscription. Per-row durability remains encoded and replayed on the rows
@@ -322,6 +317,7 @@ pub enum SyncPayload {
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
+        scope: Vec<(ObjectId, BranchName)>,
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },
@@ -444,7 +440,7 @@ impl SyncPayload {
             SyncPayload::SealBatch { submission } => {
                 submission.members.first().map(|member| member.object_id)
             }
-            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+            SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(object_id, _)| *object_id)
             }
             _ => None,
@@ -469,7 +465,7 @@ impl SyncPayload {
             },
             SyncPayload::BatchSettlementNeeded { .. } => None,
             SyncPayload::SealBatch { .. } => None,
-            SyncPayload::QueryScopeSnapshot { scope, .. } => {
+            SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
             }
             _ => None,
@@ -529,7 +525,6 @@ impl SyncPayload {
             SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
-            SyncPayload::QueryScopeSnapshot { .. } => "QueryScopeSnapshot",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::SchemaWarning(_) => "SchemaWarning",
             SyncPayload::ConnectionSchemaDiagnostics(_) => "ConnectionSchemaDiagnostics",

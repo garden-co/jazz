@@ -159,6 +159,15 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
     sm.take_outbox();
     seed_visible_row(&mut sm, &mut io, "users", row.clone());
     persist_visible_row_settlement(&mut io, row_id, &row);
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+    sm.take_outbox();
 
     sm.process_from_client(
         &mut io,
@@ -182,6 +191,126 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
                 batch_id: row.batch_id,
             }],
         }
+    )));
+}
+
+#[test]
+fn batch_settlement_needed_filters_visible_members_to_sent_row_batches() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let sent_row_id = ObjectId::new();
+    let scoped_but_unsent_row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let branch_name = BranchName::new("main");
+    let settlement = BatchSettlement::DurableDirect {
+        batch_id,
+        confirmed_tier: DurabilityTier::GlobalServer,
+        visible_members: vec![
+            VisibleBatchMember {
+                object_id: sent_row_id,
+                branch_name,
+                batch_id,
+            },
+            VisibleBatchMember {
+                object_id: scoped_but_unsent_row_id,
+                branch_name,
+                batch_id,
+            },
+        ],
+    };
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    io.upsert_authoritative_batch_settlement(&settlement)
+        .unwrap();
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([
+            (sent_row_id, branch_name),
+            (scoped_but_unsent_row_id, branch_name),
+        ]),
+        None,
+    );
+    sm.take_outbox();
+    sm.row_batch_interest
+        .entry(RowBatchKey::new(sent_row_id, branch_name, batch_id))
+        .or_default()
+        .insert(client_id);
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::BatchSettlement { settlement },
+        } if id == client_id && settlement == BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: sent_row_id,
+                branch_name,
+                batch_id,
+            }],
+        }
+    )));
+}
+
+#[test]
+fn batch_settlement_needed_returns_full_visible_members_to_server() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let first_row_id = ObjectId::new();
+    let second_row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let branch_name = BranchName::new("main");
+    let settlement = BatchSettlement::DurableDirect {
+        batch_id,
+        confirmed_tier: DurabilityTier::GlobalServer,
+        visible_members: vec![
+            VisibleBatchMember {
+                object_id: first_row_id,
+                branch_name,
+                batch_id,
+            },
+            VisibleBatchMember {
+                object_id: second_row_id,
+                branch_name,
+                batch_id,
+            },
+        ],
+    };
+
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+    io.upsert_authoritative_batch_settlement(&settlement)
+        .unwrap();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchSettlementNeeded {
+            batch_ids: vec![batch_id],
+        },
+    );
+
+    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::BatchSettlement { settlement: returned },
+        } if id == server_id && returned == settlement
     )));
 }
 
@@ -274,6 +403,87 @@ fn batch_settlement_needed_returns_persisted_rejected_without_visible_rows() {
             payload: SyncPayload::BatchSettlement { settlement: returned },
         } if id == client_id && returned == settlement
     )));
+}
+
+#[test]
+fn batch_settlement_from_server_filters_visible_members_to_sent_row_batches() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let sent_row_id = ObjectId::new();
+    let scoped_but_unsent_row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let branch_name = BranchName::new("main");
+
+    add_client(&mut sm, &io, client_id);
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([
+            (sent_row_id, branch_name),
+            (scoped_but_unsent_row_id, branch_name),
+        ]),
+        None,
+    );
+    sm.take_outbox();
+    sm.row_batch_interest
+        .entry(RowBatchKey::new(sent_row_id, branch_name, batch_id))
+        .or_default()
+        .insert(client_id);
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchSettlement {
+            settlement: BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![
+                    VisibleBatchMember {
+                        object_id: sent_row_id,
+                        branch_name,
+                        batch_id,
+                    },
+                    VisibleBatchMember {
+                        object_id: scoped_but_unsent_row_id,
+                        branch_name,
+                        batch_id,
+                    },
+                ],
+            },
+        },
+    );
+
+    let settlements = sm
+        .take_outbox()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchSettlement { settlement },
+            } if id == client_id => Some(settlement),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        settlements,
+        vec![BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: sent_row_id,
+                branch_name,
+                batch_id,
+            }],
+        }]
+    );
 }
 
 #[test]

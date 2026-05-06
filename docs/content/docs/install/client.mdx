@@ -90,6 +90,9 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     registerRootComponent(App);
     ```
 
+    Keep this import first in the app entry point. It installs the React Native `fetch`, stream, and
+    related web API shims Jazz needs before the RN runtime is loaded.
+
     Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
 
     ```js title="babel.config.js"

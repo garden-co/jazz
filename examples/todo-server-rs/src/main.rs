@@ -24,6 +24,12 @@
 //! | `/todos/:id` | DELETE | Delete item |
 //! | `/updates` | GET | SSE stream of add/remove events |
 
+// mimalloc replaces the system allocator for ~25% throughput on Rust-side
+// allocation-heavy paths (query/insert/observer). Single-process, single-language —
+// no FFI ownership concerns here.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod routes;
 
 use std::net::SocketAddr;

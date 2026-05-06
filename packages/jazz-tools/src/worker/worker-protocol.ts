@@ -5,6 +5,7 @@
  */
 
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
+import type { LocalBatchRecord } from "../runtime/client.js";
 import type { AuthFailureReason } from "../runtime/sync-transport.js";
 
 // ============================================================================
@@ -28,12 +29,19 @@ export interface InitMessage {
   fallbackWasmUrl?: string;
   /** Optional WASM tracing log level for this worker runtime (default: "warn"). */
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  /** Optional OTLP/HTTP collector URL for dev telemetry. */
+  telemetryCollectorUrl?: string;
 }
 
 /** Forward a sync payload from main thread to worker. */
 export interface SyncToWorkerMessage {
   type: "sync";
   payload: Uint8Array[];
+}
+
+export interface SequencedSyncPayload {
+  payload: Uint8Array | string;
+  sequence: number;
 }
 
 export type WorkerLifecycleEvent =
@@ -96,6 +104,12 @@ export interface ShutdownMessage {
   type: "shutdown";
 }
 
+/** Acknowledge that the main thread already handled a replayable rejection. */
+export interface AcknowledgeRejectedBatchMessage {
+  type: "acknowledge-rejected-batch";
+  batchId: string;
+}
+
 /**
  * Simulate a crash: release OPFS handles without flushing snapshot.
  * Used for testing WAL recovery. Worker closes OPFS locks and confirms
@@ -127,6 +141,7 @@ export type MainToWorkerMessage =
   | DisconnectUpstreamMessage
   | ReconnectUpstreamMessage
   | ShutdownMessage
+  | AcknowledgeRejectedBatchMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage
   | DebugSeedLiveSchemaMessage;
@@ -159,7 +174,7 @@ export interface UpstreamDisconnectedMessage {
 /** Forward a sync payload from worker to main thread. */
 export interface SyncToMainMessage {
   type: "sync";
-  payload: (Uint8Array | string)[];
+  payload: (Uint8Array | string | SequencedSyncPayload)[];
 }
 
 /** Forward sync payload(s) to a specific follower peer through leader main thread. */
@@ -168,6 +183,18 @@ export interface PeerSyncToMainMessage {
   peerId: string;
   term: number;
   payload: Uint8Array[];
+}
+
+/** Replay a persisted rejected batch that was not acknowledged before restart. */
+export interface MutationErrorReplayMessage {
+  type: "mutation-error-replay";
+  batch: LocalBatchRecord;
+}
+
+/** Sync retained local batch records from the worker into the main runtime overlay. */
+export interface LocalBatchRecordsSyncMessage {
+  type: "local-batch-records-sync";
+  batches: LocalBatchRecord[];
 }
 
 /** Worker encountered an error. */
@@ -218,6 +245,8 @@ export type WorkerToMainMessage =
   | UpstreamDisconnectedMessage
   | SyncToMainMessage
   | PeerSyncToMainMessage
+  | MutationErrorReplayMessage
+  | LocalBatchRecordsSyncMessage
   | ErrorMessage
   | WorkerAuthFailedMessage
   | ShutdownOkMessage

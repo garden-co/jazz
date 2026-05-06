@@ -74,20 +74,18 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
     let reader = JazzClient::connect(reader_context)
         .await
         .expect("connect reader");
-    wait_for_edge_query_ready(&reader, "users", Duration::from_secs(30)).await;
 
-    let rows_before_permissions = wait_for_query(
-        &reader,
-        QueryBuilder::new("users").build(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(10),
-        "reader query before permissions head",
-        Some,
-    )
-    .await;
     assert!(
-        rows_before_permissions.is_empty(),
-        "dynamic server should deny reads before any permissions head is published"
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            reader.query(
+                QueryBuilder::new("users").build(),
+                Some(DurabilityTier::EdgeServer),
+            ),
+        )
+        .await
+        .is_err(),
+        "dynamic server should not settle reads before any permissions head is published"
     );
 
     publish_allow_all_permissions(
@@ -97,6 +95,8 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
         &schema,
     )
     .await;
+
+    wait_for_edge_query_ready(&reader, "users", Duration::from_secs(30)).await;
 
     let admin =
         JazzClient::connect(server.make_client_context_for_user(schema.clone(), "admin-dynamic"))
@@ -145,7 +145,6 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("observer-queued-write")
-        .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
     let writer = TestingClient::builder()
@@ -153,7 +152,6 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         .with_schema(schema.clone())
         .with_user_id("writer-queued-write")
         .as_user()
-        .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
 
@@ -178,18 +176,14 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         "expected missing permissions-head reason, got: {queued_write_error}"
     );
 
-    let rows_before_permissions = wait_for_query(
-        &observer,
-        query.clone(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(5),
-        "observer query before permissions for queued write",
-        Some,
-    )
-    .await;
     assert!(
-        rows_before_permissions.is_empty(),
-        "server should keep queued user writes invisible before permissions arrive"
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            observer.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+        )
+        .await
+        .is_err(),
+        "server should not settle observer queries before permissions arrive"
     );
 
     publish_allow_all_permissions(
@@ -199,6 +193,8 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
         &schema,
     )
     .await;
+    wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let rows_after_publish = wait_for_query(
         &observer,
@@ -307,7 +303,6 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .with_server(&server)
         .with_schema(schema.clone())
         .with_user_id("observer-timeout-write")
-        .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
     let writer = TestingClient::builder()
@@ -315,7 +310,6 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .with_schema(schema.clone())
         .with_user_id("writer-timeout-write")
         .as_user()
-        .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
 
@@ -329,18 +323,14 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         .expect("optimistic local create before timeout");
 
     tokio::time::sleep(Duration::from_secs(12)).await;
-    let rows_after_timeout = wait_for_query(
-        &observer,
-        query.clone(),
-        Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(5),
-        "observer query after timeout before permissions publish",
-        Some,
-    )
-    .await;
     assert!(
-        rows_after_timeout.is_empty(),
-        "timed-out write should still be absent before permissions are published"
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            observer.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+        )
+        .await
+        .is_err(),
+        "observer query should remain unsettled before permissions are published"
     );
     publish_allow_all_permissions(
         &server.base_url(),
@@ -349,6 +339,8 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
         &schema,
     )
     .await;
+    wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
+    wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let allowed_user_id = jazz_tools::ObjectId::new();
     let (allowed_row_id, _) = writer
@@ -399,7 +391,6 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         .with_schema(schema.clone())
         .with_user_id("reader-subscribe")
         .as_user()
-        .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
     let mut stream = reader
@@ -412,13 +403,13 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         &mut stream,
         &mut log,
         Duration::from_secs(10),
-        "initial empty subscription snapshot before permissions",
+        "initial empty local subscription snapshot before permissions",
         |updates| !updates.is_empty(),
     )
     .await;
     assert!(
         log[0].is_empty(),
-        "first subscription snapshot should fail closed as an empty delta"
+        "plain local subscription should fail closed as an empty local delta before permissions"
     );
 
     let allow_head = publish_allow_all_permissions(
@@ -498,7 +489,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 /// ```text
 /// alice (v1) ──create user──► server
 ///                                │
-///              push v2 schema + lens via HTTP /sync
+///              push v2 schema + lens via WS sync
 ///                                │
 ///                  bob (v2) connects and queries
 ///                                │

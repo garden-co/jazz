@@ -1,0 +1,127 @@
+---
+title: Lifecycle
+description: "Client auth lifecycle: local-first identity storage, sign-in and sign-out, storage reset, and upgrading to external auth."
+reviewedAt: "unreviewed"
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+Jazz clients have two pieces of local state that are easy to confuse:
+
+- **Identity secret**&hairsp;—&hairsp;the local-first auth secret. In browser apps this is usually stored
+  by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
+  secure storage.
+- **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
+  in OPFS; React Native uses native storage; memory drivers keep it only for the life of the process.
+
+Clearing one does not automatically clear the other. That separation is intentional: a development
+storage reset should not silently destroy a user's identity, and signing out of an auth provider
+should not necessarily delete offline data.
+
+## Local-first identity storage
+
+Local-first auth derives the user's Jazz identity from a 32-byte secret. The same secret always
+produces the same Jazz user ID, so preserving the secret preserves identity across app restarts.
+
+```ts
+const secret = await BrowserAuthSecretStore.getOrCreateSecret();
+
+const db = await createDb({
+  appId: "my-app",
+  secret,
+});
+```
+
+`useLocalFirstAuth()` wraps this storage for React and Expo apps. Its `signOut()` method clears the
+stored secret, which means the next login without a restored secret creates a different Jazz
+identity.
+
+<Callout type="warn">
+  The local-first secret is the user's identity. If it is lost, rows owned only by that identity may
+  become inaccessible unless the user restores the same secret from a recovery passphrase, passkey
+  backup, or linked external account. The secret should be protected carefully: anyone with the
+  secret can authenticate as the user.
+</Callout>
+
+Use [Local-first auth](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) to add
+recovery before shipping flows that clear or replace a local-first secret.
+
+## Switching users
+
+Recreate the
+client with a new auth config whenever the active principal changes:
+
+```tsx
+<JazzProvider key={sessionKey} config={config}>
+  <App />
+</JazzProvider>
+```
+
+For the same external user, `db.updateAuthToken(freshJwt)` is fine for refreshing an expiring
+bearer token. Do not use `db.updateAuthToken(null)` to sign out or switch users on a live `Db`. For cookie-based auth, `db.updateCookieSession(nextSession)` updates the mirrored
+session for the same user while the HttpOnly cookie remains the transport credential.
+
+## Logout
+
+Use `db.logout()` when you are done with a `Db` instance during logout or switching users. It
+shuts down subscriptions, workers, and cached runtime clients. Your auth provider is still
+responsible for clearing its own token or cookie, and your app should recreate `Db` or
+`JazzProvider` with the next auth config.
+
+```ts
+await db.logout();
+```
+
+In browser persistent mode, pass `wipeData: true` to also clear the local OPFS database namespace
+before shutdown:
+
+```ts
+await db.logout({ wipeData: true });
+```
+
+`wipeData` clears the local database for this browser storage namespace. It does not clear
+local-first auth secrets from `localStorage`, Expo secure storage, or your external provider's
+cookies/tokens.
+
+## Storage reset
+
+For development tools that only need to clear browser database storage without treating it as
+logout, call:
+
+```ts
+await db.deleteClientStorage();
+```
+
+This API is only available for browser worker-backed persistent storage. It clears OPFS database
+files and coordinates across tabs, but intentionally leaves local-first auth secrets alone.
+
+Need a console-only reset while debugging? See [How do I reset browser storage?](/docs/faq#reset-browser-storage).
+
+## Upgrading to external auth
+
+Users can start with local-first auth and later sign up with an external provider while keeping the
+same Jazz identity. The upgrade flow is:
+
+1. Start the app with a local-first `secret`.
+2. Before sign-up, call `db.getLocalFirstIdentityProof(...)` to prove ownership of that identity.
+3. Verify that proof on your server.
+4. Create or link the external account so its future JWTs use the same Jazz user ID as `sub`.
+5. Recreate `Db` or `JazzProvider` with `jwtToken` or `cookieSession` for the linked external account.
+
+After the external account is linked, keep the local-first secret backed up until you are confident
+the external provider can recover the same Jazz user ID. See
+[Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth) for the full
+proof-token flow.
+
+## Related APIs
+
+| API                               | Use it for                                                       |
+| --------------------------------- | ---------------------------------------------------------------- |
+| `BrowserAuthSecretStore`          | Browser local-first secret storage                               |
+| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                           |
+| `useLocalFirstAuth()`             | React/Expo hook for loading, replacing, and clearing the secret  |
+| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                   |
+| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal |
+| `db.logout()`                     | Shutting down a client during logout or principal switch         |
+| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                           |
+| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                      |

@@ -34,25 +34,24 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     // TODO: Accept app-name aliases in app-scoped route matching
     // Nesting all non-health routes under a fixed "/apps/{state.app_id}" path makes the server only match the canonical UUID string, but JavaScript callers frequently propagate human-readable app IDs (e.g. "test-app") that are valid elsewhere via AppId::from_name(...). In that non-UUID case, the client now builds /apps/test-app/... URLs while the server only serves /apps/<derived-uuid>/..., so websocket and admin/schema requests return 404 for otherwise valid app IDs.
     let app_route_prefix = format!("/apps/{}", state.app_id);
+    let admin_routes = Router::new()
+        .route("/schemas", post(publish_schema_handler))
+        .route("/schema-connectivity", get(schema_connectivity_handler))
+        .route("/permissions/head", get(permissions_head_handler))
+        .route(
+            "/permissions",
+            get(permissions_handler).post(publish_permissions_handler),
+        )
+        .route("/migrations", post(publish_migration_handler))
+        .route(
+            "/introspection/subscriptions",
+            get(admin_subscription_introspection_handler),
+        );
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
-        .route("/admin/schemas", post(publish_schema_handler))
-        .route(
-            "/admin/schema-connectivity",
-            get(schema_connectivity_handler),
-        )
-        .route("/admin/permissions/head", get(permissions_head_handler))
-        .route(
-            "/admin/permissions",
-            get(permissions_handler).post(publish_permissions_handler),
-        )
-        .route("/admin/migrations", post(publish_migration_handler))
-        .route(
-            "/admin/introspection/subscriptions",
-            get(admin_subscription_introspection_handler),
-        )
+        .nest("/admin", admin_routes)
         .layer(TraceLayer::new_for_http());
 
     Router::new()
@@ -340,6 +339,7 @@ mod tests {
 
         // An AuthHandshake with an empty AuthConfig (no secret, no JWT).
         let handshake = AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: client_id.to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
@@ -376,6 +376,7 @@ mod tests {
             .expect("build sync test state")
             .state;
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
@@ -418,6 +419,7 @@ mod tests {
             .expect("build sync test state")
             .state;
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
@@ -460,6 +462,7 @@ mod tests {
             .expect("build sync test state")
             .state;
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
@@ -502,6 +505,7 @@ mod tests {
             .expect("build sync test state")
             .state;
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: None,
@@ -1965,6 +1969,7 @@ mod tests {
         let state = make_state_with_schema(schema).await;
         let declared_hash = SchemaHash::from_bytes([9; 32]);
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: ClientId::new().to_string(),
             auth: crate::transport_manager::AuthConfig::default(),
             catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
@@ -2002,6 +2007,7 @@ mod tests {
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
 
         let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
             client_id: client_id.clone(),
             auth: crate::transport_manager::AuthConfig {
                 backend_secret: Some("test-backend-secret".to_string()),
@@ -2022,9 +2028,16 @@ mod tests {
             .expect("wait for ConnectedResponse")
             .expect("ws frame")
             .expect("ws result");
-        assert!(
-            matches!(connected, WsMessage::Binary(_)),
-            "expected binary ConnectedResponse frame"
+        let WsMessage::Binary(connected_frame) = connected else {
+            panic!("expected binary ConnectedResponse frame, got {connected:?}");
+        };
+        let connected_payload = crate::transport_manager::frame_decode(&connected_frame)
+            .expect("decode ConnectedResponse frame");
+        let connected_response: crate::transport_manager::ConnectedResponse =
+            serde_json::from_slice(connected_payload).expect("parse ConnectedResponse");
+        assert_eq!(
+            connected_response.sync_protocol_version,
+            crate::transport_manager::SYNC_PROTOCOL_VERSION
         );
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2042,6 +2055,84 @@ mod tests {
         );
 
         let _ = ws.close(None).await;
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_handler_rejects_pre_versioned_handshake_loudly() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let app = create_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ws listener");
+        let addr = listener.local_addr().expect("ws local addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve ws app");
+        });
+
+        let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
+        let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "client_id": ClientId::new().to_string(),
+            "auth": {
+                "backend_secret": "test-backend-secret"
+            },
+            "catalogue_state_hash": null,
+            "declared_schema_hash": null
+        }))
+        .expect("serialize old handshake");
+        ws.send(WsMessage::Binary(
+            crate::transport_manager::frame_encode(&payload).into(),
+        ))
+        .await
+        .expect("send handshake");
+
+        let error_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for error frame")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Binary(error_frame) = error_frame else {
+            panic!("expected binary ServerEvent::Error frame, got {error_frame:?}");
+        };
+        let payload =
+            crate::transport_manager::frame_decode(&error_frame).expect("decode error frame");
+        let event: crate::jazz_transport::ServerEvent =
+            serde_json::from_slice(payload).expect("parse error event");
+        match event {
+            crate::jazz_transport::ServerEvent::Error { message, code } => {
+                assert_eq!(code, crate::jazz_transport::ErrorCode::BadRequest);
+                assert!(
+                    message.contains("Incompatible Jazz sync protocol"),
+                    "unexpected error message: {message}"
+                );
+                assert!(
+                    message.contains("client sent 0"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected Error event, got {:?}", other.variant_name()),
+        }
+
+        let close_frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for close frame")
+            .expect("ws frame")
+            .expect("ws result");
+        let WsMessage::Close(Some(close)) = close_frame else {
+            panic!("expected native close frame, got {close_frame:?}");
+        };
+        assert_eq!(
+            close.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Protocol
+        );
+        assert!(
+            close.reason.contains("Incompatible Jazz sync protocol"),
+            "unexpected close reason: {}",
+            close.reason
+        );
+
         server_task.abort();
     }
 }

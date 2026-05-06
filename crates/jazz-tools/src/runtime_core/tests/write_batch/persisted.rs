@@ -33,6 +33,7 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
     let update_batch_id =
         s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
             .unwrap();
+    s.a.seal_batch(update_batch_id).unwrap();
 
     let update_record =
         s.a.storage()
@@ -98,6 +99,7 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
     s.a.immediate_tick();
 
     let delete_batch_id = s.a.delete(id, None).unwrap();
+    s.a.seal_batch(delete_batch_id).unwrap();
 
     let delete_record =
         s.a.storage()
@@ -335,8 +337,17 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
     assert_eq!(initial_record.batch_id, batch_id);
     assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
     assert_eq!(
-        initial_record.latest_settlement, None,
-        "client-side persisted direct writes should start pending until an upstream durability settlement arrives"
+        initial_record.latest_settlement,
+        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                object_id: row_id,
+                branch_name,
+                batch_id,
+            }],
+        }),
+        "standalone persisted direct writes auto-seal and start locally durable"
     );
 
     s.a.push_sync_inbox(InboxEntry {
@@ -584,7 +595,7 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         payload: SyncPayload::BatchSettlement {
             settlement: crate::batch_fate::BatchSettlement::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Local,
+                confirmed_tier: DurabilityTier::EdgeServer,
                 visible_members: vec![crate::batch_fate::VisibleBatchMember {
                     object_id: row_id,
                     branch_name,
@@ -600,6 +611,13 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
         Ok(Some(Ok(()))),
         "persisted receivers should resolve from replayable batch settlement even when a live row-batch ack was missed"
     );
+
+    let visible_row =
+        s.a.storage()
+            .load_visible_region_row("users", branch_name.as_str(), row_id)
+            .unwrap()
+            .expect("settled direct row should remain visible");
+    assert_eq!(visible_row.confirmed_tier, Some(DurabilityTier::EdgeServer));
 }
 
 #[test]

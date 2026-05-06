@@ -51,6 +51,7 @@ struct RowMutationCallCounts {
     row_mutation_calls: usize,
     separate_index_mutation_calls: usize,
     flush_wal_calls: usize,
+    local_batch_record_get_calls: usize,
 }
 
 struct RowMutationObservingStorage {
@@ -968,6 +969,9 @@ impl Storage for RowMutationObservingStorage {
     }
 
     fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        if table == "__local_batch_record" && key.starts_with("batch:") {
+            self.calls.lock().unwrap().local_batch_record_get_calls += 1;
+        }
         self.inner.raw_table_get(table, key)
     }
 

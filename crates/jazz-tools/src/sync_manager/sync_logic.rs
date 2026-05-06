@@ -1,11 +1,12 @@
 use super::*;
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::SharedString;
 use crate::row_histories::StoredRowBatch;
 use crate::storage::{RowLocator, metadata_from_row_locator};
 use std::collections::HashMap;
 
-type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowBatch);
+type RowSyncData = (SharedString, HashMap<String, String>, StoredRowBatch);
 
 impl SyncManager {
     fn scope_delivery_row(mut row: StoredRowBatch) -> StoredRowBatch {
@@ -49,8 +50,16 @@ impl SyncManager {
             self.collect_row_sync_versions(storage, object_id, &row_locator, &mut row_sync);
         }
 
-        for (object_id, metadata, row) in row_sync {
-            self.queue_row_to_server(server_id, object_id, metadata, row);
+        for (table, metadata, row) in row_sync {
+            let mut visiting = std::collections::HashSet::new();
+            self.queue_row_to_server_with_missing_parents(
+                storage,
+                table.as_str(),
+                server_id,
+                metadata,
+                row,
+                &mut visiting,
+            );
         }
     }
 
@@ -82,7 +91,7 @@ impl SyncManager {
             if already_upstream {
                 continue;
             }
-            row_sync.push((object_id, metadata.clone(), row));
+            row_sync.push((row_locator.table.clone(), metadata.clone(), row));
         }
     }
 
@@ -177,12 +186,13 @@ impl SyncManager {
         }
     }
 
-    pub(super) fn queue_row_to_server(
+    pub(super) fn queue_row_to_server_with_metadata(
         &mut self,
         server_id: ServerId,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         row: StoredRowBatch,
+        include_metadata: bool,
     ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -194,18 +204,15 @@ impl SyncManager {
 
         let branch_name = BranchName::new(&row.branch);
         let batch_id = row.batch_id;
-
-        let (include_metadata, already_sent) = {
+        let already_sent = {
             let Some(server) = self.servers.get(&server_id) else {
                 return;
             };
-            let include_metadata = !server.sent_metadata.contains(&object_id);
-            let already_sent = server
+            server
                 .sent_batch_ids
                 .get(&(object_id, branch_name))
                 .cloned()
-                .unwrap_or_default();
-            (include_metadata, already_sent)
+                .unwrap_or_default()
         };
 
         if already_sent.contains(&batch_id) && !include_metadata {

@@ -619,7 +619,7 @@ pub fn decode_column(
     decode_column_with_layout(descriptor, layout.as_ref(), data, col_index)
 }
 
-fn decode_column_with_layout(
+pub(crate) fn decode_column_with_layout(
     descriptor: &RowDescriptor,
     layout: &CompiledRowLayout,
     data: &[u8],

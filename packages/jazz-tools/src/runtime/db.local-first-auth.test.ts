@@ -45,7 +45,7 @@ describe("getLocalFirstIdentityProof", () => {
       secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     });
 
-    const token = await db.getLocalFirstIdentityProof({ audience: "test-audience" });
+    const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
     expect(token).toBeTypeOf("string");
     expect(token!.split(".")).toHaveLength(3);
     await db.shutdown();
@@ -58,7 +58,7 @@ describe("getLocalFirstIdentityProof", () => {
       jwtToken: "dummy-jwt",
     });
 
-    const token = await db.getLocalFirstIdentityProof({ audience: "test-audience" });
+    const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
     expect(token).toBeNull();
     await db.shutdown();
   });

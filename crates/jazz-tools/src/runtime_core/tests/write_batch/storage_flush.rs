@@ -54,6 +54,7 @@ fn rc_local_row_writes_batch_row_and_index_mutations() {
             row_mutation_calls: 3,
             separate_index_mutation_calls: 0,
             flush_wal_calls: 0,
+            local_batch_record_get_calls: 3,
         },
         "local row writes should persist row history, visible heads, and index changes in one storage mutation"
     );
@@ -130,6 +131,7 @@ fn rc_batched_tick_skips_flush_wal_for_query_settled_only_message() {
         payload: SyncPayload::QuerySettled {
             query_id: crate::sync_manager::QueryId(1),
             tier: DurabilityTier::Local,
+            scope: vec![],
             through_seq: 1,
         },
     });

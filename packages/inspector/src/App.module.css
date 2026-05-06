@@ -44,6 +44,11 @@
   background: #273346;
 }
 
+.actionButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .actionButtonSecondary {
   border: 1px solid #33445d;
   border-radius: 6px;
@@ -62,4 +67,104 @@
   margin: 0;
   color: #a6b3c8;
   font-size: 14px;
+}
+
+.connectionManager {
+  width: min(920px, 100%);
+  border: 1px solid #2a3341;
+  border-radius: 8px;
+  background: #151a24;
+  padding: 20px;
+  display: grid;
+  gap: 18px;
+}
+
+.managerHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.managerSubtitle {
+  margin: 0;
+  color: #92a1b8;
+  font-size: 13px;
+}
+
+.emptyText {
+  margin: 0;
+  color: #a6b3c8;
+  font-size: 14px;
+}
+
+.connectionList {
+  display: grid;
+  gap: 10px;
+}
+
+.connectionItem {
+  border: 1px solid #253142;
+  border-radius: 8px;
+  background: #101723;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.connectionDetails {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.connectionTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.connectionName {
+  margin: 0;
+  color: #e4e9f3;
+  font-size: 15px;
+}
+
+.activeBadge {
+  border: 1px solid #385371;
+  border-radius: 999px;
+  color: #cfe0f4;
+  background: #1a2635;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.connectionMeta {
+  margin: 0;
+  color: #8e9bb0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.connectionActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .managerHeader,
+  .connectionItem {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .actionRow,
+  .connectionActions {
+    flex-wrap: wrap;
+  }
 }

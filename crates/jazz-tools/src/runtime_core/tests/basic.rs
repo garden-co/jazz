@@ -488,7 +488,6 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );

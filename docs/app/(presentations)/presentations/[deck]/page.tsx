@@ -1,25 +1,63 @@
+import { Notes, PresentationDeckView, Slide } from "@/components/presentations/slide";
+import { getMDXComponents } from "@/mdx-components";
 import {
   getPresentationDeckPage,
   getPresentationDecks,
-  getPresentationSlidesForPage,
+  getPresentationDeckSlides,
+  presentationsSource,
 } from "@/lib/presentations";
-import { notFound, redirect } from "next/navigation";
+import { resolvePresentationSlideIdentity } from "@/lib/presentation-deck";
+import { createRelativeLink } from "fumadocs-ui/mdx";
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import type { ComponentProps } from "react";
 
-export default async function PresentationDeckRedirectPage(
-  props: PageProps<"/presentations/[deck]">,
-) {
+export default async function PresentationDeckPage(props: PageProps<"/presentations/[deck]">) {
   const params = await props.params;
-  const deck = getPresentationDeckPage(params.deck);
+  const page = getPresentationDeckPage(params.deck);
 
-  if (!deck) notFound();
+  if (!page) notFound();
 
-  const slides = await getPresentationSlidesForPage(deck);
+  const deckSlides = await getPresentationDeckSlides(params.deck);
+  const MDX = page.data.body;
+  let renderedSlideIndex = 0;
 
-  redirect(slides[0].href);
+  function DeckSlide(props: ComponentProps<typeof Slide>) {
+    const identity = resolvePresentationSlideIdentity(deckSlides, renderedSlideIndex, props);
+    renderedSlideIndex += 1;
+
+    return <Slide {...props} slug={identity.slug} title={identity.title} />;
+  }
+
+  return (
+    <PresentationDeckView slides={deckSlides}>
+      <MDX
+        components={getMDXComponents({
+          a: createRelativeLink(presentationsSource, page),
+          Notes,
+          Slide: DeckSlide,
+        })}
+      />
+    </PresentationDeckView>
+  );
 }
 
 export async function generateStaticParams() {
   const decks = await getPresentationDecks();
 
   return decks.map((deck) => ({ deck: deck.slug }));
+}
+
+export async function generateMetadata(
+  props: PageProps<"/presentations/[deck]">,
+): Promise<Metadata> {
+  const params = await props.params;
+  const page = getPresentationDeckPage(params.deck);
+
+  if (!page) notFound();
+
+  return {
+    title: page.data.title,
+    description: page.data.description,
+  };
 }

@@ -3,6 +3,7 @@ import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
 import { presentationDecks } from "../.source/server";
 import {
+  extractPresentationImageSrcsFromMdx,
   parsePresentationSlidesFromMdx,
   type PresentationSlideDefinition,
 } from "./presentation-deck";
@@ -18,7 +19,6 @@ export type PresentationSlide = PresentationSlideDefinition;
 
 type PresentationDeck = {
   description: string | undefined;
-  firstSlideUrl: string;
   slideCount: number;
   slug: string;
   title: string;
@@ -43,6 +43,7 @@ export function getPresentationDeckPage(deck: string) {
 }
 
 const presentationSlideCache = new Map<string, Promise<PresentationSlide[]>>();
+const presentationImageSrcCache = new Map<string, Promise<string[]>>();
 
 async function getRawDeckSource(page: PresentationDeckPage) {
   return page.data.getText("raw");
@@ -65,6 +66,21 @@ export async function getPresentationSlidesForPage(
   return parsedSlides;
 }
 
+export async function getPresentationImageSrcsForPage(page: PresentationDeckPage) {
+  const deckSlug = getDeckSlug(page);
+  const cached = presentationImageSrcCache.get(deckSlug);
+
+  if (cached) return cached;
+
+  const imageSrcs = getRawDeckSource(page).then((rawMdx) =>
+    extractPresentationImageSrcsFromMdx(rawMdx),
+  );
+
+  presentationImageSrcCache.set(deckSlug, imageSrcs);
+
+  return imageSrcs;
+}
+
 export async function getPresentationDeckSlides(deck: string) {
   const page = getPresentationDeckPage(deck);
 
@@ -80,7 +96,6 @@ export async function getPresentationDecks(): Promise<PresentationDeck[]> {
 
       return {
         description: page.data.description,
-        firstSlideUrl: slides[0].href,
         slideCount: slides.length,
         slug: getDeckSlug(page),
         title: page.data.title,
@@ -89,10 +104,4 @@ export async function getPresentationDecks(): Promise<PresentationDeck[]> {
   );
 
   return decks.sort(sortDecks);
-}
-
-export async function getPresentationSlide(deck: string, slideSlug: string) {
-  const slides = await getPresentationDeckSlides(deck);
-
-  return slides.find((slide) => slide.slug === slideSlug);
 }

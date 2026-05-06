@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
 import type { WorkerToMainMessage } from "../worker/worker-protocol.js";
 import { OutboxDestinationKind, type AuthFailureReason } from "./sync-transport.js";
+
+afterEach(() => {
+  delete (globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__;
+});
 
 class MockWorker {
   onmessage: ((event: MessageEvent<WorkerToMainMessage>) => void) | null = null;
@@ -43,17 +48,20 @@ type SendSyncPayloadCallback = (
   destinationId: string,
   payload: Uint8Array,
   isCatalogue: boolean,
+  sequence?: number | null,
 ) => void;
 
 function createRuntimeMock(): {
   runtime: Runtime;
   emitSyncPayload: SendSyncPayloadCallback;
   receivedFromWorker: Uint8Array[];
+  receivedSequences: Array<number | null | undefined>;
   addServerCalls: { count: number };
   removeServerCalls: { count: number };
 } {
   let onSyncToSend: SendSyncPayloadCallback | null = null;
   const receivedFromWorker: Uint8Array[] = [];
+  const receivedSequences: Array<number | null | undefined> = [];
   const addServerCalls = { count: 0 };
   const removeServerCalls = { count: 0 };
 
@@ -61,24 +69,22 @@ function createRuntimeMock(): {
     loadLocalBatchRecord: () => null,
     loadLocalBatchRecords: () => [],
     insert: () => ({ id: "id", values: [], batchId: "batch-id" }),
-    insertDurable: async () => ({ id: "id", values: [], batchId: "batch-id" }),
     update: () => ({
       batchId: "batch-id",
     }),
-    updateDurable: async () => {},
     delete: () => ({
       batchId: "batch-id",
     }),
-    deleteDurable: async () => {},
     query: async () => [],
     subscribe: () => 1,
     unsubscribe: () => undefined,
     createSubscription: () => 1,
     executeSubscription: () => undefined,
-    onSyncMessageReceived: (payload: Uint8Array | string) => {
+    onSyncMessageReceived: (payload: Uint8Array | string, seq?: number | null) => {
       receivedFromWorker.push(
         typeof payload === "string" ? new TextEncoder().encode(payload) : payload,
       );
+      receivedSequences.push(seq);
     },
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
@@ -101,13 +107,15 @@ function createRuntimeMock(): {
       destinationId: string,
       payload: Uint8Array,
       isCatalogue = false,
+      sequence?: number | null,
     ) => {
       if (!onSyncToSend) {
         throw new Error("onSyncMessageToSend callback not registered");
       }
-      onSyncToSend(destinationKind, destinationId, payload, isCatalogue);
+      onSyncToSend(destinationKind, destinationId, payload, isCatalogue, sequence);
     },
     receivedFromWorker,
+    receivedSequences,
     addServerCalls,
     removeServerCalls,
   };
@@ -130,6 +138,24 @@ describe("WorkerBridge", () => {
     });
 
     expect(runtimeMock.receivedFromWorker).toEqual([enc({ id: 1 }), enc({ id: 2 })]);
+  });
+
+  it("forwards worker sync stream sequences to the runtime", () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+
+    new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    worker.emitFromWorker({
+      type: "sync",
+      payload: [
+        { payload: enc({ id: 1 }), sequence: 7 },
+        { payload: enc({ id: 2 }), sequence: 8 },
+      ],
+    });
+
+    expect(runtimeMock.receivedFromWorker).toEqual([enc({ id: 1 }), enc({ id: 2 })]);
+    expect(runtimeMock.receivedSequences).toEqual([7, 8]);
   });
 
   it("batches server-bound runtime payloads into one worker sync message", async () => {
@@ -232,6 +258,55 @@ describe("WorkerBridge", () => {
     });
 
     await expect(initPromise).resolves.toBe("worker-client-123");
+  });
+
+  it("passes telemetry collector url through worker init", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+
+    expect(worker.posted[0]).toMatchObject({
+      type: "init",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+
+    worker.emitFromWorker({
+      type: "init-ok",
+      clientId: "worker-client-123",
+    });
+    await initPromise;
+  });
+
+  it("does not install a global WASM trace callback during init", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: '{"tables":[]}',
+      appId: "app-1",
+      env: "dev",
+      userBranch: "main",
+      dbName: "db-1",
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    await initPromise;
+
+    expect((globalThis as Record<string, unknown>).__JAZZ_WASM_TRACE_SPAN__).toBeUndefined();
+
+    const shutdownPromise = bridge.shutdown(worker as unknown as Worker);
+    worker.emitFromWorker({ type: "shutdown-ok" });
+    await shutdownPromise;
   });
 
   it("detaches runtime server on shutdown and stops forwarding after disposal", async () => {

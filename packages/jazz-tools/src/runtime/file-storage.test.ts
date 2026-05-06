@@ -6,7 +6,7 @@ import {
   type FileStorageDb,
 } from "./file-storage.js";
 import { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
-import { InsertHandle, JazzClient } from "./client.js";
+import { WriteResult, JazzClient } from "./client.js";
 
 interface StoredFile {
   id: string;
@@ -80,7 +80,7 @@ class FakeDb implements FileStorageDb {
   readonly fileParts = new Map<string, StoredFilePart>();
   readonly #insertsByBatchId = new Map<string, number>();
 
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init): InsertHandle<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteResult<T> {
     const batchId = `batch-${this.nextBatchId++}`;
     const row = this.store(table, data, false);
     this.#insertsByBatchId.set(batchId, this.inserts.length - 1);
@@ -99,7 +99,7 @@ class FakeDb implements FileStorageDb {
       },
     } as JazzClient;
 
-    return new InsertHandle(row as T, batchId, client);
+    return new WriteResult(row as T, batchId, client);
   }
 
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {

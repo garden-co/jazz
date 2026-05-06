@@ -102,7 +102,6 @@ mod install_transport_tests {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         );
@@ -143,7 +142,6 @@ mod install_transport_tests {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         );
@@ -200,7 +198,6 @@ mod install_transport_tests {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         );
