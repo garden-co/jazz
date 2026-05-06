@@ -928,6 +928,9 @@ importers:
       expo-secure-store:
         specifier: ~14.0.0
         version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
+      jazz-rn:
+        specifier: workspace:*
+        version: link:../../crates/jazz-rn
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -1275,9 +1278,6 @@ importers:
       expo-secure-store:
         specifier: '>=14.0.0'
         version: 14.0.1(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
@@ -1336,6 +1336,9 @@ importers:
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
+      jazz-rn:
+        specifier: workspace:*
+        version: link:../../crates/jazz-rn
       jsdom:
         specifier: ^26.0.0
         version: 26.1.0

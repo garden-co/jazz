@@ -1,4 +1,3 @@
-import jazzRn from "jazz-rn";
 import { JazzClient, type DurabilityTier } from "../runtime/client.js";
 import type { DbConfig as RuntimeDbConfig } from "../runtime/db.js";
 import {
@@ -7,6 +6,7 @@ import {
   type RuntimeTokenOptions,
 } from "../runtime/db-runtime-module.js";
 import { createJazzRnRuntime } from "./create-jazz-rn-runtime.js";
+import { getJazzRnSync, loadJazzRn } from "./jazz-rn-loader.js";
 
 export interface ReactNativeRuntimeDbConfig extends RuntimeDbConfig {
   dataPath?: string;
@@ -18,7 +18,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
   override readonly supportsPolicyBypass = false;
 
   protected override async loadRuntime(): Promise<void> {
-    return;
+    await loadJazzRn();
   }
 
   override createClient({
@@ -56,7 +56,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
   }
 
   override mintLocalFirstToken(options: RuntimeTokenOptions): string {
-    return jazzRn.jazz_rn.mintLocalFirstToken(
+    return getJazzRnSync().jazz_rn.mintLocalFirstToken(
       options.secret,
       options.audience,
       BigInt(options.ttlSeconds),
@@ -64,7 +64,7 @@ export class ReactNativeRuntimeModule extends DbRuntimeModule<ReactNativeRuntime
   }
 
   override mintAnonymousToken(options: RuntimeTokenOptions): string {
-    return jazzRn.jazz_rn.mintAnonymousToken(
+    return getJazzRnSync().jazz_rn.mintAnonymousToken(
       options.secret,
       options.audience,
       BigInt(options.ttlSeconds),
