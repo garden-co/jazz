@@ -77,6 +77,36 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
   });
 
+  it("yields the JS event loop while a query is in flight", async () => {
+    // Simulates a slow native query: the binding returns a Promise that we
+    // resolve only from a setTimeout(0), i.e. after the event loop has had a
+    // chance to run other tasks. A correct adapter awaits the binding's
+    // Promise, so the timeout fires, resolves the binding, and the query
+    // returns. A blocking adapter (e.g. one that parses the result without
+    // awaiting) never yields and the query never settles.
+    let resolveBinding!: (value: string) => void;
+    const queryMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveBinding = resolve;
+        }),
+    );
+    const binding = createBinding({
+      query: queryMock as unknown as JazzRnRuntimeBinding["query"],
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    let otherJsDidRun = false;
+    const queryPromise = adapter.query("{}", null, null);
+    setTimeout(() => {
+      otherJsDidRun = true;
+      resolveBinding(JSON.stringify([{ id: "row-1", values: [] }]));
+    }, 0);
+
+    await expect(queryPromise).resolves.toEqual([{ id: "row-1", values: [] }]);
+    expect(otherJsDidRun).toBe(true);
+  });
+
   it("encodes Bytea mutations with an explicit FFI transport shape", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
