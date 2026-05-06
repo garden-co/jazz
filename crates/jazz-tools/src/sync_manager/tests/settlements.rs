@@ -259,6 +259,73 @@ fn batch_settlement_needed_returns_current_accepted_transaction() {
 }
 
 #[test]
+fn accepted_transaction_settlement_before_rows_materializes_when_row_arrives() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let batch_id = BatchId::new();
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::StagingPending,
+        None,
+    );
+    let settlement = BatchSettlement::AcceptedTransaction {
+        batch_id,
+        confirmed_tier: DurabilityTier::EdgeServer,
+        visible_members: vec![VisibleBatchMember {
+            object_id: row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        }],
+    };
+
+    seed_users_schema(&mut io);
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::BatchSettlement {
+            settlement: settlement.clone(),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(settlement),
+        "settlement should persist even when its member rows are not present yet"
+    );
+    assert_eq!(
+        io.load_visible_region_row("users", "main", row_id).unwrap(),
+        None,
+        "settlement-first delivery should be a no-op until the row exists"
+    );
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchNeeded {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    let visible = load_visible_row(&io, "users", row_id, "main");
+    assert_eq!(
+        visible.state,
+        crate::row_histories::RowState::VisibleTransactional
+    );
+    assert_eq!(visible.confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(visible.batch_id, batch_id);
+}
+
+#[test]
 fn batch_settlement_needed_filters_visible_members_to_sent_row_batches() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

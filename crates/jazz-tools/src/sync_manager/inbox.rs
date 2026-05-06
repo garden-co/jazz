@@ -889,6 +889,47 @@ impl SyncManager {
         }
     }
 
+    fn apply_authoritative_transaction_settlement_for_row<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        row: &StoredRowBatch,
+    ) {
+        let settlement = match storage.load_authoritative_batch_settlement(row.batch_id) {
+            Ok(Some(settlement @ BatchSettlement::AcceptedTransaction { .. })) => settlement,
+            Ok(Some(_)) | Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    batch_id = ?row.batch_id,
+                    %error,
+                    "failed to load authoritative batch settlement for received row"
+                );
+                return;
+            }
+        };
+
+        let BatchSettlement::AcceptedTransaction {
+            batch_id,
+            visible_members,
+            ..
+        } = &settlement
+        else {
+            unreachable!("settlement match above only allows AcceptedTransaction")
+        };
+        if !visible_members
+            .iter()
+            .any(|member| member.object_id == row.row_id && member.batch_id == row.batch_id)
+        {
+            return;
+        }
+
+        let object_ids = visible_members
+            .iter()
+            .map(|member| member.object_id)
+            .collect::<Vec<_>>();
+        let rows = self.transactional_batch_rows(storage, *batch_id, &object_ids);
+        self.apply_transactional_batch_settlement_to_rows(storage, None, &settlement, &rows);
+    }
+
     fn reject_sealed_transactional_batch<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1265,6 +1306,8 @@ impl SyncManager {
                 );
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), true)
                 {
+                    self.apply_authoritative_transaction_settlement_for_row(storage, &applied.row);
+
                     let local_tiers = self.my_tiers.iter().copied().collect::<Vec<_>>();
                     for tier in local_tiers {
                         if incoming_confirmed_tier.is_some_and(|confirmed| confirmed >= tier) {
