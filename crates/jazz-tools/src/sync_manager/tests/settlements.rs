@@ -42,6 +42,70 @@ fn initial_query_sync_replays_current_direct_batch_settlement() {
 }
 
 #[test]
+fn initial_query_sync_prefers_authoritative_settlement_over_retained_client_local_settlement() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+    let visible_members = vec![VisibleBatchMember {
+        object_id: row_id,
+        branch_name: BranchName::new("main"),
+        batch_id: row.batch_id,
+    }];
+    let retained_client_local_settlement = BatchSettlement::DurableDirect {
+        batch_id: row.batch_id,
+        confirmed_tier: DurabilityTier::Local,
+        visible_members: visible_members.clone(),
+    };
+    let authoritative_settlement = BatchSettlement::DurableDirect {
+        batch_id: row.batch_id,
+        confirmed_tier: DurabilityTier::EdgeServer,
+        visible_members: visible_members.clone(),
+    };
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+    seed_visible_row(&mut sm, &mut io, "users", row.clone());
+    io.upsert_local_batch_record(&crate::batch_fate::LocalBatchRecord::new(
+        row.batch_id,
+        crate::batch_fate::BatchMode::Direct,
+        true,
+        Some(retained_client_local_settlement),
+    ))
+    .unwrap();
+    io.upsert_authoritative_batch_settlement(&authoritative_settlement)
+        .unwrap();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, BranchName::new("main"))]),
+        None,
+    );
+
+    let settlements = sm
+        .take_outbox()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::BatchSettlement { settlement },
+            } if id == client_id => Some(settlement),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        settlements,
+        vec![authoritative_settlement],
+        "server replay should not downgrade an authoritative edge settlement to the retained client-local tier"
+    );
+}
+
+#[test]
 fn initial_query_sync_sends_only_current_row_for_deep_history() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
