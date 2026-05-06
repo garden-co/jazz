@@ -945,6 +945,13 @@ impl SyncManager {
             Ok(Some(BatchSettlement::DurableDirect { confirmed_tier, .. }))
                 if mode == SealedBatchMode::Direct =>
             {
+                let confirmed_tier = self
+                    .my_tiers
+                    .iter()
+                    .copied()
+                    .max()
+                    .map(|authority_tier| authority_tier.max(confirmed_tier))
+                    .unwrap_or(confirmed_tier);
                 let settlement = BatchSettlement::DurableDirect {
                     batch_id,
                     confirmed_tier,
@@ -1040,25 +1047,36 @@ impl SyncManager {
         };
         match storage.load_authoritative_batch_settlement(batch_id) {
             Ok(Some(settlement)) => {
-                let should_prune_submission =
-                    matches!(settlement, BatchSettlement::Rejected { .. })
-                        || settlement
-                            .confirmed_tier()
-                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
-                let prune_result = if should_prune_submission {
-                    storage.delete_sealed_batch_submission(batch_id)
+                let highest_authority_tier = self.my_tiers.iter().copied().max();
+                if matches!(
+                    settlement,
+                    BatchSettlement::DurableDirect { confirmed_tier, .. }
+                        if highest_authority_tier
+                            .is_some_and(|authority_tier| confirmed_tier < authority_tier)
+                ) {
+                    // Continue into seal validation so this authority can promote a
+                    // previously local direct settlement to its own durability tier.
                 } else {
-                    Ok(())
-                };
-                if let Err(error) = prune_result {
-                    tracing::warn!(
-                        ?batch_id,
-                        %error,
-                        "failed to delete sealed batch submission"
-                    );
+                    let should_prune_submission =
+                        matches!(settlement, BatchSettlement::Rejected { .. })
+                            || settlement
+                                .confirmed_tier()
+                                .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
+                    let prune_result = if should_prune_submission {
+                        storage.delete_sealed_batch_submission(batch_id)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(error) = prune_result {
+                        tracing::warn!(
+                            ?batch_id,
+                            %error,
+                            "failed to delete sealed batch submission"
+                        );
+                    }
+                    self.queue_batch_settlement_to_client(client_id, settlement);
+                    return;
                 }
-                self.queue_batch_settlement_to_client(client_id, settlement);
-                return;
             }
             Ok(None) => {}
             Err(error) => {
@@ -1789,10 +1807,13 @@ impl SyncManager {
                     return;
                 }
                 match storage.load_authoritative_batch_settlement(submission.batch_id) {
-                    Ok(Some(settlement)) => {
+                    Ok(Some(settlement @ BatchSettlement::Rejected { .. }))
+                    | Ok(Some(settlement @ BatchSettlement::AcceptedTransaction { .. }))
+                    | Ok(Some(settlement @ BatchSettlement::Missing { .. })) => {
                         self.queue_batch_settlement_to_client(client_id, settlement);
                         return;
                     }
+                    Ok(Some(BatchSettlement::DurableDirect { .. })) => {}
                     Ok(None) => {}
                     Err(error) => {
                         tracing::warn!(

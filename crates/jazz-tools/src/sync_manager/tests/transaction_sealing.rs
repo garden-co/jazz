@@ -168,6 +168,78 @@ fn direct_batch_from_client_sends_one_settlement_on_seal() {
 }
 
 #[test]
+fn direct_batch_seal_promotes_existing_local_settlement_to_authority_tier() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+    io.upsert_authoritative_batch_settlement(&BatchSettlement::DurableDirect {
+        batch_id,
+        confirmed_tier: DurabilityTier::Local,
+        visible_members: vec![VisibleBatchMember {
+            object_id: row_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        }],
+    })
+    .unwrap();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::SealBatch {
+            submission: sealed_submission(
+                batch_id,
+                "main",
+                vec![SealedBatchMember {
+                    object_id: row_id,
+                    row_digest: row.content_digest(),
+                }],
+                Vec::new(),
+            ),
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_settlement(batch_id).unwrap(),
+        Some(BatchSettlement::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::EdgeServer,
+            visible_members: vec![VisibleBatchMember {
+                object_id: row_id,
+                branch_name: BranchName::new("main"),
+                batch_id,
+            }],
+        }),
+        "sealing a direct batch should promote a stale local settlement to the accepting authority tier"
+    );
+}
+
+#[test]
 fn direct_client_settlement_retains_replayable_sealed_submission() {
     let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
     let mut io = MemoryStorage::new();
