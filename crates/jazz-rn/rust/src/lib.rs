@@ -82,20 +82,23 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     "non-string panic payload".to_string()
 }
 
+fn panic_to_jazz_error(
+    context: &'static str,
+    payload: Box<dyn std::any::Any + Send>,
+) -> JazzRnError {
+    let panic_message = panic_payload_to_string(payload);
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    JazzRnError::Internal {
+        message: format!("panic in {context}: {panic_message}\n{backtrace}"),
+    }
+}
+
 fn with_panic_boundary<T, F>(context: &'static str, f: F) -> Result<T, JazzRnError>
 where
     F: FnOnce() -> Result<T, JazzRnError>,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(payload) => {
-            let panic_message = panic_payload_to_string(payload);
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            Err(JazzRnError::Internal {
-                message: format!("panic in {context}: {panic_message}\n{backtrace}"),
-            })
-        }
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|payload| Err(panic_to_jazz_error(context, payload)))
 }
 
 async fn with_async_panic_boundary<T, F, Fut>(context: &'static str, f: F) -> Result<T, JazzRnError>
@@ -103,16 +106,10 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, JazzRnError>>,
 {
-    match std::panic::AssertUnwindSafe(f()).catch_unwind().await {
-        Ok(result) => result,
-        Err(payload) => {
-            let panic_message = panic_payload_to_string(payload);
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            Err(JazzRnError::Internal {
-                message: format!("panic in {context}: {panic_message}\n{backtrace}"),
-            })
-        }
-    }
+    std::panic::AssertUnwindSafe(f())
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|payload| Err(panic_to_jazz_error(context, payload)))
 }
 
 #[derive(Debug, Clone, Deserialize)]
