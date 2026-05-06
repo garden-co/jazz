@@ -17,8 +17,8 @@ describe("remote autonomy gateway", () => {
       syncServerUrl: "https://jazz2.example.test",
       syncServerAppId: "test-app-id",
       hostId: "mac-test",
-      localSpacesRoot: join(tempDir, "spaces"),
-      remoteSpacesRoot: "/users/nikiv/spaces",
+      localSpacesRoot: join(tempDir, ".designer", "spaces"),
+      remoteSpacesRoot: "/users/nikiv/.designer/spaces",
       connectStoresToSyncServer: false,
       syncServerProbe: async () => ({
         ok: true,
@@ -299,15 +299,15 @@ describe("remote autonomy gateway", () => {
         title: "Designer Starter Project",
         localPath: "/Users/nikitavoloboev/code/prom/ide/designer/starter-project",
         remotePath: "/users/nikiv/code/prom/ide/designer/starter-project",
-        objectStoragePrefix: "x/nikiv/designer/spaces/designer-starter-project",
+        objectStoragePrefix: "nikiv/designer/designer-starter-project",
         objectStorageUri:
-          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+          "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         objectStorage: {
           provider: "oci",
-          region: "us-dallas-1",
-          bucket: "reactron-updates-dev",
-          prefix: "x/nikiv/designer/spaces/designer-starter-project",
-          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+          region: "us-sanjose-1",
+          bucket: "x-sanjose",
+          prefix: "nikiv/designer/designer-starter-project",
+          uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         },
       },
       job: {
@@ -334,13 +334,13 @@ describe("remote autonomy gateway", () => {
       expect.objectContaining({
         slug: "designer-starter-project",
         objectStorageUri:
-          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+          "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         objectStorage: {
           provider: "oci",
-          region: "us-dallas-1",
-          bucket: "reactron-updates-dev",
-          prefix: "x/nikiv/designer/spaces/designer-starter-project",
-          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/designer-starter-project/",
+          region: "us-sanjose-1",
+          bucket: "x-sanjose",
+          prefix: "nikiv/designer/designer-starter-project",
+          uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         },
       }),
     ]);
@@ -356,26 +356,26 @@ describe("remote autonomy gateway", () => {
       space: {
         slug: "bay-bridge-clock",
         title: "bay-bridge-clock",
-        localPath: join(tempDir, "spaces", "bay-bridge-clock"),
-        remotePath: "/users/nikiv/spaces/bay-bridge-clock",
-        objectStoragePrefix: "x/nikiv/designer/spaces/bay-bridge-clock",
+        localPath: join(tempDir, ".designer", "spaces", "bay-bridge-clock", "work"),
+        remotePath: "/users/nikiv/.designer/spaces/bay-bridge-clock/work",
+        objectStoragePrefix: "nikiv/designer/bay-bridge-clock",
         objectStorageUri:
-          "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/bay-bridge-clock/",
+          "oci://us-sanjose-1/x-sanjose/nikiv/designer/bay-bridge-clock/",
         objectStorage: {
           provider: "oci",
-          region: "us-dallas-1",
-          bucket: "reactron-updates-dev",
-          prefix: "x/nikiv/designer/spaces/bay-bridge-clock",
-          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/bay-bridge-clock/",
+          region: "us-sanjose-1",
+          bucket: "x-sanjose",
+          prefix: "nikiv/designer/bay-bridge-clock",
+          uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/bay-bridge-clock/",
         },
         syncKind: "space-rsync-mirror",
       },
       job: {
-        repoRoot: "/users/nikiv/spaces/bay-bridge-clock",
-        workspaceRoot: "/users/nikiv/spaces/bay-bridge-clock",
+        repoRoot: "/users/nikiv/.designer/spaces/bay-bridge-clock/work",
+        workspaceRoot: "/users/nikiv/.designer/spaces/bay-bridge-clock/work",
         payloadJson: {
-          sourcePath: "/users/nikiv/spaces/bay-bridge-clock",
-          targetPath: join(tempDir, "spaces", "bay-bridge-clock"),
+          sourcePath: "/users/nikiv/.designer/spaces/bay-bridge-clock/work",
+          targetPath: join(tempDir, ".designer", "spaces", "bay-bridge-clock", "work"),
           transport: "rsync",
         },
       },
@@ -395,8 +395,8 @@ describe("remote autonomy gateway", () => {
       syncServerUrl: "https://jazz2.example.test",
       syncServerAppId: "test-app-id",
       hostId: "mac-test",
-      localSpacesRoot: join(tempDir, "spaces"),
-      remoteSpacesRoot: "/users/nikiv/spaces",
+      localSpacesRoot: join(tempDir, ".designer", "spaces"),
+      remoteSpacesRoot: "/users/nikiv/.designer/spaces",
       objectStorageRegion: "us-ashburn-1",
       objectStorageBucket: "designer-spaces-test",
       designerSpacesPrefix: "/custom/designer/spaces/",
@@ -429,20 +429,20 @@ describe("remote autonomy gateway", () => {
   it("does not list Designer spaces with inconsistent object storage descriptors", async () => {
     await requestJson("POST", "/v1/sync/jobs", {
       kind: "space-rsync-mirror",
-      repoRoot: "/users/nikiv/spaces/bad-storage-space",
-      workspaceRoot: "/users/nikiv/spaces/bad-storage-space",
+      repoRoot: "/users/nikiv/.designer/spaces/bad-storage-space/work",
+      workspaceRoot: "/users/nikiv/.designer/spaces/bad-storage-space/work",
       payloadJson: {
         space: {
           slug: "bad-storage-space",
           title: "Bad Storage Space",
-          localPath: join(tempDir, "spaces", "bad-storage-space"),
-          remotePath: "/users/nikiv/spaces/bad-storage-space",
+          localPath: join(tempDir, ".designer", "spaces", "bad-storage-space", "work"),
+          remotePath: "/users/nikiv/.designer/spaces/bad-storage-space/work",
           objectStorage: {
             provider: "oci",
-            region: "us-dallas-1",
-            bucket: "reactron-updates-dev",
-            prefix: "x/nikiv/designer/spaces/bad-storage-space",
-            uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/other-space/",
+            region: "us-sanjose-1",
+            bucket: "x-sanjose",
+            prefix: "nikiv/designer/bad-storage-space",
+            uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/other-space/",
           },
         },
       },
@@ -533,8 +533,8 @@ describe("remote autonomy gateway", () => {
         jobId: registered.job.jobId,
         status: "completed",
         transport: "rsync",
-        sourcePath: "/users/nikiv/spaces/remote-cad-space",
-        targetPath: join(tempDir, "spaces", "remote-cad-space"),
+        sourcePath: "/users/nikiv/.designer/spaces/remote-cad-space/work",
+        targetPath: join(tempDir, ".designer", "spaces", "remote-cad-space", "work"),
       },
       job: {
         status: "completed",
@@ -549,8 +549,8 @@ describe("remote autonomy gateway", () => {
     expect(listed.spaces).toEqual([
       expect.objectContaining({
         slug: "remote-cad-space",
-        localPath: join(tempDir, "spaces", "remote-cad-space"),
-        remotePath: "/users/nikiv/spaces/remote-cad-space",
+        localPath: join(tempDir, ".designer", "spaces", "remote-cad-space", "work"),
+        remotePath: "/users/nikiv/.designer/spaces/remote-cad-space/work",
       }),
     ]);
   });
@@ -576,8 +576,8 @@ describe("remote autonomy gateway", () => {
       file: {
         spaceSlug: "remote-cad-space",
         path: "parts/gear.build123d.py",
-        localPath: join(tempDir, "spaces", "remote-cad-space", "parts", "gear.build123d.py"),
-        remotePath: "/users/nikiv/spaces/remote-cad-space/parts/gear.build123d.py",
+        localPath: join(tempDir, ".designer", "spaces", "remote-cad-space", "work", "parts", "gear.build123d.py"),
+        remotePath: "/users/nikiv/.designer/spaces/remote-cad-space/work/parts/gear.build123d.py",
         contentHash: "sha256:gear-v1",
         sizeBytes: 4096,
         contentType: "text/x-python",
@@ -586,10 +586,10 @@ describe("remote autonomy gateway", () => {
         sourceSession: "codex-session-1",
         objectStorage: {
           provider: "oci",
-          region: "us-dallas-1",
-          bucket: "reactron-updates-dev",
-          key: "x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
-          uri: "oci://us-dallas-1/reactron-updates-dev/x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
+          region: "us-sanjose-1",
+          bucket: "x-sanjose",
+          key: "nikiv/designer/remote-cad-space/files/parts/gear.build123d.py",
+          uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/remote-cad-space/files/parts/gear.build123d.py",
         },
       },
       uploadJob: {
@@ -626,7 +626,7 @@ describe("remote autonomy gateway", () => {
             contentHash: "sha256:gear-v1",
           }),
           objectStorage: expect.objectContaining({
-            key: "x/nikiv/designer/spaces/remote-cad-space/files/parts/gear.build123d.py",
+            key: "nikiv/designer/remote-cad-space/files/parts/gear.build123d.py",
           }),
         }),
       }),
@@ -791,8 +791,8 @@ describe("remote autonomy gateway", () => {
       dedupeKey: "space-rsync-mirror:collab-cad-space:pull",
       payloadJson: {
         direction: "pull",
-        sourcePath: "/users/nikiv/spaces/collab-cad-space",
-        targetPath: join(tempDir, "spaces", "collab-cad-space"),
+        sourcePath: "/users/nikiv/.designer/spaces/collab-cad-space/work",
+        targetPath: join(tempDir, ".designer", "spaces", "collab-cad-space", "work"),
         transport: "rsync",
       },
     });
@@ -801,8 +801,8 @@ describe("remote autonomy gateway", () => {
       dedupeKey: "space-rsync-mirror:collab-cad-space:push",
       payloadJson: {
         direction: "push",
-        sourcePath: join(tempDir, "spaces", "collab-cad-space"),
-        targetPath: "/users/nikiv/spaces/collab-cad-space",
+        sourcePath: join(tempDir, ".designer", "spaces", "collab-cad-space", "work"),
+        targetPath: "/users/nikiv/.designer/spaces/collab-cad-space/work",
         transport: "rsync",
       },
     });
@@ -812,8 +812,8 @@ describe("remote autonomy gateway", () => {
     await requestJson("POST", "/v1/sync/jobs", {
       kind: "space-rsync-mirror",
       payloadJson: {
-        sourcePath: "/users/nikiv/spaces/missing-space-payload",
-        targetPath: join(tempDir, "spaces", "missing-space-payload"),
+        sourcePath: "/users/nikiv/.designer/spaces/missing-space-payload/work",
+        targetPath: join(tempDir, ".designer", "spaces", "missing-space-payload", "work"),
         transport: "rsync",
       },
     });

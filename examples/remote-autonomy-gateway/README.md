@@ -56,11 +56,11 @@ export REMOTE_AUTONOMY_SYNC_SERVER_APP_ID="313aa802-8598-5165-bb91-dab72dcb9d46"
 export REMOTE_AUTONOMY_HOST_ID="$(hostname)"
 export REMOTE_AUTONOMY_PORT="7474"
 export REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS="3000"
-export REMOTE_AUTONOMY_LOCAL_SPACES_ROOT="$HOME/spaces"
-export REMOTE_AUTONOMY_REMOTE_SPACES_ROOT="/users/nikiv/spaces"
-export REMOTE_AUTONOMY_OBJECT_STORAGE_REGION="us-dallas-1"
-export REMOTE_AUTONOMY_OBJECT_STORAGE_BUCKET="reactron-updates-dev"
-export REMOTE_AUTONOMY_DESIGNER_SPACES_PREFIX="x/nikiv/designer/spaces"
+export REMOTE_AUTONOMY_LOCAL_SPACES_ROOT="$HOME/.designer/spaces"
+export REMOTE_AUTONOMY_REMOTE_SPACES_ROOT="/users/nikiv/.designer/spaces"
+export REMOTE_AUTONOMY_OBJECT_STORAGE_REGION="us-sanjose-1"
+export REMOTE_AUTONOMY_OBJECT_STORAGE_BUCKET="x-sanjose"
+export REMOTE_AUTONOMY_DESIGNER_SPACES_PREFIX="nikiv/designer"
 ```
 
 By default the local Jazz2 stores connect to the configured sync server. Set
@@ -72,7 +72,8 @@ For shared Designer/CAD work, run one gateway on the same Tailscale-reachable
 machine that owns the compute workers and the remote workspace filesystem. Point
 `REMOTE_AUTONOMY_REMOTE_SPACES_ROOT` at the filesystem path those workers read
 and write, and keep `REMOTE_AUTONOMY_LOCAL_SPACES_ROOT` on durable server-local
-storage for the object cache and gateway mirror state.
+storage for the object cache and gateway mirror state. The gateway materializes
+each shared space as `<spaces-root>/<space-id>/work` on both sides.
 
 Two developers should use the same gateway URL in Designer bootstrap. They
 should not each run an independent `127.0.0.1` gateway, because that creates
@@ -101,11 +102,11 @@ event, and another user hydrates the latest verified bytes through
 `/v1/spaces` is a control-plane registration surface. It creates a durable
 `space-rsync-mirror` job with:
 
-- `payloadJson.sourcePath`: remote path under the remote spaces root.
-- `payloadJson.targetPath`: local mirror path under the local spaces root.
+- `payloadJson.sourcePath`: remote work path under the remote spaces root.
+- `payloadJson.targetPath`: local mirror work path under the local spaces root.
 - `payloadJson.transport`: `rsync`.
 - `payloadJson.space.objectStoragePrefix`: OCI object-key prefix under
-  `x/nikiv/designer/spaces/<slug>`.
+  `nikiv/designer/<slug>`.
 
 The expected mirror movement is: a worker claims the `space-rsync-mirror` job,
 runs `rsync` from `sourcePath` to `targetPath`, then records `/v1/sync/receipts`

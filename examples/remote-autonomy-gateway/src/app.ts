@@ -76,10 +76,11 @@ const CONTROL_RUN_ID = "remote-autonomy-gateway:control";
 const DEFAULT_SYNC_SERVER_URL = "https://nikitavoloboev-jazz2-sync-ingress.tailbf2c6c.ts.net";
 const DEFAULT_SYNC_SERVER_APP_ID = "313aa802-8598-5165-bb91-dab72dcb9d46";
 const DEFAULT_REMOTE_HOME = "/users/nikiv";
-const DEFAULT_OBJECT_STORAGE_REGION = "us-dallas-1";
-const DEFAULT_OBJECT_STORAGE_BUCKET = "reactron-updates-dev";
-const DEFAULT_DESIGNER_SPACES_PREFIX = "x/nikiv/designer/spaces";
+const DEFAULT_OBJECT_STORAGE_REGION = "us-sanjose-1";
+const DEFAULT_OBJECT_STORAGE_BUCKET = "x-sanjose";
+const DEFAULT_DESIGNER_SPACES_PREFIX = "nikiv/designer";
 const OBJECT_CACHE_DIR = ".object-cache";
+const SPACE_WORK_DIR = "work";
 const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
 const SPACE_FILE_UPLOAD_JOB_KIND = "space-file-object-upload";
 const SPACE_FILE_MATERIALIZE_JOB_KIND = "space-file-materialize";
@@ -815,12 +816,12 @@ function resolveOptions(options: RemoteAutonomyGatewayOptions) {
     localSpacesRoot: stripTrailingSlash(
       options.localSpacesRoot ??
         process.env.REMOTE_AUTONOMY_LOCAL_SPACES_ROOT ??
-        join(homedir(), "spaces"),
+        join(homedir(), ".designer", "spaces"),
     ),
     remoteSpacesRoot: stripTrailingSlash(
       options.remoteSpacesRoot ??
         process.env.REMOTE_AUTONOMY_REMOTE_SPACES_ROOT ??
-        posix.join(DEFAULT_REMOTE_HOME, "spaces"),
+        posix.join(DEFAULT_REMOTE_HOME, ".designer", "spaces"),
     ),
     objectStorageRegion:
       options.objectStorageRegion ??
@@ -1023,10 +1024,10 @@ function resolveDesignerSpace(payload: JsonObject, options: ResolvedOptions): De
   const slug = spaceSlug(requiredString(payload, "slug"));
   const title = optionalString(payload, "title") ?? slug;
   const localPath = stripTrailingSlash(
-    optionalString(payload, "localPath") ?? join(options.localSpacesRoot, slug),
+    optionalString(payload, "localPath") ?? join(options.localSpacesRoot, slug, SPACE_WORK_DIR),
   );
   const remotePath = stripTrailingSlash(
-    optionalString(payload, "remotePath") ?? posix.join(options.remoteSpacesRoot, slug),
+    optionalString(payload, "remotePath") ?? posix.join(options.remoteSpacesRoot, slug, SPACE_WORK_DIR),
   );
   const objectStoragePrefix = storageKey(options.designerSpacesPrefix, slug);
   const objectStorage = designerSpaceObjectStorage(options, objectStoragePrefix);
