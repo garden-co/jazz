@@ -1855,6 +1855,9 @@ impl WasmRuntime {
         if let Some(handle) = core.transport() {
             handle.disconnect();
         }
+        if let Some(server_id) = *self.upstream_server_id.borrow() {
+            core.remove_server(server_id);
+        }
         // Drop the borrow before mutably clearing.
         core.clear_transport();
     }

@@ -609,6 +609,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       if (runtime) {
         try {
           runtime.disconnect?.();
+          runtime.removeServer?.();
+          runtime.batchedTick?.();
           post({ type: "upstream-disconnected" });
         } catch (e) {
           console.error("[worker] disconnect-upstream failed:", e);

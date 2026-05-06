@@ -148,6 +148,7 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     setClientRole: vi.fn(),
     onAuthFailure: null,
     onSyncMessageToSend: vi.fn(),
+    disconnect: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
     batchedTick: vi.fn(),
@@ -238,5 +239,25 @@ describe("handleInit — OPFS unavailable (Firefox private browsing)", () => {
     expect(result).toBeDefined();
     expect(runtime.batchedTick).toHaveBeenCalledBefore(runtime.flushWal);
     expect(runtime.flushWal).toHaveBeenCalledBefore(runtime.free);
+  });
+
+  it("removes the upstream server from the runtime on explicit disconnect", async () => {
+    const runtime = fakeRuntime();
+    openPersistentMock.mockReturnValue(runtime);
+
+    sendInit("disconnect-upstream-test");
+    await waitForMessage("init-ok");
+    fakeSelf().postMessage.mockClear();
+    runtime.disconnect.mockClear();
+    runtime.removeServer.mockClear();
+    runtime.batchedTick.mockClear();
+
+    fakeSelf().onmessage(new MessageEvent("message", { data: { type: "disconnect-upstream" } }));
+
+    const result = await waitForMessage("upstream-disconnected");
+    expect(result).toBeDefined();
+    expect(runtime.disconnect).toHaveBeenCalledOnce();
+    expect(runtime.removeServer).toHaveBeenCalledOnce();
+    expect(runtime.batchedTick).toHaveBeenCalled();
   });
 });

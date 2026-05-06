@@ -1325,9 +1325,13 @@ impl NapiRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     #[napi]
     pub fn disconnect(&self) {
+        let server_id = self.upstream_server_id.lock().ok().and_then(|slot| *slot);
         if let Ok(mut core) = self.core.lock() {
             if let Some(handle) = core.transport() {
                 handle.disconnect();
+            }
+            if let Some(server_id) = server_id {
+                core.remove_server(server_id);
             }
             core.clear_transport();
         }
