@@ -157,11 +157,8 @@ fn row_batch_id_for_commit(
 fn client_write_rejection_reason(
     outbox: &[crate::sync_manager::OutboxEntry],
     client_id: ClientId,
-    row_id: ObjectId,
-    branch: &str,
     batch_id: BatchId,
 ) -> Option<String> {
-    let mut saw_rejected_state = false;
     let mut settlement_reason = None;
 
     for entry in outbox {
@@ -172,18 +169,6 @@ fn client_write_rejection_reason(
         match &entry.payload {
             SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
                 return Some(reason.clone());
-            }
-            SyncPayload::RowBatchStateChanged {
-                row_id: rejected_row_id,
-                branch_name,
-                batch_id: rejected_batch_id,
-                state: Some(RowState::Rejected),
-                ..
-            } if *rejected_row_id == row_id
-                && branch_name.as_str() == branch
-                && *rejected_batch_id == batch_id =>
-            {
-                saw_rejected_state = true;
             }
             SyncPayload::BatchSettlement {
                 settlement:
@@ -199,17 +184,15 @@ fn client_write_rejection_reason(
         }
     }
 
-    settlement_reason.or_else(|| saw_rejected_state.then(|| "rejected".to_string()))
+    settlement_reason
 }
 
 fn client_write_was_rejected(
     outbox: &[crate::sync_manager::OutboxEntry],
     client_id: ClientId,
-    row_id: ObjectId,
-    branch: &str,
     batch_id: BatchId,
 ) -> bool {
-    client_write_rejection_reason(outbox, client_id, row_id, branch, batch_id).is_some()
+    client_write_rejection_reason(outbox, client_id, batch_id).is_some()
 }
 
 fn add_row_commit(
@@ -700,8 +683,6 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        grand_id,
-        &branch,
         row_batch_id_for_commit(grand_id, &branch, &update_commit),
     );
 

@@ -18,7 +18,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         };
         let terminal_tier = self.retained_batch_terminal_tier();
 
-        records
+        let mut batch_ids = records
             .into_iter()
             .filter(|record| {
                 record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
@@ -36,7 +36,10 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }) => confirmed_tier < &terminal_tier,
             })
             .map(|record| record.batch_id)
-            .collect()
+            .collect::<Vec<_>>();
+        batch_ids.sort();
+        batch_ids.dedup();
+        batch_ids
     }
 
     // =========================================================================

@@ -1,7 +1,6 @@
 use super::*;
 use crate::batch_fate::LocalBatchMember;
-use crate::row_histories::RowState;
-use crate::row_histories::patch_row_batch_state;
+use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -97,6 +96,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         if let Some(acked_tier) = settlement.confirmed_tier() {
+            self.schema_manager
+                .query_manager_mut()
+                .mark_subscriptions_visibility_recompute_for_tier(acked_tier);
             match &settlement {
                 crate::batch_fate::BatchSettlement::DurableDirect {
                     visible_members, ..
@@ -105,30 +107,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     visible_members, ..
                 } => {
                     for member in visible_members {
-                        match patch_row_batch_state(
-                            &mut self.storage,
-                            member.object_id,
-                            &member.branch_name,
-                            member.batch_id,
-                            None,
-                            Some(acked_tier),
-                        ) {
-                            Ok(Some(update)) => self
-                                .schema_manager
+                        if let Ok(Some(locator)) = self.storage.load_row_locator(member.object_id) {
+                            self.schema_manager
                                 .query_manager_mut()
-                                .enqueue_row_visibility_change(update),
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::debug!(
-                                    object_id = %member.object_id,
-                                    branch_name = %member.branch_name,
-                                    batch_id = ?member.batch_id,
-                                    ?acked_tier,
-                                    ?error,
-                                    "ignoring batch settlement tier for local row batch that is not present"
+                                .mark_local_row_updated_in_subscriptions(
+                                    locator.table.as_str(),
+                                    member.object_id,
                                 );
-                                continue;
-                            }
                         }
                         self.durability.record_ack(
                             crate::sync_manager::RowBatchKey::new(
@@ -169,10 +154,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 row.batch_id(),
                 row.data.to_vec(),
                 matches!(row.state, RowState::VisibleDirect),
+                row.delete_kind.is_some(),
             ));
         }
 
-        for (table, _, _, _, _, _, _) in &cleared_rows {
+        for (table, _, _, _, _, _, was_visible, _) in &cleared_rows {
+            if *was_visible {
+                continue;
+            }
             batch_patch_succeeded_by_table
                 .entry(table.clone())
                 .or_insert_with(|| {
@@ -188,10 +177,28 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         let query_manager = self.schema_manager.query_manager_mut();
-        for (table, schema_hash, branch, row_id, member_batch_id, row_data, was_visible) in
-            cleared_rows
+        for (
+            table,
+            schema_hash,
+            branch,
+            row_id,
+            member_batch_id,
+            row_data,
+            was_visible,
+            was_delete,
+        ) in cleared_rows
         {
-            if !batch_patch_succeeded_by_table
+            if was_visible {
+                let branch_name = crate::object::BranchName::new(&branch);
+                let _ = patch_row_batch_state(
+                    &mut self.storage,
+                    row_id,
+                    &branch_name,
+                    member_batch_id,
+                    Some(RowState::Rejected),
+                    None,
+                );
+            } else if !batch_patch_succeeded_by_table
                 .get(&table)
                 .copied()
                 .unwrap_or(false)
@@ -207,19 +214,37 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 );
             }
             if was_visible {
-                let _ = self
+                match self
                     .storage
-                    .delete_visible_region_row(&table, &branch, row_id);
-            }
-            if was_visible {
-                query_manager.retract_local_rejected_row(
-                    &mut self.storage,
-                    &table,
-                    &branch,
-                    row_id,
-                    &row_data,
-                    true,
-                );
+                    .load_visible_region_row(&table, &branch, row_id)
+                {
+                    Ok(Some(_)) => {
+                        if was_delete {
+                            query_manager.restore_local_rejected_delete_row(
+                                &mut self.storage,
+                                &table,
+                                &branch,
+                                row_id,
+                                &row_data,
+                            );
+                        } else {
+                            query_manager.clear_local_pending_row_overlay(&table, row_id);
+                        }
+                    }
+                    _ => {
+                        let _ = self
+                            .storage
+                            .delete_visible_region_row(&table, &branch, row_id);
+                        query_manager.retract_local_rejected_row(
+                            &mut self.storage,
+                            &table,
+                            &branch,
+                            row_id,
+                            &row_data,
+                            true,
+                        );
+                    }
+                }
             } else {
                 query_manager.retract_local_pending_transaction_row(
                     &mut self.storage,
@@ -449,16 +474,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
                 self.subscription_reverse.remove(&pending.subscription_id);
             }
-        }
-
-        // 3b. Process received row-batch persistence acks — resolve matching watchers
-        let received_acks = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_received_row_batch_acks();
-        for (row_batch_key, acked_tier) in received_acks {
-            self.durability.record_ack(row_batch_key, acked_tier);
         }
 
         // 4. Schedule batched_tick if outbound messages exist or a WAL flush

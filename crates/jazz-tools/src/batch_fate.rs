@@ -2,6 +2,7 @@ use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SchemaHash;
@@ -36,7 +37,7 @@ impl BatchMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VisibleBatchMember {
     pub object_id: ObjectId,
     pub branch_name: BranchName,
@@ -89,6 +90,64 @@ impl BatchSettlement {
             Self::DurableDirect { confirmed_tier, .. }
             | Self::AcceptedTransaction { confirmed_tier, .. } => Some(*confirmed_tier),
             Self::Missing { .. } | Self::Rejected { .. } => None,
+        }
+    }
+
+    pub fn visible_members(&self) -> &[VisibleBatchMember] {
+        match self {
+            Self::DurableDirect {
+                visible_members, ..
+            }
+            | Self::AcceptedTransaction {
+                visible_members, ..
+            } => visible_members,
+            Self::Missing { .. } | Self::Rejected { .. } => &[],
+        }
+    }
+
+    pub fn merged_with(&self, incoming: &BatchSettlement) -> BatchSettlement {
+        match (self, incoming) {
+            (
+                Self::DurableDirect {
+                    batch_id,
+                    confirmed_tier: existing_tier,
+                    visible_members: existing_members,
+                },
+                Self::DurableDirect {
+                    confirmed_tier: incoming_tier,
+                    visible_members: incoming_members,
+                    ..
+                },
+            ) => {
+                let visible_members =
+                    merged_visible_batch_members(existing_members, incoming_members);
+                Self::DurableDirect {
+                    batch_id: *batch_id,
+                    confirmed_tier: (*existing_tier).max(*incoming_tier),
+                    visible_members,
+                }
+            }
+            (
+                Self::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier: existing_tier,
+                    visible_members: existing_members,
+                },
+                Self::AcceptedTransaction {
+                    confirmed_tier: incoming_tier,
+                    visible_members: incoming_members,
+                    ..
+                },
+            ) => {
+                let visible_members =
+                    merged_visible_batch_members(existing_members, incoming_members);
+                Self::AcceptedTransaction {
+                    batch_id: *batch_id,
+                    confirmed_tier: (*existing_tier).max(*incoming_tier),
+                    visible_members,
+                }
+            }
+            _ => incoming.clone(),
         }
     }
 
@@ -204,8 +263,9 @@ fn merged_visible_batch_members(
     incoming: &[VisibleBatchMember],
 ) -> Vec<VisibleBatchMember> {
     let mut merged = current.to_vec();
+    let mut seen = current.iter().cloned().collect::<HashSet<_>>();
     for member in incoming {
-        if !merged.iter().any(|existing| existing == member) {
+        if seen.insert(member.clone()) {
             merged.push(member.clone());
         }
     }
@@ -1157,6 +1217,42 @@ mod tests {
                     },
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn batch_settlement_merge_dedups_members_and_keeps_highest_tier() {
+        let batch_id = BatchId::new();
+        let alice_id = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
+        let bob_id = ObjectId::from_uuid(uuid::Uuid::from_u128(2));
+        let alice = VisibleBatchMember {
+            object_id: alice_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        };
+        let bob = VisibleBatchMember {
+            object_id: bob_id,
+            branch_name: BranchName::new("main"),
+            batch_id,
+        };
+        let current = BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+            visible_members: vec![alice.clone()],
+        };
+        let incoming = BatchSettlement::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+            visible_members: vec![bob.clone(), alice.clone(), bob.clone()],
+        };
+
+        assert_eq!(
+            current.merged_with(&incoming),
+            BatchSettlement::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+                visible_members: vec![alice, bob],
+            }
         );
     }
 

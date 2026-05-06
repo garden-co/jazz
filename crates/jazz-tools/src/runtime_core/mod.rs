@@ -298,7 +298,6 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     next_expected_server_seq: HashMap<ServerId, u64>,
     /// Highest per-server stream sequence already applied to the inbox.
     last_applied_server_seq: HashMap<ServerId, u64>,
-
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
     /// Reverse map for routing updates.

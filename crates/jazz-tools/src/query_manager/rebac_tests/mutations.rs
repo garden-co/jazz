@@ -105,8 +105,6 @@ fn rebac_update_denied_by_using_policy() {
         client_write_was_rejected(
             &outbox,
             bob_client,
-            obj_id,
-            "main",
             row_batch_id_for_commit(obj_id, "main", &update_commit),
         ),
         "Bob's update of Alice's document should be denied by USING policy"
@@ -207,8 +205,6 @@ fn synced_soft_delete_should_use_delete_policy() {
     let denied = client_write_was_rejected(
         &outbox,
         bob_client,
-        protected.row_id,
-        &branch,
         row_batch_id_for_commit(protected.row_id, &branch, &delete_commit),
     );
     assert!(

@@ -274,15 +274,6 @@ pub enum SyncPayload {
         row: StoredRowBatch,
     },
 
-    /// System-column update for a previously sent row batch entry.
-    RowBatchStateChanged {
-        row_id: ObjectId,
-        branch_name: BranchName,
-        batch_id: BatchId,
-        state: Option<crate::row_histories::RowState>,
-        confirmed_tier: Option<DurabilityTier>,
-    },
-
     /// Replayable fate for one logical batch.
     BatchSettlement { settlement: BatchSettlement },
 
@@ -312,8 +303,7 @@ pub enum SyncPayload {
     /// for the settled server result.
     ///
     /// This means the upstream server has reached a complete first frontier for the
-    /// subscription. Per-row durability remains encoded and replayed on the rows
-    /// themselves via `RowBatchStateChanged`.
+    /// subscription. Per-batch durability and visibility are replayed via `BatchSettlement`.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -426,7 +416,6 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
-            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
             SyncPayload::BatchSettlement { settlement } => match settlement {
                 BatchSettlement::DurableDirect {
                     visible_members, ..
@@ -453,7 +442,6 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(BranchName::new(&row.branch))
             }
-            SyncPayload::RowBatchStateChanged { branch_name, .. } => Some(*branch_name),
             SyncPayload::BatchSettlement { settlement } => match settlement {
                 BatchSettlement::DurableDirect {
                     visible_members, ..
@@ -479,7 +467,6 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. }
                 | SyncPayload::RowBatchCreated { .. }
                 | SyncPayload::RowBatchNeeded { .. }
-                | SyncPayload::RowBatchStateChanged { .. }
                 | SyncPayload::BatchSettlement { .. }
                 | SyncPayload::SealBatch { .. }
         )
@@ -519,7 +506,6 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
             SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
             SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
-            SyncPayload::RowBatchStateChanged { .. } => "RowBatchStateChanged",
             SyncPayload::BatchSettlement { .. } => "BatchSettlement",
             SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
             SyncPayload::SealBatch { .. } => "SealBatch",

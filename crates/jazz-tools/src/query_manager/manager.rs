@@ -1075,6 +1075,31 @@ impl QueryManager {
         }
     }
 
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_settlement_members(&mut self) {
+        for subscription in self.subscriptions.values_mut() {
+            subscription.needs_visibility_recompute = true;
+            subscription.graph.mark_all_dirty();
+        }
+        for subscription in self.server_subscriptions.values_mut() {
+            subscription.graph.mark_all_dirty();
+        }
+    }
+
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
+        &mut self,
+        confirmed_tier: DurabilityTier,
+    ) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription
+                .durability_tier
+                .is_some_and(|required_tier| confirmed_tier >= required_tier)
+            {
+                subscription.needs_visibility_recompute = true;
+                subscription.graph.mark_all_dirty();
+            }
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
@@ -1121,6 +1146,23 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
+        let batch_settlements = self.sync_manager.pending_batch_settlements().to_vec();
+        for settlement in &batch_settlements {
+            if !settlement.visible_members().is_empty() {
+                self.mark_subscriptions_visibility_recompute_for_settlement_members();
+            }
+            if let Some(confirmed_tier) = settlement.confirmed_tier() {
+                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+            }
+            for member in settlement.visible_members() {
+                if let Ok(Some(locator)) = storage.load_row_locator(member.object_id) {
+                    self.mark_row_updated_in_subscriptions(
+                        locator.table.as_str(),
+                        member.object_id,
+                    );
+                }
+            }
+        }
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1162,6 +1204,18 @@ impl QueryManager {
 
         // 4b. Settle policy graphs and finalize completed checks
         self.settle_policy_checks(storage);
+
+        let post_permission_row_visibility_changes =
+            self.sync_manager.take_pending_row_visibility_changes();
+        if !post_permission_row_visibility_changes.is_empty() {
+            tracing::debug!(
+                count = post_permission_row_visibility_changes.len(),
+                "processing row visibility changes from accepted permission checks"
+            );
+        }
+        for update in post_permission_row_visibility_changes {
+            self.handle_row_update(storage, update);
+        }
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
         // sequenced sync updates. Watermarked settlements stay queued for
@@ -1302,7 +1356,6 @@ impl QueryManager {
                 // initial upstream frontier has been replayed — or until every
                 // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
                 // which means nothing upstream is going to replay.
-                tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1365,11 +1418,6 @@ impl QueryManager {
                 );
                 subscription.current_ordered_ids = ordered.ordered_ids_after;
                 subscription.current_visible_rows = visible_rows_by_id;
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = visible_delta.added.len(),
-                    "first delivery (snapshot)"
-                );
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: sub_id,
                     delta: visible_delta,
@@ -1416,10 +1464,6 @@ impl QueryManager {
 
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
-    }
-
-    pub(crate) fn enqueue_row_visibility_change(&mut self, update: RowVisibilityChange) {
-        self.pending_row_visibility_changes.push(update);
     }
 
     pub(super) fn handle_row_update_with_origin(
@@ -1731,7 +1775,7 @@ impl QueryManager {
     /// Mark a row as updated in all subscriptions for a table.
     /// This triggers content change detection during settle().
     /// Checks all tables involved in the subscription (including joined tables).
-    pub(super) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         // Mark local subscriptions
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
@@ -1746,7 +1790,7 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_updated(id);

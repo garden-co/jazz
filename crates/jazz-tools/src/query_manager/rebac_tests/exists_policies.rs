@@ -86,8 +86,6 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         client_write_was_rejected(
             &outbox,
             client_id,
-            obj_id,
-            "main",
             row_batch_id_for_commit(obj_id, "main", &commit),
         ),
         "Non-admin insert should be denied by EXISTS policy"
@@ -212,8 +210,6 @@ fn rebac_update_denied_by_using_exists_policy() {
         client_write_was_rejected(
             &outbox,
             bob_client,
-            protected_obj,
-            &branch,
             row_batch_id_for_commit(protected_obj, &branch, &bob_commit),
         ),
         "Bob's update should be denied by EXISTS in USING policy"
@@ -287,8 +283,6 @@ fn rebac_update_denied_by_using_exists_policy() {
         !client_write_was_rejected(
             &outbox,
             alice_client,
-            protected_obj,
-            &branch,
             row_batch_id_for_commit(protected_obj, &branch, &alice_commit),
         ),
         "Alice's update should be allowed by EXISTS in USING policy (she is an admin)"
