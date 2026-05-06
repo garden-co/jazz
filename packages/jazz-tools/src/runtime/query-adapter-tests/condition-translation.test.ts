@@ -309,6 +309,61 @@ describe("condition translation", () => {
     });
   });
 
+  it("translates contains condition with non-text array element values", () => {
+    const reviewedAt = "2026-02-03T04:05:06.000Z";
+    const builderJson = JSON.stringify({
+      table: "todos",
+      conditions: [
+        { column: "checkpoints", op: "contains", value: 3 },
+        { column: "flags", op: "contains", value: true },
+        {
+          column: "reviewers",
+          op: "contains",
+          value: "00000000-0000-0000-0000-000000000123",
+        },
+        { column: "status_history", op: "contains", value: "done" },
+        { column: "reviewed_at", op: "contains", value: reviewedAt },
+      ],
+      includes: {},
+      orderBy: [],
+    });
+
+    const result = parseTranslatedQuery(builderJson, basicSchema);
+    expect(expectFilterPredicate(result)).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "Contains",
+          left: { scope: "todos", column: "checkpoints" },
+          value: { type: "Literal", value: { Integer: 3 } },
+        },
+        {
+          type: "Contains",
+          left: { scope: "todos", column: "flags" },
+          value: { type: "Literal", value: { Boolean: true } },
+        },
+        {
+          type: "Contains",
+          left: { scope: "todos", column: "reviewers" },
+          value: {
+            type: "Literal",
+            value: { Uuid: "00000000-0000-0000-0000-000000000123" },
+          },
+        },
+        {
+          type: "Contains",
+          left: { scope: "todos", column: "status_history" },
+          value: { type: "Literal", value: { Text: "done" } },
+        },
+        {
+          type: "Contains",
+          left: { scope: "todos", column: "reviewed_at" },
+          value: { type: "Literal", value: { Timestamp: Date.parse(reviewedAt) } },
+        },
+      ],
+    });
+  });
+
   it("translates ne condition", () => {
     const builderJson = JSON.stringify({
       table: "todos",

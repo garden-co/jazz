@@ -240,6 +240,7 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
   | ({
       eq?: MaybeNullableWhere<T, TOptional>;
       ne?: MaybeNullableWhere<T, TOptional>;
+      in?: T[];
     } & TExtra);
 type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
   T,
@@ -258,17 +259,13 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
 >;
 type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
   ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
-  : WhereEqNe<
-      string,
-      TOptional,
-      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
-    >;
+  : WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
     ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? boolean
+      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"

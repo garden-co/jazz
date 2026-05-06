@@ -363,7 +363,7 @@ function conditionToRelPredicate(
   }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const rightLiteral =
+  const rightLiteral = () =>
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
@@ -384,7 +384,7 @@ function conditionToRelPredicate(
       if (cond.value === null) {
         return { IsNull: { column: columnRef } };
       }
-      return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
+      return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral() } };
     case "ne":
       if (cond.value === null) {
         return { IsNotNull: { column: columnRef } };
@@ -393,7 +393,7 @@ function conditionToRelPredicate(
         Cmp: {
           left: columnRef,
           op: "Ne",
-          right: rightLiteral,
+          right: rightLiteral(),
         },
       };
     case "gt":
@@ -401,7 +401,7 @@ function conditionToRelPredicate(
         Cmp: {
           left: columnRef,
           op: "Gt",
-          right: rightLiteral,
+          right: rightLiteral(),
         },
       };
     case "gte":
@@ -409,7 +409,7 @@ function conditionToRelPredicate(
         Cmp: {
           left: columnRef,
           op: "Ge",
-          right: rightLiteral,
+          right: rightLiteral(),
         },
       };
     case "lt":
@@ -417,7 +417,7 @@ function conditionToRelPredicate(
         Cmp: {
           left: columnRef,
           op: "Lt",
-          right: rightLiteral,
+          right: rightLiteral(),
         },
       };
     case "lte":
@@ -425,7 +425,7 @@ function conditionToRelPredicate(
         Cmp: {
           left: columnRef,
           op: "Le",
-          right: rightLiteral,
+          right: rightLiteral(),
         },
       };
     case "isNull":
@@ -434,7 +434,7 @@ function conditionToRelPredicate(
       }
       return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
     case "contains":
-      return { Contains: { left: columnRef, right: rightLiteral } };
+      return { Contains: { left: columnRef, right: rightLiteral() } };
     case "in":
       if (!Array.isArray(cond.value)) {
         throw new Error('"in" operator requires an array value');
