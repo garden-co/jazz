@@ -10,6 +10,22 @@
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Server sync uses the Rust-owned WebSocket transport via `connect()`
+//!
+//! # Allocator
+//!
+//! This crate uses `mimalloc-safe` (napi-rs–maintained mimalloc fork) as Rust's
+//! `#[global_allocator]`. It does NOT override the host process's `malloc`/`free` —
+//! Node.js / V8 keep their own allocator. The two coexist safely as long as
+//! memory crosses the FFI boundary **by copy**, which is what napi-rs does today
+//! for Vec/String/Buffer returns.
+//!
+//! Footgun: never `Vec::leak` / `Box::into_raw` an allocation across FFI and let
+//! the host call `free()` on it — that mixes allocators and corrupts the heap.
+//! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
+//! callback that frees through mimalloc instead.
+
+#[global_allocator]
+static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -18,7 +34,7 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -53,21 +69,6 @@ use jazz_tools::sync_manager::{
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
     values.into_iter().collect()
-}
-
-fn runtime_error_to_napi(
-    err: jazz_tools::runtime_core::RuntimeError,
-    fallback_prefix: &str,
-) -> napi::Error {
-    match err {
-        jazz_tools::runtime_core::RuntimeError::AnonymousWriteDenied { table, operation } => {
-            napi::Error::from_reason(format!(
-                "anonymous session cannot {} on table {}",
-                operation, table
-            ))
-        }
-        other => napi::Error::from_reason(format!("{fallback_prefix}: {other}")),
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,7 +150,6 @@ impl FromNapiValue for FfiRecordArg {
 struct QueryExecutionOptionsWire {
     propagation: Option<String>,
     local_updates: Option<String>,
-    strict_transactions: Option<bool>,
     transaction_overlay: Option<QueryTransactionOverlayWire>,
 }
 
@@ -178,7 +178,6 @@ fn parse_read_durability_options(
             ReadDurabilityOptions {
                 tier: parsed_tier,
                 local_updates: jazz_tools::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             QueryPropagation::Full,
             None,
@@ -225,7 +224,6 @@ fn parse_read_durability_options(
         ReadDurabilityOptions {
             tier: parsed_tier,
             local_updates,
-            strict_transactions: options.strict_transactions.unwrap_or(false),
         },
         propagation,
         overlay,
@@ -373,11 +371,44 @@ struct DevServerStartOptions {
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
     catalogue_authority_admin_secret: Option<String>,
+    telemetry_collector_url: Option<String>,
 }
 
 fn parse_dev_server_start_options(options: JsonValue) -> napi::Result<DevServerStartOptions> {
     serde_json::from_value(options)
         .map_err(|error| napi::Error::from_reason(format!("Invalid DevServer options: {error}")))
+}
+
+static DEV_SERVER_OTEL_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    OnceLock::new();
+static DEV_SERVER_TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
+
+fn init_dev_server_telemetry(collector_url: Option<&str>) {
+    let Some(collector_url) = collector_url else {
+        return;
+    };
+
+    DEV_SERVER_TELEMETRY_INIT.get_or_init(|| {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let endpoint = jazz_tools::otel::normalize_otlp_traces_endpoint(collector_url);
+        let provider = jazz_tools::otel::init_tracer_provider_with_endpoint(
+            "jazz-dev-server",
+            Some(&endpoint),
+        );
+        let otel_layer = jazz_tools::otel::layer(&provider);
+        let filter = tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("jazz_tools=trace".parse().expect("valid tracing directive"))
+            .add_directive("tower_http=debug".parse().expect("valid tracing directive"));
+
+        if tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(filter).with(otel_layer),
+        )
+        .is_ok()
+        {
+            let _ = DEV_SERVER_OTEL_PROVIDER.set(provider);
+        }
+    });
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -989,196 +1020,6 @@ impl NapiRuntime {
     }
 
     // =========================================================================
-    // Persisted CRUD Operations
-    // =========================================================================
-
-    #[napi(js_name = "insertDurable", ts_return_type = "Promise<any>")]
-    pub async fn insert_durable(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        tier: String,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let persistence_tier = parse_tier(&tier)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let ((object_id, row_values), receiver) = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            let ((object_id, row_values), receiver) = core
-                .insert_persisted_with_id(&table, values.0, object_id, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
-            ((object_id, row_values), receiver)
-        };
-
-        let _ = receiver.await;
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-        }))
-    }
-
-    #[napi(js_name = "insertDurableWithSession", ts_return_type = "Promise<any>")]
-    pub async fn insert_durable_with_session(
-        &self,
-        table: String,
-        #[napi(ts_arg_type = "Record<string, unknown>")] values: FfiRecordArg,
-        write_context_json: Option<String>,
-        tier: String,
-        object_id: Option<String>,
-    ) -> napi::Result<serde_json::Value> {
-        let persistence_tier = parse_tier(&tier)?;
-        let write_context = parse_write_context_json(write_context_json)?;
-        let object_id =
-            parse_external_object_id(object_id.as_deref()).map_err(napi::Error::from_reason)?;
-
-        let ((object_id, row_values), receiver) = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            let ((object_id, row_values), receiver) = core
-                .insert_persisted_with_id(
-                    &table,
-                    values.0,
-                    object_id,
-                    write_context.as_ref(),
-                    persistence_tier,
-                )
-                .map_err(|e| runtime_error_to_napi(e, "Insert failed"))?;
-            let row_values = align_row_values_to_declared_schema(
-                &self.declared_schema,
-                core.current_schema(),
-                &TableName::new(table.clone()),
-                row_values,
-            );
-            ((object_id, row_values), receiver)
-        };
-
-        let _ = receiver.await;
-        Ok(serde_json::json!({
-            "id": object_id.uuid().to_string(),
-            "values": row_values,
-        }))
-    }
-
-    #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
-    pub async fn update_durable(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let updates = convert_updates(values.0);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "updateDurableWithSession", ts_return_type = "Promise<void>")]
-    pub async fn update_durable_with_session(
-        &self,
-        object_id: String,
-        #[napi(ts_arg_type = "any")] values: FfiRecordArg,
-        write_context_json: Option<String>,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let updates = convert_updates(values.0);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Update failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
-    pub async fn delete_durable(&self, object_id: String, tier: String) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.delete_persisted(oid, None, persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    #[napi(js_name = "deleteDurableWithSession", ts_return_type = "Promise<void>")]
-    pub async fn delete_durable_with_session(
-        &self,
-        object_id: String,
-        write_context_json: Option<String>,
-        tier: String,
-    ) -> napi::Result<()> {
-        let persistence_tier = parse_tier(&tier)?;
-
-        let uuid = uuid::Uuid::parse_str(&object_id)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
-        let oid = ObjectId::from_uuid(uuid);
-        let write_context = parse_write_context_json(write_context_json)?;
-
-        let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
-                .map_err(|e| runtime_error_to_napi(e, "Delete failed"))?
-        };
-
-        let _ = receiver.await;
-        Ok(())
-    }
-
-    // =========================================================================
     // Sync Operations
     // =========================================================================
 
@@ -1702,11 +1543,12 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
         let opts = parse_dev_server_start_options(options)?;
+        init_dev_server_telemetry(opts.telemetry_collector_url.as_deref());
 
         let app_id =
             AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));

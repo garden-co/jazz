@@ -103,6 +103,35 @@ export function generateId(): string {
   );
 }
 /**
+ * Mint an anonymous JWT from a base64url-encoded 32-byte seed.
+ *
+ * Returns a signed JWT that can be used as a bearer token for anonymous auth.
+ * `audience` should be the app ID (UUID) or a human-readable app name.
+ * `ttl_seconds` controls token lifetime (e.g. 3600 for one hour).
+ */
+export function mintAnonymousToken(
+  seedB64: string,
+  audience: string,
+  ttlSeconds: /*i64*/ bigint
+): string /*throws*/ {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_jazz_rn_fn_func_mint_anonymous_token(
+          FfiConverterString.lower(seedB64),
+          FfiConverterString.lower(audience),
+          FfiConverterInt64.lower(ttlSeconds),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Mint a local-first JWT from a base64url-encoded 32-byte seed.
  *
  * Returns a signed JWT that can be used as a bearer token for local-first auth.
@@ -1564,6 +1593,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_func_generate_id'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token() !==
+    11470
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_func_mint_anonymous_token'
     );
   }
   if (

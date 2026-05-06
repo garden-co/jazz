@@ -64,6 +64,9 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
   a passkey backup, or an external provider they linked earlier.
 </Callout>
 
+For how the secret relates to local database storage, logout, and user switching, see
+[Auth Lifecycle](/docs/auth/lifecycle).
+
 ## Backing up and restoring the secret
 
 You can keep local-first auth fully serverless and still make it recoverable. Jazz ships two backup
@@ -344,6 +347,7 @@ Jazz reads the JWT `sub` claim verbatim as `session.user_id` — no custom-claim
 
 ## Next steps
 
+- [Lifecycle](/docs/auth/lifecycle) — local-first storage, logout, and upgrading auth
 - [Sessions](/docs/auth/sessions) — read the current user and scope queries to their identity
 - [Permissions](/docs/auth/permissions) — define row-level access policies
 - [Auth provider integration](/docs/recipes/auth/auth-provider-integration) — set up BetterAuth or WorkOS as your JWT provider

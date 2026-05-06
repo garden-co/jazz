@@ -6,7 +6,6 @@ use crate::sync_manager::QueryPropagation;
 pub struct ReadDurabilityOptions {
     pub tier: Option<DurabilityTier>,
     pub local_updates: LocalUpdates,
-    pub strict_transactions: bool,
 }
 
 impl Default for ReadDurabilityOptions {
@@ -14,7 +13,6 @@ impl Default for ReadDurabilityOptions {
         Self {
             tier: None,
             local_updates: LocalUpdates::Immediate,
-            strict_transactions: false,
         }
     }
 }
@@ -48,7 +46,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 session,
                 durability.tier,
                 durability.local_updates,
-                durability.strict_transactions,
                 propagation,
             )
             .map_err(|e| RuntimeError::QueryError(e.to_string()))
@@ -375,7 +372,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 durability.tier,
                 crate::query_manager::subscriptions::SubscriptionExecutionOptions {
                     local_updates: durability.local_updates,
-                    strict_transactions: durability.strict_transactions,
                     propagation,
                     local_overlay_rows,
                 },

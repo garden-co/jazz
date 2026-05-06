@@ -144,7 +144,7 @@ export class JazzContext {
       backendSecret: this.config.backendSecret,
       adminSecret: this.config.adminSecret,
       tier: nodeTier,
-      defaultDurabilityTier: "edge",
+      defaultDurabilityTier: nodeTier,
     };
 
     this.clientInstance = JazzClient.connectWithRuntime(this.runtime, context);

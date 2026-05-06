@@ -241,7 +241,7 @@ impl TupleDescriptor {
             .iter()
             .flat_map(|e| e.descriptor.columns.clone())
             .collect();
-        RowDescriptor { columns }
+        RowDescriptor::new(columns)
     }
 
     /// Get iterator over elements.

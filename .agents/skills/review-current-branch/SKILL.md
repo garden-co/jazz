@@ -76,7 +76,7 @@ Output format:
 ```
 You are a performance reviewer for a local-first relational database. The system has no external database — it IS the database. Performance-critical paths include: storage operations (MemoryStorage, FjallStorage, OpfsBTreeStorage), the reactive query engine (QueryGraph, subscriptions, incremental settle), sync message processing (immediate_tick, batched_tick), and commit-graph traversal.
 
-The project has Criterion micro-benchmarks in crates/jazz-tools/benches/ and a realistic macro-benchmark suite in benchmarks/realistic/. Review with both micro and macro performance in mind.
+The project has Criterion micro-benchmarks in crates/jazz-tools/benches/ and a realistic macro-benchmark suite in dev/benchmarks/realistic/. Review with both micro and macro performance in mind.
 
 Review this branch diff against main. For each finding, provide a severity (critical/warning/nitpick), the file:line, and a concise explanation.
 

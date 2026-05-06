@@ -1,13 +1,64 @@
-import { access } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
+import type { WasmSchema } from "../drivers/types.js";
+import { DbTransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import {
-  pushSchemaCatalogue,
-  startLocalJazzServer,
-  type LocalJazzServerHandle,
-} from "./local-jazz-server.js";
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../runtime/schema-fetch.js";
+import { startLocalJazzServer, type LocalJazzServerHandle } from "./local-jazz-server.js";
+
+type PolicyTestAppSchema = { wasmSchema: WasmSchema };
+type ExpectLike = (value: unknown) => {
+  not: {
+    toThrow(expected?: unknown): void;
+  };
+  toThrow(expected?: unknown): void;
+};
+type TestDbMethodCallback = (db: DbTransactionScope) => unknown;
+
+/**
+ * Db used for testing permissions.
+ * Supports all {@link Db} operations plus the {@link TestDb.expectAllowed} and {@link TestDb.expectDenied}
+ * helpers to test write operations without producing side effects on the test database.
+ */
+export type TestDb = Db & {
+  /**
+   * Assert that the callback does not throw a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
+  expectAllowed(callback: TestDbMethodCallback): void;
+
+  /**
+   * Assert that the callback throws a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
+  expectDenied(callback: TestDbMethodCallback): void;
+};
+
+function asTestDb(db: Db, expect: ExpectLike): TestDb {
+  const testDb = db as TestDb;
+
+  Object.defineProperties(testDb, {
+    expectAllowed: {
+      value: (callback: TestDbMethodCallback) => {
+        const tx = db.beginTransaction();
+        expect(() => callback(tx)).not.toThrow();
+        tx.rollback();
+      },
+    },
+    expectDenied: {
+      value: (callback: TestDbMethodCallback) => {
+        const tx = db.beginTransaction();
+        expect(() => callback(tx)).toThrow('WriteError("policy denied');
+        tx.rollback();
+      },
+    },
+  });
+
+  return testDb;
+}
 
 /**
  * A test app for permissions tests. Simplifies setting up a test app and provides methods
@@ -15,7 +66,7 @@ import {
  */
 export class PolicyTestApp {
   constructor(
-    private readonly expect: Function,
+    private readonly expect: ExpectLike,
     private readonly app: any,
     private readonly jazzContext: JazzContext,
     private readonly server: LocalJazzServerHandle,
@@ -33,24 +84,9 @@ export class PolicyTestApp {
   /**
    * Get a database client for the given session.
    */
-  as(session: Session): Db {
-    return this.jazzContext.forSession(session, this.app);
-  }
-
-  /**
-   * Assert that the callback does not throw a policy error.
-   * TODO: rollback mutations performed as part of the callback (once we support transactions).
-   */
-  expectAllowed(callback: () => unknown): void {
-    this.expect(callback).not.toThrow();
-  }
-
-  /**
-   * Assert that the callback throws a policy error.
-   * TODO: rollback mutations performed as part of the callback (once we support transactions).
-   */
-  expectDenied(callback: () => unknown): void {
-    this.expect(callback).toThrow('WriteError("policy denied');
+  as(session: Session): TestDb {
+    const db = this.jazzContext.forSession(session, this.app);
+    return asTestDb(db, this.expect);
   }
 
   /**
@@ -62,115 +98,43 @@ export class PolicyTestApp {
   }
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function resolvePolicyTestSchemaPaths(schemaDir: string): Promise<{
-  catalogueDir: string;
-  appModulePath: string;
-  permissionsModulePath?: string;
-}> {
-  const directAppModule = join(schemaDir, "app.js");
-  if (await pathExists(directAppModule)) {
-    return {
-      catalogueDir: schemaDir,
-      appModulePath: directAppModule,
-      permissionsModulePath: (await pathExists(join(schemaDir, "permissions.js")))
-        ? join(schemaDir, "permissions.js")
-        : undefined,
-    };
-  }
-
-  for (const extension of ["ts", "js"]) {
-    const directRootSchema = join(schemaDir, `schema.${extension}`);
-    if (await pathExists(directRootSchema)) {
-      const permissionsModulePath = await findPermissionsModulePath(schemaDir);
-      return {
-        catalogueDir: schemaDir,
-        appModulePath: directRootSchema,
-        permissionsModulePath,
-      };
-    }
-  }
-
-  if (basename(schemaDir) === "schema") {
-    const appRoot = dirname(schemaDir);
-    for (const extension of ["ts", "js"]) {
-      const parentRootSchema = join(appRoot, `schema.${extension}`);
-      if (await pathExists(parentRootSchema)) {
-        const permissionsModulePath = await findPermissionsModulePath(appRoot);
-        return {
-          catalogueDir: appRoot,
-          appModulePath: parentRootSchema,
-          permissionsModulePath,
-        };
-      }
-    }
-  }
-
-  throw new Error(
-    `Could not find a schema app near ${schemaDir}. Expected app.js, schema.ts, or schema.js.`,
-  );
-}
-
-async function findPermissionsModulePath(rootDir: string): Promise<string | undefined> {
-  for (const extension of ["ts", "js"]) {
-    const candidate = join(rootDir, `permissions.${extension}`);
-    if (await pathExists(candidate)) {
-      return candidate;
-    }
-  }
-
-  return undefined;
-}
-
 /**
  * Create a new policy test app.
  * This will start a local Jazz server and push the schema catalogue to it.
- * Returns a PolicyTestApp instance that can be used to seed the database and validate policy checks.
- * @param schemaDir - The directory containing the Jazz schema and permissions
- * @param expectFn - The expect function to use for assertions
+ * @returns a {@link PolicyTestApp} instance that can be used to seed the database and validate policy checks.
+ * @param app - The Jazz app created with `defineApp(...)`
+ * @param permissions - The permissions created with `definePermissions(...)`
+ * @param expectFn - The `expect` function to use for assertions (e.g. `expect` from `vitest`)
  */
 export async function createPolicyTestApp(
-  schemaDir: string,
-  expectFn: Function,
+  app: PolicyTestAppSchema,
+  permissions: CompiledPermissions,
+  expectFn: ExpectLike,
 ): Promise<PolicyTestApp> {
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
-  const resolvedPaths = await resolvePolicyTestSchemaPaths(schemaDir);
   const server = await startLocalJazzServer({
     backendSecret,
     adminSecret,
   });
 
-  await pushSchemaCatalogue({
-    serverUrl: server.url,
+  const { hash: schemaHash } = await publishStoredSchema(server.url, {
     appId: server.appId,
     adminSecret,
-    schemaDir: resolvedPaths.catalogueDir,
-    env: "test",
-    userBranch: "main",
+    schema: app.wasmSchema,
+  });
+  const { head } = await fetchPermissionsHead(server.url, {
+    appId: server.appId,
+    adminSecret,
+  });
+  await publishStoredPermissions(server.url, {
+    appId: server.appId,
+    adminSecret,
+    schemaHash,
+    permissions,
+    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
-  const app = await import(pathToFileURL(resolvedPaths.appModulePath).href);
-  if (!app) {
-    throw new Error(`No schema app module found near ${schemaDir}`);
-  }
-  const permissionsModule = resolvedPaths.permissionsModulePath
-    ? await import(pathToFileURL(resolvedPaths.permissionsModulePath).href)
-    : null;
-  const permissions = (permissionsModule?.default ?? permissionsModule?.permissions) as
-    | CompiledPermissions
-    | undefined;
-  if (!permissions) {
-    throw new Error(`No permissions module found near ${resolvedPaths.appModulePath}`);
-  }
   const jazzContext = createJazzContext({
     appId: server.appId,
     app,

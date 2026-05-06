@@ -97,7 +97,7 @@ fn add_server_with_storage_syncs_full_row_history_to_server() {
         OutboxEntry {
             destination: Destination::Server(id),
             payload: SyncPayload::RowBatchCreated { row, metadata, .. },
-        } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_none()
+        } if *id == server_id && row.batch_id() == newer.batch_id() && metadata.is_some()
     ));
 }
 
@@ -158,4 +158,66 @@ fn add_server_with_storage_skips_rows_already_confirmed_upstream() {
         .collect();
 
     assert_eq!(pushed_batch_ids, vec![local_pending.batch_id()]);
+}
+
+#[test]
+fn add_server_with_storage_sends_skipped_parent_before_child() {
+    let mut io = MemoryStorage::new();
+    let row_id = ObjectId::new();
+    let upstream_confirmed_parent = row_with_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"upstream-parent"),
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::EdgeServer),
+    );
+    let local_child = visible_row(
+        row_id,
+        "main",
+        vec![upstream_confirmed_parent.batch_id()],
+        2_000,
+        b"local-child",
+    );
+
+    seed_users_schema(&mut io);
+    io.put_row_locator(
+        row_id,
+        Some(
+            &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                .expect("row metadata should produce a row locator"),
+        ),
+    )
+    .unwrap();
+    io.append_history_region_rows(
+        "users",
+        &[upstream_confirmed_parent.clone(), local_child.clone()],
+    )
+    .unwrap();
+    io.upsert_visible_region_rows(
+        "users",
+        std::slice::from_ref(&VisibleRowEntry::rebuild(
+            local_child.clone(),
+            &[upstream_confirmed_parent.clone(), local_child.clone()],
+        )),
+    )
+    .unwrap();
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    let outbox = sm.take_outbox();
+    let pushed_batch_ids: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowBatchCreated { row, .. },
+            } if *id == server_id => Some(row.batch_id()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        pushed_batch_ids,
+        vec![upstream_confirmed_parent.batch_id(), local_child.batch_id()]
+    );
 }

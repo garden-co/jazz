@@ -36,7 +36,6 @@ fn rc_query_settled_tier_holds() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -75,7 +74,6 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -87,11 +85,18 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
         "Query should wait for the initial remote frontier"
     );
 
-    // Local frontier completion is enough to unblock the first snapshot. With
-    // immediate local updates, the locally-authored row should still be visible
-    // even though it has not reached EdgeServer durability yet.
+    // Local frontier completion is not enough for an EdgeServer read.
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should ignore a lower-tier frontier"
+    );
+
+    // Once the requested tier settles, immediate local updates can overlay the
+    // locally-authored row even though the row itself is still pending.
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Ok(results)) => {
@@ -99,7 +104,7 @@ fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row(
             assert_eq!(results[0].0, id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve once the initial frontier is complete"),
+        Poll::Pending => panic!("Query should resolve once the EdgeServer frontier is complete"),
     }
 }
 
@@ -121,7 +126,6 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -152,20 +156,37 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
-        if entry.destination == Destination::Client(s.a_client_of_b) {
-            s.a.park_sync_message(InboxEntry {
-                source: Source::Server(s.b_server_for_a),
-                payload: entry.payload,
-            });
+        match entry.destination {
+            Destination::Client(id) if id == s.a_client_of_b => {
+                s.a.park_sync_message(InboxEntry {
+                    source: Source::Server(s.b_server_for_a),
+                    payload: entry.payload,
+                });
+            }
+            Destination::Server(id) if id == s.c_server_for_b => {
+                s.c.park_sync_message(InboxEntry {
+                    source: Source::Client(s.b_client_of_c),
+                    payload: entry.payload,
+                });
+            }
+            _ => {}
         }
     }
     s.a.batched_tick();
     s.a.immediate_tick();
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should ignore B's lower-tier empty frontier"
+    );
+
+    s.c.batched_tick();
+    s.c.immediate_tick();
+    pump_c_to_b_to_a(&mut s);
 
     match Pin::new(&mut future).poll(&mut cx) {
         Poll::Ready(Ok(results)) => {
@@ -177,7 +198,7 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
             assert_eq!(results[0].0, id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => panic!("Query should resolve after EdgeServer frontier completion"),
     }
 }
 
@@ -237,6 +258,13 @@ fn rc_query_local_transaction_overlay_shows_only_the_requested_staged_insert() {
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(alice_rows[0].0, alice_id);
     assert_eq!(alice_rows[0].1[1], Value::Text("alice-draft".into()));
+
+    let visible_rows = execute_runtime_query(&mut core, Query::new("users"), None);
+    assert_eq!(
+        visible_rows,
+        Vec::<(ObjectId, Vec<Value>)>::new(),
+        "ordinary reads should not see staged transactional rows"
+    );
 }
 
 #[test]
@@ -317,7 +345,7 @@ fn rc_query_local_transaction_overlay_keeps_same_row_updates_isolated_by_batch()
 }
 
 #[test]
-fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_head() {
+fn rc_query_remote_tier_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -371,7 +399,6 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -403,8 +430,8 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     assert!(
         !server_outbox
             .iter()
-            .any(|entry| matches!(entry.payload, SyncPayload::QueryScopeSnapshot { .. })),
-        "server without a published permissions head should not advertise an authoritative scope snapshot"
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative session query"
     );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
@@ -419,22 +446,16 @@ fn rc_query_remote_tier_session_exists_rel_keeps_local_rows_without_permissions_
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_without_permissions_head()
- {
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_without_permissions_head() {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-query");
     let mut server = create_runtime_with_schema_and_sync_manager(
@@ -491,7 +512,6 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -520,6 +540,12 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     server.immediate_tick();
 
     let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query"
+    );
     for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
@@ -533,21 +559,16 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_local_rows_witho
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Immediate local updates should keep the session-visible team for backend-authenticated clients"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize backend scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
 #[test]
-fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_rows_without_permissions_head()
+fn rc_query_remote_tier_backend_client_session_exists_rel_waits_for_synced_policy_rows_without_permissions_head()
  {
     let schema = session_exists_rel_teams_schema();
     let mut client = create_runtime_with_schema(schema, "backend-session-exists-rel-synced");
@@ -597,7 +618,14 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
         .unwrap();
 
     pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
-    for entry in server.sync_sender().take() {
+    let server_outbox = server.sync_sender().take();
+    assert!(
+        !server_outbox
+            .iter()
+            .any(|entry| matches!(entry.payload, SyncPayload::QuerySettled { .. })),
+        "server without a published permissions head should not settle an authoritative backend session query even when policy rows synced"
+    );
+    for entry in server_outbox {
         if entry.destination == Destination::Client(client_id) {
             client.park_sync_message(InboxEntry {
                 source: Source::Server(server_id),
@@ -614,7 +642,6 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -655,16 +682,11 @@ fn rc_query_remote_tier_backend_client_session_exists_rel_keeps_synced_policy_ro
     client.immediate_tick();
 
     match Pin::new(&mut future).poll(&mut cx) {
-        Poll::Ready(Ok(results)) => {
-            assert_eq!(
-                results.len(),
-                1,
-                "Synced policy context rows should keep the session-visible team"
-            );
-            assert_eq!(results[0].0, team_id);
-        }
+        Poll::Ready(Ok(results)) => panic!(
+            "Query should remain pending until the server can authorize synced policy scope, got {results:?}"
+        ),
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after frontier completion"),
+        Poll::Pending => {}
     }
 }
 
@@ -678,7 +700,6 @@ fn rc_query_settled_tier_empty_resolves() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -769,7 +790,6 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -780,7 +800,6 @@ fn query_reads_pick_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::GlobalServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -929,7 +948,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -940,7 +958,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::EdgeServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -951,7 +968,6 @@ fn query_reads_merge_conflicting_row_batches_by_required_durability_tier() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::GlobalServer),
             local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::LocalOnly,
     );
@@ -1002,7 +1018,6 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         ReadDurabilityOptions {
             tier: Some(DurabilityTier::Local),
             local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-            strict_transactions: false,
         },
         crate::sync_manager::QueryPropagation::Full,
     );
@@ -1118,7 +1133,6 @@ fn rc_subscribe_settled_tier() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1148,6 +1162,66 @@ fn rc_subscribe_settled_tier() {
 }
 
 #[test]
+fn rc_subscribe_global_tier_ignores_lower_tier_query_settled() {
+    let mut s = create_3tier_rc();
+
+    let received = Arc::new(Mutex::new(Vec::<SubscriptionDelta>::new()));
+    let received_clone = received.clone();
+
+    let _handle =
+        s.a.subscribe_with_durability_and_propagation(
+            Query::new("users"),
+            move |delta| {
+                received_clone.lock().unwrap().push(delta);
+            },
+            None,
+            ReadDurabilityOptions {
+                tier: Some(DurabilityTier::GlobalServer),
+                local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+            },
+            crate::sync_manager::QueryPropagation::Full,
+        )
+        .unwrap();
+
+    s.a.park_sync_message(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::QuerySettled {
+            query_id: crate::sync_manager::QueryId(0),
+            tier: DurabilityTier::Local,
+            scope: Vec::<(ObjectId, crate::object::BranchName)>::new(),
+            through_seq: 0,
+        },
+    });
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "Local QuerySettled must not release a Global-tier subscription"
+    );
+
+    s.a.park_sync_message(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::QuerySettled {
+            query_id: crate::sync_manager::QueryId(0),
+            tier: DurabilityTier::GlobalServer,
+            scope: Vec::<(ObjectId, crate::object::BranchName)>::new(),
+            through_seq: 0,
+        },
+    });
+    s.a.batched_tick();
+    s.a.immediate_tick();
+
+    let calls = received.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        1,
+        "Global QuerySettled should release the initial empty snapshot"
+    );
+    assert!(calls[0].ordered_delta.added.is_empty());
+}
+
+#[test]
 fn rc_subscribe_remote_tier_immediate_local_updates() {
     let mut s = create_3tier_rc();
 
@@ -1165,7 +1239,6 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1188,16 +1261,25 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     );
     drop(calls);
 
-    // Local frontier completion is enough to unblock the first snapshot. With
-    // immediate local updates, the locally-authored row is shown immediately
-    // while its EdgeServer durability is still pending.
+    // Local frontier completion is not enough to unblock an EdgeServer read.
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
+    let calls = received.lock().unwrap();
+    assert!(
+        calls.is_empty(),
+        "Local frontier completion should not release the EdgeServer subscription"
+    );
+    drop(calls);
+
+    // Once EdgeServer settles, the first snapshot can include the local row via
+    // the immediate local-update overlay.
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
     let calls = received.lock().unwrap();
     assert_eq!(
         calls.len(),
         1,
-        "First callback should happen after frontier completion"
+        "First callback should happen after EdgeServer frontier completion"
     );
     assert_eq!(
         calls[0].len(),
@@ -1205,20 +1287,6 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         "First callback should contain the local row"
     );
     assert_eq!(calls[0][0].0, first_id);
-    drop(calls);
-
-    // Reach EdgeServer settlement for the first row. This should not emit a
-    // second visible delta because the row is already on screen via the local
-    // pending overlay.
-    pump_b_to_c(&mut s);
-    pump_c_to_b_to_a(&mut s);
-
-    let calls = received.lock().unwrap();
-    assert_eq!(
-        calls.len(),
-        1,
-        "Tier promotion should not emit a second visible delta for the same row"
-    );
     drop(calls);
 
     // After initial delivery, local updates should callback immediately.
@@ -1274,7 +1342,6 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: false,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1299,26 +1366,43 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
     assert!(
         b_out.iter().any(|entry| matches!(
             entry.payload,
-            SyncPayload::QueryScopeSnapshot { ref scope, .. } if scope.is_empty()
+            SyncPayload::QuerySettled { ref scope, .. } if scope.is_empty()
         )),
-        "Expected an empty remote scope snapshot from B"
+        "Expected an empty settled remote scope from B"
     );
     for entry in b_out {
-        if entry.destination == Destination::Client(s.a_client_of_b) {
-            s.a.park_sync_message(InboxEntry {
-                source: Source::Server(s.b_server_for_a),
-                payload: entry.payload,
-            });
+        match entry.destination {
+            Destination::Client(id) if id == s.a_client_of_b => {
+                s.a.park_sync_message(InboxEntry {
+                    source: Source::Server(s.b_server_for_a),
+                    payload: entry.payload,
+                });
+            }
+            Destination::Server(id) if id == s.c_server_for_b => {
+                s.c.park_sync_message(InboxEntry {
+                    source: Source::Client(s.b_client_of_c),
+                    payload: entry.payload,
+                });
+            }
+            _ => {}
         }
     }
     s.a.batched_tick();
     s.a.immediate_tick();
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "B's lower-tier empty frontier should not release the EdgeServer subscription"
+    );
+
+    s.c.batched_tick();
+    s.c.immediate_tick();
+    pump_c_to_b_to_a(&mut s);
 
     let calls = received.lock().unwrap();
     assert_eq!(
         calls.len(),
         1,
-        "Frontier completion should emit one initial snapshot"
+        "EdgeServer frontier completion should emit one initial snapshot"
     );
     assert_eq!(
         calls[0].len(),
@@ -1329,12 +1413,10 @@ fn rc_subscribe_remote_tier_immediate_local_updates_survives_empty_remote_scope_
 }
 
 #[test]
-fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
+fn rc_transaction_visible_subscription_can_overlay_local_pending_batch() {
     // alice strict-subscribes at EdgeServer durability
     //   alice stages one transactional row locally
-    //   local frontier completion unblocks the first snapshot
-    //   the row should appear via alice's local pending overlay even before EdgeServer settlement
-    //   later EdgeServer settlement should not emit the same row again
+    //   the row should appear via alice's local pending overlay once EdgeServer settles
     let mut s = create_3tier_rc();
 
     let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
@@ -1351,7 +1433,6 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1383,19 +1464,10 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    let calls = received.lock().unwrap();
-    assert_eq!(
-        calls.len(),
-        1,
-        "local frontier completion should unblock the first snapshot"
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "local frontier completion should not unblock an EdgeServer subscription"
     );
-    assert_eq!(
-        calls[0].len(),
-        1,
-        "alice should see her own staged transactional row through the local overlay"
-    );
-    assert_eq!(calls[0][0].0, row_id);
-    drop(calls);
 
     pump_b_to_c(&mut s);
     pump_c_to_b_to_a(&mut s);
@@ -1404,14 +1476,21 @@ fn rc_strict_transaction_subscription_can_overlay_local_pending_batch() {
     assert_eq!(
         calls.len(),
         1,
-        "EdgeServer settlement should not emit a duplicate visible delta for the same row"
+        "EdgeServer frontier completion should unblock the first snapshot"
     );
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "alice should see her own staged transactional row through the local overlay"
+    );
+    assert_eq!(calls[0][0].0, row_id);
+    drop(calls);
 }
 
 #[test]
-fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejected() {
+fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_rejected() {
     // alice strict-subscribes at EdgeServer durability
-    //   local frontier first opens the subscription with an empty snapshot
+    //   EdgeServer frontier first opens the subscription with an empty snapshot
     //   alice then stages one transactional row locally
     //   the row appears only through the local pending overlay
     //   a replayable rejected batch settlement should remove that overlay immediately
@@ -1430,7 +1509,6 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::EdgeServer),
                 local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1438,6 +1516,14 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
+
+    {
+        let calls = received.lock().unwrap();
+        assert_eq!(calls.len(), 0);
+    }
+
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
 
     {
         let calls = received.lock().unwrap();
@@ -1478,6 +1564,8 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
         assert_eq!(decode_added_rows(&calls[1])[0].0, row_id);
     }
 
+    s.a.seal_batch(batch_id).unwrap();
+
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
         payload: SyncPayload::BatchSettlement {
@@ -1503,9 +1591,9 @@ fn rc_strict_transaction_subscription_removes_local_pending_overlay_when_rejecte
 }
 
 #[test]
-fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_complete() {
+fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_complete() {
     // alice authors one transactional batch with two rows
-    //   worker accepts it and reports both rows in the query scope snapshot
+    //   worker accepts it and reports both rows in the QuerySettled scope
     //   downstream strict visibility must hide the first delivered row until the second arrives
     let mut s = create_3tier_rc();
 
@@ -1578,7 +1666,6 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
             ReadDurabilityOptions {
                 tier: Some(DurabilityTier::Local),
                 local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
-                strict_transactions: true,
             },
             crate::sync_manager::QueryPropagation::Full,
         )
@@ -1615,8 +1702,7 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
                     remaining_row_payloads.push(payload);
                 }
             }
-            payload @ SyncPayload::QueryScopeSnapshot { .. }
-            | payload @ SyncPayload::BatchSettlement { .. }
+            payload @ SyncPayload::BatchSettlement { .. }
             | payload @ SyncPayload::QuerySettled { .. }
             | payload @ SyncPayload::RowBatchStateChanged { .. } => {
                 control_payloads.push(payload);
@@ -1629,11 +1715,11 @@ fn rc_strict_transaction_subscription_hides_partial_accepted_batch_until_scope_c
     assert!(
         control_payloads
             .iter()
-            .any(|payload| matches!(payload, SyncPayload::QueryScopeSnapshot { query_id, scope }
+            .any(|payload| matches!(payload, SyncPayload::QuerySettled { query_id, scope, .. }
                 if *query_id == crate::sync_manager::QueryId(0)
                     && scope.iter().map(|(object_id, _)| *object_id).collect::<std::collections::HashSet<_>>()
                         == std::collections::HashSet::from([first_id, second_id]))),
-        "expected scope snapshot covering both accepted transaction members, got {control_payloads:#?}"
+        "expected settled scope covering both accepted transaction members, got {control_payloads:#?}"
     );
     assert!(
         control_payloads.iter().any(|payload| matches!(

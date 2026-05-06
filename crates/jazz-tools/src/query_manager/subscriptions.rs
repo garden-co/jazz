@@ -32,7 +32,6 @@ type ReplayableQuerySubscription = (
 
 pub(crate) struct SubscriptionExecutionOptions {
     pub(crate) local_updates: LocalUpdates,
-    pub(crate) strict_transactions: bool,
     pub(crate) propagation: QueryPropagation,
     pub(crate) local_overlay_rows: HashMap<ObjectId, crate::sync_manager::RowBatchKey>,
 }
@@ -102,7 +101,6 @@ impl QueryManager {
             durability_tier,
             SubscriptionExecutionOptions {
                 local_updates,
-                strict_transactions: false,
                 propagation: QueryPropagation::Full,
                 local_overlay_rows: HashMap::new(),
             },
@@ -118,7 +116,6 @@ impl QueryManager {
     ) -> Result<QuerySubscriptionId, QueryError> {
         let SubscriptionExecutionOptions {
             local_updates,
-            strict_transactions,
             propagation,
             local_overlay_rows,
         } = options;
@@ -159,10 +156,10 @@ impl QueryManager {
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
-        let query_frontier_complete = durability_tier.is_none()
+        let query_frontier_settled_tier = (durability_tier.is_none()
             || !self.should_send_local_subscription_upstream(propagation)
-            || !self.sync_manager.has_servers_or_pending_servers();
-
+            || !self.sync_manager.has_servers_or_pending_servers())
+        .then_some(DurabilityTier::GlobalServer);
         tracing::debug!(
             sub_id = id.0,
             ?branches,
@@ -178,13 +175,13 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
+                needs_visibility_recompute: true,
                 durability_tier,
                 local_updates,
-                strict_transactions,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows,
-                query_frontier_complete,
+                query_frontier_settled_tier,
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 policy_context_tables,
@@ -260,13 +257,13 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
+                needs_visibility_recompute: true,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
-                strict_transactions: false,
                 has_pending_local_updates: false,
                 pending_local_row_ids: HashSet::new(),
                 local_overlay_rows: HashMap::new(),
-                query_frontier_complete: true,
+                query_frontier_settled_tier: Some(DurabilityTier::GlobalServer),
                 current_ordered_ids: Vec::new(),
                 current_visible_rows: HashMap::new(),
                 policy_context_tables,
@@ -318,7 +315,6 @@ impl QueryManager {
             session,
             durability_tier,
             local_updates,
-            false,
             QueryPropagation::Full,
         )
     }
@@ -336,7 +332,6 @@ impl QueryManager {
             session,
             durability_tier,
             LocalUpdates::Immediate,
-            false,
             propagation,
         )
     }
@@ -347,7 +342,6 @@ impl QueryManager {
         session: Option<Session>,
         durability_tier: Option<DurabilityTier>,
         local_updates: LocalUpdates,
-        strict_transactions: bool,
         propagation: QueryPropagation,
     ) -> Result<QuerySubscriptionId, QueryError> {
         self.subscribe_with_sync_and_propagation_with_local_overlay(
@@ -356,7 +350,6 @@ impl QueryManager {
             durability_tier,
             SubscriptionExecutionOptions {
                 local_updates,
-                strict_transactions,
                 propagation,
                 local_overlay_rows: HashMap::new(),
             },
@@ -564,6 +557,7 @@ impl QueryManager {
     /// This enables lazy branch activation when rows arrive with unknown branches.
     pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
+        self.authorization_context_cache.clear();
     }
 
     /// Add a branch → schema hash mapping (for server-mode schema activation).
@@ -668,7 +662,7 @@ impl QueryManager {
     ) -> std::collections::HashSet<(crate::object::ObjectId, crate::object::BranchName)> {
         self.subscriptions
             .get(&sub_id)
-            .map(|sub| sub.graph.contributing_object_ids())
+            .map(|sub| sub.graph.sync_scope_object_ids())
             .unwrap_or_default()
     }
 }

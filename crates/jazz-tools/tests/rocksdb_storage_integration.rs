@@ -239,7 +239,6 @@ async fn make_client(
         .with_server(server)
         .with_schema(schema.clone())
         .with_user_id(user_id)
-        .ready_on(ready_table, READY_TIMEOUT)
         .connect()
         .await;
 
@@ -248,6 +247,15 @@ async fn make_client(
         server.app_id(),
         server.admin_secret(),
         &schema,
+    )
+    .await;
+    wait_for_query(
+        &client,
+        QueryBuilder::new(ready_table).build(),
+        Some(DurabilityTier::EdgeServer),
+        READY_TIMEOUT,
+        format!("EdgeServer query readiness for {ready_table}"),
+        |_| Some(()),
     )
     .await;
 
@@ -277,6 +285,13 @@ async fn make_client_external_jwks(
 
     let client = JazzClient::connect(context).await.expect("connect client");
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
     wait_for_query(
         &client,
         QueryBuilder::new(ready_table).build(),
@@ -284,13 +299,6 @@ async fn make_client_external_jwks(
         READY_TIMEOUT,
         format!("EdgeServer query readiness for {ready_table}"),
         |_| Some(()),
-    )
-    .await;
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
     )
     .await;
 

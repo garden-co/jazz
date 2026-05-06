@@ -50,11 +50,18 @@ vi.mock("./tab-leader-election.js", async (importOriginal) => {
   };
 });
 
-import { Db } from "./db.js";
+import { Db, type DbConfig } from "./db.js";
+import { WasmRuntimeModule } from "./wasm-runtime-module.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalLocation = globalThis.location;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
+
+async function createWorkerDb(config: DbConfig): Promise<Db> {
+  const runtimeModule = new WasmRuntimeModule();
+  await runtimeModule.load(config);
+  return await Db.createWithWorker(config, runtimeModule);
+}
 
 afterEach(() => {
   loadWasmModuleMock.mockClear();
@@ -107,7 +114,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await Db.createWithWorker({
+    const db = await createWorkerDb({
       appId: "worker-bootstrap-explicit-urls",
       driver: { type: "persistent", dbName: "worker-bootstrap-explicit-urls" },
       runtimeSources: {
@@ -152,7 +159,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await Db.createWithWorker({
+    const db = await createWorkerDb({
       appId: "worker-bootstrap-base-url",
       driver: { type: "persistent", dbName: "worker-bootstrap-base-url" },
       runtimeSources: {
@@ -195,7 +202,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await Db.createWithWorker({
+    const db = await createWorkerDb({
       appId: "worker-bootstrap-browser-assets",
       driver: { type: "persistent", dbName: "worker-bootstrap-browser-assets" },
     });
@@ -232,7 +239,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await Db.createWithWorker({
+    const db = await createWorkerDb({
       appId: "worker-bootstrap-fallback-wasm",
       driver: { type: "persistent", dbName: "worker-bootstrap-fallback-wasm" },
     });
@@ -241,6 +248,43 @@ describe("Db worker runtime bootstrap", () => {
     await db.shutdown();
 
     expect(options.fallbackWasmUrl).toMatch(/jazz_wasm_bg\.wasm$/);
+  });
+
+  it("passes telemetryCollectorUrl into worker bridge options", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL, _options?: WorkerOptions) {
+        super();
+        queueMicrotask(() => {
+          const event = new Event("message");
+          Object.defineProperty(event, "data", {
+            value: { type: "ready" },
+            configurable: true,
+          });
+          this.dispatchEvent(event);
+        });
+      }
+
+      postMessage(): void {}
+
+      terminate(): void {}
+    }
+
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).location = {
+      href: "http://localhost:3000/",
+    };
+    (globalThis as Record<string, unknown>).Worker = FakeWorker;
+
+    const db = await createWorkerDb({
+      appId: "worker-bootstrap-telemetry",
+      driver: { type: "persistent", dbName: "worker-bootstrap-telemetry" },
+      telemetryCollectorUrl: "http://127.0.0.1:54418",
+    });
+
+    const options = (db as any).buildWorkerBridgeOptions("{}");
+    await db.shutdown();
+
+    expect(options.telemetryCollectorUrl).toBe("http://127.0.0.1:54418");
   });
 
   it("does not append a bootstrap wasm URL when runtimeSources provides in-memory wasmSource", async () => {
@@ -271,7 +315,7 @@ describe("Db worker runtime bootstrap", () => {
     };
     (globalThis as Record<string, unknown>).Worker = FakeWorker;
 
-    const db = await Db.createWithWorker({
+    const db = await createWorkerDb({
       appId: "worker-bootstrap-wasm-source",
       driver: { type: "persistent", dbName: "worker-bootstrap-wasm-source" },
       runtimeSources: {

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Callout } from "fumadocs-ui/components/callout";
 import { DynamicCodeBlock } from "fumadocs-ui/components/dynamic-codeblock";
-import { Tab, Tabs } from "fumadocs-ui/components/tabs";
+import { Tab, Tabs } from "./tabs";
 import { type GeneratedApp, storeGeneratedApp } from "@/lib/generated-app-store";
 
 const JAZZ_CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";

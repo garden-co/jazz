@@ -34,38 +34,7 @@ fn set_query_scope_stores_session() {
 }
 
 #[test]
-fn set_query_scope_emits_query_scope_snapshot_to_client() {
-    let mut sm = SyncManager::new();
-    let io = MemoryStorage::new();
-    let client_id = ClientId::new();
-    let row_id = ObjectId::new();
-    let query_id = QueryId(7);
-
-    add_client(&mut sm, &io, client_id);
-    sm.take_outbox();
-
-    set_client_query_scope(
-        &mut sm,
-        &io,
-        client_id,
-        query_id,
-        HashSet::from([(row_id, BranchName::new("main"))]),
-        None,
-    );
-
-    assert!(sm.take_outbox().into_iter().any(|entry| matches!(
-        entry,
-        OutboxEntry {
-            destination: Destination::Client(id),
-            payload: SyncPayload::QueryScopeSnapshot { query_id: snapshot_query_id, scope },
-        } if id == client_id
-            && snapshot_query_id == query_id
-            && scope == vec![(row_id, BranchName::new("main"))]
-    )));
-}
-
-#[test]
-fn query_scope_snapshot_from_server_is_stored_for_query() {
+fn query_settled_from_server_stores_scope_for_query() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let server_id = ServerId::new();
@@ -76,12 +45,14 @@ fn query_scope_snapshot_from_server_is_stored_for_query() {
     sm.process_from_server(
         &mut io,
         server_id,
-        SyncPayload::QueryScopeSnapshot {
+        SyncPayload::QuerySettled {
             query_id,
+            tier: DurabilityTier::Local,
             scope: vec![
                 (second_row_id, BranchName::new("main")),
                 (first_row_id, BranchName::new("main")),
             ],
+            through_seq: 0,
         },
     );
 
@@ -95,7 +66,7 @@ fn query_scope_snapshot_from_server_is_stored_for_query() {
 }
 
 #[test]
-fn query_scope_snapshot_from_server_relays_to_interested_clients() {
+fn query_settled_from_server_relays_scope_to_interested_clients() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -113,9 +84,11 @@ fn query_scope_snapshot_from_server_relays_to_interested_clients() {
     sm.process_from_server(
         &mut io,
         server_id,
-        SyncPayload::QueryScopeSnapshot {
+        SyncPayload::QuerySettled {
             query_id,
+            tier: DurabilityTier::Local,
             scope: vec![(row_id, BranchName::new("main"))],
+            through_seq: 0,
         },
     );
 
@@ -123,7 +96,7 @@ fn query_scope_snapshot_from_server_relays_to_interested_clients() {
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::QueryScopeSnapshot { query_id: relayed_query_id, scope },
+            payload: SyncPayload::QuerySettled { query_id: relayed_query_id, scope, .. },
         } if id == client_id
             && relayed_query_id == query_id
             && scope == vec![(row_id, BranchName::new("main"))]
@@ -141,17 +114,27 @@ fn remove_server_clears_remote_query_scope() {
     sm.process_from_server(
         &mut io,
         server_id,
-        SyncPayload::QueryScopeSnapshot {
+        SyncPayload::QuerySettled {
             query_id,
+            tier: DurabilityTier::Local,
             scope: vec![(row_id, BranchName::new("main"))],
+            through_seq: 0,
         },
     );
     assert_eq!(
         sm.remote_query_scope(query_id),
         HashSet::from([(row_id, BranchName::new("main"))])
     );
+    assert_eq!(
+        sm.take_remote_query_scope_dirty(),
+        HashSet::from([query_id])
+    );
 
     sm.remove_server(server_id);
 
     assert!(sm.remote_query_scope(query_id).is_empty());
+    assert_eq!(
+        sm.take_remote_query_scope_dirty(),
+        HashSet::from([query_id])
+    );
 }

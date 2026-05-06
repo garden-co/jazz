@@ -6,17 +6,17 @@ import type { WasmSchema } from "../../src/drivers/types.js";
 import { loadWasmModule } from "../../src/runtime/client.js";
 import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
-import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
-import profileJson from "../../../../benchmarks/realistic/profiles/s.json";
-import w1Json from "../../../../benchmarks/realistic/scenarios/w1_interactive.json";
-import w3Json from "../../../../benchmarks/realistic/scenarios/w3_offline_reconnect.json";
-import w4Json from "../../../../benchmarks/realistic/scenarios/w4_cold_start.json";
-import b1Json from "../../../../benchmarks/realistic/scenarios/b1_server_crud_sustained.json";
-import b2Json from "../../../../benchmarks/realistic/scenarios/b2_server_reads_sustained.json";
-import b3Json from "../../../../benchmarks/realistic/scenarios/b3_server_cold_load_large.json";
-import b4Json from "../../../../benchmarks/realistic/scenarios/b4_server_fanout_updates.json";
-import b5Json from "../../../../benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
-import b6Json from "../../../../benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
+import schemaJson from "../../../../dev/benchmarks/realistic/schema/project_board.schema.json";
+import profileJson from "../../../../dev/benchmarks/realistic/profiles/s.json";
+import w1Json from "../../../../dev/benchmarks/realistic/scenarios/w1_interactive.json";
+import w3Json from "../../../../dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json";
+import w4Json from "../../../../dev/benchmarks/realistic/scenarios/w4_cold_start.json";
+import b1Json from "../../../../dev/benchmarks/realistic/scenarios/b1_server_crud_sustained.json";
+import b2Json from "../../../../dev/benchmarks/realistic/scenarios/b2_server_reads_sustained.json";
+import b3Json from "../../../../dev/benchmarks/realistic/scenarios/b3_server_cold_load_large.json";
+import b4Json from "../../../../dev/benchmarks/realistic/scenarios/b4_server_fanout_updates.json";
+import b5Json from "../../../../dev/benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
+import b6Json from "../../../../dev/benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
 
 declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
@@ -519,7 +519,7 @@ async function createServerDb(
     config.jwtToken = await getTestingServerJwtForUser(sub, claims);
   }
   if (options.localFirstSecret) {
-    config.auth = { localFirstSecret: options.localFirstSecret };
+    config.secret = options.localFirstSecret;
   }
   return createDb(config);
 }

@@ -11,8 +11,12 @@ export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
 
 export interface SyncOutboxRouterOptions {
   logPrefix?: string;
-  onServerPayload(payload: Uint8Array | string, isCatalogue: boolean): void | Promise<void>;
-  onClientPayload?(payload: Uint8Array): void;
+  onServerPayload(
+    payload: Uint8Array | string,
+    isCatalogue: boolean,
+    sequence: number | null,
+  ): void | Promise<void>;
+  onClientPayload?(payload: Uint8Array, sequence: number | null): void;
   onServerPayloadError?(error: unknown): void;
   retryServerPayloads?: boolean;
 }
@@ -24,6 +28,7 @@ export type RuntimeSyncOutboxCallbackArgs =
       destinationId: string,
       payload: Uint8Array | string,
       isCatalogue: boolean,
+      sequence?: number | null,
     ]
   | [
       err: unknown,
@@ -31,6 +36,7 @@ export type RuntimeSyncOutboxCallbackArgs =
       destinationId: string,
       payload: Uint8Array | string,
       isCatalogue: boolean,
+      sequence?: number | null,
     ]
   | [
       err: unknown,
@@ -39,6 +45,7 @@ export type RuntimeSyncOutboxCallbackArgs =
         destinationId: string,
         payload: Uint8Array | string,
         isCatalogue: boolean,
+        sequence?: number | null,
       ],
     ];
 export type RuntimeSyncOutboxCallback = (...args: RuntimeSyncOutboxCallbackArgs) => void;
@@ -55,8 +62,9 @@ function normalizeOutboxCallbackArgs(args: unknown[]): {
   destinationKind: OutboxDestinationKind;
   payload: Uint8Array | string;
   isCatalogue: boolean;
+  sequence: number | null;
 } | null {
-  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue)
+  // WASM/RN-style callback: (destinationKind, destinationId, payloadJson, isCatalogue, sequence)
   if (isOutboxDestinationKind(args[0])) {
     const payload = args[2];
     if (!isOutboxPayload(payload)) return null;
@@ -64,10 +72,11 @@ function normalizeOutboxCallbackArgs(args: unknown[]): {
       destinationKind: args[0],
       payload: payload,
       isCatalogue: Boolean(args[3]),
+      sequence: typeof args[4] === "number" ? args[4] : null,
     };
   }
 
-  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue)
+  // NAPI callee-handled callback: (err, destinationKind, destinationId, payloadJson, isCatalogue, sequence)
   if (isOutboxDestinationKind(args[1])) {
     const payload = args[3];
     if (!isOutboxPayload(payload)) return null;
@@ -75,10 +84,11 @@ function normalizeOutboxCallbackArgs(args: unknown[]): {
       destinationKind: args[1],
       payload: payload,
       isCatalogue: Boolean(args[4]),
+      sequence: typeof args[5] === "number" ? args[5] : null,
     };
   }
 
-  // Real NAPI callback: (err, [destinationKind, destinationId, payloadJson, isCatalogue])
+  // Real NAPI callback: (err, [destinationKind, destinationId, payloadJson, isCatalogue, sequence])
   if (Array.isArray(args[1]) && isOutboxDestinationKind(args[1][0])) {
     const payload = args[1][2];
     if (!isOutboxPayload(payload)) return null;
@@ -86,6 +96,7 @@ function normalizeOutboxCallbackArgs(args: unknown[]): {
       destinationKind: args[1][0],
       payload,
       isCatalogue: Boolean(args[1][3]),
+      sequence: typeof args[1][4] === "number" ? args[1][4] : null,
     };
   }
 
@@ -107,13 +118,13 @@ export function createSyncOutboxRouter(
       return;
     }
 
-    const { destinationKind, payload, isCatalogue } = normalized;
+    const { destinationKind, payload, isCatalogue, sequence } = normalized;
     if (destinationKind === "client") {
-      options.onClientPayload?.(payload as Uint8Array);
+      options.onClientPayload?.(payload as Uint8Array, sequence);
       return;
     }
 
-    Promise.resolve(options.onServerPayload(payload, isCatalogue)).catch((error) => {
+    Promise.resolve(options.onServerPayload(payload, isCatalogue, sequence)).catch((error) => {
       if (options.onServerPayloadError) {
         options.onServerPayloadError(error);
         return;

@@ -28,6 +28,7 @@ pub use codecs::{
     encode_flat_history_row, encode_flat_visible_row_entry, history_row_physical_descriptor,
     visible_row_physical_descriptor,
 };
+pub(crate) use mutations::{ApplyRowBatchWithContext, apply_row_batch_with_context};
 pub use mutations::{apply_row_batch, patch_row_batch_state};
 pub(crate) use resolution::visible_row_preview_from_history_rows;
 pub use types::{

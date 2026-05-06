@@ -1,6 +1,7 @@
 use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SchemaHash;
@@ -269,29 +270,45 @@ impl LocalBatchRecord {
     }
 
     pub fn upsert_member(&mut self, member: LocalBatchMember) {
-        if let Some(existing) = self.members.iter_mut().find(|existing| {
-            existing.object_id == member.object_id
-                && existing.table_name == member.table_name
-                && existing.branch_name == member.branch_name
+        match self.members.binary_search_by(|existing| {
+            Self::compare_member_identity(existing, &member)
+                .then_with(|| Self::compare_member_version(existing, &member))
         }) {
-            *existing = member;
-        } else {
-            self.members.push(member);
+            Ok(index) => {
+                self.members[index] = member;
+            }
+            Err(index) => {
+                if index > 0
+                    && Self::compare_member_identity(&self.members[index - 1], &member)
+                        == Ordering::Equal
+                {
+                    self.members[index - 1] = member;
+                } else if index < self.members.len()
+                    && Self::compare_member_identity(&self.members[index], &member)
+                        == Ordering::Equal
+                {
+                    self.members[index] = member;
+                } else {
+                    self.members.insert(index, member);
+                }
+            }
         }
-        self.members.sort_by(|left, right| {
-            left.object_id
-                .uuid()
-                .as_bytes()
-                .cmp(right.object_id.uuid().as_bytes())
-                .then_with(|| left.table_name.cmp(&right.table_name))
-                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| {
-                    left.schema_hash
-                        .as_bytes()
-                        .cmp(right.schema_hash.as_bytes())
-                })
-                .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
-        });
+    }
+
+    fn compare_member_identity(left: &LocalBatchMember, right: &LocalBatchMember) -> Ordering {
+        left.object_id
+            .uuid()
+            .as_bytes()
+            .cmp(right.object_id.uuid().as_bytes())
+            .then_with(|| left.table_name.cmp(&right.table_name))
+            .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
+    }
+
+    fn compare_member_version(left: &LocalBatchMember, right: &LocalBatchMember) -> Ordering {
+        left.schema_hash
+            .as_bytes()
+            .cmp(right.schema_hash.as_bytes())
+            .then_with(|| left.row_digest.0.cmp(&right.row_digest.0))
     }
 
     pub fn mark_sealed(&mut self, submission: SealedBatchSubmission) {
@@ -1021,6 +1038,45 @@ mod tests {
         let decoded = LocalBatchRecord::decode_storage_row(&bytes).expect("decode record");
 
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn local_batch_record_upsert_member_keeps_members_sorted_and_replaces_row() {
+        let batch_id = BatchId::new();
+        let mut record = LocalBatchRecord::new(batch_id, BatchMode::Direct, false, None);
+        let alice_id = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
+        let bob_id = ObjectId::from_uuid(uuid::Uuid::from_u128(2));
+
+        record.upsert_member(LocalBatchMember {
+            object_id: bob_id,
+            table_name: "tasks".to_string(),
+            branch_name: BranchName::new("main"),
+            schema_hash: SchemaHash::from_bytes([2; 32]),
+            row_digest: Digest32([2; 32]),
+        });
+        record.upsert_member(LocalBatchMember {
+            object_id: alice_id,
+            table_name: "tasks".to_string(),
+            branch_name: BranchName::new("main"),
+            schema_hash: SchemaHash::from_bytes([1; 32]),
+            row_digest: Digest32([1; 32]),
+        });
+        record.upsert_member(LocalBatchMember {
+            object_id: bob_id,
+            table_name: "tasks".to_string(),
+            branch_name: BranchName::new("main"),
+            schema_hash: SchemaHash::from_bytes([3; 32]),
+            row_digest: Digest32([3; 32]),
+        });
+
+        assert_eq!(
+            record
+                .members
+                .iter()
+                .map(|member| (member.object_id, member.row_digest))
+                .collect::<Vec<_>>(),
+            vec![(alice_id, Digest32([1; 32])), (bob_id, Digest32([3; 32]))]
+        );
     }
 
     #[test]

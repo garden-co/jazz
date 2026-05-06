@@ -218,6 +218,9 @@ void uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
 int64_t
 uniffi_jazz_rn_fn_func_current_timestamp_ms(RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_func_generate_id(RustCallStatus *uniffi_out_err);
+RustBuffer uniffi_jazz_rn_fn_func_mint_anonymous_token(
+    RustBuffer seed_b64, RustBuffer audience, int64_t ttl_seconds,
+    RustCallStatus *uniffi_out_err);
 RustBuffer uniffi_jazz_rn_fn_func_mint_local_first_token(
     RustBuffer seed_b64, RustBuffer audience, int64_t ttl_seconds,
     RustCallStatus *uniffi_out_err);
@@ -339,6 +342,7 @@ void ffi_jazz_rn_rust_future_complete_void(
     /*handle*/ uint64_t handle, RustCallStatus *uniffi_out_err);
 uint16_t uniffi_jazz_rn_checksum_func_current_timestamp_ms();
 uint16_t uniffi_jazz_rn_checksum_func_generate_id();
+uint16_t uniffi_jazz_rn_checksum_func_mint_anonymous_token();
 uint16_t uniffi_jazz_rn_checksum_func_mint_local_first_token();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_acknowledge_rejected_batch();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_add_client();
@@ -3365,6 +3369,17 @@ NativeJazzRn::NativeJazzRn(
             return this->cpp_uniffi_jazz_rn_fn_func_generate_id(rt, thisVal,
                                                                 args, count);
           });
+  props["ubrn_uniffi_jazz_rn_fn_func_mint_anonymous_token"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_func_mint_anonymous_token"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_func_mint_anonymous_token(
+                rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_jazz_rn_fn_func_mint_local_first_token"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3396,6 +3411,17 @@ NativeJazzRn::NativeJazzRn(
           [this](jsi::Runtime &rt, const jsi::Value &thisVal,
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_checksum_func_generate_id(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_checksum_func_mint_anonymous_token"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_checksum_func_mint_anonymous_token(
                 rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_func_mint_local_first_token"] =
@@ -4547,6 +4573,20 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_func_generate_id(
 
   return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_func_mint_anonymous_token(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = uniffi_jazz_rn_fn_func_mint_anonymous_token(
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging<int64_t>::fromJs(rt, callInvoker, args[2]), &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_func_mint_local_first_token(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
@@ -4572,6 +4612,13 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_func_generate_id(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_func_generate_id();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_func_mint_anonymous_token(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_func_mint_anonymous_token();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }

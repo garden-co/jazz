@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_manager::SyncPayload;
 use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
 use support::{TestingClient, wait_for_query};
@@ -24,7 +25,7 @@ fn test_schema() -> jazz_tools::Schema {
 ///
 /// ```text
 /// alice ──RowBatchCreated────► server ──RowBatchNeeded────► bob
-///       ◄──RowBatchStateChanged──
+///       ◄──BatchSettlement──────
 /// ```
 #[tokio::test]
 async fn alice_write_bob_read() {
@@ -59,12 +60,13 @@ async fn alice_write_bob_read() {
     tracer.clear();
 
     alice
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("traced-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("alice creates todo");
@@ -100,13 +102,6 @@ async fn alice_write_bob_read() {
             .any(|message| message.payload.variant_name() == "BatchSettlement"),
         "alice should receive a settlement for the created row batch"
     );
-    assert!(
-        alice_received
-            .iter()
-            .any(|message| message.is_persistence_ack()),
-        "alice should receive a row-batch state update"
-    );
-
     let bob_received = tracer
         .between("server", "bob")
         .into_iter()
@@ -134,16 +129,11 @@ async fn alice_write_bob_read() {
             "bob should see a batch settlement from the server"
         );
         assert!(
-            messages
-                .iter()
-                .any(|message| message.payload.variant_name() == "QueryScopeSnapshot"),
-            "bob should see at least one query scope snapshot from the server"
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.payload.variant_name() == "QuerySettled"),
-            "bob should see query settlement from the server"
+            messages.iter().any(|message| matches!(
+                &message.payload,
+                SyncPayload::QuerySettled { scope, .. } if !scope.is_empty()
+            )),
+            "bob should see query settlement carrying the server scope"
         );
         assert!(
             messages.iter().any(|message| message.is_object_updated()),
@@ -219,9 +209,10 @@ async fn bob_updates_alice_todo() {
     tracer.clear();
 
     // Bob updates
-    bob.update(
+    bob.update_persisted(
         todo_id,
         vec![("completed".to_string(), Value::Boolean(true))],
+        DurabilityTier::EdgeServer,
     )
     .await
     .expect("bob updates todo");
@@ -254,7 +245,7 @@ async fn bob_updates_alice_todo() {
     tracer.expect_contains(
         "
         bob      -> server   RowBatchCreated
-        server   -> bob      RowBatchStateChanged
+        server   -> bob      BatchSettlement
     ",
     );
 
@@ -272,11 +263,13 @@ async fn bob_updates_alice_todo() {
         "alice should have received a row update from server"
     );
 
-    // Bob received a durability-state update from server.
+    // Bob received a batch-level durability confirmation from server.
     let bob_recv = tracer.to("bob");
     assert!(
-        bob_recv.iter().any(|m| m.is_persistence_ack()),
-        "bob should have received a row state update"
+        bob_recv
+            .iter()
+            .any(|m| m.payload.variant_name() == "BatchSettlement"),
+        "bob should have received a batch settlement"
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -308,12 +301,13 @@ async fn single_writer_flow() {
     tracer.clear();
 
     alice
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("solo-todo".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create todo");
@@ -321,10 +315,10 @@ async fn single_writer_flow() {
     tracer.wait_until_settled(Duration::from_secs(10)).await;
 
     insta::assert_snapshot!(tracer.tally(), @"
-    alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1)
-    alice    => server  : RowBatchCreated (1)
-    server   -> alice   : BatchSettlement (1), RowBatchStateChanged (2)
-    server   => alice   : BatchSettlement (1), RowBatchStateChanged (2)
+    alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1), SealBatch (1)
+    alice    => server  : RowBatchCreated (1), SealBatch (1)
+    server   -> alice   : BatchSettlement (1)
+    server   => alice   : BatchSettlement (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -357,12 +351,13 @@ async fn named_object_trace() {
     tracer.clear();
 
     let (todo_id, _) = alice
-        .create(
+        .create_persisted(
             "todos",
             HashMap::from([
                 ("title".to_string(), Value::Text("buy milk".to_string())),
                 ("completed".to_string(), Value::Boolean(false)),
             ]),
+            DurabilityTier::EdgeServer,
         )
         .await
         .expect("create todo");
@@ -376,12 +371,10 @@ async fn named_object_trace() {
     alice    -> server    QueryUnsubscription  query:0
     alice    => server    RowBatchCreated      created row:my-todo branch:main batch:B1
     alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
+    alice    => server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
+    alice    -> server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
     server   => alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
     server   -> alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
-    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
-    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(EdgeServer)
-    server   => alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
-    server   -> alice     RowBatchStateChanged state row:my-todo branch:main batch:B1 state:None tier:Some(GlobalServer)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import styles from "./DbConfigForm.module.css";
 
 export interface DbConfigFormValues {
+  name: string;
   serverUrl: string;
   appId: string;
   adminSecret: string;
@@ -14,15 +15,18 @@ interface DbConfigFormProps {
   onSubmit: (values: DbConfigFormValues, hashes: string[]) => void;
   initialValues?: Partial<DbConfigFormValues>;
   mode?: "connect" | "edit";
-  onReset?: () => void;
+  title?: string;
+  onCancel?: () => void;
 }
 
 export function DbConfigForm({
   onSubmit,
   initialValues,
   mode = "connect",
-  onReset,
+  title,
+  onCancel,
 }: DbConfigFormProps) {
+  const [name, setName] = useState(initialValues?.name ?? "");
   const [serverUrl, setServerUrl] = useState(initialValues?.serverUrl ?? "");
   const [appId, setAppId] = useState(initialValues?.appId ?? "");
   const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
@@ -32,6 +36,7 @@ export function DbConfigForm({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    setName(initialValues?.name ?? "");
     setServerUrl(initialValues?.serverUrl ?? "");
     setAppId(initialValues?.appId ?? "");
     setAdminSecret(initialValues?.adminSecret ?? "");
@@ -47,6 +52,7 @@ export function DbConfigForm({
     setIsSubmitting(true);
 
     const values: DbConfigFormValues = {
+      name: name.trim(),
       serverUrl: serverUrl.trim(),
       appId: appId.trim(),
       adminSecret: adminSecret.trim(),
@@ -71,8 +77,18 @@ export function DbConfigForm({
   return (
     <form onSubmit={handleSubmit} className={styles.form}>
       <h2 className={styles.title}>
-        {mode === "edit" ? "Edit connection" : "Connect to Jazz server"}
+        {title ?? (mode === "edit" ? "Edit connection" : "Connect to Jazz server")}
       </h2>
+      <label className={styles.field}>
+        Name
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Local dev"
+          className={styles.input}
+        />
+      </label>
       <label className={styles.field}>
         Server URL
         <input
@@ -133,9 +149,9 @@ export function DbConfigForm({
         <button type="submit" disabled={isSubmitting} className={styles.submitButton}>
           {isSubmitting ? "Fetching schemas…" : mode === "edit" ? "Save changes" : "Connect"}
         </button>
-        {onReset ? (
-          <button type="button" onClick={onReset} className={styles.resetButton}>
-            Reset connection
+        {onCancel ? (
+          <button type="button" onClick={onCancel} className={styles.resetButton}>
+            Cancel
           </button>
         ) : null}
       </div>
