@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { Row } from "./client.js";
+import { type MutationErrorEvent, type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
@@ -546,6 +547,88 @@ describe("NAPI integration", () => {
         },
         { timeout: 20_000 },
       );
+    } finally {
+      if (context) {
+        await context.shutdown();
+      }
+      await settleAsyncSyncWork();
+      await cleanupTempRuntimeData(runtimeData);
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("can update an optional row field to null", async () => {
+    const appId = randomUUID();
+    const backendSecret = "napi-null-update-secret";
+    const adminSecret = "napi-null-update-admin-secret";
+    let runtimeData: TempRuntimeData | null = null;
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret,
+      adminSecret,
+    });
+    let context: {
+      asBackend(): Db;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        env: "test",
+        userBranch: "main",
+      });
+      const todoServerProject = await loadTodoServerProject();
+      const todoServerSchema = todoServerProject.wasmSchema;
+      const policyTodosTable = makePolicyTodosTable(todoServerSchema);
+
+      runtimeData = await createTempRuntimeData("jazz-napi-null-update-runtime-");
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: todoServerSchema },
+        permissions: todoServerProject.permissions ?? {},
+        driver: { type: "persistent", dataPath: runtimeData.dataPath },
+        serverUrl: server.url,
+        backendSecret,
+        env: "test",
+        userBranch: "main",
+      });
+      await settleAsyncSyncWork();
+
+      const aliceDb = context.forSession({
+        user_id: "alice",
+        claims: { role: "editor", team: "alpha" },
+      });
+
+      const createdTodo = await aliceDb
+        .insert(policyTodosTable, {
+          title: "nullable-description-repro",
+          done: false,
+          description: "server-original",
+          owner_id: "alice",
+        })
+        .wait({ tier: "edge" });
+
+      const nullUpdate = aliceDb.update(policyTodosTable, createdTodo.id, {
+        description: null,
+      } as unknown as Partial<PolicyTodoInit>);
+      await nullUpdate.wait({ tier: "local" });
+
+      const rowAfterUpdate = await aliceDb.one(
+        makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id),
+        {
+          tier: "local",
+          localUpdates: "immediate",
+        },
+      );
+      expect(rowAfterUpdate).not.toBeNull();
+      expect(rowAfterUpdate?.description ?? null).toBeNull();
     } finally {
       if (context) {
         await context.shutdown();
