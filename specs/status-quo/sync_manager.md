@@ -75,8 +75,8 @@ The sync payloads now speak in row-history and query terms:
 - `RowBatchCreated`
 - `RowBatchNeeded`
 - `SealBatch`
-- `BatchSettlement`
-- `BatchSettlementNeeded`
+- `BatchFate`
+- `BatchFateNeeded`
 - `QuerySubscription`
 - `QueryUnsubscription`
 - `QueryScopeSnapshot`
@@ -90,7 +90,9 @@ That payload set matches the table-first runtime model:
 - initial query fill can explicitly ask for needed row batch entries
 - direct and transactional batches are explicitly sealed upstream
 - replayable whole-batch fate travels separately from concrete row entries
-- durability, visibility acknowledgement, and rejection travel as `BatchSettlement`
+- durability and rejection travel as `BatchFate`
+- row/query visibility is derived from row delivery, query scopes, and local or sealed batch
+  membership, not from fate payload members
 - schemas and lenses travel as catalogue entries
 - permissions bundles and permissions heads travel as catalogue entries
 
@@ -121,9 +123,9 @@ and SyncManager paths used by other runtime links.
 3. Query subscriptions settle locally.
 4. The writer seals the direct batch, sending `SealBatch` upstream. Simple write APIs do this immediately.
 5. The Sync Manager queues `RowBatchCreated` for peers and servers.
-6. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
+6. Replayable durability eventually converges through `BatchFate::DurableDirect`.
 7. If authority rejects any member write in that direct batch, the whole batch resolves as
-   `BatchSettlement::Rejected`; independent write fate requires independent batches.
+   `BatchFate::Rejected`; independent write fate requires independent batches.
 
 ### Transactional write
 
@@ -131,7 +133,7 @@ and SyncManager paths used by other runtime links.
 2. Ordinary readers ignore those `StagingPending` rows.
 3. The writer explicitly seals the batch, sending `SealBatch` upstream.
 4. The authority decides replayable batch fate.
-5. Accepted output becomes visible and is replayable as `BatchSettlement::AcceptedTransaction`.
+5. Accepted output becomes visible and is replayable as `BatchFate::AcceptedTransaction`.
 6. Rejection or missing authority truth is replayable as `Rejected` or `Missing`.
 
 ### New query subscription
@@ -140,15 +142,19 @@ and SyncManager paths used by other runtime links.
 2. The Sync Manager records that desired state.
 3. The Query Manager compiles and settles the server-side query.
 4. For each matching object/branch, initial replay sends the current visible row as `RowBatchNeeded`.
-5. If that current row has replayable batch fate, the current `BatchSettlement` is replayed too.
+5. If that current row has replayable batch fate, the current `BatchFate` is replayed too.
 6. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
 
 ### Later visibility/fate change
 
 When a row already known to a peer becomes durable, accepted, or rejected, the runtime sends the
-batch settlement that proves the new fate. Successful settlements include `visible_members`, which
-lets receivers resolve row-level waiters and mark affected subscriptions for recompute without a
-separate row-state side channel.
+batch fate that proves the new whole-batch outcome. Successful fate applies to every known row with
+that `batch_id`; receivers use their own delivered row batches, local batch records, sealed
+submissions, and `QuerySettled.scope` to decide which concrete rows or subscriptions are affected.
+
+The legacy `visible_members` field is deprecated. It may be read for compatibility
+with old storage or old sync peers, but new logic should not need to decode or scan it on a
+per-row read path.
 
 The row-level identity for local interest remains `RowBatchKey { row_id, branch_name, batch_id }`,
 but active sync does not send a row-state-change payload for it.

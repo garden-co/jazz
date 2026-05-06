@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use smallvec::smallvec;
 
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::BatchFate;
 use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
@@ -170,9 +170,9 @@ fn client_write_rejection_reason(
             SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
                 return Some(reason.clone());
             }
-            SyncPayload::BatchSettlement {
-                settlement:
-                    BatchSettlement::Rejected {
+            SyncPayload::BatchFate {
+                fate:
+                    BatchFate::Rejected {
                         batch_id: rejected_batch_id,
                         reason,
                         ..

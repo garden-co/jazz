@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::BatchFate;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
@@ -1075,13 +1075,26 @@ impl QueryManager {
         }
     }
 
-    pub(crate) fn mark_subscriptions_visibility_recompute_for_settlement_members(&mut self) {
-        for subscription in self.subscriptions.values_mut() {
-            subscription.needs_visibility_recompute = true;
-            subscription.graph.mark_all_dirty();
+    fn mark_visible_rows_updated_for_batch<H: Storage>(&mut self, storage: &H, batch_id: BatchId) {
+        let mut rows = Vec::new();
+        for subscription in self.subscriptions.values() {
+            let table = subscription.graph.table.as_str().to_string();
+            for branch in &subscription.branches {
+                let Ok(visible_rows) = storage.scan_visible_region(&table, branch.as_str()) else {
+                    continue;
+                };
+                rows.extend(
+                    visible_rows
+                        .into_iter()
+                        .filter(|row| row.batch_id == batch_id)
+                        .map(|row| (table.clone(), row.row_id)),
+                );
+            }
         }
-        for subscription in self.server_subscriptions.values_mut() {
-            subscription.graph.mark_all_dirty();
+        rows.sort();
+        rows.dedup();
+        for (table, row_id) in rows {
+            self.mark_local_row_updated_in_subscriptions(&table, row_id);
         }
     }
 
@@ -1146,18 +1159,17 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
-        let batch_settlements = self.sync_manager.pending_batch_settlements().to_vec();
-        for settlement in &batch_settlements {
-            if !settlement.visible_members().is_empty() {
-                self.mark_subscriptions_visibility_recompute_for_settlement_members();
-            }
+        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
+        for settlement in &batch_fates {
             if let Some(confirmed_tier) = settlement.confirmed_tier() {
                 self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
             }
-            for member in settlement.visible_members() {
-                if let Ok(Some(locator)) = storage.load_row_locator(member.object_id) {
-                    self.mark_row_updated_in_subscriptions(
-                        locator.table.as_str(),
+            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
+            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
+            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
+                for member in record.members {
+                    self.mark_local_row_updated_in_subscriptions(
+                        member.table_name.as_str(),
                         member.object_id,
                     );
                 }
@@ -2403,14 +2415,14 @@ impl QueryManager {
 
     fn transactional_batch_complete_for_query_scope(
         storage: &dyn Storage,
-        settlement_cache: &mut HashMap<BatchId, Option<BatchSettlement>>,
+        settlement_cache: &mut HashMap<BatchId, Option<BatchFate>>,
         batch_id: BatchId,
         local_scope: &HashSet<(ObjectId, BranchName)>,
         query_scope: &HashSet<(ObjectId, BranchName)>,
     ) -> bool {
         let settlement = settlement_cache
             .entry(batch_id)
-            .or_insert_with(|| match storage.load_authoritative_batch_settlement(batch_id) {
+            .or_insert_with(|| match storage.load_authoritative_batch_fate(batch_id) {
                 Ok(settlement) => settlement,
                 Err(error) => {
                     tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
@@ -2418,15 +2430,8 @@ impl QueryManager {
                 }
             });
 
-        match settlement {
-            Some(BatchSettlement::AcceptedTransaction {
-                visible_members, ..
-            }) => visible_members
-                .iter()
-                .filter(|member| query_scope.contains(&(member.object_id, member.branch_name)))
-                .all(|member| local_scope.contains(&(member.object_id, member.branch_name))),
-            _ => true,
-        }
+        !matches!(settlement, Some(BatchFate::AcceptedTransaction { .. }))
+            || query_scope.is_subset(local_scope)
     }
 
     fn filter_transaction_visible_tuples(
@@ -2443,7 +2448,7 @@ impl QueryManager {
         let mut query_scope = local_scope.clone();
         query_scope.extend(self.sync_manager.remote_query_scope(query_id));
 
-        let mut settlement_cache: HashMap<BatchId, Option<BatchSettlement>> = HashMap::new();
+        let mut settlement_cache: HashMap<BatchId, Option<BatchFate>> = HashMap::new();
 
         tuples
             .into_iter()

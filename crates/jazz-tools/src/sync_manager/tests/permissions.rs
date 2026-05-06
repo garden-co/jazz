@@ -50,8 +50,7 @@ fn row_batch_created_from_user_with_exact_history_match_skips_permission_check()
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == batch_id
         )),
@@ -182,8 +181,7 @@ fn approved_user_row_retries_waiting_sealed_batch() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == batch_id
         )),
@@ -241,8 +239,8 @@ fn rejecting_one_user_write_rejects_the_whole_direct_batch() {
     sm.reject_permission_check(&mut io, pending.remove(0), "bob denied".to_string());
 
     assert!(matches!(
-        io.load_authoritative_batch_settlement(batch_id).unwrap(),
-        Some(BatchSettlement::Rejected { batch_id: settled, .. }) if settled == batch_id
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::Rejected { batch_id: settled, .. }) if settled == batch_id
     ));
     assert_eq!(
         io.load_history_row_batch("users", "main", alice_id, batch_id)
@@ -328,8 +326,7 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == older_row.batch_id
         )),

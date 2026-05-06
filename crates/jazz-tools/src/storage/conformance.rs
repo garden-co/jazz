@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::ops::Bound;
 
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, CapturedFrontierMember, LocalBatchMember, LocalBatchRecord,
-    SealedBatchMember, SealedBatchSubmission, VisibleBatchMember,
+    BatchFate, BatchMode, CapturedFrontierMember, LocalBatchMember, LocalBatchRecord,
+    SealedBatchMember, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -921,14 +921,9 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
         batch_id,
         BatchMode::Direct,
         true,
-        Some(BatchSettlement::DurableDirect {
+        Some(BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![VisibleBatchMember {
-                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(91)),
-                branch_name: crate::object::BranchName::new("main"),
-                batch_id,
-            }],
         }),
     );
     record.upsert_member(LocalBatchMember {
@@ -992,7 +987,7 @@ pub fn test_local_batch_record_scan_returns_sorted_entries(factory: &dyn Fn() ->
             low,
             BatchMode::Transactional,
             false,
-            Some(BatchSettlement::Missing { batch_id: low }),
+            Some(BatchFate::Missing { batch_id: low }),
         ))
         .unwrap();
 
@@ -1009,7 +1004,7 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
         batch_id,
         BatchMode::Transactional,
         false,
-        Some(BatchSettlement::Rejected {
+        Some(BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
             reason: "writer lacks publish rights".to_string(),
@@ -1026,23 +1021,21 @@ pub fn test_local_batch_record_delete_removes_record(factory: &dyn Fn() -> Box<d
     assert_eq!(storage.load_local_batch_record(batch_id).unwrap(), None);
 }
 
-pub fn test_authoritative_batch_settlement_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_authoritative_batch_fate_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let batch_id = crate::row_histories::BatchId::new();
-    let settlement = BatchSettlement::Rejected {
+    let settlement = BatchFate::Rejected {
         batch_id,
         code: "permission_denied".to_string(),
         reason: "writer lacks publish rights".to_string(),
     };
 
     storage
-        .upsert_authoritative_batch_settlement(&settlement)
+        .upsert_authoritative_batch_fate(&settlement)
         .unwrap();
 
     assert_eq!(
-        storage
-            .load_authoritative_batch_settlement(batch_id)
-            .unwrap(),
+        storage.load_authoritative_batch_fate(batch_id).unwrap(),
         Some(settlement)
     );
 }
@@ -1218,14 +1211,9 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
         batch_id,
         BatchMode::Direct,
         true,
-        Some(BatchSettlement::DurableDirect {
+        Some(BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![VisibleBatchMember {
-                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(111)),
-                branch_name: crate::object::BranchName::new("main"),
-                batch_id,
-            }],
         }),
     );
     record.sealed_submission = Some(SealedBatchSubmission::new(
@@ -1270,13 +1258,11 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
     }
 }
 
-pub fn test_authoritative_batch_settlement_survives_close_reopen(
-    factory: &PersistentStorageFactory,
-) {
+pub fn test_authoritative_batch_fate_survives_close_reopen(factory: &PersistentStorageFactory) {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path();
     let batch_id = crate::row_histories::BatchId::new();
-    let settlement = BatchSettlement::Rejected {
+    let settlement = BatchFate::Rejected {
         batch_id,
         code: "session_required".to_string(),
         reason: "transaction needs an authenticated session".to_string(),
@@ -1285,7 +1271,7 @@ pub fn test_authoritative_batch_settlement_survives_close_reopen(
     {
         let mut storage = factory(path);
         storage
-            .upsert_authoritative_batch_settlement(&settlement)
+            .upsert_authoritative_batch_fate(&settlement)
             .unwrap();
         storage.flush();
         storage.close().unwrap();
@@ -1294,9 +1280,7 @@ pub fn test_authoritative_batch_settlement_survives_close_reopen(
     {
         let storage = factory(path);
         assert_eq!(
-            storage
-                .load_authoritative_batch_settlement(batch_id)
-                .unwrap(),
+            storage.load_authoritative_batch_fate(batch_id).unwrap(),
             Some(settlement)
         );
     }
@@ -1611,8 +1595,8 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn authoritative_batch_settlement_round_trip() {
-                conformance::test_authoritative_batch_settlement_round_trip(&$factory);
+            fn authoritative_batch_fate_round_trip() {
+                conformance::test_authoritative_batch_fate_round_trip(&$factory);
             }
 
             #[test]
@@ -1663,10 +1647,8 @@ macro_rules! storage_conformance_tests_persistent {
             }
 
             #[test]
-            fn authoritative_batch_settlement_survives_close_reopen() {
-                conformance::test_authoritative_batch_settlement_survives_close_reopen(
-                    &$reopen_factory,
-                );
+            fn authoritative_batch_fate_survives_close_reopen() {
+                conformance::test_authoritative_batch_fate_survives_close_reopen(&$reopen_factory);
             }
 
             #[test]
