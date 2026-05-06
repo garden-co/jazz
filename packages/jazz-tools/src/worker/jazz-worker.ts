@@ -620,6 +620,9 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     case "reconnect-upstream": {
       if (runtime && currentWsUrl) {
         performUpstreamConnect(runtime, post, currentWsUrl, JSON.stringify(currentAuth));
+        runtime.removeServer?.();
+        runtime.addServer?.();
+        runtime.batchedTick?.();
       }
       break;
     }
