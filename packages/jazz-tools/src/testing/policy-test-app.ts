@@ -1,5 +1,6 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { DbTransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import {
   fetchPermissionsHead,
@@ -9,6 +10,55 @@ import {
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./local-jazz-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
+type ExpectLike = (value: unknown) => {
+  not: {
+    toThrow(expected?: unknown): void;
+  };
+  toThrow(expected?: unknown): void;
+};
+type TestDbMethodCallback = (db: DbTransactionScope) => unknown;
+
+/**
+ * Db used for testing permissions.
+ * Supports all {@link Db} operations plus the {@link TestDb.expectAllowed} and {@link TestDb.expectDenied}
+ * helpers to test write operations without producing side effects on the test database.
+ */
+export type TestDb = Db & {
+  /**
+   * Assert that the callback does not throw a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
+  expectAllowed(callback: TestDbMethodCallback): void;
+
+  /**
+   * Assert that the callback throws a policy error.
+   * Write operations performed inside the callback are not persisted.
+   */
+  expectDenied(callback: TestDbMethodCallback): void;
+};
+
+function asTestDb(db: Db, expect: ExpectLike): TestDb {
+  const testDb = db as TestDb;
+
+  Object.defineProperties(testDb, {
+    expectAllowed: {
+      value: (callback: TestDbMethodCallback) => {
+        const tx = db.beginTransaction();
+        expect(() => callback(tx)).not.toThrow();
+        tx.rollback();
+      },
+    },
+    expectDenied: {
+      value: (callback: TestDbMethodCallback) => {
+        const tx = db.beginTransaction();
+        expect(() => callback(tx)).toThrow('WriteError("policy denied');
+        tx.rollback();
+      },
+    },
+  });
+
+  return testDb;
+}
 
 /**
  * A test app for permissions tests. Simplifies setting up a test app and provides methods
@@ -16,7 +66,7 @@ type PolicyTestAppSchema = { wasmSchema: WasmSchema };
  */
 export class PolicyTestApp {
   constructor(
-    private readonly expect: Function,
+    private readonly expect: ExpectLike,
     private readonly app: any,
     private readonly jazzContext: JazzContext,
     private readonly server: LocalJazzServerHandle,
@@ -34,24 +84,9 @@ export class PolicyTestApp {
   /**
    * Get a database client for the given session.
    */
-  as(session: Session): Db {
-    return this.jazzContext.forSession(session, this.app);
-  }
-
-  /**
-   * Assert that the callback does not throw a policy error.
-   * TODO: rollback mutations performed as part of the callback (once we support transactions).
-   */
-  expectAllowed(callback: () => unknown): void {
-    this.expect(callback).not.toThrow();
-  }
-
-  /**
-   * Assert that the callback throws a policy error.
-   * TODO: rollback mutations performed as part of the callback (once we support transactions).
-   */
-  expectDenied(callback: () => unknown): void {
-    this.expect(callback).toThrow('WriteError("policy denied');
+  as(session: Session): TestDb {
+    const db = this.jazzContext.forSession(session, this.app);
+    return asTestDb(db, this.expect);
   }
 
   /**
@@ -74,7 +109,7 @@ export class PolicyTestApp {
 export async function createPolicyTestApp(
   app: PolicyTestAppSchema,
   permissions: CompiledPermissions,
-  expectFn: Function,
+  expectFn: ExpectLike,
 ): Promise<PolicyTestApp> {
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
