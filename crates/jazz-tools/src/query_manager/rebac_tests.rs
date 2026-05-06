@@ -157,8 +157,6 @@ fn row_batch_id_for_commit(
 fn client_write_rejection_reason(
     outbox: &[crate::sync_manager::OutboxEntry],
     client_id: ClientId,
-    row_id: ObjectId,
-    branch: &str,
     batch_id: BatchId,
 ) -> Option<String> {
     let mut settlement_reason = None;
@@ -186,18 +184,15 @@ fn client_write_rejection_reason(
         }
     }
 
-    let _ = (row_id, branch);
     settlement_reason
 }
 
 fn client_write_was_rejected(
     outbox: &[crate::sync_manager::OutboxEntry],
     client_id: ClientId,
-    row_id: ObjectId,
-    branch: &str,
     batch_id: BatchId,
 ) -> bool {
-    client_write_rejection_reason(outbox, client_id, row_id, branch, batch_id).is_some()
+    client_write_rejection_reason(outbox, client_id, batch_id).is_some()
 }
 
 fn add_row_commit(
@@ -688,8 +683,6 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        grand_id,
-        &branch,
         row_batch_id_for_commit(grand_id, &branch, &update_commit),
     );
 
