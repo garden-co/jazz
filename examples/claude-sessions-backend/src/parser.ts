@@ -111,12 +111,13 @@ export function parseClaudeTranscript(filePath: string): ClaudeSessionSummary | 
 
     const type = entry.type;
     if (type === "user") {
-      // Skip tool-result-only user entries for preview purposes
+      userCount += 1;
+      // Skip tool-result-only user entries for preview purposes, but still
+      // count them as transcript turns so follow cursors match Claude JSONL.
       const toolUseResult = entry.toolUseResult;
       if (toolUseResult !== undefined) continue;
       const text = extractText(entry.message).trim();
       if (!text) continue;
-      userCount += 1;
       if (firstUserText === null) firstUserText = text;
       latestUserText = text;
     } else if (type === "assistant") {

@@ -92,7 +92,7 @@ describe("parseClaudeTranscript", () => {
     );
 
     const summary = parseClaudeTranscript(file);
-    expect(summary?.userTurnCount).toBe(1);
+    expect(summary?.userTurnCount).toBe(2);
     expect(summary?.latestUserMessage).toBe("real prompt");
   });
 
