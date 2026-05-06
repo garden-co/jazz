@@ -38,6 +38,10 @@ import {
   type UpsertJAgentDefinitionInput,
 } from "./store.js";
 import {
+  buildProjectContextPacket,
+  getProjectContextPacketSection,
+} from "./context-packet.js";
+import {
   buildSessionProjectionFromRolloutFile,
   type SyncedProjectionEvent,
   syncCodexRollouts,
@@ -137,8 +141,17 @@ interface SessionServiceRequest {
   runId?: string;
   completedAfter?: string;
   limit?: number;
+  activeLimit?: number;
+  contextLimit?: number;
+  recentSessionLimit?: number;
+  turnLimitPerSession?: number;
+  streamCursorLimit?: number;
+  maxPreviewChars?: number;
+  since?: string;
+  nodeId?: string;
   latest?: boolean;
   includePayload?: boolean;
+  includeSectionBodies?: boolean;
   payload?: unknown;
 }
 
@@ -2195,6 +2208,41 @@ async function dispatchSessionServiceRequest(
       });
       return entries.map(toProjectContextEntryRow);
     }
+    case "context-packet": {
+      if (!request.projectRoot) {
+        throw new Error("context-packet requires projectRoot");
+      }
+      return buildProjectContextPacket(store, {
+        projectRoot: expandHomePath(request.projectRoot),
+        since: request.since,
+        activeLimit: request.activeLimit,
+        contextLimit: request.contextLimit,
+        recentSessionLimit: request.recentSessionLimit,
+        turnLimitPerSession: request.turnLimitPerSession,
+        streamCursorLimit: request.streamCursorLimit,
+        maxPreviewChars: request.maxPreviewChars,
+        includeSectionBodies: request.includeSectionBodies,
+      });
+    }
+    case "context-packet-section": {
+      if (!request.projectRoot) {
+        throw new Error("context-packet-section requires projectRoot");
+      }
+      if (!request.nodeId) {
+        throw new Error("context-packet-section requires nodeId");
+      }
+      return getProjectContextPacketSection(store, {
+        projectRoot: expandHomePath(request.projectRoot),
+        nodeId: request.nodeId,
+        since: request.since,
+        activeLimit: request.activeLimit,
+        contextLimit: request.contextLimit,
+        recentSessionLimit: request.recentSessionLimit,
+        turnLimitPerSession: request.turnLimitPerSession,
+        streamCursorLimit: request.streamCursorLimit,
+        maxPreviewChars: request.maxPreviewChars,
+      });
+    }
     case "list-rollout-events": {
       if (!request.sessionId && !request.absolutePath) {
         throw new Error("list-rollout-events requires sessionId or absolutePath");
@@ -3972,6 +4020,36 @@ async function main(): Promise<void> {
         limit,
       });
       console.log(JSON.stringify(entries.map(toProjectContextEntryRow)));
+      return;
+    }
+
+    if (command === "context-packet") {
+      const projectRoot = readFlag("--project-root");
+      if (!projectRoot) {
+        throw new Error("context-packet requires --project-root");
+      }
+      const nodeId = readFlag("--node-id");
+      const options = {
+        projectRoot: expandHomePath(projectRoot),
+        since: readFlag("--since"),
+        activeLimit: readOptionalNumberFlag("--active-limit"),
+        contextLimit: readOptionalNumberFlag("--context-limit"),
+        recentSessionLimit: readOptionalNumberFlag("--recent-session-limit"),
+        turnLimitPerSession: readOptionalNumberFlag("--turn-limit-per-session"),
+        streamCursorLimit: readOptionalNumberFlag("--stream-cursor-limit"),
+        maxPreviewChars: readOptionalNumberFlag("--max-preview-chars"),
+      };
+      if (nodeId) {
+        console.log(JSON.stringify(await getProjectContextPacketSection(store, {
+          ...options,
+          nodeId,
+        })));
+        return;
+      }
+      console.log(JSON.stringify(await buildProjectContextPacket(store, {
+        ...options,
+        includeSectionBodies: readBooleanFlag("--include-section-bodies", false),
+      })));
       return;
     }
 

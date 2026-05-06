@@ -115,6 +115,27 @@ node examples/codex-sessions-backend/dist/src/cli.js get-run-summary \
   --data-path ./examples/codex-sessions-backend/codex-sessions.db
 ```
 
+Project context packets:
+
+```sh
+node examples/codex-sessions-backend/dist/src/cli.js context-packet \
+  --project-root ~/code/prom \
+  --since 8h \
+  --data-path ./examples/codex-sessions-backend/codex-sessions.db
+
+node examples/codex-sessions-backend/dist/src/cli.js context-packet \
+  --project-root ~/code/prom \
+  --since 8h \
+  --node-id 0003 \
+  --data-path ./examples/codex-sessions-backend/codex-sessions.db
+```
+
+The packet follows the useful PageIndex pattern without adding a hot-path LLM
+dependency: return a compact document structure first, then let the caller ask
+for a precise section by node id. Jazz rows remain the source of truth. Packet
+cursors include stream-event sequences and rollout line counts so repeated
+tailing can fetch deltas instead of replaying prior transcript text.
+
 Write-side controller commands:
 
 ```sh

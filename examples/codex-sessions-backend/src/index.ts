@@ -41,3 +41,18 @@ export {
   type SyncCodexRolloutsOptions,
   type WatchCodexRolloutsOptions,
 } from "./projector.js";
+export {
+  buildProjectContextPacket,
+  getProjectContextPacketSection,
+  parseSinceDuration,
+  type BuildProjectContextPacketOptions,
+  type GetProjectContextPacketSectionOptions,
+  type ProjectContextCursors,
+  type ProjectContextDocument,
+  type ProjectContextIndexNode,
+  type ProjectContextPacket,
+  type ProjectContextPacketItem,
+  type ProjectContextPacketSection,
+  type ProjectContextRolloutCursor,
+  type ProjectContextStreamCursor,
+} from "./context-packet.js";
