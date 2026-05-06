@@ -27,7 +27,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
-    query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
+    query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
@@ -91,9 +91,7 @@ describe("JazzRnRuntimeAdapter", () => {
           resolveBinding = resolve;
         }),
     );
-    const binding = createBinding({
-      query: queryMock as unknown as JazzRnRuntimeBinding["query"],
-    });
+    const binding = createBinding({ query: queryMock });
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
     let otherJsDidRun = false;
@@ -326,9 +324,7 @@ describe("JazzRnRuntimeAdapter", () => {
       insert: vi.fn(() => {
         throw runtimeError;
       }),
-      query: vi.fn(() => {
-        throw runtimeError;
-      }),
+      query: vi.fn(() => Promise.reject(runtimeError)),
       update: vi.fn(() => {
         throw runtimeError;
       }),
