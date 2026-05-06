@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
+import { APP_ID, ADMIN_SECRET, EDGE_SERVER_URL, CORE_SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,16 @@ function todoTitles(el: HTMLDivElement): Array<string | null> {
 
 function hasTodoTitle(el: HTMLDivElement, title: string): boolean {
   return todoTitles(el).includes(title);
+}
+
+async function addTodo(el: HTMLDivElement, title: string): Promise<void> {
+  const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
+  const form = input.closest("form")!;
+
+  await act(async () => {
+    typeInto(input, title);
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -274,24 +284,21 @@ describe("React Todo App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 7. Server sync between two app instances
+  // 7. Core-edge sync between two app instances
   // -------------------------------------------------------------------------
 
-  it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-
-    // Mount two independent app instances connected to the same server
-    const el1 = await mountApp({
+  it("syncs todos between app instances connected to the edge and core", async () => {
+    const edgeApp = await mountApp({
       appId: APP_ID,
-      driver: { type: "persistent", dbName: uniqueDbName("sync-a") },
-      serverUrl,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-c") },
+      serverUrl: EDGE_SERVER_URL,
       adminSecret: ADMIN_SECRET,
       auth: { localFirstSecret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
     });
-    const el2 = await mountApp({
+    const coreApp = await mountApp({
       appId: APP_ID,
-      driver: { type: "persistent", dbName: uniqueDbName("sync-b") },
-      serverUrl,
+      driver: { type: "persistent", dbName: uniqueDbName("sync-d") },
+      serverUrl: CORE_SERVER_URL,
       adminSecret: ADMIN_SECRET,
       auth: { localFirstSecret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
     });
@@ -299,42 +306,49 @@ describe("React Todo App E2E", () => {
     // Let both app instances finish server/event-stream setup before mutating.
     await new Promise((r) => setTimeout(r, 750));
 
-    // Add a todo in app 1 via the form
-    const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form1 = input1.closest("form")!;
+    await addTodo(edgeApp, "Edge to core todo");
 
-    await act(async () => {
-      typeInto(input1, "Synced todo");
-      form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-
-    await waitFor(() => hasTodoTitle(el1, "Synced todo"), 3000, "Todo should appear in app 1");
-
-    // Wait for it to appear in app 2 via server sync
     await waitFor(
-      () => hasTodoTitle(el2, "Synced todo"),
+      () => hasTodoTitle(edgeApp, "Edge to core todo"),
+      3000,
+      "Todo should appear on edge app",
+    );
+
+    await waitFor(
+      () => hasTodoTitle(coreApp, "Edge to core todo"),
       20000,
-      "Todo should sync to app 2 through the server",
+      "Edge todo should sync to the core app",
+    );
+
+    await addTodo(coreApp, "Core to edge todo");
+
+    await waitFor(
+      () => hasTodoTitle(coreApp, "Core to edge todo"),
+      3000,
+      "Todo should appear on core app",
+    );
+
+    await waitFor(
+      () => hasTodoTitle(edgeApp, "Core to edge todo"),
+      20000,
+      "Core todo should sync to the edge app",
     );
   });
 
   // -------------------------------------------------------------------------
-  // 8. Server sync between two app instances with memory driver
+  // 8. Core-edge sync between two app instances with memory driver
   // -------------------------------------------------------------------------
 
-  it("syncs a todo between two app instances through the server without local persistence", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-
-    // Mount two independent app instances connected to the same server
-    const el1 = await mountApp({
+  it("syncs a todo between core and edge app instances without local persistence", async () => {
+    const edgeApp = await mountApp({
       appId: APP_ID,
-      serverUrl,
+      serverUrl: EDGE_SERVER_URL,
       auth: { localFirstSecret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
       driver: { type: "memory" },
     });
-    const el2 = await mountApp({
+    const coreApp = await mountApp({
       appId: APP_ID,
-      serverUrl,
+      serverUrl: CORE_SERVER_URL,
       auth: { localFirstSecret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
       driver: { type: "memory" },
     });
@@ -342,32 +356,18 @@ describe("React Todo App E2E", () => {
     // Let both app instances finish server/event-stream setup before mutating.
     await new Promise((r) => setTimeout(r, 750));
 
-    // Add a todo in app 1 via the form
-    const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form1 = input1.closest("form")!;
-
-    await act(async () => {
-      typeInto(input1, "Inmemory todo");
-      form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
+    await addTodo(edgeApp, "Inmemory todo");
 
     await waitFor(
-      () =>
-        Array.from(el1.querySelectorAll("#todo-list li span").values()).some(
-          (el) => el.textContent === "Inmemory todo",
-        ),
+      () => hasTodoTitle(edgeApp, "Inmemory todo"),
       3000,
-      "Todo should appear in app 1",
+      "Todo should appear in edge app",
     );
 
-    // Wait for it to appear in app 2 via server sync
     await waitFor(
-      () =>
-        Array.from(el2.querySelectorAll("#todo-list li span").values()).some(
-          (el) => el.textContent === "Inmemory todo",
-        ),
+      () => hasTodoTitle(coreApp, "Inmemory todo"),
       20000,
-      "Todo should sync to app 2 through the server",
+      "Todo should sync from edge app to core app",
     );
   });
 });

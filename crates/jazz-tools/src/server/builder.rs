@@ -15,7 +15,9 @@ use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_catalogue};
-use crate::server::{CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState};
+use crate::server::{
+    CatalogueAuthorityMode, ConnectionEventHub, DynStorage, ServerState, ServerTopology,
+};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -66,6 +68,7 @@ pub struct ServerBuilder {
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    upstream_url: Option<String>,
 }
 
 impl ServerBuilder {
@@ -82,6 +85,7 @@ impl ServerBuilder {
                 path: PathBuf::from("./data"),
             },
             sync_tracer: None,
+            upstream_url: None,
         }
     }
 
@@ -105,6 +109,11 @@ impl ServerBuilder {
         self
     }
 
+    pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
+        self.upstream_url = Some(upstream_url.into());
+        self
+    }
+
     pub fn with_storage(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
         self
@@ -118,11 +127,23 @@ impl ServerBuilder {
 
     pub async fn build(self) -> Result<BuiltServer, String> {
         let auth_config = self.auth_config.clone();
-        validate_catalogue_authority(&auth_config, &self.catalogue_authority)?;
+        let topology = if self.upstream_url.is_some() {
+            ServerTopology::Edge
+        } else {
+            ServerTopology::Core
+        };
+        let upstream_ws_url = match self.upstream_url.as_deref() {
+            Some(upstream_url) => Some(upstream_ws_url(upstream_url, self.app_id)?),
+            None => None,
+        };
+        validate_server_config(&auth_config, &self.catalogue_authority, topology)?;
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
-        log_auth_config(&auth_config, &self.catalogue_authority);
+        log_auth_config(&auth_config, &self.catalogue_authority, topology);
 
         let (runtime, connection_event_hub) = self.build_runtime()?;
+        if let Some(upstream_ws_url) = upstream_ws_url.clone() {
+            start_upstream_sync(&runtime, upstream_ws_url, &auth_config)?;
+        }
         let http_client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
@@ -135,6 +156,7 @@ impl ServerBuilder {
             connection_event_hub,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
+            topology,
             jwt_verifier,
             http_client,
             disconnect_candidates: RwLock::new(HashMap::new()),
@@ -186,7 +208,7 @@ impl ServerBuilder {
     }
 
     fn build_schema_manager(&self, storage: &dyn Storage) -> Result<SchemaManager, String> {
-        let sync_manager = server_sync_manager();
+        let sync_manager = server_sync_manager(self.local_durability_tier());
 
         match &self.schema_mode {
             ServerSchemaMode::Dynamic => {
@@ -260,11 +282,18 @@ impl ServerBuilder {
             StorageBackend::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
     }
+
+    fn local_durability_tier(&self) -> DurabilityTier {
+        if self.upstream_url.is_some() {
+            DurabilityTier::EdgeServer
+        } else {
+            DurabilityTier::GlobalServer
+        }
+    }
 }
 
-fn server_sync_manager() -> SyncManager {
-    let sync_manager = SyncManager::new()
-        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+fn server_sync_manager(local_tier: DurabilityTier) -> SyncManager {
+    let sync_manager = SyncManager::new().with_durability_tier(local_tier);
 
     if should_allow_unprivileged_schema_catalogue_writes() {
         sync_manager.with_unprivileged_schema_catalogue_writes()
@@ -341,10 +370,15 @@ async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVe
     }
 }
 
-fn validate_catalogue_authority(
+fn validate_server_config(
     auth_config: &AuthConfig,
     catalogue_authority: &CatalogueAuthorityMode,
+    topology: ServerTopology,
 ) -> Result<(), String> {
+    if topology.is_edge() && auth_config.peer_secret.is_none() {
+        return Err("edge mode requires --peer-secret / JAZZ_PEER_SECRET".to_string());
+    }
+
     if matches!(catalogue_authority, CatalogueAuthorityMode::Local) {
         return Ok(());
     }
@@ -359,7 +393,11 @@ fn validate_catalogue_authority(
     Ok(())
 }
 
-fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuthorityMode) {
+fn log_auth_config(
+    auth_config: &AuthConfig,
+    catalogue_authority: &CatalogueAuthorityMode,
+    topology: ServerTopology,
+) {
     let authority_mode = match catalogue_authority {
         CatalogueAuthorityMode::Local => "local".to_string(),
         CatalogueAuthorityMode::Forward { base_url, .. } => {
@@ -367,13 +405,196 @@ fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuth
         }
     };
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, catalogue_authority={}",
+        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, cookie={}, backend={}, admin={}, peer={}, catalogue_authority={}, topology={:?}",
         auth_config.allow_local_first_auth,
         auth_config.jwks_url.is_some(),
         auth_config.jwt_public_key.is_some(),
         auth_config.auth_cookie_name.is_some(),
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some(),
-        authority_mode
+        auth_config.peer_secret.is_some(),
+        authority_mode,
+        topology
     );
+}
+
+pub fn upstream_ws_url(base_url: &str, app_id: AppId) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|err| format!("invalid upstream URL '{base_url}': {err}"))?;
+
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("upstream URL must not include query parameters or a fragment".to_string());
+    }
+
+    let scheme = match url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        "ws" => "ws",
+        "wss" => "wss",
+        other => {
+            return Err(format!(
+                "unsupported upstream URL scheme '{other}'; expected http, https, ws, or wss"
+            ));
+        }
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| format!("failed to set upstream URL scheme to {scheme}"))?;
+
+    let app_ws_path = format!("/apps/{app_id}/ws");
+    let normalized_path = url.path().trim_end_matches('/');
+    if normalized_path == app_ws_path.trim_end_matches('/') {
+        url.set_path(&app_ws_path);
+    } else {
+        let base_path = match normalized_path {
+            "" | "/" => String::new(),
+            path => path.to_string(),
+        };
+        url.set_path(&format!(
+            "{}/{}",
+            base_path.trim_end_matches('/'),
+            app_ws_path.trim_start_matches('/')
+        ));
+    }
+
+    Ok(url.to_string())
+}
+
+fn start_upstream_sync(
+    runtime: &TokioRuntime<DynStorage>,
+    upstream_ws_url: String,
+    auth_config: &AuthConfig,
+) -> Result<(), String> {
+    let peer_secret = auth_config
+        .peer_secret
+        .clone()
+        .ok_or_else(|| "edge mode requires --peer-secret / JAZZ_PEER_SECRET".to_string())?;
+
+    info!(
+        local_tier = "edge",
+        upstream_url = %upstream_ws_url,
+        upstream_connected = false,
+        "starting edge upstream sync"
+    );
+
+    runtime.connect(
+        upstream_ws_url.clone(),
+        crate::transport_manager::AuthConfig {
+            peer_secret: Some(peer_secret),
+            ..Default::default()
+        },
+    );
+
+    let wait_runtime = (*runtime).clone();
+    tokio::spawn(async move {
+        let connected = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wait_runtime.transport_wait_until_connected(),
+        )
+        .await
+        .unwrap_or(false);
+        if connected {
+            tracing::info!(
+                local_tier = "edge",
+                upstream_url = %upstream_ws_url,
+                upstream_connected = true,
+                "edge upstream sync connected"
+            );
+        } else {
+            tracing::warn!(
+                local_tier = "edge",
+                upstream_url = %upstream_ws_url,
+                upstream_connected = false,
+                "edge upstream sync ended before first connection"
+            );
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema_manager::AppId;
+
+    #[test]
+    fn upstream_url_conversion_maps_base_urls_to_app_ws_route() {
+        let app_id =
+            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+
+        assert_eq!(
+            upstream_ws_url("https://core.example.com", app_id).expect("https conversion"),
+            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
+        );
+        assert_eq!(
+            upstream_ws_url("http://core.example.com/base/", app_id).expect("http conversion"),
+            "ws://core.example.com/base/apps/00000000-0000-0000-0000-000000000001/ws"
+        );
+        assert_eq!(
+            upstream_ws_url("ws://core.example.com", app_id).expect("ws conversion"),
+            "ws://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
+        );
+        assert_eq!(
+            upstream_ws_url(
+                "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws",
+                app_id
+            )
+            .expect("already app-scoped ws URL"),
+            "wss://core.example.com/apps/00000000-0000-0000-0000-000000000001/ws"
+        );
+    }
+
+    #[test]
+    fn upstream_url_conversion_rejects_query_and_fragment_urls() {
+        let app_id =
+            AppId::from_string("00000000-0000-0000-0000-000000000001").expect("parse app id");
+
+        assert!(upstream_ws_url("https://core.example.com?token=abc", app_id).is_err());
+        assert!(upstream_ws_url("https://core.example.com#cluster-a", app_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn builder_uses_global_tier_without_upstream() {
+        let built = ServerBuilder::new(AppId::from_name("global-builder-tier"))
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build global server");
+
+        let tiers = built
+            .state
+            .runtime
+            .with_sync_manager(|sync| sync.local_durability_tiers())
+            .expect("read sync manager");
+
+        assert_eq!(
+            tiers,
+            std::collections::HashSet::from([DurabilityTier::GlobalServer])
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_uses_edge_tier_with_upstream() {
+        let built = ServerBuilder::new(AppId::from_name("edge-builder-tier"))
+            .with_storage(StorageBackend::InMemory)
+            .with_auth_config(AuthConfig {
+                peer_secret: Some("cluster-secret".to_string()),
+                ..Default::default()
+            })
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build edge server");
+
+        let tiers = built
+            .state
+            .runtime
+            .with_sync_manager(|sync| sync.local_durability_tiers())
+            .expect("read sync manager");
+
+        assert_eq!(
+            tiers,
+            std::collections::HashSet::from([DurabilityTier::EdgeServer])
+        );
+    }
 }
