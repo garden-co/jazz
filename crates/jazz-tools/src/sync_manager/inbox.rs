@@ -1,7 +1,7 @@
 use super::*;
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchSubmission,
-    VisibleBatchMember,
+    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
+    SealedBatchSubmission, VisibleBatchMember,
 };
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
@@ -167,8 +167,78 @@ impl SyncManager {
         let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) else {
             return;
         };
+        if matches!(settlement, BatchSettlement::DurableDirect { .. })
+            && record.mode == BatchMode::Direct
+            && !record.sealed
+            && let Some(submission) =
+                Self::direct_submission_from_client_record(storage, settlement, &record)
+        {
+            record.mark_sealed(submission);
+        }
         record.apply_settlement(settlement.clone());
         let _ = storage.upsert_local_batch_record(&record);
+    }
+
+    fn direct_submission_from_client_record<H: Storage>(
+        storage: &H,
+        settlement: &BatchSettlement,
+        record: &LocalBatchRecord,
+    ) -> Option<SealedBatchSubmission> {
+        let (target_branch_name, members) = if let Some(first_member) = record.members.first() {
+            let target_branch_name = first_member.branch_name;
+            if record
+                .members
+                .iter()
+                .any(|member| member.branch_name != target_branch_name)
+            {
+                return None;
+            }
+            let members = record
+                .members
+                .iter()
+                .map(|member| SealedBatchMember {
+                    object_id: member.object_id,
+                    row_digest: member.row_digest,
+                })
+                .collect();
+            (target_branch_name, members)
+        } else {
+            let BatchSettlement::DurableDirect {
+                visible_members, ..
+            } = settlement
+            else {
+                return None;
+            };
+            let first_member = visible_members.first()?;
+            let target_branch_name = first_member.branch_name;
+            let mut members = Vec::new();
+            for member in visible_members {
+                if member.branch_name != target_branch_name {
+                    return None;
+                }
+                let locator = storage.load_row_locator(member.object_id).ok().flatten()?;
+                let row = storage
+                    .load_history_row_batch(
+                        locator.table.as_str(),
+                        member.branch_name.as_str(),
+                        member.object_id,
+                        record.batch_id,
+                    )
+                    .ok()
+                    .flatten()?;
+                members.push(SealedBatchMember {
+                    object_id: member.object_id,
+                    row_digest: row.content_digest(),
+                });
+            }
+            (target_branch_name, members)
+        };
+        Some(SealedBatchSubmission::new(
+            record.batch_id,
+            target_branch_name,
+            members,
+            Vec::new(),
+        ))
     }
 
     fn retain_client_sealed_batch_submission<H: Storage>(
@@ -1568,6 +1638,7 @@ impl SyncManager {
                     });
             }
             SyncPayload::BatchSettlement { settlement } => {
+                self.retain_client_batch_settlement(storage, settlement);
                 self.pending_batch_settlements.push(settlement.clone());
             }
             SyncPayload::BatchSettlementNeeded { batch_ids } => {
