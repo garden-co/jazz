@@ -106,7 +106,7 @@ impl SyncManager {
     }
 
     fn retain_client_local_batch_row<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
         metadata: &HashMap<String, String>,
         row: &StoredRowBatch,
@@ -155,28 +155,52 @@ impl SyncManager {
             schema_hash,
             row_digest: row.content_digest(),
         });
+        if let Some(settlement) = record.latest_settlement.clone()
+            && let Some(submission) =
+                Self::seal_direct_client_record_from_settlement(storage, &mut record, &settlement)
+        {
+            self.seal_batch_to_servers(submission);
+        }
         let _ = storage.upsert_local_batch_record(&record);
     }
 
     fn retain_client_batch_settlement<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
         settlement: &BatchSettlement,
     ) {
         let batch_id = settlement.batch_id();
-        let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) else {
-            return;
+        let mut record = match storage.load_local_batch_record(batch_id) {
+            Ok(Some(record)) => record,
+            Ok(None) if matches!(settlement, BatchSettlement::DurableDirect { .. }) => {
+                LocalBatchRecord::new(batch_id, BatchMode::Direct, false, None)
+            }
+            Ok(None) | Err(_) => return,
         };
-        if matches!(settlement, BatchSettlement::DurableDirect { .. })
-            && record.mode == BatchMode::Direct
-            && !record.sealed
-            && let Some(submission) =
-                Self::direct_submission_from_client_record(storage, settlement, &record)
+        if let Some(submission) =
+            Self::seal_direct_client_record_from_settlement(storage, &mut record, settlement)
         {
-            record.mark_sealed(submission);
+            self.seal_batch_to_servers(submission);
         }
         record.apply_settlement(settlement.clone());
         let _ = storage.upsert_local_batch_record(&record);
+    }
+
+    fn seal_direct_client_record_from_settlement<H: Storage>(
+        storage: &H,
+        record: &mut LocalBatchRecord,
+        settlement: &BatchSettlement,
+    ) -> Option<SealedBatchSubmission> {
+        if matches!(settlement, BatchSettlement::DurableDirect { .. })
+            && record.mode == BatchMode::Direct
+            && record.sealed_submission.is_none()
+            && let Some(submission) =
+                Self::direct_submission_from_client_record(storage, settlement, record)
+        {
+            record.mark_sealed(submission.clone());
+            return Some(submission);
+        }
+        None
     }
 
     fn direct_submission_from_client_record<H: Storage>(
