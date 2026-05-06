@@ -92,6 +92,9 @@ type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
 > = Optional extends true ? "lww" : Sql extends "INTEGER" ? ColumnMergeStrategyName : "lww";
+type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
+  ? Date | number
+  : TSTypeFromSqlType<Sql>;
 
 export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
@@ -109,7 +112,7 @@ export type TypedColumnBuilder<
    * Set the default value for the column
    */
   default(
-    value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
+    value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
   ): ColumnAlias<Sql, Optional, Ref, true, Value>;
   /**
    * Set the merge strategy for the column (defaults to LWW)
@@ -171,7 +174,7 @@ export type IntColumn<
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
-  Value = Date | number,
+  Value = Date,
 > = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value>;
 export type FloatColumn<
   Optional extends boolean = false,
