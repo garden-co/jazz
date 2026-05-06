@@ -113,6 +113,11 @@ db.subscribeAll(...)
   -> callback receives first snapshot
 ```
 
+`QuerySettled.scope` is the query-completeness signal. Batch durability travels separately as
+`BatchFate`, and that fate applies to the whole batch.
+The subscription path should not need a per-row decode of batch-fate member lists to decide whether
+a known row has reached the requested tier.
+
 ## Key Files
 
 | File                                               | Purpose                                       |
