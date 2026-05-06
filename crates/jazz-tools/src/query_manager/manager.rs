@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,22 @@ use super::types::{
     Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
     build_ordered_delta_with_post_ids,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timing_now() -> Option<Instant> {
+    Some(Instant::now())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn timing_now() -> Option<Instant> {
+    None
+}
+
+fn timing_elapsed_ms(started: Option<Instant>) -> u64 {
+    started
+        .map(|started| started.elapsed().as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Error types for QueryManager operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1222,11 +1239,30 @@ impl QueryManager {
         // RuntimeCore, which tracks per-server stream progress.
         let pending_query_settled = self.sync_manager.take_pending_query_settled();
         if !pending_query_settled.is_empty() {
+            tracing::debug!(
+                target: "jazz_timing",
+                count = pending_query_settled.len(),
+                "[jazz timing] client/runtime pending QuerySettled messages"
+            );
             let mut blocked = Vec::new();
             for pending_settled in pending_query_settled {
                 if pending_settled.through_seq == 0 {
+                    tracing::debug!(
+                        target: "jazz_timing",
+                        query_id = pending_settled.query_id.0,
+                        ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        "[jazz timing] client/runtime applying QuerySettled immediately"
+                    );
                     self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 } else {
+                    tracing::debug!(
+                        target: "jazz_timing",
+                        query_id = pending_settled.query_id.0,
+                        ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        "[jazz timing] client/runtime QuerySettled blocked on stream watermark"
+                    );
                     blocked.push(pending_settled);
                 }
             }
@@ -1261,6 +1297,7 @@ impl QueryManager {
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
         for sub_id in subscription_ids {
+            let subscription_started = timing_now();
             let should_process_subscription =
                 self.subscriptions.get(&sub_id).is_some_and(|subscription| {
                     subscription.needs_recompile
@@ -1284,6 +1321,7 @@ impl QueryManager {
             let include_deleted = subscription.query.include_deleted;
 
             let delta = {
+                let settle_started = timing_now();
                 let schema_context = &self.schema_context;
                 let branch_schema_map = &self.branch_schema_map;
                 let row_loader =
@@ -1329,7 +1367,18 @@ impl QueryManager {
                         )
                     };
 
-                subscription.graph.settle(storage_ref, row_loader)
+                let delta = subscription.graph.settle(storage_ref, row_loader);
+                tracing::debug!(
+                    target: "jazz_timing",
+                    sub_id = sub_id.0,
+                    table = %table,
+                    elapsed_ms = timing_elapsed_ms(settle_started),
+                    added = delta.added.len(),
+                    removed = delta.removed.len(),
+                    settled_once = subscription.settled_once,
+                    "[jazz timing] client/runtime subscription graph settled"
+                );
+                delta
             };
             subscription.needs_visibility_recompute = false;
             let new_schema_warnings = Self::finalize_schema_warnings(
@@ -1356,6 +1405,14 @@ impl QueryManager {
                 // initial upstream frontier has been replayed — or until every
                 // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
                 // which means nothing upstream is going to replay.
+                tracing::debug!(
+                    target: "jazz_timing",
+                    sub_id = sub_id.0,
+                    table = %table,
+                    elapsed_ms = timing_elapsed_ms(subscription_started),
+                    has_servers_or_pending = self.sync_manager.has_servers_or_pending_servers(),
+                    "[jazz timing] client/runtime query frontier incomplete; holding first delivery"
+                );
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1418,6 +1475,14 @@ impl QueryManager {
                 );
                 subscription.current_ordered_ids = ordered.ordered_ids_after;
                 subscription.current_visible_rows = visible_rows_by_id;
+                tracing::warn!(
+                    target: "jazz_timing",
+                    sub_id = sub_id.0,
+                    table = %table,
+                    added = visible_delta.added.len(),
+                    elapsed_ms = timing_elapsed_ms(subscription_started),
+                    "[jazz timing] client/runtime first delivery queued"
+                );
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: sub_id,
                     delta: visible_delta,

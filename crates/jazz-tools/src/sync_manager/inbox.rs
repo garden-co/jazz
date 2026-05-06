@@ -1337,6 +1337,21 @@ impl SyncManager {
                 scope,
                 through_seq,
             } => {
+                let relay_client_count = self
+                    .query_origin
+                    .get(&query_id)
+                    .map(|clients| clients.len())
+                    .unwrap_or(0);
+                tracing::warn!(
+                    target: "jazz_timing",
+                    %server_id,
+                    query_id = query_id.0,
+                    ?tier,
+                    scope_size = scope.len(),
+                    through_seq,
+                    relay_client_count,
+                    "[jazz timing] server QuerySettled received for relay"
+                );
                 let scope_set: HashSet<(ObjectId, BranchName)> = scope.iter().copied().collect();
                 let scope_changed = self
                     .remote_query_scopes
@@ -1360,6 +1375,16 @@ impl SyncManager {
                 // Relay to interested clients
                 if let Some(clients) = self.query_origin.get(&query_id) {
                     for &cid in clients {
+                        tracing::warn!(
+                            target: "jazz_timing",
+                            %server_id,
+                            %cid,
+                            query_id = query_id.0,
+                            ?tier,
+                            scope_size = scope.len(),
+                            through_seq,
+                            "[jazz timing] server QuerySettled relayed to client"
+                        );
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(cid),
                             payload: SyncPayload::QuerySettled {
