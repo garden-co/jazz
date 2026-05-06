@@ -1038,6 +1038,34 @@ impl SyncManager {
                 return;
             }
         };
+        match storage.load_authoritative_batch_settlement(batch_id) {
+            Ok(Some(settlement)) => {
+                let should_prune_submission =
+                    matches!(settlement, BatchSettlement::Rejected { .. })
+                        || settlement
+                            .confirmed_tier()
+                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
+                let prune_result = if should_prune_submission {
+                    storage.delete_sealed_batch_submission(batch_id)
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = prune_result {
+                    tracing::warn!(
+                        ?batch_id,
+                        %error,
+                        "failed to delete sealed batch submission"
+                    );
+                }
+                self.queue_batch_settlement_to_client(client_id, settlement);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
+                return;
+            }
+        }
 
         let batch_rows = self.transactional_batch_rows(
             storage,

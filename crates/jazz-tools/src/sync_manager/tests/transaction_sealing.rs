@@ -301,6 +301,70 @@ fn direct_client_settlement_before_row_retains_replayable_sealed_submission_afte
 }
 
 #[test]
+fn direct_client_settlement_before_row_keeps_sealed_submission_without_server() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = crate::row_histories::BatchId::new();
+    let row_id = ObjectId::new();
+    seed_users_schema(&mut io);
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox();
+
+    let row = row_with_batch_state(
+        visible_row(row_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchSettlement {
+            settlement: BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+                visible_members: vec![VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name: BranchName::new("main"),
+                    batch_id,
+                }],
+            },
+        },
+    );
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row: row.clone(),
+        },
+    );
+
+    let record = io
+        .load_local_batch_record(batch_id)
+        .unwrap()
+        .expect("offline client direct batch should retain a local batch record");
+    let submission = record.sealed_submission.clone().unwrap_or_else(|| {
+        panic!("offline client direct settlement should retain a reconnect seal: {record:?}")
+    });
+    assert_eq!(submission.batch_id, batch_id);
+    assert_eq!(submission.target_branch_name, BranchName::new("main"));
+    assert_eq!(
+        submission.members,
+        vec![SealedBatchMember {
+            object_id: row_id,
+            row_digest: row.content_digest(),
+        }]
+    );
+}
+
+#[test]
 fn seal_batch_to_servers_targets_pending_server_transport() {
     let mut sm = SyncManager::new();
     let server_id = ServerId::new();
