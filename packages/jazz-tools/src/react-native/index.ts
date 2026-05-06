@@ -1,7 +1,7 @@
 export { createDb, Db, type DbConfig } from "./db.js";
 export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
-export { createJazzRnRuntime, type CreateJazzRnRuntimeOptions } from "./create-jazz-rn-runtime.js";
-export { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
+export { loadJazzRn } from "./jazz-rn-loader.js";
+export type { JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
 export { useAll, useAllSuspense } from "./use-all.js";
 export {
   JazzProvider,

@@ -57,6 +57,20 @@ describe("startLocalJazzServer via DevServer", () => {
     await expect(fetch(`${url}/health`).then((r) => r.ok)).rejects.toThrow();
   }, 30_000);
 
+  it("passes edge upstream and peer secret options through DevServer", async () => {
+    const port = await getAvailablePort();
+    handle = await startLocalJazzServer({
+      port,
+      upstreamUrl: "ws://127.0.0.1:9",
+      peerSecret: "cluster-peer-secret",
+      inMemory: true,
+    });
+
+    expect(handle.port).toBe(port);
+    const healthResponse = await fetch(`${handle.url}/health`);
+    expect(healthResponse.ok).toBe(true);
+  }, 30_000);
+
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;

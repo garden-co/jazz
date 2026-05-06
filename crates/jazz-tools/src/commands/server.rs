@@ -16,6 +16,7 @@ pub async fn run(
     data_dir: &str,
     in_memory: bool,
     auth_config: AuthConfig,
+    upstream_url: Option<String>,
     catalogue_authority: CatalogueAuthorityMode,
     bound_port_file: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -33,6 +34,10 @@ pub async fn run(
     let builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_catalogue_authority(catalogue_authority);
+    let builder = match upstream_url {
+        Some(upstream_url) => builder.with_upstream_url(upstream_url),
+        None => builder,
+    };
     let built = if in_memory {
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {

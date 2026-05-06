@@ -62,6 +62,7 @@ import {
   destructorGuardSymbol,
   pointerLiteralSymbol,
   uniffiCreateFfiConverterString,
+  uniffiRustCallAsync,
   uniffiTraitInterfaceCall,
   uniffiTypeNameSymbol,
   variantOrdinalSymbol,
@@ -789,12 +790,19 @@ export interface RnRuntimeInterface {
   /**
    * One-shot query returning a JSON string:
    * `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
+   *
+   * `async` so the JS thread is not blocked while the query future is
+   * waiting on a later `batched_tick` to settle (which is itself driven
+   * from JS via the `on_batched_tick_needed` callback). A synchronous
+   * `block_on` here can deadlock for any query that needs more than the
+   * inline `immediate_tick` to resolve.
    */
   query(
     queryJson: string,
     sessionJson: string | undefined,
-    tier: string | undefined
-  ) /*throws*/ : string;
+    tier: string | undefined,
+    asyncOpts_?: { signal: AbortSignal }
+  ) /*throws*/ : Promise<string>;
   removeServer() /*throws*/ : void;
   sealBatch(batchId: string) /*throws*/ : void;
   setClientRole(clientId: string, role: string) /*throws*/ : void;
@@ -1283,29 +1291,52 @@ export class RnRuntime
   /**
    * One-shot query returning a JSON string:
    * `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
+   *
+   * `async` so the JS thread is not blocked while the query future is
+   * waiting on a later `batched_tick` to settle (which is itself driven
+   * from JS via the `on_batched_tick_needed` callback). A synchronous
+   * `block_on` here can deadlock for any query that needs more than the
+   * inline `immediate_tick` to resolve.
    */
-  query(
+  async query(
     queryJson: string,
     sessionJson: string | undefined,
-    tier: string | undefined
-  ): string /*throws*/ {
-    return FfiConverterString.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
+    tier: string | undefined,
+    asyncOpts_?: { signal: AbortSignal }
+  ): Promise<string> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_query(
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(queryJson),
             FfiConverterOptionalString.lower(sessionJson),
-            FfiConverterOptionalString.lower(tier),
-            callStatus
+            FfiConverterOptionalString.lower(tier)
           );
         },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
+        /*pollFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_poll_rust_buffer,
+        /*cancelFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_cancel_rust_buffer,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_complete_rust_buffer,
+        /*freeFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_free_rust_buffer,
+        /*liftFunc:*/ FfiConverterString.lift.bind(FfiConverterString),
+        /*liftString:*/ FfiConverterString.lift,
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        )
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
   }
 
   removeServer(): void /*throws*/ {
@@ -1789,7 +1820,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_query() !==
-    24218
+    42271
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_query'
