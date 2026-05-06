@@ -34,6 +34,8 @@ pub struct TestingServerBuilder {
     rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
+    peer_secret: Option<String>,
+    upstream_url: Option<String>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
@@ -106,6 +108,16 @@ impl TestingServerBuilder {
 
     pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
         self.backend_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_peer_secret(mut self, secret: impl Into<String>) -> Self {
+        self.peer_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
+        self.upstream_url = Some(upstream_url.into());
         self
     }
 
@@ -205,6 +217,8 @@ impl TestingServer {
             rocksdb_storage,
             admin_secret,
             backend_secret,
+            peer_secret,
+            upstream_url,
             jwks_url,
             auth_clock,
             sync_tracer,
@@ -234,11 +248,15 @@ impl TestingServer {
             allow_local_first_auth: true,
             backend_secret: Some(backend_secret.clone()),
             admin_secret: Some(admin_secret.clone()),
+            peer_secret,
             clock: auth_clock.clone(),
             ..Default::default()
         };
 
-        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        if let Some(upstream_url) = upstream_url {
+            server_builder = server_builder.with_upstream_url(upstream_url);
+        }
         let mut server_builder = apply_storage_mode(
             server_builder,
             data_dir.clone(),

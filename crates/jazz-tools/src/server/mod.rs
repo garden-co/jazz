@@ -166,6 +166,19 @@ impl CatalogueAuthorityMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServerTopology {
+    #[default]
+    Core,
+    Edge,
+}
+
+impl ServerTopology {
+    pub fn is_edge(self) -> bool {
+        matches!(self, Self::Edge)
+    }
+}
+
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub runtime: TokioRuntime<DynStorage>,
@@ -179,6 +192,8 @@ pub struct ServerState {
     pub auth_config: AuthConfig,
     /// Whether catalogue admin requests are handled locally or forwarded to an authority.
     pub catalogue_authority: CatalogueAuthorityMode,
+    /// Whether this process is the core/global node or an edge syncing upstream.
+    pub topology: ServerTopology,
     /// Shared HTTP client for forwarding admin requests to a remote authority.
     pub http_client: reqwest::Client,
     /// Configured verifier for external JWTs.

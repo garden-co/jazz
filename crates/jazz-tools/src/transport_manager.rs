@@ -145,6 +145,7 @@ pub struct AuthConfig {
     pub jwt_token: Option<String>,
     pub backend_secret: Option<String>,
     pub admin_secret: Option<String>,
+    pub peer_secret: Option<String>,
     pub backend_session: Option<serde_json::Value>,
 }
 
@@ -159,6 +160,10 @@ impl std::fmt::Debug for AuthConfig {
             .field(
                 "admin_secret",
                 &self.admin_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "peer_secret",
+                &self.peer_secret.as_ref().map(|_| "<redacted>"),
             )
             // backend_session may itself contain secrets; redact presence only.
             .field(
@@ -245,6 +250,21 @@ mod handshake_tests {
         .expect("pre-versioned connected response should deserialize");
 
         assert_eq!(response.sync_protocol_version, 0);
+    }
+
+    #[test]
+    fn auth_config_serializes_peer_secret_and_redacts_it_from_debug() {
+        let auth = AuthConfig {
+            peer_secret: Some("cluster-secret".to_string()),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&auth).expect("serialize auth");
+        assert_eq!(encoded["peer_secret"], "cluster-secret");
+
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("peer_secret"));
+        assert!(!debug.contains("cluster-secret"));
     }
 }
 

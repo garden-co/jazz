@@ -132,6 +132,14 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
+        /// Upstream core server URL. When set, this server runs as an edge.
+        #[arg(long, env = "JAZZ_UPSTREAM_URL")]
+        upstream_url: Option<String>,
+
+        /// Shared server-to-server secret for peer sync.
+        #[arg(long, env = "JAZZ_PEER_SECRET")]
+        peer_secret: Option<String>,
+
         /// Whether this server is the catalogue authority or forwards admin catalogue requests upstream.
         #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY", default_value = "local")]
         catalogue_authority: CatalogueAuthorityArg,
@@ -166,6 +174,11 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
+    if let Err(error) = validate_server_cli_options(&cli.command) {
+        eprintln!("Server error: {error}");
+        shutdown_tracing();
+        std::process::exit(1);
+    }
 
     match cli.command {
         Commands::Create { resource } => match resource {
@@ -184,6 +197,8 @@ async fn main() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            upstream_url,
+            peer_secret,
             catalogue_authority,
             catalogue_authority_url,
             catalogue_authority_admin_secret,
@@ -211,6 +226,7 @@ async fn main() {
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                peer_secret,
                 ..Default::default()
             };
             let catalogue_authority = match catalogue_authority {
@@ -248,6 +264,7 @@ async fn main() {
                 &data_dir,
                 in_memory,
                 auth_config,
+                upstream_url,
                 catalogue_authority,
                 bound_port_file,
             )
@@ -260,6 +277,23 @@ async fn main() {
             shutdown_tracing();
         }
     }
+}
+
+fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
+    let Commands::Server {
+        upstream_url,
+        peer_secret,
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+
+    if upstream_url.is_some() && peer_secret.is_none() {
+        return Err("--peer-secret / JAZZ_PEER_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
+    }
+
+    Ok(())
 }
 
 fn make_env_filter() -> tracing_subscriber::EnvFilter {
@@ -307,6 +341,50 @@ mod tests {
             Commands::Server { .. } => {}
             _ => panic!("expected server command"),
         }
+    }
+
+    #[test]
+    fn server_command_parses_upstream_url_and_peer_secret() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--upstream-url",
+            "https://core.example.com",
+            "--peer-secret",
+            "cluster-secret",
+        ])
+        .expect("server command should parse");
+
+        match cli.command {
+            Commands::Server {
+                upstream_url,
+                peer_secret,
+                ..
+            } => {
+                assert_eq!(upstream_url.as_deref(), Some("https://core.example.com"));
+                assert_eq!(peer_secret.as_deref(), Some("cluster-secret"));
+            }
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_cli_validation_requires_peer_secret_in_edge_mode() {
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--upstream-url",
+            "https://core.example.com",
+        ])
+        .expect("server command should parse");
+
+        let error = validate_server_cli_options(&cli.command)
+            .expect_err("edge mode without peer secret should fail validation");
+
+        assert!(error.contains("--peer-secret"));
+        assert!(error.contains("--upstream-url"));
     }
 
     #[test]
