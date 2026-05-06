@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { scanClaudeProjects, ClaudeTranscriptWatcher } from "./watcher.js";
 import { ClaudeSessionStore } from "./store.js";
-import type { ClaudeSessionSummary } from "./parser.js";
+import { parseClaudeTranscript, type ClaudeSessionSummary } from "./parser.js";
 
 interface ServeOptions {
   dataPath: string;
@@ -175,6 +175,20 @@ function scanOnce(argv: string[]): void {
   store.close();
 }
 
+function ingestOne(argv: string[]): void {
+  const options = parseServeOptions(argv);
+  const transcriptPath = readFlag(argv, "transcript-path");
+  if (!transcriptPath) {
+    console.error("ingest-one requires --transcript-path PATH");
+    process.exit(2);
+  }
+
+  const store = new ClaudeSessionStore(options.dataPath);
+  const summary = parseClaudeTranscript(expandHome(transcriptPath));
+  if (summary) store.upsert(summary);
+  store.close();
+}
+
 function startScanProcess(options: ServeOptions): void {
   const child = spawn(
     process.execPath,
@@ -204,6 +218,34 @@ function startScanProcess(options: ServeOptions): void {
   });
 }
 
+function startIngestProcess(options: ServeOptions, transcriptPath: string): void {
+  const child = spawn(
+    process.execPath,
+    [
+      process.argv[1],
+      "ingest-one",
+      "--data-path",
+      options.dataPath,
+      "--claude-projects",
+      options.claudeProjects,
+      "--transcript-path",
+      transcriptPath,
+      "--watch",
+      "false",
+    ],
+    {
+      cwd: process.cwd(),
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+  child.on("exit", (code) => {
+    if (code && code !== 0) {
+      console.error(`[claude-sessions] ingest process for ${transcriptPath} exited with code ${code}`);
+    }
+  });
+}
+
 async function serve(argv: string[]): Promise<void> {
   const options = parseServeOptions(argv);
 
@@ -224,7 +266,10 @@ async function serve(argv: string[]): Promise<void> {
   server.listen(options.socketPath, () => {
     console.log(`[claude-sessions] listening on ${options.socketPath}`);
     if (options.watch) {
-      watcher = new ClaudeTranscriptWatcher(options.claudeProjects, store);
+      watcher = new ClaudeTranscriptWatcher(options.claudeProjects, store, {
+        debounceMs: 50,
+        ingestTranscript: (transcriptPath) => startIngestProcess(options, transcriptPath),
+      });
       watcher.start();
       console.log(`[claude-sessions] watching ${options.claudeProjects}`);
     }
@@ -260,8 +305,11 @@ async function main(): Promise<void> {
     case "scan-once":
       scanOnce(rest);
       break;
+    case "ingest-one":
+      ingestOne(rest);
+      break;
     default:
-      console.error(`usage: cli <serve|scan-once> [--data-path PATH] [--socket-path PATH] [--claude-projects PATH] [--watch true|false]`);
+      console.error(`usage: cli <serve|scan-once|ingest-one> [--data-path PATH] [--socket-path PATH] [--claude-projects PATH] [--transcript-path PATH] [--watch true|false]`);
       process.exit(1);
   }
 }

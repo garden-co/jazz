@@ -49,13 +49,21 @@ export class ClaudeTranscriptWatcher {
   private watchers: fs.FSWatcher[] = [];
   private pending = new Map<string, NodeJS.Timeout>();
   private debounceMs: number;
+  private ingestTranscript: (transcriptPath: string) => void | Promise<void>;
 
   constructor(
     private projectsRoot: string,
     private store: ClaudeSessionStore,
-    options?: { debounceMs?: number },
+    options?: {
+      debounceMs?: number;
+      ingestTranscript?: (transcriptPath: string) => void | Promise<void>;
+    },
   ) {
     this.debounceMs = options?.debounceMs ?? 250;
+    this.ingestTranscript = options?.ingestTranscript ?? ((transcriptPath) => {
+      const summary = parseClaudeTranscript(transcriptPath);
+      if (summary) this.store.upsert(summary);
+    });
   }
 
   start(): void {
@@ -105,8 +113,9 @@ export class ClaudeTranscriptWatcher {
       this.pending.delete(transcriptPath);
       try {
         if (!fs.existsSync(transcriptPath)) return;
-        const summary = parseClaudeTranscript(transcriptPath);
-        if (summary) this.store.upsert(summary);
+        Promise.resolve(this.ingestTranscript(transcriptPath)).catch((error) => {
+          console.error(`[watcher] ingest failed for ${transcriptPath}:`, error);
+        });
       } catch (error) {
         console.error(`[watcher] ingest failed for ${transcriptPath}:`, error);
       }
