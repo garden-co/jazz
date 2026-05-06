@@ -67,3 +67,4 @@
 
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
 - [**relational-row-history-engine**](todo/projects/relational-row-history-engine/)
+- [**rust-owned-worker-bridge**](todo/projects/rust-owned-worker-bridge/)
