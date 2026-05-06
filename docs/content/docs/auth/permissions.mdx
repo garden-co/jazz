@@ -247,14 +247,14 @@ describe("todo permissions", () => {
       authMode: "local-first",
     });
 
-    testApp.expectAllowed(() =>
-      alice.update(app.todos, todo.id, {
+    alice.expectAllowed((db) =>
+      db.update(app.todos, todo.id, {
         title: "Buy oat milk",
       }),
     );
 
-    testApp.expectDenied(() =>
-      bob.update(app.todos, todo.id, {
+    bob.expectDenied((db) =>
+      db.update(app.todos, todo.id, {
         title: "Buy orange juice",
       }),
     );
@@ -267,11 +267,11 @@ permissions object created with `definePermissions(...)`, and your test runner's
 
 The returned `PolicyTestApp` provides:
 
-- `seed(fn)` — run setup writes as an admin, bypassing policy checks
-- `as(session)` — create a `Db` client scoped to a specific session
-- `expectAllowed(fn)` — assert that a write does not throw a policy error
-- `expectDenied(fn)` — assert that a write is rejected by a policy
-- `shutdown()` — stop the local client and server
+- `testApp.seed(fn)` — run setup writes as an admin, bypassing policy checks
+- `testApp.as(session)` — create a `TestDb` client scoped to a specific session
+- `testDb.expectAllowed(fn)` — assert that a write does not throw a policy error
+- `testDb.expectDenied(fn)` — assert that a write is rejected by a policy
+- `testApp.shutdown()` — stop the local client and server
 
 For read policies, assert on returned rows directly. Denied reads are filtered out rather than
 throwing.

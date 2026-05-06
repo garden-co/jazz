@@ -5918,7 +5918,7 @@ db.onMutationError((error) => {
 
 ## Transactions and batches
 
-Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
+Use a transaction when several writes should settle together after an authority validates the sealed batch:
 
 ```ts
 const result = await db.transaction(async (tx) => {
@@ -5935,14 +5935,39 @@ globally visible once it's committed and accepted by the authority.
 
 `DbTransaction` can read its own staged state through `all(...)` and `one(...)` before commit.
 
-You can also use a batch when you want to group several ordinary writes under one batch id, but still want them
+You can also use batches when you want to group several ordinary writes under one batch id, but still want them
 to be locally visible immediately:
 
 ```ts
 const result = db.batch((batch) => {
-  batch.insert(app.todos, { title: "Grouped direct write", done: false });
+  batch.insert(app.todos, { title: "Grouped write", done: false });
   batch.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
 console.log(result.batchId);
+```
+
+When using `transaction` and `batch`, changes are automatically committed once the callback finishes running and,
+in the case of transactions, if an error is thrown inside the callback, the whole transaction will be rolled back.
+
+Alternatively, you can use `beginTransaction` and `beginBatch` to get a transaction or batch object, respectively.
+This can be useful when making writes across multiple contexts. In this case however, you need to commit or rollback
+the transaction/batch explicitly.
+
+```ts
+let transaction: DbTransaction;
+beforeEach(() => {
+  transaction = db.beginTransaction();
+});
+
+afterEach(() => {
+  // Writes performed in tests will be rolled back at the end,
+  // preventing tests from interfering with each other
+  transaction.rollback();
+});
+
+it("tasks have a title", () => {
+  const task = transaction.insert(todos, { title: "Test task", done: false });
+  expect(task.title).toEqual("Test task");
+});
 ```

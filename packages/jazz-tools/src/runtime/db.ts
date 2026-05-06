@@ -843,7 +843,7 @@ export class Db {
   };
 
   /**
-   * Protected constructor - use createDb() in regular app code.
+   * Protected constructor - use {@link createDb} in regular app code.
    */
   protected constructor(
     config: DbConfig,
@@ -969,7 +969,7 @@ export class Db {
    * The worker runs a persistent WASM runtime (OPFS).
    * WorkerBridge wires them together via postMessage.
    *
-   * @internal Use createDb() instead — it auto-detects browser.
+   * @internal Use {@link createDb} instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
     const db = new Db(config, runtimeModule);
