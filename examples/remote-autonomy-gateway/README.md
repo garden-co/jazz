@@ -33,6 +33,9 @@ of what happened.
   job.
 - `GET /v1/spaces` lists registered Designer spaces from the latest
   `space-rsync-mirror` jobs.
+- `POST /v1/spaces/:slug/files` records a Designer space file, object-storage
+  descriptor, upload job, and materialization job. Inline `contentBase64` or
+  `content` payloads are verified, cached, and materialized immediately.
 - `GET /v1/state` returns the current active sessions, jobs, claims, and
   Designer spaces.
 
@@ -76,8 +79,8 @@ By default the local Jazz2 stores connect to the configured sync server. Set
 
 ## Designer Spaces
 
-`/v1/spaces` is a control-plane registration surface. It does not copy files.
-Each space record creates a durable `space-rsync-mirror` job with:
+`/v1/spaces` is a control-plane registration surface. It creates a durable
+`space-rsync-mirror` job with:
 
 - `payloadJson.sourcePath`: remote path under the remote spaces root.
 - `payloadJson.targetPath`: local mirror path under the local spaces root.
@@ -85,7 +88,15 @@ Each space record creates a durable `space-rsync-mirror` job with:
 - `payloadJson.space.objectStoragePrefix`: OCI object-key prefix under
   `x/nikiv/designer/spaces/<slug>`.
 
-The expected byte movement is: a worker claims the `space-rsync-mirror` job,
+The expected mirror movement is: a worker claims the `space-rsync-mirror` job,
 runs `rsync` from `sourcePath` to `targetPath`, then records `/v1/sync/receipts`
-with the final status and transfer metadata. Jazz2 syncs the metadata and
-receipts between machines; the worker is responsible for file bytes.
+with the final status and transfer metadata.
+
+File bytes for active Designer saves use `/v1/spaces/:slug/files`. Without
+inline bytes, the gateway records queued `space-file-object-upload` and
+`space-file-materialize` jobs for external workers. With `contentBase64` or
+`content`, the gateway verifies `contentHash` and `sizeBytes`, writes an object
+cache entry under `$REMOTE_AUTONOMY_LOCAL_SPACES_ROOT/.object-cache`, writes the
+file to the requested local or remote materialization target, and marks both
+jobs completed with receipts. Jazz2 syncs the metadata and receipts between
+machines; object storage or the inline object cache owns the file bytes.

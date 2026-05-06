@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { Elysia, type AnyElysia } from "elysia";
@@ -78,6 +79,7 @@ const DEFAULT_REMOTE_HOME = "/users/nikiv";
 const DEFAULT_OBJECT_STORAGE_REGION = "us-dallas-1";
 const DEFAULT_OBJECT_STORAGE_BUCKET = "reactron-updates-dev";
 const DEFAULT_DESIGNER_SPACES_PREFIX = "x/nikiv/designer/spaces";
+const OBJECT_CACHE_DIR = ".object-cache";
 const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
 const SPACE_FILE_UPLOAD_JOB_KIND = "space-file-object-upload";
 const SPACE_FILE_MATERIALIZE_JOB_KIND = "space-file-materialize";
@@ -125,6 +127,14 @@ type DesignerSpaceFileRecord = {
 
 type ObjectStorageObjectDescriptor = ObjectStorageDescriptor & {
   key: string;
+};
+
+type InlineSpaceFileReceipt = {
+  objectCachePath: string;
+  materializedPath: string;
+  checksum: string;
+  bytes: number;
+  recordedAt: string;
 };
 
 export function createRemoteAutonomyGateway(
@@ -619,6 +629,7 @@ export function createRemoteAutonomyGateway(
       const payload = objectBody(body);
       const space = await requireSpaceRecord(agentStore, slug);
       const file = resolveDesignerSpaceFile(space, payload);
+      const inlineContent = inlineSpaceFileContent(payload, file);
       const uploadJob = await agentStore.recordJob({
         kind: SPACE_FILE_UPLOAD_JOB_KIND,
         repoRoot: space.remotePath,
@@ -657,20 +668,54 @@ export function createRemoteAutonomyGateway(
         uploadJobId: uploadJob.jobId,
         materializeJobId: materializeJob.jobId,
       };
+      let finalUploadJob = uploadJob;
+      let finalMaterializeJob = materializeJob;
+      let inlineReceipt: InlineSpaceFileReceipt | null = null;
+      if (inlineContent) {
+        inlineReceipt = await writeInlineSpaceFile(resolved, recordedFile, inlineContent);
+        finalUploadJob = await agentStore.updateJob({
+          jobId: uploadJob.jobId,
+          status: "completed",
+          resultJson: {
+            status: "completed",
+            transport: "inline-object-cache",
+            targetPath: inlineReceipt.objectCachePath,
+            checksum: recordedFile.contentHash,
+            bytes: inlineContent.byteLength,
+          } as AgentJsonValue,
+          note: "inline object cached",
+          updatedAt: inlineReceipt.recordedAt,
+        });
+        finalMaterializeJob = await agentStore.updateJob({
+          jobId: materializeJob.jobId,
+          status: "completed",
+          resultJson: {
+            status: "completed",
+            transport: "inline-file",
+            targetPath: inlineReceipt.materializedPath,
+            checksum: recordedFile.contentHash,
+            bytes: inlineContent.byteLength,
+          } as AgentJsonValue,
+          note: "inline file materialized",
+          updatedAt: inlineReceipt.recordedAt,
+        });
+      }
       await recordGatewayEvent(
         SPACE_FILE_EVENT_TYPE,
         `Designer space file ${recordedFile.path} recorded`,
         {
           file: recordedFile,
           space,
+          ...(inlineReceipt ? { inlineReceipt } : {}),
         },
         spaceFileEventId(recordedFile),
       );
       return {
         ok: true,
         file: recordedFile,
-        uploadJob: serializeJob(uploadJob),
-        materializeJob: serializeJob(materializeJob),
+        uploadJob: serializeJob(finalUploadJob),
+        materializeJob: serializeJob(finalMaterializeJob),
+        inlineReceipt,
       };
     })
     .post("/v1/spaces/:slug/sync", async ({ params, body }) => {
@@ -1013,6 +1058,51 @@ function resolveDesignerSpaceFile(
       ),
     },
   };
+}
+
+function inlineSpaceFileContent(
+  payload: JsonObject,
+  file: DesignerSpaceFileRecord,
+): Buffer | null {
+  const contentBase64 = optionalString(payload, "contentBase64");
+  const content = optionalString(payload, "content");
+  if (!contentBase64 && !content) {
+    return null;
+  }
+  const bytes = contentBase64 ? Buffer.from(contentBase64, "base64") : Buffer.from(content!, "utf8");
+  const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  if (contentHash !== file.contentHash) {
+    throw new GatewayError(400, `contentHash mismatch for Designer space file ${file.path}`);
+  }
+  if (file.sizeBytes !== undefined && file.sizeBytes !== bytes.byteLength) {
+    throw new GatewayError(400, `sizeBytes mismatch for Designer space file ${file.path}`);
+  }
+  return bytes;
+}
+
+async function writeInlineSpaceFile(
+  options: ResolvedOptions,
+  file: DesignerSpaceFileRecord,
+  bytes: Buffer,
+): Promise<InlineSpaceFileReceipt> {
+  const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...file.objectStorage.key.split("/"));
+  const materializedPath = file.materializeTarget === "remote" ? file.remotePath : file.localPath;
+  await Promise.all([
+    writeFileWithParents(objectCachePath, bytes),
+    writeFileWithParents(materializedPath, bytes),
+  ]);
+  return {
+    objectCachePath,
+    materializedPath,
+    checksum: file.contentHash,
+    bytes: bytes.byteLength,
+    recordedAt: new Date().toISOString(),
+  };
+}
+
+async function writeFileWithParents(filePath: string, bytes: Buffer): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, bytes);
 }
 
 function designerSpaceObjectStorage(

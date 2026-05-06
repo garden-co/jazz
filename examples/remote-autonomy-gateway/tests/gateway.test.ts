@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -630,6 +631,58 @@ describe("remote autonomy gateway", () => {
         }),
       }),
     ]);
+  });
+
+  it("materializes inline Designer space file payloads to the remote filesystem", async () => {
+    const remotePath = join(tempDir, "remote-spaces", "inline-cad-space");
+    await requestJson("POST", "/v1/spaces", {
+      slug: "inline-cad-space",
+      title: "Inline CAD Space",
+      remotePath,
+    });
+
+    const source = "from build123d import *\n\nbox = Box(1, 2, 3)\n";
+    const contentHash = `sha256:${createHash("sha256").update(source).digest("hex")}`;
+    const recorded = await requestJson("POST", "/v1/spaces/inline-cad-space/files", {
+      path: "parts/box.build123d.py",
+      contentHash,
+      sizeBytes: Buffer.byteLength(source),
+      contentType: "text/x-python",
+      materializeTarget: "remote",
+      contentBase64: Buffer.from(source).toString("base64"),
+    });
+
+    expect(await readFile(join(remotePath, "parts", "box.build123d.py"), "utf8")).toBe(source);
+    expect(recorded).toMatchObject({
+      ok: true,
+      file: {
+        path: "parts/box.build123d.py",
+        contentHash,
+        remotePath: join(remotePath, "parts", "box.build123d.py"),
+        materializeTarget: "remote",
+      },
+      uploadJob: {
+        kind: "space-file-object-upload",
+        status: "completed",
+        resultJson: {
+          status: "completed",
+          transport: "inline-object-cache",
+          checksum: contentHash,
+          bytes: Buffer.byteLength(source),
+        },
+      },
+      materializeJob: {
+        kind: "space-file-materialize",
+        status: "completed",
+        resultJson: {
+          status: "completed",
+          transport: "inline-file",
+          targetPath: join(remotePath, "parts", "box.build123d.py"),
+          checksum: contentHash,
+          bytes: Buffer.byteLength(source),
+        },
+      },
+    });
   });
 
   it("rejects unsafe Designer space file paths", async () => {
