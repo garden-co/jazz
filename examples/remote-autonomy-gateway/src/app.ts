@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { Elysia, type AnyElysia } from "elysia";
 import {
@@ -838,8 +838,7 @@ function resolveOptions(options: RemoteAutonomyGatewayOptions) {
     ),
     backendSecret: options.backendSecret ?? process.env.REMOTE_AUTONOMY_BACKEND_SECRET,
     adminSecret: options.adminSecret ?? process.env.REMOTE_AUTONOMY_ADMIN_SECRET,
-    hostId:
-      options.hostId ?? process.env.REMOTE_AUTONOMY_HOST_ID ?? process.env.HOST ?? "unknown-host",
+    hostId: options.hostId ?? process.env.REMOTE_AUTONOMY_HOST_ID ?? hostname(),
     env: options.env ?? process.env.REMOTE_AUTONOMY_ENV ?? "remote-autonomy",
     userBranch: options.userBranch ?? process.env.REMOTE_AUTONOMY_USER_BRANCH ?? "main",
     port:
@@ -931,10 +930,12 @@ async function listSpaceFileRecords(
   if (!contentOptions?.includeContent) {
     return records;
   }
-  return await Promise.all(records.map(async (file) => {
-    const bytes = await readCachedSpaceFileContent(contentOptions.options, file);
-    return bytes ? { ...file, contentBase64: bytes.toString("base64") } : file;
-  }));
+  return await Promise.all(
+    records.map(async (file) => {
+      const bytes = await readCachedSpaceFileContent(contentOptions.options, file);
+      return bytes ? { ...file, contentBase64: bytes.toString("base64") } : file;
+    }),
+  );
 }
 
 function spaceFileRecordFromEvent(event: {
@@ -1027,7 +1028,8 @@ function resolveDesignerSpace(payload: JsonObject, options: ResolvedOptions): De
     optionalString(payload, "localPath") ?? join(options.localSpacesRoot, slug, SPACE_WORK_DIR),
   );
   const remotePath = stripTrailingSlash(
-    optionalString(payload, "remotePath") ?? posix.join(options.remoteSpacesRoot, slug, SPACE_WORK_DIR),
+    optionalString(payload, "remotePath") ??
+      posix.join(options.remoteSpacesRoot, slug, SPACE_WORK_DIR),
   );
   const objectStoragePrefix = storageKey(options.designerSpacesPrefix, slug);
   const objectStorage = designerSpaceObjectStorage(options, objectStoragePrefix);
@@ -1079,16 +1081,15 @@ function resolveDesignerSpaceFile(
   };
 }
 
-function inlineSpaceFileContent(
-  payload: JsonObject,
-  file: DesignerSpaceFileRecord,
-): Buffer | null {
+function inlineSpaceFileContent(payload: JsonObject, file: DesignerSpaceFileRecord): Buffer | null {
   const contentBase64 = optionalString(payload, "contentBase64");
   const content = optionalString(payload, "content");
   if (!contentBase64 && !content) {
     return null;
   }
-  const bytes = contentBase64 ? Buffer.from(contentBase64, "base64") : Buffer.from(content!, "utf8");
+  const bytes = contentBase64
+    ? Buffer.from(contentBase64, "base64")
+    : Buffer.from(content!, "utf8");
   const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   if (contentHash !== file.contentHash) {
     throw new GatewayError(400, `contentHash mismatch for Designer space file ${file.path}`);
@@ -1104,7 +1105,11 @@ async function writeInlineSpaceFile(
   file: DesignerSpaceFileRecord,
   bytes: Buffer,
 ): Promise<InlineSpaceFileReceipt> {
-  const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...file.objectStorage.key.split("/"));
+  const objectCachePath = join(
+    options.localSpacesRoot,
+    OBJECT_CACHE_DIR,
+    ...file.objectStorage.key.split("/"),
+  );
   const materializedPath = file.materializeTarget === "remote" ? file.remotePath : file.localPath;
   await Promise.all([
     writeFileWithParents(objectCachePath, bytes),
@@ -1123,14 +1128,18 @@ async function readCachedSpaceFileContent(
   options: ResolvedOptions,
   file: DesignerSpaceFileRecord,
 ): Promise<Buffer | null> {
-  const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...file.objectStorage.key.split("/"));
+  const objectCachePath = join(
+    options.localSpacesRoot,
+    OBJECT_CACHE_DIR,
+    ...file.objectStorage.key.split("/"),
+  );
   const candidates = [
     objectCachePath,
     file.materializeTarget === "remote" ? file.remotePath : file.localPath,
     file.localPath,
     file.remotePath,
   ];
-  for (const candidate of [...new Set(candidates)]) {
+  for (const candidate of new Set(candidates)) {
     try {
       const bytes = await readFile(candidate);
       const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;

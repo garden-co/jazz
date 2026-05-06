@@ -5,6 +5,7 @@
     "build": "tsc --noEmit",
     "dev": "bun run src/main.ts",
     "start": "bun run src/main.ts",
+    "start:worker": "REMOTE_AUTONOMY_WORKER=1 bun run src/main.ts",
     "test": "vitest run tests --exclude dist/**"
   },
   "dependencies": {

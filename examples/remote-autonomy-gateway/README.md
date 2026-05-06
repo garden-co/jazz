@@ -48,6 +48,12 @@ of what happened.
 pnpm --filter ./examples/remote-autonomy-gateway dev
 ```
 
+To run the gateway and the local server-side worker loop in one durable process:
+
+```sh
+REMOTE_AUTONOMY_WORKER=1 pnpm --filter ./examples/remote-autonomy-gateway start
+```
+
 ## Server Environment
 
 ```sh
@@ -55,6 +61,9 @@ export REMOTE_AUTONOMY_SYNC_SERVER_URL="https://nikitavoloboev-jazz2-sync-ingres
 export REMOTE_AUTONOMY_SYNC_SERVER_APP_ID="313aa802-8598-5165-bb91-dab72dcb9d46"
 export REMOTE_AUTONOMY_HOST_ID="$(hostname)"
 export REMOTE_AUTONOMY_PORT="7474"
+export REMOTE_AUTONOMY_WORKER="1"
+export REMOTE_AUTONOMY_WORKER_ID="$(hostname):designer-space-worker"
+export REMOTE_AUTONOMY_OBJECT_STORAGE_MODE="cache-only" # or oci-cli
 export REMOTE_AUTONOMY_SYNC_PROBE_TIMEOUT_MS="3000"
 export REMOTE_AUTONOMY_LOCAL_SPACES_ROOT="$HOME/.designer/spaces"
 export REMOTE_AUTONOMY_REMOTE_SPACES_ROOT="/users/nikiv/.designer/spaces"
@@ -91,9 +100,14 @@ event, and another user hydrates the latest verified bytes through
    --follow true ...` so local rollout appends are recorded into
    `codex_stream_events` with Jazz sync durability.
 4. Mac or server workers create `/v1/sync/jobs` for `git-sync` and `rsync`.
-5. Executor workers write `/v1/executor/traces` for every model/tool result
+5. The gateway worker, when `REMOTE_AUTONOMY_WORKER=1`, claims queued
+   `space-rsync-mirror`, `space-file-object-upload`, and
+   `space-file-materialize` jobs, runs the transport, and records receipts.
+   `cache-only` mode writes object bytes under
+   `$REMOTE_AUTONOMY_LOCAL_SPACES_ROOT/.object-cache`; `oci-cli` mode also
+   shells out to the `oci` CLI for object put/get.
+6. Executor workers write `/v1/executor/traces` for every model/tool result
    packet they produce.
-6. Workers claim jobs, run the transport, then write `/v1/sync/receipts`.
 7. Review/promotion automation reads `/v1/state` and the Jazz2 records instead
    of scraping logs.
 
@@ -108,9 +122,11 @@ event, and another user hydrates the latest verified bytes through
 - `payloadJson.space.objectStoragePrefix`: OCI object-key prefix under
   `nikiv/designer/<slug>`.
 
-The expected mirror movement is: a worker claims the `space-rsync-mirror` job,
-runs `rsync` from `sourcePath` to `targetPath`, then records `/v1/sync/receipts`
-with the final status and transfer metadata.
+The expected mirror movement is: the gateway worker claims the
+`space-rsync-mirror` job, runs `rsync -a --delete` from `sourcePath` to
+`targetPath`, then records `/v1/sync/receipts` with the final status and
+transfer metadata. This is intentionally async: Designer and Codex do not wait
+on long filesystem movement in prompt or launch hooks.
 
 File bytes for active Designer saves use `/v1/spaces/:slug/files`. Without
 inline bytes, the gateway records queued `space-file-object-upload` and

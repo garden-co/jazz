@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRemoteAutonomyGateway, type RemoteAutonomyGateway } from "../src/app.js";
+import { runRemoteAutonomyWorkerOnce, type CommandRunner } from "../src/worker.js";
 
 describe("remote autonomy gateway", () => {
   let tempDir: string;
@@ -65,6 +66,29 @@ describe("remote autonomy gateway", () => {
         appId: "test-app-id",
       },
     });
+  });
+
+  it("defaults hostId to the machine hostname, not an unknown placeholder", async () => {
+    await gateway.close();
+    gateway = createRemoteAutonomyGateway({
+      agentDataPath: join(tempDir, "hostname-agent-infra.db"),
+      codexDataPath: join(tempDir, "hostname-codex-sessions.db"),
+      syncServerUrl: "https://jazz2.example.test",
+      syncServerAppId: "test-app-id",
+      localSpacesRoot: join(tempDir, ".designer", "spaces"),
+      remoteSpacesRoot: "/users/nikiv/.designer/spaces",
+      connectStoresToSyncServer: false,
+      syncServerProbe: async () => ({
+        ok: true,
+        status: "healthy",
+        latencyMs: 3,
+      }),
+    });
+
+    const response = await requestJson("GET", "/health");
+
+    expect(response.hostId).toBe(hostname());
+    expect(response.hostId).not.toBe("unknown-host");
   });
 
   it("records executor traces as durable semantic events", async () => {
@@ -300,8 +324,7 @@ describe("remote autonomy gateway", () => {
         localPath: "/Users/nikitavoloboev/code/prom/ide/designer/starter-project",
         remotePath: "/users/nikiv/code/prom/ide/designer/starter-project",
         objectStoragePrefix: "nikiv/designer/designer-starter-project",
-        objectStorageUri:
-          "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
+        objectStorageUri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         objectStorage: {
           provider: "oci",
           region: "us-sanjose-1",
@@ -333,8 +356,7 @@ describe("remote autonomy gateway", () => {
     expect(listed.spaces).toEqual([
       expect.objectContaining({
         slug: "designer-starter-project",
-        objectStorageUri:
-          "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
+        objectStorageUri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/designer-starter-project/",
         objectStorage: {
           provider: "oci",
           region: "us-sanjose-1",
@@ -359,8 +381,7 @@ describe("remote autonomy gateway", () => {
         localPath: join(tempDir, ".designer", "spaces", "bay-bridge-clock", "work"),
         remotePath: "/users/nikiv/.designer/spaces/bay-bridge-clock/work",
         objectStoragePrefix: "nikiv/designer/bay-bridge-clock",
-        objectStorageUri:
-          "oci://us-sanjose-1/x-sanjose/nikiv/designer/bay-bridge-clock/",
+        objectStorageUri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/bay-bridge-clock/",
         objectStorage: {
           provider: "oci",
           region: "us-sanjose-1",
@@ -555,6 +576,53 @@ describe("remote autonomy gateway", () => {
     ]);
   });
 
+  it("runs the server worker to claim and mirror queued Designer space sync jobs", async () => {
+    const remotePath = join(tempDir, "server-spaces", "worker-sync-space", "work");
+    const localPath = join(tempDir, "mac-mirrors", "worker-sync-space", "work");
+    await mkdir(join(remotePath, "parts"), { recursive: true });
+    await writeFile(join(remotePath, "parts", "bracket.build123d.py"), "from build123d import *\n");
+
+    const registered = await requestJson("POST", "/v1/spaces", {
+      slug: "worker-sync-space",
+      remotePath,
+      localPath,
+    });
+
+    const result = await runRemoteAutonomyWorkerOnce({
+      gatewayUrl: "http://remote-autonomy.test",
+      workerId: "op1-worker-test",
+      fetchImpl: gatewayFetch(),
+      commandRunner: rsyncCopyRunner(),
+    });
+
+    expect(result).toMatchObject({
+      workerId: "op1-worker-test",
+      processed: 1,
+      completed: 1,
+      failed: 0,
+    });
+    expect(await readFile(join(localPath, "parts", "bracket.build123d.py"), "utf8")).toBe(
+      "from build123d import *\n",
+    );
+
+    const jobs = await requestJson("GET", "/v1/sync/jobs?includeFinished=1");
+    expect(jobs.jobs).toEqual([
+      expect.objectContaining({
+        jobId: registered.job.jobId,
+        status: "completed",
+        resultJson: expect.objectContaining({
+          status: "completed",
+          transport: "rsync",
+          sourcePath: remotePath,
+          targetPath: localPath,
+          payloadJson: expect.objectContaining({
+            workerId: "op1-worker-test",
+          }),
+        }),
+      }),
+    ]);
+  });
+
   it("records Designer space files with object refs and worker jobs", async () => {
     await requestJson("POST", "/v1/spaces", {
       slug: "remote-cad-space",
@@ -576,7 +644,15 @@ describe("remote autonomy gateway", () => {
       file: {
         spaceSlug: "remote-cad-space",
         path: "parts/gear.build123d.py",
-        localPath: join(tempDir, ".designer", "spaces", "remote-cad-space", "work", "parts", "gear.build123d.py"),
+        localPath: join(
+          tempDir,
+          ".designer",
+          "spaces",
+          "remote-cad-space",
+          "work",
+          "parts",
+          "gear.build123d.py",
+        ),
         remotePath: "/users/nikiv/.designer/spaces/remote-cad-space/work/parts/gear.build123d.py",
         contentHash: "sha256:gear-v1",
         sizeBytes: 4096,
@@ -631,6 +707,77 @@ describe("remote autonomy gateway", () => {
         }),
       }),
     ]);
+  });
+
+  it("runs the server worker to upload object bytes and materialize files from cache", async () => {
+    const remotePath = join(tempDir, "server-spaces", "worker-object-space", "work");
+    const localPath = join(tempDir, "mac-mirrors", "worker-object-space", "work");
+    const sourcePath = join(tempDir, "uploads", "gear.build123d.py");
+    const source = "from build123d import *\n\ngear = Box(2, 3, 5)\n";
+    const contentHash = `sha256:${createHash("sha256").update(source).digest("hex")}`;
+    await mkdir(dirname(sourcePath), { recursive: true });
+    await mkdir(remotePath, { recursive: true });
+    await writeFile(sourcePath, source);
+    await requestJson("POST", "/v1/spaces", {
+      slug: "worker-object-space",
+      remotePath,
+      localPath,
+    });
+    const recorded = await requestJson("POST", "/v1/spaces/worker-object-space/files", {
+      path: "parts/gear.build123d.py",
+      contentHash,
+      sizeBytes: Buffer.byteLength(source),
+      contentType: "text/x-python",
+      materializeTarget: "remote",
+      sourcePath,
+    });
+
+    const result = await runRemoteAutonomyWorkerOnce({
+      gatewayUrl: "http://remote-autonomy.test",
+      workerId: "op1-worker-test",
+      fetchImpl: gatewayFetch(),
+      commandRunner: rsyncCopyRunner(),
+      localSpacesRoot: join(tempDir, ".designer", "spaces"),
+    });
+
+    expect(result.failed).toBe(0);
+    expect(result.completed).toBe(3);
+    expect(await readFile(join(remotePath, "parts", "gear.build123d.py"), "utf8")).toBe(source);
+
+    const hydrated = await requestJson(
+      "GET",
+      "/v1/spaces/worker-object-space/files?includeContent=1",
+    );
+    expect(hydrated.files).toEqual([
+      expect.objectContaining({
+        objectRefId: recorded.file.objectRefId,
+        contentHash,
+        contentBase64: Buffer.from(source).toString("base64"),
+      }),
+    ]);
+
+    const jobs = await requestJson("GET", "/v1/sync/jobs?includeFinished=1&limit=10");
+    expect(jobs.jobs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          jobId: recorded.uploadJob.jobId,
+          status: "completed",
+          resultJson: expect.objectContaining({
+            transport: "object-cache",
+            checksum: contentHash,
+          }),
+        }),
+        expect.objectContaining({
+          jobId: recorded.materializeJob.jobId,
+          status: "completed",
+          resultJson: expect.objectContaining({
+            transport: "object-cache",
+            checksum: contentHash,
+            targetPath: join(remotePath, "parts", "gear.build123d.py"),
+          }),
+        }),
+      ]),
+    );
   });
 
   it("materializes inline Designer space file payloads to the remote filesystem", async () => {
@@ -850,5 +997,31 @@ describe("remote autonomy gateway", () => {
         body: body === undefined ? undefined : JSON.stringify(body),
       }),
     );
+  }
+
+  function gatewayFetch(): typeof fetch {
+    return ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      return gateway.app.handle(request);
+    }) as typeof fetch;
+  }
+
+  function rsyncCopyRunner(): CommandRunner {
+    return async (command, args) => {
+      expect(command).toBe("rsync");
+      const source = args.at(-2)?.replace(/\/+$/, "");
+      const target = args.at(-1)?.replace(/\/+$/, "");
+      if (!source || !target) {
+        return { exitCode: 2, stdout: "", stderr: "missing source or target" };
+      }
+      await rm(target, { recursive: true, force: true });
+      await mkdir(target, { recursive: true });
+      await cp(source, target, {
+        recursive: true,
+        force: true,
+        errorOnExist: false,
+      });
+      return { exitCode: 0, stdout: "copied", stderr: "" };
+    };
   }
 });
