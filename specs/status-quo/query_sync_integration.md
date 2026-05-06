@@ -38,6 +38,7 @@ client sends QuerySubscription
   -> QueryManager compiles a server-side graph
   -> graph settles against current visible rows
   -> matching rows are sent as RowBatchNeeded
+  -> matching rows' BatchSettlement records are sent after row entries
   -> QuerySettled marks the first snapshot as ready at a given tier
 ```
 
@@ -54,6 +55,8 @@ When a row changes:
 3. the graph settles incrementally
 4. the runtime figures out which rows entered, changed inside, or left the result
 5. sync payloads are sent only for the affected rows
+6. batch settlements carry the durability/rejection fate that lets receivers decide when those rows
+   satisfy tiered delivery
 
 That is how Jazz avoids treating every remote subscription update as a full snapshot.
 
@@ -82,6 +85,11 @@ main thread subscribes
 ```
 
 The implementation also threads per-connection sequence information through these signals so a `QuerySettled` message is not treated as valid before earlier row payloads on the same stream have been applied.
+
+Because batch settlement is the active durability signal, server-side subscriptions may emit a new
+`QuerySettled` when their settled graph was dirtied even if the object-id scope did not change. That
+lets downstream runtimes release updated rows whose `batch_id` changed but whose query membership
+stayed the same.
 
 ## Reconnect and Replay
 

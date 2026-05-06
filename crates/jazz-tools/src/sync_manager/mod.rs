@@ -84,8 +84,8 @@ pub struct SyncManager {
     /// Pending replayable batch settlements for RuntimeCore to process.
     pub(super) pending_batch_settlements: Vec<BatchSettlement>,
 
-    /// Row batch-member state acks received during inbox processing.
-    pub(super) received_row_batch_acks: Vec<(RowBatchKey, DurabilityTier)>,
+    /// Batch settlements to send to clients after a full inbox batch has been processed.
+    pub(super) pending_client_batch_settlements: HashMap<ClientId, HashSet<BatchId>>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -124,7 +124,10 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_query_settled", &self.pending_query_settled)
             .field("pending_query_rejections", &self.pending_query_rejections)
             .field("pending_batch_settlements", &self.pending_batch_settlements)
-            .field("received_row_batch_acks", &self.received_row_batch_acks)
+            .field(
+                "pending_client_batch_settlements",
+                &self.pending_client_batch_settlements,
+            )
             .finish()
     }
 }
@@ -223,7 +226,7 @@ impl SyncManager {
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
             pending_batch_settlements: Vec::new(),
-            received_row_batch_acks: Vec::new(),
+            pending_client_batch_settlements: HashMap::new(),
         }
     }
 
@@ -363,8 +366,14 @@ impl SyncManager {
             + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
             + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
             + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
-            + self.received_row_batch_acks.len()
-                * std::mem::size_of::<(RowBatchKey, DurabilityTier)>();
+            + self
+                .pending_client_batch_settlements
+                .values()
+                .map(|batch_ids| {
+                    std::mem::size_of::<ClientId>()
+                        + batch_ids.len() * std::mem::size_of::<BatchId>()
+                })
+                .sum::<usize>();
 
         let total = catalogue + connections + subscriptions + queues;
         (catalogue, connections, subscriptions, queues, total)
@@ -413,11 +422,13 @@ impl SyncManager {
     pub fn request_batch_settlements_from_server(
         &mut self,
         server_id: ServerId,
-        batch_ids: Vec<crate::row_histories::BatchId>,
+        mut batch_ids: Vec<crate::row_histories::BatchId>,
     ) {
         if batch_ids.is_empty() {
             return;
         }
+        batch_ids.sort();
+        batch_ids.dedup();
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
@@ -571,6 +582,15 @@ impl SyncManager {
         for entry in entries {
             self.process_inbox_entry(storage, entry);
         }
+        let pending_client_batch_settlements =
+            std::mem::take(&mut self.pending_client_batch_settlements);
+        for (client_id, batch_ids) in pending_client_batch_settlements {
+            self.respond_to_batch_settlement_request(
+                storage,
+                Destination::Client(client_id),
+                batch_ids.into_iter().collect(),
+            );
+        }
     }
 
     // ========================================================================
@@ -644,14 +664,28 @@ impl SyncManager {
 
         self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
+        let mut newly_visible_batch_ids = HashSet::new();
         for (object_id, branch_name) in newly_visible_for_query {
-            self.queue_initial_sync_to_client_with_storage(
+            if let Some(batch_id) = self.queue_initial_row_to_client_with_storage(
                 storage,
                 client_id,
                 object_id,
                 branch_name,
                 true,
-            );
+            ) {
+                newly_visible_batch_ids.insert(batch_id);
+            }
+        }
+
+        // Initial query scope delivery can include many rows from the same
+        // sealed batch. Queue rows first so client interest is complete, then
+        // send one settlement per batch instead of one growing settlement per row.
+        for batch_id in newly_visible_batch_ids {
+            if let Some(settlement) =
+                self.load_batch_settlement_by_batch_id_from_storage(storage, batch_id)
+            {
+                self.queue_batch_settlement_to_client(client_id, settlement);
+            }
         }
     }
 
@@ -824,10 +858,12 @@ impl SyncManager {
         std::mem::take(&mut self.pending_batch_settlements)
     }
 
-    /// Take received row batch-member persistence state since last call.
-    /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_batch_acks(&mut self) -> Vec<(RowBatchKey, DurabilityTier)> {
-        std::mem::take(&mut self.received_row_batch_acks)
+    pub fn pending_batch_settlements(&self) -> &[BatchSettlement] {
+        &self.pending_batch_settlements
+    }
+
+    pub fn push_pending_batch_settlement(&mut self, settlement: BatchSettlement) {
+        self.pending_batch_settlements.push(settlement);
     }
 
     /// Take pending row visibility changes for QueryManager to materialize

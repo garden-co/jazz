@@ -74,7 +74,6 @@ The sync payloads now speak in row-history and query terms:
 - `CatalogueEntryUpdated`
 - `RowBatchCreated`
 - `RowBatchNeeded`
-- `RowBatchStateChanged`
 - `SealBatch`
 - `BatchSettlement`
 - `BatchSettlementNeeded`
@@ -91,7 +90,7 @@ That payload set matches the table-first runtime model:
 - initial query fill can explicitly ask for needed row batch entries
 - direct and transactional batches are explicitly sealed upstream
 - replayable whole-batch fate travels separately from concrete row entries
-- row-state and durability progression travel as row-state changes
+- durability, visibility acknowledgement, and rejection travel as `BatchSettlement`
 - schemas and lenses travel as catalogue entries
 - permissions bundles and permissions heads travel as catalogue entries
 
@@ -121,8 +120,10 @@ and SyncManager paths used by other runtime links.
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
 4. The writer seals the direct batch, sending `SealBatch` upstream. Simple write APIs do this immediately.
-5. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
+5. The Sync Manager queues `RowBatchCreated` for peers and servers.
 6. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
+7. If authority rejects any member write in that direct batch, the whole batch resolves as
+   `BatchSettlement::Rejected`; independent write fate requires independent batches.
 
 ### Transactional write
 
@@ -142,11 +143,15 @@ and SyncManager paths used by other runtime links.
 5. If that current row has replayable batch fate, the current `BatchSettlement` is replayed too.
 6. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
 
-### Later visibility/state change
+### Later visibility/fate change
 
-When a row already known to a peer changes durability or state, the runtime can send `RowBatchStateChanged` without pretending the row is brand new.
+When a row already known to a peer becomes durable, accepted, or rejected, the runtime sends the
+batch settlement that proves the new fate. Successful settlements include `visible_members`, which
+lets receivers resolve row-level waiters and mark affected subscriptions for recompute without a
+separate row-state side channel.
 
-The row-level identity for those changes is `RowBatchKey { row_id, branch_name, batch_id }`.
+The row-level identity for local interest remains `RowBatchKey { row_id, branch_name, batch_id }`,
+but active sync does not send a row-state-change payload for it.
 
 ## Query-Scoped Delivery
 

@@ -311,13 +311,14 @@ export function mergeAuth(
  * marked as down instead of optimistically assuming it is up.
  */
 export function performUpstreamConnect(
-  runtime: { connect?: (url: string, auth: string) => void },
+  runtime: { connect?: (url: string, auth: string) => void; batchedTick?: () => void },
   post: (msg: WorkerToMainMessage) => void,
   wsUrl: string,
   authJson: string,
 ): void {
   try {
     runtime.connect?.(wsUrl, authJson);
+    runtime.batchedTick?.();
     post({ type: "upstream-connected" });
   } catch (err) {
     console.error("[worker] runtime.connect failed:", err);
@@ -464,6 +465,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
     }
+    if (bufferedSyncMessages.length > 0 || bufferedPeerSyncMessages.length > 0) {
+      runtime.batchedTick?.();
+    }
 
     // Bootstrap catalogue-only sync from worker to main runtime.
     // This sends persisted schema/lens objects (including rehydrated ones)
@@ -548,6 +552,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         for (const payload of payloads) {
           runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
         }
+        runtime.batchedTick?.();
       } else {
         pendingSyncMessages.push(...payloads);
       }
@@ -576,6 +581,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       for (const payload of msg.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+      runtime.batchedTick?.();
       break;
     }
 
@@ -603,6 +609,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       if (runtime) {
         try {
           runtime.disconnect?.();
+          runtime.removeServer?.();
+          runtime.batchedTick?.();
           post({ type: "upstream-disconnected" });
         } catch (e) {
           console.error("[worker] disconnect-upstream failed:", e);
@@ -614,6 +622,9 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
     case "reconnect-upstream": {
       if (runtime && currentWsUrl) {
         performUpstreamConnect(runtime, post, currentWsUrl, JSON.stringify(currentAuth));
+        runtime.removeServer?.();
+        runtime.addServer?.();
+        runtime.batchedTick?.();
       }
       break;
     }
@@ -623,6 +634,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       disposeWasmTelemetry?.();
       disposeWasmTelemetry = null;
       if (runtime) {
+        runtime.batchedTick?.();
+        runtime.flushWal?.();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
       }

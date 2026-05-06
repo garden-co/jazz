@@ -1,8 +1,8 @@
 use super::*;
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::{BatchSettlement, LocalBatchMember};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
-use crate::row_histories::RowState;
+use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
 use crate::storage::Storage;
 use std::collections::HashMap;
 
@@ -34,6 +34,12 @@ impl SyncManager {
             }
             _ => None,
         };
+        if let Some(batch_id) = batch_id
+            && let Some(settlement) = self.load_rejected_batch_settlement(storage, batch_id)
+        {
+            self.queue_batch_settlement_to_client(check.client_id, settlement);
+            return;
+        }
         self.apply_payload_from_client(storage, check.client_id, check.payload, true);
         if let Some(batch_id) = batch_id {
             self.try_accept_completed_sealed_batch_from_client(storage, check.client_id, batch_id);
@@ -77,28 +83,7 @@ impl SyncManager {
                 code: code.clone(),
                 reason: reason.clone(),
             };
-            if let Err(error) = storage.upsert_authoritative_batch_settlement(&settlement) {
-                tracing::warn!(
-                    batch_id = ?row.batch_id,
-                    %error,
-                    "failed to persist rejected transactional batch settlement"
-                );
-                return;
-            }
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(check.client_id),
-                payload: SyncPayload::RowBatchStateChanged {
-                    row_id: row.row_id,
-                    branch_name: crate::object::BranchName::new(&row.branch),
-                    batch_id: row.batch_id,
-                    state: Some(RowState::Rejected),
-                    confirmed_tier: None,
-                },
-            });
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(check.client_id),
-                payload: SyncPayload::BatchSettlement { settlement },
-            });
+            self.reject_permission_batch(storage, check.client_id, settlement, row.clone());
             return;
         }
 
@@ -148,5 +133,119 @@ impl SyncManager {
             operation,
         });
         id
+    }
+
+    fn load_rejected_batch_settlement<H: Storage>(
+        &self,
+        storage: &H,
+        batch_id: BatchId,
+    ) -> Option<BatchSettlement> {
+        match storage.load_authoritative_batch_settlement(batch_id) {
+            Ok(Some(settlement @ BatchSettlement::Rejected { .. })) => Some(settlement),
+            _ => None,
+        }
+    }
+
+    fn local_batch_rows<H: Storage>(
+        &self,
+        storage: &H,
+        batch_id: BatchId,
+        fallback_row: StoredRowBatch,
+    ) -> Vec<StoredRowBatch> {
+        let mut rows = storage
+            .load_local_batch_record(batch_id)
+            .ok()
+            .flatten()
+            .map(|record| {
+                record
+                    .members
+                    .into_iter()
+                    .filter_map(|member: LocalBatchMember| {
+                        storage
+                            .load_history_row_batch_for_schema_hash(
+                                member.table_name.as_str(),
+                                member.schema_hash,
+                                member.branch_name.as_str(),
+                                member.object_id,
+                                batch_id,
+                            )
+                            .ok()
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !rows.iter().any(|row| {
+            row.row_id == fallback_row.row_id
+                && row.branch == fallback_row.branch
+                && row.batch_id == fallback_row.batch_id
+        }) {
+            rows.push(fallback_row);
+        }
+        rows
+    }
+
+    fn reject_permission_batch<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        origin_client_id: ClientId,
+        settlement: BatchSettlement,
+        fallback_row: StoredRowBatch,
+    ) {
+        let batch_id = settlement.batch_id();
+        if let Err(error) = storage.upsert_authoritative_batch_settlement(&settlement) {
+            tracing::warn!(
+                ?batch_id,
+                %error,
+                "failed to persist rejected batch settlement"
+            );
+            return;
+        }
+
+        if let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) {
+            record.apply_settlement(settlement.clone());
+            let _ = storage.upsert_local_batch_record(&record);
+        }
+        let _ = storage.delete_sealed_batch_submission(batch_id);
+        self.pending_permission_checks.retain(|pending| {
+            !matches!(
+                &pending.payload,
+                SyncPayload::RowBatchCreated { row, .. }
+                    | SyncPayload::RowBatchNeeded { row, .. }
+                    if row.batch_id == batch_id
+            )
+        });
+        self.pending_batch_settlements.push(settlement.clone());
+
+        for row in self.local_batch_rows(storage, batch_id, fallback_row) {
+            let branch_name = BranchName::new(&row.branch);
+            let visibility_change = patch_row_batch_state(
+                storage,
+                row.row_id,
+                &branch_name,
+                row.batch_id,
+                Some(RowState::Rejected),
+                None,
+            )
+            .ok()
+            .flatten();
+
+            if let Some(update) = visibility_change {
+                self.pending_row_visibility_changes.push(update);
+                self.forward_update_to_clients_except_with_storage(
+                    storage,
+                    row.row_id,
+                    branch_name,
+                    origin_client_id,
+                );
+            }
+        }
+
+        let mut clients = self.interested_clients_for_batch_settlement(storage, &settlement);
+        clients.insert(origin_client_id);
+        for client_id in clients {
+            self.queue_batch_settlement_to_client(client_id, settlement.clone());
+        }
     }
 }

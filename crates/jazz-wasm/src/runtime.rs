@@ -25,6 +25,7 @@ use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
 use tracing::{debug_span, info, info_span};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 
 /// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
@@ -466,7 +467,7 @@ impl WasmScheduler {
 }
 
 fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
-    wasm_bindgen_futures::spawn_local(async move {
+    let task = Closure::once_into_js(move || {
         *flag.borrow_mut() = false;
 
         let Some(core_rc) = core_ref.upgrade() else {
@@ -492,6 +493,14 @@ fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<Re
             schedule_batched_tick_task(core_ref.clone(), flag.clone());
         }
     });
+
+    let global = js_sys::global();
+    let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+        .and_then(|value| value.dyn_into::<Function>())
+    else {
+        return;
+    };
+    let _ = set_timeout.call2(&global, &task, &JsValue::from_f64(0.0));
 }
 
 impl Scheduler for WasmScheduler {
@@ -817,6 +826,13 @@ impl WasmRuntime {
 
         self.core.borrow_mut().park_sync_message(entry);
         Ok(())
+    }
+
+    /// Drive the runtime's batched receive/apply/send loop immediately.
+    #[wasm_bindgen(js_name = batchedTick)]
+    pub fn batched_tick(&self) {
+        let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
+        self.core.borrow_mut().batched_tick();
     }
 
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
@@ -1838,6 +1854,9 @@ impl WasmRuntime {
         // Signal the manager to shut down before dropping the handle.
         if let Some(handle) = core.transport() {
             handle.disconnect();
+        }
+        if let Some(server_id) = *self.upstream_server_id.borrow() {
+            core.remove_server(server_id);
         }
         // Drop the borrow before mutably clearing.
         core.clear_transport();

@@ -655,12 +655,16 @@ fn query_settled_holds_until_tier() {
         .sync_manager_mut()
         .push_inbox(InboxEntry {
             source: Source::Server(server_b_id),
-            payload: SyncPayload::RowBatchStateChanged {
-                row_id: visible_row.row_id,
-                branch_name: BranchName::new(&visible_row.branch),
-                batch_id: visible_row.batch_id,
-                state: None,
-                confirmed_tier: Some(DurabilityTier::Local),
+            payload: SyncPayload::BatchSettlement {
+                settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                    batch_id: visible_row.batch_id,
+                    confirmed_tier: DurabilityTier::Local,
+                    visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                        object_id: visible_row.row_id,
+                        branch_name: BranchName::new(&visible_row.branch),
+                        batch_id: visible_row.batch_id,
+                    }],
+                },
             },
         });
     client_a.process(&mut io_a);
@@ -681,12 +685,16 @@ fn query_settled_holds_until_tier() {
         .sync_manager_mut()
         .push_inbox(InboxEntry {
             source: Source::Server(server_b_id),
-            payload: SyncPayload::RowBatchStateChanged {
-                row_id: visible_row.row_id,
-                branch_name: BranchName::new(&visible_row.branch),
-                batch_id: visible_row.batch_id,
-                state: None,
-                confirmed_tier: Some(DurabilityTier::EdgeServer),
+            payload: SyncPayload::BatchSettlement {
+                settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                    batch_id: visible_row.batch_id,
+                    confirmed_tier: DurabilityTier::EdgeServer,
+                    visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                        object_id: visible_row.row_id,
+                        branch_name: BranchName::new(&visible_row.branch),
+                        batch_id: visible_row.batch_id,
+                    }],
+                },
             },
         });
     client_a.process(&mut io_a);
@@ -994,12 +1002,16 @@ fn query_settled_data_accumulates() {
             .sync_manager_mut()
             .push_inbox(InboxEntry {
                 source: Source::Server(server_id),
-                payload: SyncPayload::RowBatchStateChanged {
-                    row_id: row.row_id,
-                    branch_name: BranchName::new(&row.branch),
-                    batch_id: row.batch_id,
-                    state: None,
-                    confirmed_tier: Some(DurabilityTier::Local),
+                payload: SyncPayload::BatchSettlement {
+                    settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                        batch_id: row.batch_id,
+                        confirmed_tier: DurabilityTier::Local,
+                        visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                            object_id: row.row_id,
+                            branch_name: BranchName::new(&row.branch),
+                            batch_id: row.batch_id,
+                        }],
+                    },
                 },
             });
     }
@@ -1086,12 +1098,16 @@ fn query_one_shot_settled_tier() {
         .sync_manager_mut()
         .push_inbox(InboxEntry {
             source: Source::Server(server_id),
-            payload: SyncPayload::RowBatchStateChanged {
-                row_id: visible_row.row_id,
-                branch_name: BranchName::new(&visible_row.branch),
-                batch_id: visible_row.batch_id,
-                state: None,
-                confirmed_tier: Some(DurabilityTier::Local),
+            payload: SyncPayload::BatchSettlement {
+                settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                    batch_id: visible_row.batch_id,
+                    confirmed_tier: DurabilityTier::Local,
+                    visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                        object_id: visible_row.row_id,
+                        branch_name: BranchName::new(&visible_row.branch),
+                        batch_id: visible_row.batch_id,
+                    }],
+                },
             },
         });
     client.process(&mut storage);

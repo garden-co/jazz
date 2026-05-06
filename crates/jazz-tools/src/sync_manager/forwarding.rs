@@ -131,15 +131,15 @@ impl SyncManager {
         batch_id: BatchId,
     ) -> Option<BatchSettlement> {
         storage
-            .load_local_batch_record(batch_id)
+            .load_authoritative_batch_settlement(batch_id)
             .ok()
             .flatten()
-            .and_then(|record| record.latest_settlement)
             .or_else(|| {
                 storage
-                    .load_authoritative_batch_settlement(batch_id)
+                    .load_local_batch_record(batch_id)
                     .ok()
                     .flatten()
+                    .and_then(|record| record.latest_settlement)
             })
     }
 

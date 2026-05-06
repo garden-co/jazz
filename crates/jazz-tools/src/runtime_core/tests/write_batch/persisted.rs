@@ -194,12 +194,16 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 
     core.push_sync_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }],
+            },
         },
     });
     core.immediate_tick();
@@ -207,7 +211,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
     assert_eq!(
         receiver.try_recv(),
         Ok(Some(Ok(()))),
-        "row persisted receiver should resolve from row-batch state changes alone"
+        "row persisted receiver should resolve from batch settlements alone"
     );
     assert_eq!(
         *calls.lock().unwrap(),
@@ -217,7 +221,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 }
 
 #[test]
-fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id() {
+fn rc_insert_persisted_ignores_batch_settlement_for_different_row_same_batch_id() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) =
         s.a.insert_persisted(
@@ -238,12 +242,16 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id: ObjectId::new(),
-            branch_name,
-            batch_id: row_batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id: row_batch_id,
+                confirmed_tier: DurabilityTier::Local,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: ObjectId::new(),
+                    branch_name,
+                    batch_id: row_batch_id,
+                }],
+            },
         },
     });
     s.a.immediate_tick();
@@ -251,7 +259,7 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
     assert_eq!(
         receiver.try_recv(),
         Ok(None),
-        "row persisted receivers should ignore row-state acks for a different row, even if the batch id matches"
+        "row persisted receivers should ignore batch settlements for a different row, even if the batch id matches"
     );
 }
 
@@ -352,12 +360,16 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchSettlement {
+            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+                visible_members: vec![crate::batch_fate::VisibleBatchMember {
+                    object_id: row_id,
+                    branch_name,
+                    batch_id,
+                }],
+            },
         },
     });
     s.a.immediate_tick();
@@ -617,7 +629,22 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
             .load_visible_region_row("users", branch_name.as_str(), row_id)
             .unwrap()
             .expect("settled direct row should remain visible");
-    assert_eq!(visible_row.confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(visible_row.confirmed_tier, None);
+
+    let edge_visible_row =
+        s.a.storage()
+            .load_visible_region_row_for_tier(
+                "users",
+                branch_name.as_str(),
+                row_id,
+                DurabilityTier::EdgeServer,
+            )
+            .unwrap()
+            .expect("settled direct row should satisfy edge-tier reads");
+    assert_eq!(
+        edge_visible_row.confirmed_tier,
+        Some(DurabilityTier::EdgeServer)
+    );
 }
 
 #[test]

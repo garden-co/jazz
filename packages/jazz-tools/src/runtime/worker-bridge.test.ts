@@ -89,6 +89,7 @@ function createRuntimeMock(): {
     onSyncMessageToSend: (callback: SendSyncPayloadCallback) => {
       onSyncToSend = callback;
     },
+    batchedTick: () => undefined,
     addServer: () => {
       addServerCalls.count += 1;
     },
@@ -330,6 +331,33 @@ describe("WorkerBridge", () => {
         typeof entry === "object" && entry !== null && (entry as { type?: string }).type === "sync",
     );
     expect(syncMessagesAfterShutdown).toHaveLength(0);
+  });
+
+  it("flushes queued sync payloads before sending shutdown", async () => {
+    const worker = new MockWorker();
+    const runtimeMock = createRuntimeMock();
+    const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+    const initPromise = bridge.init({
+      schemaJson: "{}",
+      appId: "queued-shutdown-flush",
+      env: "development",
+      userBranch: "main",
+      dbName: "queued-shutdown-flush",
+    });
+    worker.emitFromWorker({ type: "init-ok", clientId: "worker-client-123" });
+    await initPromise;
+
+    const payload = enc({ write: "pending" });
+    runtimeMock.emitSyncPayload("server", "server-1", payload, false);
+
+    const shutdownPromise = bridge.shutdown(worker as unknown as Worker);
+
+    expect(worker.posted.at(-2)).toEqual({ type: "sync", payload: [payload] });
+    expect(worker.posted.at(-1)).toEqual({ type: "shutdown" });
+
+    worker.emitFromWorker({ type: "shutdown-ok" });
+    await shutdownPromise;
   });
 
   it("supports peer channel control and peer-sync forwarding", () => {

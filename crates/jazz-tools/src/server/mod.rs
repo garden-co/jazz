@@ -100,7 +100,6 @@ impl ConnectionEventHub {
                 },
                 _ => payload.clone(),
             };
-
             prepared.push(PreparedSyncDispatch {
                 connection_id,
                 sender: state.sender.clone(),

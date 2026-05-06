@@ -507,4 +507,37 @@ impl QueryManager {
             self.clear_local_pending_row_overlay(table, row_id);
         }
     }
+
+    pub(crate) fn restore_local_rejected_delete_row(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+        restored_data: &[u8],
+    ) {
+        let table_name = TableName::new(table);
+        if let Some(table_schema) = self.schema.get(&table_name)
+            && let Err(error) = Self::update_indices_for_undelete_on_branch(
+                storage,
+                table,
+                branch,
+                row_id,
+                restored_data,
+                &table_schema.columns,
+            )
+        {
+            tracing::warn!(
+                table,
+                branch,
+                object_id = %row_id,
+                %error,
+                "failed to restore rejected delete indices"
+            );
+        }
+
+        self.pending_local_row_batches.remove(&row_id);
+        self.mark_subscriptions_dirty_local(table);
+        self.mark_local_row_updated_in_subscriptions(table, row_id);
+    }
 }

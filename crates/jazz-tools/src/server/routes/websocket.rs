@@ -445,9 +445,29 @@ async fn handle_ws_connection(
             },
             update = sync_rx.recv() => {
                 let Some(u) = update else { break };
-                let event = crate::jazz_transport::ServerEvent::SyncUpdate {
+                let mut updates = Vec::with_capacity(256);
+                updates.push(crate::jazz_transport::SequencedSyncPayload {
                     seq: Some(u.seq),
-                    payload: Box::new(u.payload),
+                    payload: u.payload,
+                });
+                while updates.len() < 256 {
+                    match sync_rx.try_recv() {
+                        Ok(u) => updates.push(crate::jazz_transport::SequencedSyncPayload {
+                            seq: Some(u.seq),
+                            payload: u.payload,
+                        }),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+                let event = if updates.len() == 1 {
+                    let update = updates.pop().expect("single update is present");
+                    crate::jazz_transport::ServerEvent::SyncUpdate {
+                        seq: update.seq,
+                        payload: Box::new(update.payload),
+                    }
+                } else {
+                    crate::jazz_transport::ServerEvent::SyncUpdateBatch { updates }
                 };
                 let bytes = match serde_json::to_vec(&event) {
                     Ok(b) => b,
