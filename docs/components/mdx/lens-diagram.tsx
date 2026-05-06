@@ -440,7 +440,7 @@ export function LensDiagram() {
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [pathD, client, dataVersion]);
+  }, [pathD]);
 
   return (
     <div className="my-6 rounded-xl border border-fd-border bg-fd-card/30 p-5 not-prose hidden lg:block">
