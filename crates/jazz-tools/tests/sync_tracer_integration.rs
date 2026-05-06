@@ -25,7 +25,7 @@ fn test_schema() -> jazz_tools::Schema {
 ///
 /// ```text
 /// alice ──RowBatchCreated────► server ──RowBatchNeeded────► bob
-///       ◄──BatchSettlement──────
+///       ◄──BatchFate──────
 /// ```
 #[tokio::test]
 async fn alice_write_bob_read() {
@@ -99,7 +99,7 @@ async fn alice_write_bob_read() {
     assert!(
         alice_received
             .iter()
-            .any(|message| message.payload.variant_name() == "BatchSettlement"),
+            .any(|message| message.payload.variant_name() == "BatchFate"),
         "alice should receive a settlement for the created row batch"
     );
     let bob_received = tracer
@@ -125,7 +125,7 @@ async fn alice_write_bob_read() {
         assert!(
             messages
                 .iter()
-                .any(|message| message.payload.variant_name() == "BatchSettlement"),
+                .any(|message| message.payload.variant_name() == "BatchFate"),
             "bob should see a batch settlement from the server"
         );
         assert!(
@@ -245,7 +245,7 @@ async fn bob_updates_alice_todo() {
     tracer.expect_contains(
         "
         bob      -> server   RowBatchCreated
-        server   -> bob      BatchSettlement
+        server   -> bob      BatchFate
     ",
     );
 
@@ -268,7 +268,7 @@ async fn bob_updates_alice_todo() {
     assert!(
         bob_recv
             .iter()
-            .any(|m| m.payload.variant_name() == "BatchSettlement"),
+            .any(|m| m.payload.variant_name() == "BatchFate"),
         "bob should have received a batch settlement"
     );
 
@@ -317,8 +317,8 @@ async fn single_writer_flow() {
     insta::assert_snapshot!(tracer.tally(), @"
     alice    -> server  : QueryUnsubscription (1), RowBatchCreated (1), SealBatch (1)
     alice    => server  : RowBatchCreated (1), SealBatch (1)
-    server   -> alice   : BatchSettlement (1)
-    server   => alice   : BatchSettlement (1)
+    server   -> alice   : BatchFate (1)
+    server   => alice   : BatchFate (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");
@@ -373,8 +373,8 @@ async fn named_object_trace() {
     alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
     alice    => server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
     alice    -> server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
-    server   => alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
-    server   -> alice     BatchSettlement      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
+    server   => alice     BatchFate            durable_direct batch:B1 tier:GlobalServer
+    server   -> alice     BatchFate            durable_direct batch:B1 tier:GlobalServer
     ");
 
     alice.shutdown().await.expect("shutdown alice");

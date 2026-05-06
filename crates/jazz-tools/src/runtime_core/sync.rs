@@ -23,16 +23,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .filter(|record| {
                 record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
             })
-            .filter(|record| match record.latest_settlement.as_ref() {
+            .filter(|record| match record.latest_fate.as_ref() {
                 None => true,
-                Some(crate::batch_fate::BatchSettlement::Missing { .. }) => true,
-                Some(crate::batch_fate::BatchSettlement::Rejected { .. }) => false,
-                Some(crate::batch_fate::BatchSettlement::DurableDirect {
+                Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
+                Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
+                Some(crate::batch_fate::BatchFate::DurableDirect { confirmed_tier, .. })
+                | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
                     confirmed_tier, ..
-                })
-                | Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
-                    confirmed_tier,
-                    ..
                 }) => confirmed_tier < &terminal_tier,
             })
             .map(|record| record.batch_id)
@@ -83,7 +80,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .request_batch_settlements_from_server(server_id, pending_batch_ids);
+            .request_batch_fates_from_server(server_id, pending_batch_ids);
         self.immediate_tick();
     }
 

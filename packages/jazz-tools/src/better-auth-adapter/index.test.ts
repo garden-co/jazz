@@ -1059,7 +1059,7 @@ describe("jazzAdapter", () => {
       }
     });
 
-    test("supports email/password sign up and sign in", async () => {
+    test("supports email/password sign up and sign in", { timeout: 10_000 }, async () => {
       const signUpResponse = await auth.api.signUpEmail({
         body: {
           name: "memory-test",

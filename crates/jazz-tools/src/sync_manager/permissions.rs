@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::{BatchSettlement, LocalBatchMember};
+use crate::batch_fate::{BatchFate, LocalBatchMember};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
@@ -35,9 +35,9 @@ impl SyncManager {
             _ => None,
         };
         if let Some(batch_id) = batch_id
-            && let Some(settlement) = self.load_rejected_batch_settlement(storage, batch_id)
+            && let Some(fate) = self.load_rejected_batch_fate(storage, batch_id)
         {
-            self.queue_batch_settlement_to_client(check.client_id, settlement);
+            self.queue_batch_fate_to_client(check.client_id, fate);
             return;
         }
         self.apply_payload_from_client(storage, check.client_id, check.payload, true);
@@ -78,12 +78,12 @@ impl SyncManager {
                 RowState::StagingPending | RowState::VisibleDirect
             )
         {
-            let settlement = BatchSettlement::Rejected {
+            let fate = BatchFate::Rejected {
                 batch_id: row.batch_id,
                 code: code.clone(),
                 reason: reason.clone(),
             };
-            self.reject_permission_batch(storage, check.client_id, settlement, row.clone());
+            self.reject_permission_batch(storage, check.client_id, fate, row.clone());
             return;
         }
 
@@ -135,13 +135,13 @@ impl SyncManager {
         id
     }
 
-    fn load_rejected_batch_settlement<H: Storage>(
+    fn load_rejected_batch_fate<H: Storage>(
         &self,
         storage: &H,
         batch_id: BatchId,
-    ) -> Option<BatchSettlement> {
-        match storage.load_authoritative_batch_settlement(batch_id) {
-            Ok(Some(settlement @ BatchSettlement::Rejected { .. })) => Some(settlement),
+    ) -> Option<BatchFate> {
+        match storage.load_authoritative_batch_fate(batch_id) {
+            Ok(Some(fate @ BatchFate::Rejected { .. })) => Some(fate),
             _ => None,
         }
     }
@@ -190,21 +190,21 @@ impl SyncManager {
         &mut self,
         storage: &mut H,
         origin_client_id: ClientId,
-        settlement: BatchSettlement,
+        fate: BatchFate,
         fallback_row: StoredRowBatch,
     ) {
-        let batch_id = settlement.batch_id();
-        if let Err(error) = storage.upsert_authoritative_batch_settlement(&settlement) {
+        let batch_id = fate.batch_id();
+        if let Err(error) = storage.upsert_authoritative_batch_fate(&fate) {
             tracing::warn!(
                 ?batch_id,
                 %error,
-                "failed to persist rejected batch settlement"
+                "failed to persist rejected batch fate"
             );
             return;
         }
 
         if let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) {
-            record.apply_settlement(settlement.clone());
+            record.apply_fate(fate.clone());
             let _ = storage.upsert_local_batch_record(&record);
         }
         let _ = storage.delete_sealed_batch_submission(batch_id);
@@ -216,7 +216,7 @@ impl SyncManager {
                     if row.batch_id == batch_id
             )
         });
-        self.pending_batch_settlements.push(settlement.clone());
+        self.pending_batch_fates.push(fate.clone());
 
         for row in self.local_batch_rows(storage, batch_id, fallback_row) {
             let branch_name = BranchName::new(&row.branch);
@@ -242,10 +242,11 @@ impl SyncManager {
             }
         }
 
-        let mut clients = self.interested_clients_for_batch_settlement(storage, &settlement);
-        clients.insert(origin_client_id);
+        let mut clients = self.interested_clients_for_batch_fate(storage, &fate);
+        self.queue_batch_fate_to_client_unfiltered(origin_client_id, fate.clone());
+        clients.remove(&origin_client_id);
         for client_id in clients {
-            self.queue_batch_settlement_to_client(client_id, settlement.clone());
+            self.queue_batch_fate_to_client(client_id, fate.clone());
         }
     }
 }

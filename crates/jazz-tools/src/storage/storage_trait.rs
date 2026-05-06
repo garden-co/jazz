@@ -466,8 +466,8 @@ pub trait Storage {
         if let Some(submission) = record.sealed_submission.as_ref() {
             self.upsert_sealed_batch_submission(submission)?;
         }
-        if let Some(settlement) = record.latest_settlement.as_ref() {
-            self.upsert_authoritative_batch_settlement(settlement)?;
+        if let Some(settlement) = record.latest_fate.as_ref() {
+            self.upsert_authoritative_batch_fate(settlement)?;
         }
         ensure_raw_table_header(
             self,
@@ -599,11 +599,11 @@ pub trait Storage {
         Ok(submissions)
     }
 
-    fn upsert_authoritative_batch_settlement(
+    fn upsert_authoritative_batch_fate(
         &mut self,
-        settlement: &BatchSettlement,
+        settlement: &BatchFate,
     ) -> Result<(), StorageError> {
-        let settlement = match self.load_authoritative_batch_settlement(settlement.batch_id())? {
+        let settlement = match self.load_authoritative_batch_fate(settlement.batch_id())? {
             Some(existing) => existing.merged_with(settlement),
             None => settlement.clone(),
         };
@@ -625,10 +625,10 @@ pub trait Storage {
         )
     }
 
-    fn load_authoritative_batch_settlement(
+    fn load_authoritative_batch_fate(
         &self,
         batch_id: BatchId,
-    ) -> Result<Option<BatchSettlement>, StorageError> {
+    ) -> Result<Option<BatchFate>, StorageError> {
         match self.raw_table_get(
             AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
             &local_batch_record_key(batch_id),
@@ -640,7 +640,7 @@ pub trait Storage {
                     STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
                     AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
                 )?;
-                BatchSettlement::decode_storage_row(&bytes)
+                BatchFate::decode_storage_row(&bytes)
                     .map(Some)
                     .map_err(|err| {
                         StorageError::IoError(format!(
@@ -652,7 +652,7 @@ pub trait Storage {
         }
     }
 
-    fn scan_authoritative_batch_settlements(&self) -> Result<Vec<BatchSettlement>, StorageError> {
+    fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {
         let mut settlements = Vec::new();
         for (key, bytes) in
             self.raw_table_scan_prefix(AUTHORITATIVE_BATCH_SETTLEMENT_TABLE, "batch:")?
@@ -664,7 +664,7 @@ pub trait Storage {
                 AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
             )?;
             let batch_id = decode_local_batch_record_key(&key)?;
-            let settlement = BatchSettlement::decode_storage_row(&bytes).map_err(|err| {
+            let settlement = BatchFate::decode_storage_row(&bytes).map_err(|err| {
                 StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
             })?;
             if settlement.batch_id() != batch_id {
@@ -1031,7 +1031,7 @@ pub trait Storage {
             &row.bytes,
         )
         .map_err(|err| StorageError::IoError(format!("decode flat visible row: {err}")))?;
-        let current_tier = row_confirmed_tier_with_batch_settlement(self, &entry.current_row)?;
+        let current_tier = row_confirmed_tier_with_batch_fate(self, &entry.current_row)?;
         if current_tier.is_some_and(|tier| tier >= required_tier) {
             let mut current_row = entry.current_row.clone();
             current_row.confirmed_tier = current_tier;
@@ -1039,7 +1039,7 @@ pub trait Storage {
         }
         let mut history_rows =
             self.scan_history_region(table, branch, HistoryScan::Row { row_id })?;
-        apply_batch_settlement_tiers_to_rows(self, &mut history_rows)?;
+        apply_batch_fate_tiers_to_rows(self, &mut history_rows)?;
         crate::row_histories::visible_row_preview_from_history_rows(
             row.user_descriptor.as_ref(),
             &history_rows,
@@ -1712,22 +1712,22 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).scan_sealed_batch_submissions()
     }
 
-    fn upsert_authoritative_batch_settlement(
+    fn upsert_authoritative_batch_fate(
         &mut self,
-        settlement: &BatchSettlement,
+        settlement: &BatchFate,
     ) -> Result<(), StorageError> {
-        (**self).upsert_authoritative_batch_settlement(settlement)
+        (**self).upsert_authoritative_batch_fate(settlement)
     }
 
-    fn load_authoritative_batch_settlement(
+    fn load_authoritative_batch_fate(
         &self,
         batch_id: BatchId,
-    ) -> Result<Option<BatchSettlement>, StorageError> {
-        (**self).load_authoritative_batch_settlement(batch_id)
+    ) -> Result<Option<BatchFate>, StorageError> {
+        (**self).load_authoritative_batch_fate(batch_id)
     }
 
-    fn scan_authoritative_batch_settlements(&self) -> Result<Vec<BatchSettlement>, StorageError> {
-        (**self).scan_authoritative_batch_settlements()
+    fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {
+        (**self).scan_authoritative_batch_fates()
     }
 
     fn append_history_region_row_bytes(

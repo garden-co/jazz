@@ -340,8 +340,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .into_iter()
                     .filter_map(|record| {
                         matches!(
-                            record.latest_settlement,
-                            Some(crate::batch_fate::BatchSettlement::Rejected { .. })
+                            record.latest_fate,
+                            Some(crate::batch_fate::BatchFate::Rejected { .. })
                         )
                         .then_some(record.batch_id)
                     })

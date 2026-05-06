@@ -136,17 +136,9 @@ fn initial_query_scope_sends_one_settlement_per_batch() {
         })
         .collect();
 
-    io.upsert_authoritative_batch_settlement(&BatchSettlement::DurableDirect {
+    io.upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
         batch_id,
         confirmed_tier: DurabilityTier::GlobalServer,
-        visible_members: rows
-            .iter()
-            .map(|(object_id, row)| VisibleBatchMember {
-                object_id: *object_id,
-                branch_name: BranchName::new(&row.branch),
-                batch_id: row.batch_id,
-            })
-            .collect(),
     })
     .unwrap();
 
@@ -173,7 +165,7 @@ fn initial_query_scope_sends_one_settlement_per_batch() {
     let settlements: Vec<_> = outbox
         .iter()
         .filter_map(|entry| match &entry.payload {
-            SyncPayload::BatchSettlement { settlement } => Some(settlement),
+            SyncPayload::BatchFate { fate } => Some(fate),
             _ => None,
         })
         .collect();
@@ -184,10 +176,9 @@ fn initial_query_scope_sends_one_settlement_per_batch() {
     );
     assert!(matches!(
         settlements[0],
-        BatchSettlement::DurableDirect {
+        BatchFate::DurableDirect {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
-            visible_members
-        } if *settled_batch_id == batch_id && visible_members.len() == rows.len()
+        } if *settled_batch_id == batch_id
     ));
 }

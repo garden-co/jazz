@@ -25,7 +25,6 @@ import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
-import { normalizeRuntimeWriteError } from "./anonymous-write-denied-error.js";
 import { appScopedUrl, httpUrlToWs } from "./url.js";
 
 /**
@@ -217,13 +216,7 @@ interface TimestampOverrideOptions {
 
 export type BatchMode = "direct" | "transactional";
 
-export interface VisibleBatchMember {
-  objectId: string;
-  branchName: string;
-  batchId: string;
-}
-
-export type BatchSettlement =
+export type BatchFate =
   | {
       kind: "missing";
       batchId: string;
@@ -238,20 +231,18 @@ export type BatchSettlement =
       kind: "durableDirect";
       batchId: string;
       confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
     }
   | {
       kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
     };
 
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
   sealed: boolean;
-  latestSettlement: BatchSettlement | null;
+  latestSettlement: BatchFate | null;
 }
 
 export interface CreateOptions extends TimestampOverrideOptions {
@@ -730,7 +721,7 @@ function durabilityTierRank(tier: DurabilityTier): number {
 }
 
 function settlementSatisfiesTier(
-  settlement: BatchSettlement | null | undefined,
+  settlement: BatchFate | null | undefined,
   tier: DurabilityTier,
 ): boolean {
   if (!settlement) {
@@ -745,7 +736,7 @@ function settlementSatisfiesTier(
 }
 
 function rejectionFromSettlement(
-  settlement: BatchSettlement | null | undefined,
+  settlement: BatchFate | null | undefined,
 ): PersistedWriteRejectedError | null {
   if (!settlement || settlement.kind !== "rejected") {
     return null;
