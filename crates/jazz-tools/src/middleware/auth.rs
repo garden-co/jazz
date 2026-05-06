@@ -143,6 +143,8 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     /// Secret for admin operations (schema/policy sync).
     pub admin_secret: Option<String>,
+    /// Shared secret for trusted server-to-server peer sync.
+    pub peer_secret: Option<String>,
     /// Time source for auth expiry checks. Defaults to the system clock.
     pub clock: AuthClock,
 }
@@ -156,6 +158,7 @@ impl AuthConfig {
             || self.allow_local_first_auth
             || self.backend_secret.is_some()
             || self.admin_secret.is_some()
+            || self.peer_secret.is_some()
     }
 }
 
@@ -1112,6 +1115,23 @@ pub fn validate_admin_secret(
             "Admin secret required for this operation",
         )),
         (None, _) => Err((StatusCode::FORBIDDEN, "Admin auth not configured")),
+    }
+}
+
+/// Check if peer sync secret is valid.
+pub fn validate_peer_secret(
+    provided: Option<&str>,
+    config: &AuthConfig,
+) -> Result<(), (StatusCode, &'static str)> {
+    match (&config.peer_secret, provided) {
+        (Some(expected), Some(got)) if expected == got => Ok(()),
+        (Some(_), Some(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid peer secret")),
+        (Some(_), None) => Err((
+            StatusCode::UNAUTHORIZED,
+            "Peer secret required for peer sync",
+        )),
+        (None, Some(_)) => Err((StatusCode::FORBIDDEN, "Peer auth not configured")),
+        (None, None) => Err((StatusCode::UNAUTHORIZED, "Peer secret required")),
     }
 }
 

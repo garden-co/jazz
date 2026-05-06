@@ -194,6 +194,19 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    /// Ensure a client exists and is marked as Peer without resetting state.
+    pub fn ensure_client_as_peer(&mut self, client_id: ClientId) {
+        use crate::sync_manager::ClientRole;
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+        if sm.get_client(client_id).is_some() {
+            sm.set_client_role(client_id, ClientRole::Peer);
+        } else {
+            sm.add_client_with_storage(&self.storage, client_id);
+            sm.set_client_role(client_id, ClientRole::Peer);
+            self.immediate_tick();
+        }
+    }
+
     /// Set a client's role.
     pub fn set_client_role_by_name(
         &mut self,

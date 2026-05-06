@@ -19,5 +19,8 @@ export default defineConfig({
     globalSetup: ["tests/browser/global-setup.ts"],
     setupFiles: ["tests/browser/setup-react.ts"],
     testTimeout: 30000,
+    sequence: {
+      concurrent: false,
+    },
   },
 });

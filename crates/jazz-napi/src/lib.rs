@@ -367,6 +367,8 @@ struct DevServerStartOptions {
     jwks_url: Option<String>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
+    upstream_url: Option<String>,
+    peer_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
@@ -1543,7 +1545,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1578,6 +1580,7 @@ impl DevServer {
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
+            peer_secret: opts.peer_secret.clone(),
             ..Default::default()
         };
 
@@ -1591,6 +1594,9 @@ impl DevServer {
         let mut server_builder = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_catalogue_authority(catalogue_authority);
+        if let Some(upstream_url) = opts.upstream_url.clone() {
+            server_builder = server_builder.with_upstream_url(upstream_url);
+        }
 
         if in_memory {
             server_builder = server_builder.with_storage(StorageBackend::InMemory);
