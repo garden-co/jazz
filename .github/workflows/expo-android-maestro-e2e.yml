@@ -53,7 +53,7 @@ jobs:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
 
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.14.0
 
