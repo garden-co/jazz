@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { Elysia, type AnyElysia } from "elysia";
@@ -123,6 +123,10 @@ type DesignerSpaceFileRecord = {
   materializeJobId?: string;
   materializeTarget: SpaceFileMaterializeTarget;
   updatedAt: string;
+};
+
+type DesignerSpaceFileListRecord = DesignerSpaceFileRecord & {
+  contentBase64?: string;
 };
 
 type ObjectStorageObjectDescriptor = ObjectStorageDescriptor & {
@@ -621,7 +625,10 @@ export function createRemoteAutonomyGateway(
       const slug = spaceSlug(params.slug);
       return {
         ok: true,
-        files: await listSpaceFileRecords(agentStore, slug, intQuery(query.limit, 50)),
+        files: await listSpaceFileRecords(agentStore, slug, intQuery(query.limit, 50), {
+          includeContent: truthy(query.includeContent),
+          options: resolved,
+        }),
       };
     })
     .post("/v1/spaces/:slug/files", async ({ params, body }) => {
@@ -895,7 +902,11 @@ async function listSpaceFileRecords(
   agentStore: AgentDataStore,
   slug: string | undefined,
   limit: number,
-): Promise<DesignerSpaceFileRecord[]> {
+  contentOptions?: {
+    includeContent?: boolean;
+    options: ResolvedOptions;
+  },
+): Promise<DesignerSpaceFileListRecord[]> {
   const resultLimit = Math.max(0, Math.floor(limit));
   if (resultLimit === 0) {
     return [];
@@ -915,7 +926,14 @@ async function listSpaceFileRecords(
       break;
     }
   }
-  return [...files.values()];
+  const records = [...files.values()];
+  if (!contentOptions?.includeContent) {
+    return records;
+  }
+  return await Promise.all(records.map(async (file) => {
+    const bytes = await readCachedSpaceFileContent(contentOptions.options, file);
+    return bytes ? { ...file, contentBase64: bytes.toString("base64") } : file;
+  }));
 }
 
 function spaceFileRecordFromEvent(event: {
@@ -1098,6 +1116,31 @@ async function writeInlineSpaceFile(
     bytes: bytes.byteLength,
     recordedAt: new Date().toISOString(),
   };
+}
+
+async function readCachedSpaceFileContent(
+  options: ResolvedOptions,
+  file: DesignerSpaceFileRecord,
+): Promise<Buffer | null> {
+  const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...file.objectStorage.key.split("/"));
+  const candidates = [
+    objectCachePath,
+    file.materializeTarget === "remote" ? file.remotePath : file.localPath,
+    file.localPath,
+    file.remotePath,
+  ];
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      const bytes = await readFile(candidate);
+      const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      if (contentHash === file.contentHash) {
+        return bytes;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 async function writeFileWithParents(filePath: string, bytes: Buffer): Promise<void> {

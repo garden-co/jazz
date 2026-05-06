@@ -683,6 +683,77 @@ describe("remote autonomy gateway", () => {
         },
       },
     });
+    const listed = await requestJson("GET", "/v1/spaces/inline-cad-space/files?includeContent=1");
+    expect(listed.files).toEqual([
+      expect.objectContaining({
+        path: "parts/box.build123d.py",
+        contentHash,
+        contentBase64: Buffer.from(source).toString("base64"),
+      }),
+    ]);
+  });
+
+  it("serves latest inline Designer space bytes so two users hydrate the same remote file space", async () => {
+    const remotePath = join(tempDir, "remote-spaces", "collab-cad-space");
+    await requestJson("POST", "/v1/spaces", {
+      slug: "collab-cad-space",
+      title: "Collab CAD Space",
+      remotePath,
+    });
+
+    const filePath = "parts/shared-gear.build123d.py";
+    const aliceSource = "from build123d import *\n\ngear = Box(1, 2, 3)\n";
+    const aliceHash = `sha256:${createHash("sha256").update(aliceSource).digest("hex")}`;
+    await requestJson("POST", "/v1/spaces/collab-cad-space/files", {
+      path: filePath,
+      contentHash: aliceHash,
+      sizeBytes: Buffer.byteLength(aliceSource),
+      contentType: "text/x-python",
+      materializeTarget: "remote",
+      writerId: "alice",
+      contentBase64: Buffer.from(aliceSource).toString("base64"),
+    });
+
+    const hydratedForBob = await requestJson(
+      "GET",
+      "/v1/spaces/collab-cad-space/files?includeContent=1",
+    );
+    expect(hydratedForBob.files).toEqual([
+      expect.objectContaining({
+        path: filePath,
+        writerId: "alice",
+        contentHash: aliceHash,
+        contentBase64: Buffer.from(aliceSource).toString("base64"),
+      }),
+    ]);
+
+    const bobSource = "from build123d import *\n\ngear = Box(5, 8, 13)\n";
+    const bobHash = `sha256:${createHash("sha256").update(bobSource).digest("hex")}`;
+    await requestJson("POST", "/v1/spaces/collab-cad-space/files", {
+      path: filePath,
+      contentHash: bobHash,
+      sizeBytes: Buffer.byteLength(bobSource),
+      contentType: "text/x-python",
+      materializeTarget: "remote",
+      writerId: "bob",
+      contentBase64: Buffer.from(bobSource).toString("base64"),
+    });
+
+    const hydratedForAlice = await requestJson(
+      "GET",
+      "/v1/spaces/collab-cad-space/files?includeContent=1",
+    );
+    expect(hydratedForAlice.files).toEqual([
+      expect.objectContaining({
+        path: filePath,
+        writerId: "bob",
+        contentHash: bobHash,
+        contentBase64: Buffer.from(bobSource).toString("base64"),
+      }),
+    ]);
+    expect(await readFile(join(remotePath, "parts", "shared-gear.build123d.py"), "utf8")).toBe(
+      bobSource,
+    );
   });
 
   it("rejects unsafe Designer space file paths", async () => {

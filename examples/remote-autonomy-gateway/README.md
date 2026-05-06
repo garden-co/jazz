@@ -33,6 +33,9 @@ of what happened.
   job.
 - `GET /v1/spaces` lists registered Designer spaces from the latest
   `space-rsync-mirror` jobs.
+- `GET /v1/spaces/:slug/files?includeContent=1` lists the latest file records
+  for a space and, when the gateway can verify cached or materialized bytes
+  against `contentHash`, includes `contentBase64` for hydration.
 - `POST /v1/spaces/:slug/files` records a Designer space file, object-storage
   descriptor, upload job, and materialization job. Inline `contentBase64` or
   `content` payloads are verified, cached, and materialized immediately.
@@ -62,6 +65,22 @@ export REMOTE_AUTONOMY_DESIGNER_SPACES_PREFIX="x/nikiv/designer/spaces"
 
 By default the local Jazz2 stores connect to the configured sync server. Set
 `REMOTE_AUTONOMY_CONNECT_SYNC=0` for isolated local tests.
+
+## Compute/File Server Deployment
+
+For shared Designer/CAD work, run one gateway on the same Tailscale-reachable
+machine that owns the compute workers and the remote workspace filesystem. Point
+`REMOTE_AUTONOMY_REMOTE_SPACES_ROOT` at the filesystem path those workers read
+and write, and keep `REMOTE_AUTONOMY_LOCAL_SPACES_ROOT` on durable server-local
+storage for the object cache and gateway mirror state.
+
+Two developers should use the same gateway URL in Designer bootstrap. They
+should not each run an independent `127.0.0.1` gateway, because that creates
+separate object caches and separate materialized files. With a shared gateway,
+one user saves a file through `POST /v1/spaces/:slug/files`; the gateway
+hash-checks the bytes, writes the object cache and remote file, records the Jazz2
+event, and another user hydrates the latest verified bytes through
+`GET /v1/spaces/:slug/files?includeContent=1`.
 
 ## Workflow Shape
 
