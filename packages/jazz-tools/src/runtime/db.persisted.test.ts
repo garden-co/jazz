@@ -55,7 +55,7 @@ function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
 
 function makeHandleClient(localBatchRecord: LocalBatchRecord) {
   return {
-    waitForPersistedBatch: vi.fn(async () => undefined),
+    waitForBatch: vi.fn(async () => undefined),
     localBatchRecord: vi.fn(() => localBatchRecord),
     acknowledgeRejectedBatch: vi.fn(() => false),
   };
@@ -123,7 +123,7 @@ describe("Db write handles", () => {
       title: "Buy milk",
       done: false,
     });
-    expect(handleClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-insert", "global");
+    expect(handleClient.waitForBatch).toHaveBeenCalledWith("batch-insert", "global");
   });
 
   it("keeps update and delete handles waitable by durability tier", async () => {
@@ -152,8 +152,8 @@ describe("Db write handles", () => {
     expect(remove).toHaveBeenCalledWith("todo-1");
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(updateClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-update", "edge");
-    expect(deleteClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-delete", "global");
+    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
+    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-delete", "global");
   });
 
   it("routes write handles through the session-aware client-backed db path", async () => {
@@ -229,14 +229,8 @@ describe("Db write handles", () => {
     });
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertClient.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-session-insert",
-      "global",
-    );
-    expect(updateClient.waitForPersistedBatch).toHaveBeenCalledWith("batch-session-update", "edge");
-    expect(deleteClient.waitForPersistedBatch).toHaveBeenCalledWith(
-      "batch-session-delete",
-      "local",
-    );
+    expect(insertClient.waitForBatch).toHaveBeenCalledWith("batch-session-insert", "global");
+    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-session-update", "edge");
+    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-session-delete", "local");
   });
 });

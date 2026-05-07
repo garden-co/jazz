@@ -305,9 +305,7 @@ describe("JazzClient transactions", () => {
   it("returns a write handle from commit so callers can wait on the batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const committed = client.beginTransaction().commit();
 
@@ -315,7 +313,7 @@ describe("JazzClient transactions", () => {
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+    expect(waitForBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
   it("rolls back an open transaction without sealing the batch", () => {
@@ -353,9 +351,7 @@ describe("JazzClient transactions", () => {
   it("returns a write handle from batch commit so callers can wait on the batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const committed = client.beginBatch().commit();
 
@@ -363,7 +359,7 @@ describe("JazzClient transactions", () => {
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+    expect(waitForBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
   it("rolls back an open batch without sealing the batch", () => {
@@ -419,9 +415,7 @@ describe("JazzClient transactions", () => {
   it("commits a sync callback transaction and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const handle = client.transaction(() => {
       return { title: "Callback transaction" };
@@ -434,15 +428,13 @@ describe("JazzClient transactions", () => {
     await expect(handle.wait({ tier: "global" })).resolves.toEqual({
       title: "Callback transaction",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
+    expect(waitForBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
   it("commits an async callback transaction after the callback resolves", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const handlePromise = client.transaction(async () => {
       expect(runtime.sealBatch).not.toHaveBeenCalled();
@@ -457,15 +449,13 @@ describe("JazzClient transactions", () => {
     await expect(handle.wait({ tier: "global" })).resolves.toEqual({
       title: "Async callback transaction",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
+    expect(waitForBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
   it("commits a sync callback batch and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const handle = client.batch(() => {
       return { title: "Callback batch" };
@@ -478,15 +468,13 @@ describe("JazzClient transactions", () => {
     await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
       title: "Callback batch",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
+    expect(waitForBatch).toHaveBeenCalledWith(handle.batchId, "edge");
   });
 
   it("commits an async callback batch after the callback resolves", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const waitForBatch = vi.spyOn(client, "waitForBatch").mockResolvedValue(undefined);
 
     const handlePromise = client.batch(async () => {
       expect(runtime.sealBatch).not.toHaveBeenCalled();
@@ -501,7 +489,7 @@ describe("JazzClient transactions", () => {
     await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
       title: "Async callback batch",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
+    expect(waitForBatch).toHaveBeenCalledWith(handle.batchId, "edge");
   });
 
   it("does not commit a callback batch when the callback throws", () => {

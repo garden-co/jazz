@@ -15,7 +15,7 @@ class TestDb extends Db {
 
 function makeHandleClient(): JazzClient {
   return {
-    waitForPersistedBatch: vi.fn(async () => undefined),
+    waitForBatch: vi.fn(async () => undefined),
   } as unknown as JazzClient;
 }
 
