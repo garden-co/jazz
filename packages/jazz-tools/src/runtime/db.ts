@@ -1065,6 +1065,9 @@ export class Db {
       const existingRecord = client.localBatchRecord(batch.batchId);
       const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
       client.replayRejectedBatchRecord(batch);
+      if (client.hasPendingBatchWaiter(batch.batchId)) {
+        return;
+      }
       if (existingRecord && !replayableFromWorker) {
         return;
       }
@@ -1862,7 +1865,17 @@ export class Db {
     const queryOptions = ordinaryDbQueryOptions(options);
     await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
-    const rows = await client.query(wasmQuery, queryOptions);
+    const rows =
+      builtQuery.hops.length > 0 &&
+      "queryInternal" in client &&
+      typeof client.queryInternal === "function"
+        ? await client.queryInternal(
+            wasmQuery,
+            undefined,
+            { ...queryOptions, runtimeSettledTier: null },
+            runtimeSchema.peek(),
+          )
+        : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -2339,7 +2352,7 @@ class ClientBackedDb extends Db {
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
-      queryOptions,
+      builtQuery.hops.length > 0 ? { ...queryOptions, runtimeSettledTier: null } : queryOptions,
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;

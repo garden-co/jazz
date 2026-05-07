@@ -723,6 +723,50 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))
     }
 
+    pub fn hydrate_local_batch_record(
+        &mut self,
+        record: LocalBatchRecord,
+    ) -> Result<(), RuntimeError> {
+        self.storage
+            .upsert_local_batch_record(&record)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("persist local batch record: {err}"))
+            })?;
+        self.local_batch_record_cache
+            .insert(record.batch_id, record);
+        self.mark_storage_write_pending_flush();
+        Ok(())
+    }
+
+    pub fn replay_batch_rejection(
+        &mut self,
+        batch_id: BatchId,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let already_rejected = matches!(
+            self.storage
+                .load_authoritative_batch_fate(batch_id)
+                .map_err(|err| { RuntimeError::WriteError(format!("load batch fate: {err}")) })?,
+            Some(BatchFate::Rejected { .. })
+        );
+        let fate = BatchFate::Rejected {
+            batch_id,
+            code: code.to_string(),
+            reason: reason.to_string(),
+        };
+        self.storage
+            .upsert_authoritative_batch_fate(&fate)
+            .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
+        self.mark_local_batch_rows_rejected(batch_id);
+        if !already_rejected {
+            self.durability.record_rejection(batch_id, code, reason);
+        }
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(())
+    }
+
     /// Drain replayable rejected batch ids that should be surfaced by bindings.
     pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
         self.durability.drain_rejected()

@@ -81,8 +81,11 @@ export interface Runtime {
     tier: string,
   ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
+  loadLocalBatchRecordStorageRow?(batch_id: string): Uint8Array | null;
+  hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
   loadLocalBatchRecords?(): LocalBatchRecord[];
   loadBatchFate?(batch_id: string): BatchFate | null;
+  replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
@@ -198,6 +201,7 @@ type TransactionQueryOverlay = {
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
   transactionOverlay?: TransactionQueryOverlay;
+  runtimeSettledTier?: DurabilityTier | null;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -244,6 +248,7 @@ export interface LocalBatchRecord {
   mode: BatchMode;
   sealed: boolean;
   latestSettlement: BatchFate | null;
+  encodedRecord?: Uint8Array;
 }
 
 export interface CreateOptions extends TimestampOverrideOptions {
@@ -1273,6 +1278,7 @@ export class JazzClient {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
+  private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly completedEmptyBatchIds = new Set<string>();
   private readonly pendingReplayedRejectedBatchIds = new Set<string>();
@@ -1639,31 +1645,59 @@ export class JazzClient {
   hydrateLocalBatchRecords(records: LocalBatchRecord[]): void {
     const loadLocalBatchRecord = this.requireBatchRecordMethod("loadLocalBatchRecord");
     for (const record of records) {
+      const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
       this.hydratedWorkerBatchIds.add(record.batchId);
+      this.replayRejectedBatchRows(publicRecord);
       const runtimeRecord = loadLocalBatchRecord(record.batchId);
       if (
         runtimeRecord &&
         !(
-          record.latestSettlement?.kind === "rejected" &&
+          publicRecord.latestSettlement?.kind === "rejected" &&
           runtimeRecord.latestSettlement?.kind !== "rejected"
         )
       ) {
         continue;
       }
-      this.replayedRejectedBatchRecords.set(record.batchId, record);
-      if (record.latestSettlement?.kind === "rejected") {
+      this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
+      if (publicRecord.latestSettlement?.kind === "rejected") {
+        this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
         this.pendingReplayedRejectedBatchIds.add(record.batchId);
       }
     }
   }
 
   replayRejectedBatchRecord(record: LocalBatchRecord): void {
+    const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
     this.hydratedWorkerBatchIds.add(record.batchId);
-    if (record.latestSettlement?.kind !== "rejected") {
+    if (publicRecord.latestSettlement?.kind !== "rejected") {
       return;
     }
-    this.replayedRejectedBatchRecords.set(record.batchId, record);
+    this.replayRejectedBatchRows(publicRecord);
+    this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
+    this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
     this.pendingReplayedRejectedBatchIds.add(record.batchId);
+  }
+
+  private hydrateEncodedLocalBatchRecord(record: LocalBatchRecord): LocalBatchRecord {
+    if (record.encodedRecord) {
+      this.runtime.hydrateLocalBatchRecordStorageRow?.(record.encodedRecord);
+    }
+    const { encodedRecord: _encodedRecord, ...publicRecord } = record;
+    return publicRecord;
+  }
+
+  private replayRejectedBatchRows(record: LocalBatchRecord): void {
+    const settlement = record.latestSettlement;
+    if (settlement?.kind !== "rejected") {
+      return;
+    }
+    this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
+  }
+
+  private replayRejectedBatchRollbacks(): void {
+    for (const record of this.rejectedBatchRollbackRecords.values()) {
+      this.replayRejectedBatchRows(record);
+    }
   }
 
   markReplayedRejectedBatchDelivered(batchId: string): void {
@@ -1678,6 +1712,10 @@ export class JazzClient {
 
   hasAcknowledgedRejectedBatch(batchId: string): boolean {
     return this.acknowledgedRejectedBatchErrors.has(batchId);
+  }
+
+  hasPendingBatchWaiter(batchId: string): boolean {
+    return (this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0;
   }
 
   sealBatch(batchId: string): WriteHandle {
@@ -2181,10 +2219,13 @@ export class JazzClient {
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
+    this.replayRejectedBatchRollbacks();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
-      normalizedOptions.tier,
+      options?.runtimeSettledTier === null
+        ? undefined
+        : (options?.runtimeSettledTier ?? normalizedOptions.tier),
       optionsJson,
     );
     return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], effectiveRuntimeSchema);
