@@ -49,10 +49,17 @@ pnpm dev
 
 Open `http://127.0.0.1:5173`.
 
-## Playwright
+## Tests
 
-Run the full end-to-end setup and flow tests with:
+Run the Jazz + permissions integration tests with:
 
 ```bash
-pnpm test:e2e
+pnpm test
 ```
+
+Vitest browser mode (chromium) mints ES256 JWTs for `admin` / `member`
+roles against a local JWKS server, then asserts the policy outcomes
+for posting to Announcements vs the general chat. The runtime auth
+server (`server/auth-server.ts`) and the sign-in UI are covered by
+the example itself when run via `pnpm dev` + `pnpm dev:auth` — they
+aren't exercised by `pnpm test`.

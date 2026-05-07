@@ -1,3 +1,15 @@
+/**
+ * Jazz permission-DSL tests for auth-simple-chat.
+ *
+ * Mints role-tagged JWTs (admin / member / anonymous) against a local
+ * JWKS and asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID
+ * vs CHAT_ID.
+ *
+ * NOT covered by `pnpm test`: the runtime auth server's sign-in/sign-up
+ * endpoints (server/auth-server.ts), the AuthCard UI, or session
+ * restoration across page reload. Those flows live in `pnpm dev` +
+ * `pnpm dev:auth` and are exercised by hand.
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import { type JazzClient, createJazzClient } from "jazz-tools/react";
 import { app } from "../../schema.js";
