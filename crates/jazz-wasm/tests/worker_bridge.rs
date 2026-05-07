@@ -380,3 +380,446 @@ fn main_to_worker_main_side_sync_envelope() {
         other => panic!("expected Sync, got {other:?}"),
     }
 }
+
+// =============================================================================
+// Async helpers
+// =============================================================================
+
+/// Yield once through `setTimeout(0)` so any `spawn_local`/microtask flushes
+/// scheduled by the bridge or runtime get a chance to run before assertions.
+async fn yield_once() {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout: Function = Reflect::get(&global, &"setTimeout".into())
+            .unwrap()
+            .unchecked_into();
+        let _ = set_timeout.call2(&JsValue::NULL, &resolve, &JsValue::from_f64(0.0));
+    });
+    JsFuture::from(promise).await.expect("yield");
+}
+
+// =============================================================================
+// Wire-format trio for the peer-channel API
+// =============================================================================
+
+#[wasm_bindgen_test]
+fn peer_open_send_close_emit_postcard_binary() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    bridge.open_peer("peer-α");
+    let last = fw.last_posted_decoded();
+    match last {
+        Some(MainToWorkerWire::PeerOpen { peer_id }) => {
+            assert_eq!(peer_id, "peer-α");
+        }
+        other => panic!("expected PeerOpen, got {other:?}"),
+    }
+
+    let payload_array = js_sys::Array::new();
+    payload_array.push(&Uint8Array::from(&[1u8, 2, 3][..]));
+    payload_array.push(&Uint8Array::from(&[4u8][..]));
+    bridge.send_peer_sync("peer-α", 5, payload_array);
+    let last = fw.last_posted_decoded();
+    match last {
+        Some(MainToWorkerWire::PeerSync {
+            peer_id,
+            term,
+            payloads,
+        }) => {
+            assert_eq!(peer_id, "peer-α");
+            assert_eq!(term, 5);
+            assert_eq!(payloads.len(), 2);
+            assert_eq!(&*payloads[0], &[1, 2, 3]);
+            assert_eq!(&*payloads[1], &[4]);
+        }
+        other => panic!("expected PeerSync, got {other:?}"),
+    }
+
+    bridge.close_peer("peer-α");
+    let last = fw.last_posted_decoded();
+    match last {
+        Some(MainToWorkerWire::PeerClose { peer_id }) => {
+            assert_eq!(peer_id, "peer-α");
+        }
+        other => panic!("expected PeerClose, got {other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn send_peer_sync_drops_empty_payload() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+    let posted_before = fw.posted.borrow().len();
+    bridge.send_peer_sync("p", 0, js_sys::Array::new());
+    assert_eq!(
+        fw.posted.borrow().len(),
+        posted_before,
+        "empty payload should not post"
+    );
+}
+
+#[wasm_bindgen_test]
+fn acknowledge_rejected_batch_emits_postcard_binary() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    bridge.acknowledge_rejected_batch("batch-7");
+    match fw.last_posted_decoded() {
+        Some(MainToWorkerWire::AcknowledgeRejectedBatch { batch_id }) => {
+            assert_eq!(batch_id, "batch-7");
+        }
+        other => panic!("expected AcknowledgeRejectedBatch, got {other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn disconnect_and_reconnect_upstream_emit_postcard_binary() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    bridge.disconnect_upstream();
+    assert!(matches!(
+        fw.last_posted_decoded(),
+        Some(MainToWorkerWire::DisconnectUpstream)
+    ));
+
+    bridge.reconnect_upstream();
+    assert!(matches!(
+        fw.last_posted_decoded(),
+        Some(MainToWorkerWire::ReconnectUpstream)
+    ));
+}
+
+// =============================================================================
+// Forwarder + upstream wait gate
+// =============================================================================
+
+#[wasm_bindgen_test]
+async fn forwarder_routes_server_bound_through_callback() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    // Complete init so the gate opens and any later flushes go via the wire.
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+
+    // Install a forwarder. From now on, any server-bound outbox traffic the
+    // runtime emits goes to the callback, not to the worker.
+    let captured = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
+    let captured_clone = Rc::clone(&captured);
+    let forwarder = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+        if let Some(arr) = payload.dyn_ref::<Uint8Array>() {
+            captured_clone.borrow_mut().push(arr.to_vec());
+        }
+    });
+    bridge
+        .set_server_payload_forwarder(Some(forwarder.as_ref().unchecked_ref::<Function>().clone()));
+
+    // `replayServerConnection` re-runs `removeServer` + `addServer`, which
+    // emits catalogue server-bound traffic through the runtime's outbox.
+    // With the forwarder installed, those payloads land in `captured`.
+    let posted_count_before = fw.posted.borrow().len();
+    bridge.replay_server_connection();
+    yield_once().await;
+    let posted_count_after = fw.posted.borrow().len();
+
+    assert!(
+        !captured.borrow().is_empty(),
+        "forwarder did not receive any server-bound payloads"
+    );
+    assert_eq!(
+        posted_count_before, posted_count_after,
+        "forwarder install should have suppressed worker postMessage"
+    );
+
+    // Removing the forwarder routes server-bound traffic back through the
+    // worker again.
+    bridge.set_server_payload_forwarder(None);
+    bridge.replay_server_connection();
+    yield_once().await;
+    assert!(
+        fw.posted.borrow().len() > posted_count_after,
+        "after forwarder removal, server-bound should reach the worker"
+    );
+
+    drop(forwarder);
+}
+
+#[wasm_bindgen_test]
+async fn wait_for_upstream_short_circuits_without_server_url() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    // No `serverUrl` in options → `expects_upstream` is false → resolves
+    // immediately.
+    bridge
+        .wait_for_upstream_server_connection()
+        .await
+        .expect("resolves immediately");
+}
+
+#[wasm_bindgen_test]
+async fn wait_for_upstream_resolves_on_connected_message() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(
+        fw.worker(),
+        &runtime,
+        build_options(Some("https://example.test")),
+    )
+    .expect("attach");
+
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+
+    // expects_upstream = true (serverUrl set), upstream not yet connected.
+    // wait should block until we emit `UpstreamConnected`.
+    let waiter = bridge.wait_for_upstream_server_connection();
+    fw.emit_wire(&WorkerToMainWire::UpstreamConnected);
+    waiter.await.expect("wait resolved");
+}
+
+#[wasm_bindgen_test]
+async fn wait_for_upstream_short_circuits_when_forwarder_installed() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(
+        fw.worker(),
+        &runtime,
+        build_options(Some("https://example.test")),
+    )
+    .expect("attach");
+
+    // Forwarder install marks upstream effectively ready. wait should resolve
+    // even though no upstream-connected message has arrived.
+    let forwarder = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {});
+    bridge
+        .set_server_payload_forwarder(Some(forwarder.as_ref().unchecked_ref::<Function>().clone()));
+
+    bridge
+        .wait_for_upstream_server_connection()
+        .await
+        .expect("forwarder resolves");
+    drop(forwarder);
+}
+
+// =============================================================================
+// Listener slots
+// =============================================================================
+
+#[wasm_bindgen_test]
+fn auth_failed_fires_listener() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let captured = Rc::new(RefCell::new(Vec::<String>::new()));
+    let captured_clone = Rc::clone(&captured);
+    let on_auth = Closure::<dyn FnMut(JsValue)>::new(move |reason: JsValue| {
+        captured_clone
+            .borrow_mut()
+            .push(reason.as_string().unwrap_or_default());
+    });
+    let listeners = Object::new();
+    Reflect::set(
+        &listeners,
+        &"onAuthFailure".into(),
+        on_auth.as_ref().unchecked_ref(),
+    )
+    .unwrap();
+    bridge.set_listeners(listeners.into());
+
+    fw.emit_wire(&WorkerToMainWire::AuthFailed {
+        reason: "expired".into(),
+    });
+
+    assert_eq!(captured.borrow().as_slice(), &["expired".to_string()]);
+    drop(on_auth);
+}
+
+#[wasm_bindgen_test]
+fn local_batch_records_sync_listener_decodes_json() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
+    let captured_clone = Rc::clone(&captured);
+    let on_records = Closure::<dyn FnMut(JsValue)>::new(move |batches: JsValue| {
+        *captured_clone.borrow_mut() = Some(batches);
+    });
+    let listeners = Object::new();
+    Reflect::set(
+        &listeners,
+        &"onLocalBatchRecordsSync".into(),
+        on_records.as_ref().unchecked_ref(),
+    )
+    .unwrap();
+    bridge.set_listeners(listeners.into());
+
+    // Worker host serialises `Vec<LocalBatchRecord>` as JSON inside the
+    // postcard envelope; bridge `JSON.parse`s on receive and hands the JS
+    // shape to the listener.
+    fw.emit_wire(&WorkerToMainWire::LocalBatchRecordsSync {
+        batches_json: r#"[{"batchId":"b1"}]"#.into(),
+    });
+
+    let batches = captured.borrow().clone().expect("listener fired");
+    let arr: js_sys::Array = batches.dyn_into().expect("batches array");
+    assert_eq!(arr.length(), 1);
+    let first = arr.get(0);
+    let batch_id = Reflect::get(&first, &"batchId".into())
+        .ok()
+        .and_then(|v| v.as_string());
+    assert_eq!(batch_id.as_deref(), Some("b1"));
+    drop(on_records);
+}
+
+#[wasm_bindgen_test]
+fn mutation_error_replay_listener_decodes_json() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let captured = Rc::new(RefCell::new(Option::<JsValue>::None));
+    let captured_clone = Rc::clone(&captured);
+    let on_replay = Closure::<dyn FnMut(JsValue)>::new(move |batch: JsValue| {
+        *captured_clone.borrow_mut() = Some(batch);
+    });
+    let listeners = Object::new();
+    Reflect::set(
+        &listeners,
+        &"onMutationErrorReplay".into(),
+        on_replay.as_ref().unchecked_ref(),
+    )
+    .unwrap();
+    bridge.set_listeners(listeners.into());
+
+    fw.emit_wire(&WorkerToMainWire::MutationErrorReplay {
+        batch_json: r#"{"batchId":"b9"}"#.into(),
+    });
+
+    let batch = captured.borrow().clone().expect("listener fired");
+    let batch_id = Reflect::get(&batch, &"batchId".into())
+        .ok()
+        .and_then(|v| v.as_string());
+    assert_eq!(batch_id.as_deref(), Some("b9"));
+    drop(on_replay);
+}
+
+// =============================================================================
+// Pre-init outbox buffering
+// =============================================================================
+
+#[wasm_bindgen_test]
+async fn pre_init_outbox_traffic_is_buffered_until_init_ok() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    // attach() calls `runtime.add_server(None, Some(1.0))`, which fires a
+    // synchronous batched_tick. Catalogue traffic from the schema gets emitted
+    // into the outbox sender — which has its init-gate closed and so just
+    // accumulates without scheduling a flush.
+    yield_once().await;
+
+    // Before init, the only thing the worker should have seen is the init
+    // JS object. No binary `Sync` envelope yet.
+    let pre_init_binaries = fw.posted_decoded();
+    assert!(
+        pre_init_binaries.is_empty(),
+        "pre-init binary posts: {pre_init_binaries:?}"
+    );
+
+    // Now drive init to completion — the bridge opens the gate and flushes
+    // the accumulated entries.
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+    yield_once().await;
+
+    let post_init_syncs: Vec<MainToWorkerWire> = fw
+        .posted_decoded()
+        .into_iter()
+        .filter(|m| matches!(m, MainToWorkerWire::Sync { .. }))
+        .collect();
+    assert!(
+        !post_init_syncs.is_empty(),
+        "init-ok did not flush a binary Sync envelope; posted_decoded={:?}",
+        fw.posted_decoded()
+    );
+}
+
+// =============================================================================
+// Misc lifecycle
+// =============================================================================
+
+#[wasm_bindgen_test]
+fn ready_js_object_does_not_break_dispatch() {
+    // The worker's JS shim posts `{type:"ready"}` early. Bridge must accept
+    // it (treated as a no-op) and not panic or surface as an error.
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let _bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let ready = Object::new();
+    Reflect::set(&ready, &"type".into(), &"ready".into()).unwrap();
+    fw.emit_data(ready.into());
+}
+
+#[wasm_bindgen_test]
+async fn upstream_disconnected_rearms_wait() {
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(
+        fw.worker(),
+        &runtime,
+        build_options(Some("https://example.test")),
+    )
+    .expect("attach");
+
+    let init = bridge.init();
+    fw.emit_wire(&WorkerToMainWire::InitOk {
+        client_id: "c1".into(),
+    });
+    JsFuture::from(init).await.expect("init resolved");
+    fw.emit_wire(&WorkerToMainWire::UpstreamConnected);
+
+    // Connected — wait should resolve immediately.
+    bridge
+        .wait_for_upstream_server_connection()
+        .await
+        .expect("connected resolves");
+
+    // Now disconnect — wait should re-arm and block.
+    fw.emit_wire(&WorkerToMainWire::UpstreamDisconnected);
+    let waiter = bridge.wait_for_upstream_server_connection();
+    fw.emit_wire(&WorkerToMainWire::UpstreamConnected);
+    waiter.await.expect("re-arm resolves");
+}
