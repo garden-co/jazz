@@ -1,5 +1,7 @@
 # Jazz + Next.js example
 
+The canonical Next.js server-side rendering / RSC story for Jazz: a Server Component reading the database via `jazz-tools/backend` alongside a Client Component using the standard `jazz-tools/react` hooks. The `next-*` starters under `starters/` are pure client-side; this example is where SSR + Server Actions + `BACKEND_SECRET` live.
+
 - `pnpm run sync-server`
 - `pnpm run dev`
 
