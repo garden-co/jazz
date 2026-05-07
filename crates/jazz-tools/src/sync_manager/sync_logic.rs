@@ -279,18 +279,6 @@ impl SyncManager {
         row: StoredRowBatch,
         force_resend: bool,
     ) {
-        self.queue_row_to_client_internal(client_id, object_id, metadata, row, force_resend, true);
-    }
-
-    fn queue_row_to_client_internal(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        row: StoredRowBatch,
-        force_resend: bool,
-        require_scope: bool,
-    ) {
         let row = Self::scope_delivery_row(row);
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -317,7 +305,7 @@ impl SyncManager {
             (in_scope, include_metadata, already_sent)
         };
 
-        if require_scope && !in_scope {
+        if !in_scope {
             return;
         }
 
