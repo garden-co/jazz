@@ -572,11 +572,14 @@ Important APIs:
 The `Db` batch handles bind lazily: the first table operation chooses the runtime client/schema,
 and later writes through the same handle must stay on that client-bound schema surface.
 
-Transactional handles also support transaction-scoped reads before commit:
+Explicit transaction and batch handles also support scoped reads before commit:
 
 - `Transaction.query(...)`
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
+- `DirectBatch.query(...)`
+- `DbDirectBatch.all(...)`
+- `DbDirectBatch.one(...)`
 
 Open explicit batch writes are not individually waitable:
 

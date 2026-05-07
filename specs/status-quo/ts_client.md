@@ -144,11 +144,14 @@ tx.update(app.todos, "todo-1", { done: true });
 await tx.commit().wait({ tier: "global" });
 ```
 
-Transactional handles also expose transaction-scoped reads over their own staged rows:
+Explicit transaction and batch handles also expose reads over their own staged rows:
 
 - `Transaction.query(...)`
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
+- `DirectBatch.query(...)`
+- `DbDirectBatch.all(...)`
+- `DbDirectBatch.one(...)`
 
 Both explicit batch handles add the explicit completion step:
 

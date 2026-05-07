@@ -900,11 +900,15 @@ export function runInBatch<
   return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
-export class Transaction {
-  private transactionStatus: "active" | "committed" | "rolledBack" = "active";
+type BatchHandleStatus = "active" | "committed" | "rolledBack";
+type BatchHandleKind = "Transaction" | "Direct batch";
+
+abstract class BatchHandleBase {
+  private status: BatchHandleStatus = "active";
   private readonly touchedRowIds = new Set<string>();
 
   constructor(
+    private readonly kind: BatchHandleKind,
     private readonly client: JazzClient,
     private readonly batchContext: BatchWriteContext,
     private readonly session?: Session,
@@ -912,11 +916,11 @@ export class Transaction {
   ) {}
 
   private ensureActive(): void {
-    if (this.transactionStatus === "committed") {
-      throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    if (this.status === "committed") {
+      throw new Error(`${this.kind} ${this.batchContext.batchId} is already committed`);
     }
-    if (this.transactionStatus === "rolledBack") {
-      throw new Error(`Transaction ${this.batchContext.batchId} has already been rolled back`);
+    if (this.status === "rolledBack") {
+      throw new Error(`${this.kind} ${this.batchContext.batchId} has already been rolled back`);
     }
   }
 
@@ -943,13 +947,13 @@ export class Transaction {
   commit(): WriteHandle {
     this.ensureActive();
     const handle = this.client.sealBatch(this.batchId());
-    this.transactionStatus = "committed";
+    this.status = "committed";
     return handle;
   }
 
   rollback(): void {
     this.ensureActive();
-    this.transactionStatus = "rolledBack";
+    this.status = "rolledBack";
   }
 
   create(table: string, values: InsertValues, options?: CreateOptions): Row {
@@ -1017,97 +1021,38 @@ export class Transaction {
 }
 
 /**
+ * Transactions group a set of writes that should settle together after an authority validates them.
+ *
+ * Data read and written through this transaction is scoped to it, and will only be
+ * globally visible once it's committed and accepted by the authority.
+ */
+export class Transaction extends BatchHandleBase {
+  constructor(
+    client: JazzClient,
+    batchContext: BatchWriteContext,
+    session?: Session,
+    attribution?: string,
+  ) {
+    super("Transaction", client, batchContext, session, attribution);
+  }
+}
+
+/**
  * Transaction object available inside {@link JazzClient.transaction}'s callback.
  */
 export type TransactionScope = Scoped<Transaction>;
 
-export class DirectBatch {
-  private committedHandle: WriteHandle | null = null;
-  private batchStatus: "active" | "rolledBack" = "active";
-
+/**
+ * Direct batches group a set of writes under one batch id and publish them when committed.
+ */
+export class DirectBatch extends BatchHandleBase {
   constructor(
-    private readonly client: JazzClient,
-    private readonly batchContext: BatchWriteContext,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-  ) {}
-
-  batchId(): string {
-    return this.batchContext.batchId;
-  }
-
-  private ensureActive(): void {
-    if (this.committedHandle) {
-      throw new Error(`Direct batch ${this.batchContext.batchId} is already committed`);
-    }
-    if (this.batchStatus === "rolledBack") {
-      throw new Error(`Direct batch ${this.batchContext.batchId} has already been rolled back`);
-    }
-  }
-
-  commit(): WriteHandle {
-    this.ensureActive();
-    const handle = this.client.sealBatch(this.batchId());
-    this.committedHandle = handle;
-    return handle;
-  }
-
-  rollback(): void {
-    this.ensureActive();
-    this.batchStatus = "rolledBack";
-  }
-
-  create(table: string, values: InsertValues, options?: CreateOptions): Row {
-    this.ensureActive();
-    return this.client.createInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.ensureActive();
-    this.client.upsertInternal(
-      table,
-      values,
-      options.id,
-      this.session,
-      this.attribution,
-      options.updatedAt,
-      this.batchContext,
-    );
-  }
-
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.ensureActive();
-    this.client.updateInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  delete(objectId: string): void {
-    this.ensureActive();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
-  }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
+    client: JazzClient,
+    batchContext: BatchWriteContext,
+    session?: Session,
+    attribution?: string,
+  ) {
+    super("Direct batch", client, batchContext, session, attribution);
   }
 }
 

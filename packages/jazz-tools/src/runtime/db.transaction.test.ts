@@ -1082,6 +1082,57 @@ describe("Db transactions", () => {
     });
   });
 
+  it("supports typed reads scoped to the open batch", async () => {
+    const table = todoTable();
+    const query = todoQuery();
+    const runtimeRow: Row = {
+      id: "todo-direct-read-1",
+      values: [
+        { type: "Text", value: "Direct batch read" },
+        { type: "Boolean", value: false },
+      ],
+    };
+    const runtimeBatch = {
+      batchId: vi.fn(() => "batch-direct-read"),
+      create: vi.fn(() => runtimeRow),
+      update: vi.fn(),
+      delete: vi.fn(),
+      query: vi.fn(async () => [runtimeRow]),
+      commit: vi.fn(() => makeWriteHandle("batch-direct-read", "direct").handle),
+      rollback: vi.fn(),
+      localBatchRecord: vi.fn((batchId = "batch-direct-read") =>
+        makeLocalBatchRecord(batchId, "direct"),
+      ),
+      localBatchRecords: vi.fn(() => [makeLocalBatchRecord("batch-direct-read", "direct")]),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    };
+    const client = {
+      getSchema: () => new Map(Object.entries(todoSchema())),
+      beginBatchInternal: vi.fn(() => runtimeBatch),
+      localBatchRecord: vi.fn((batchId: string) => makeLocalBatchRecord(batchId, "direct")),
+      acknowledgeRejectedBatch: vi.fn(() => false),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+
+    const batch = db.beginBatch();
+    batch.insert(table, { title: "Direct batch read", done: false });
+
+    await expect(batch.all(query)).resolves.toEqual([
+      {
+        id: "todo-direct-read-1",
+        title: "Direct batch read",
+        done: false,
+      },
+    ]);
+    await expect(batch.one(query)).resolves.toEqual({
+      id: "todo-direct-read-1",
+      title: "Direct batch read",
+      done: false,
+    });
+
+    expect(runtimeBatch.query).toHaveBeenCalledTimes(2);
+  });
+
   it("commits a callback batch and returns the callback result handle", async () => {
     const table = todoTable();
     const runtimeRow: Row = {
