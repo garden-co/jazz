@@ -14,12 +14,12 @@ export interface GridOptions {
 const W = 595;
 const H = 842;
 
-export function hash(n: number): number {
+function hash(n: number): number {
   const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
   return x - Math.floor(x);
 }
 
-export function blendHex(a: string, b: string, t: number): string {
+function blendHex(a: string, b: string, t: number): string {
   const pa = [
     parseInt(a.slice(1, 3), 16),
     parseInt(a.slice(3, 5), 16),
