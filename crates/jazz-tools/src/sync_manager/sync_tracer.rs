@@ -108,13 +108,7 @@ impl SyncMessage {
 
     /// True if this is a durability-state payload.
     pub fn is_persistence_ack(&self) -> bool {
-        matches!(
-            self.payload,
-            SyncPayload::RowBatchStateChanged {
-                confirmed_tier: Some(_),
-                ..
-            }
-        )
+        matches!(self.payload, SyncPayload::BatchFate { .. })
     }
 
     /// True if this is a `QuerySubscription` payload.
@@ -138,7 +132,7 @@ impl SyncMessage {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
-            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::BatchFate { .. } => None,
             _ => None,
         }
     }
@@ -159,7 +153,7 @@ impl SyncMessage {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 vec![row.batch_id()]
             }
-            SyncPayload::RowBatchStateChanged { batch_id, .. } => vec![*batch_id],
+            SyncPayload::BatchFate { fate } => vec![fate.batch_id()],
             _ => vec![],
         }
     }
@@ -876,22 +870,8 @@ impl<'a> Normalizer<'a> {
                     self.batch(&row.batch_id()),
                 )
             }
-            SyncPayload::RowBatchStateChanged {
-                row_id,
-                branch_name,
-                batch_id,
-                state,
-                confirmed_tier,
-            } => {
-                format!(
-                    "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
-                    self.object(row_id),
-                    self.branch(branch_name),
-                    self.batch(batch_id),
-                )
-            }
-            SyncPayload::BatchSettlement { settlement } => self.format_settlement(settlement),
-            SyncPayload::BatchSettlementNeeded { batch_ids } => {
+            SyncPayload::BatchFate { fate } => self.format_settlement(fate),
+            SyncPayload::BatchFateNeeded { batch_ids } => {
                 let batches = batch_ids
                     .iter()
                     .map(|batch_id| self.batch(batch_id))
@@ -952,12 +932,12 @@ impl<'a> Normalizer<'a> {
         }
     }
 
-    fn format_settlement(&mut self, settlement: &crate::batch_fate::BatchSettlement) -> String {
+    fn format_settlement(&mut self, settlement: &crate::batch_fate::BatchFate) -> String {
         match settlement {
-            crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+            crate::batch_fate::BatchFate::Missing { batch_id } => {
                 format!("missing batch:{}", self.batch(batch_id))
             }
-            crate::batch_fate::BatchSettlement::Rejected {
+            crate::batch_fate::BatchFate::Rejected {
                 batch_id,
                 code,
                 reason,
@@ -967,47 +947,25 @@ impl<'a> Normalizer<'a> {
                     self.batch(batch_id)
                 )
             }
-            crate::batch_fate::BatchSettlement::DurableDirect {
+            crate::batch_fate::BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier,
-                visible_members,
             } => {
                 format!(
-                    "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
-                    self.batch(batch_id),
-                    self.format_visible_members(visible_members)
+                    "durable_direct batch:{} tier:{confirmed_tier:?}",
+                    self.batch(batch_id)
                 )
             }
-            crate::batch_fate::BatchSettlement::AcceptedTransaction {
+            crate::batch_fate::BatchFate::AcceptedTransaction {
                 batch_id,
                 confirmed_tier,
-                visible_members,
             } => {
                 format!(
-                    "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
-                    self.batch(batch_id),
-                    self.format_visible_members(visible_members)
+                    "accepted_transaction batch:{} tier:{confirmed_tier:?}",
+                    self.batch(batch_id)
                 )
             }
         }
-    }
-
-    fn format_visible_members(
-        &mut self,
-        members: &[crate::batch_fate::VisibleBatchMember],
-    ) -> String {
-        members
-            .iter()
-            .map(|member| {
-                format!(
-                    "row:{} branch:{} batch:{}",
-                    self.object(&member.object_id),
-                    self.branch(&member.branch_name),
-                    self.batch(&member.batch_id),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 
@@ -1075,22 +1033,8 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 entry.object_type().unwrap_or("unknown"),
             )
         }
-        SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state,
-            confirmed_tier,
-        } => {
-            format!(
-                "state row:{} branch:{} batch:{} state:{state:?} tier:{confirmed_tier:?}",
-                names.object(row_id),
-                branch_name,
-                names.batch(batch_id),
-            )
-        }
-        SyncPayload::BatchSettlement { settlement } => format_settlement_details(settlement, names),
-        SyncPayload::BatchSettlementNeeded { batch_ids } => {
+        SyncPayload::BatchFate { fate } => format_settlement_details(fate, names),
+        SyncPayload::BatchFateNeeded { batch_ids } => {
             let batches = batch_ids
                 .iter()
                 .map(|batch_id| names.batch(batch_id))
@@ -1145,14 +1089,14 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
 }
 
 fn format_settlement_details(
-    settlement: &crate::batch_fate::BatchSettlement,
+    settlement: &crate::batch_fate::BatchFate,
     names: &Names<'_>,
 ) -> String {
     match settlement {
-        crate::batch_fate::BatchSettlement::Missing { batch_id } => {
+        crate::batch_fate::BatchFate::Missing { batch_id } => {
             format!("missing batch:{}", names.batch(batch_id))
         }
-        crate::batch_fate::BatchSettlement::Rejected {
+        crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code,
             reason,
@@ -1162,47 +1106,25 @@ fn format_settlement_details(
                 names.batch(batch_id)
             )
         }
-        crate::batch_fate::BatchSettlement::DurableDirect {
+        crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier,
-            visible_members,
         } => {
             format!(
-                "durable_direct batch:{} tier:{confirmed_tier:?} members:[{}]",
-                names.batch(batch_id),
-                format_visible_members_details(visible_members, names)
+                "durable_direct batch:{} tier:{confirmed_tier:?}",
+                names.batch(batch_id)
             )
         }
-        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+        crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier,
-            visible_members,
         } => {
             format!(
-                "accepted_transaction batch:{} tier:{confirmed_tier:?} members:[{}]",
-                names.batch(batch_id),
-                format_visible_members_details(visible_members, names)
+                "accepted_transaction batch:{} tier:{confirmed_tier:?}",
+                names.batch(batch_id)
             )
         }
     }
-}
-
-fn format_visible_members_details(
-    members: &[crate::batch_fate::VisibleBatchMember],
-    names: &Names<'_>,
-) -> String {
-    members
-        .iter()
-        .map(|member| {
-            format!(
-                "row:{} branch:{} batch:{}",
-                names.object(&member.object_id),
-                member.branch_name,
-                names.batch(&member.batch_id),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// First 4 bytes of a BatchId as hex (8 chars).
@@ -1268,7 +1190,6 @@ mod tests {
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
         assert_eq!(tracer.of_type("RowBatchCreated").len(), 2);
-        assert_eq!(tracer.of_type("RowBatchStateChanged").len(), 0);
     }
 
     #[test]
@@ -1281,12 +1202,11 @@ mod tests {
             metadata: None,
             row: row.clone(),
         };
-        let incoming = SyncPayload::RowBatchStateChanged {
-            row_id: row.row_id,
-            branch_name: "main".into(),
-            batch_id: row.batch_id,
-            state: None,
-            confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
+        let incoming = SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id: row.batch_id,
+                confirmed_tier: crate::sync_manager::DurabilityTier::EdgeServer,
+            },
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &outgoing);

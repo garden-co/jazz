@@ -52,7 +52,11 @@ export interface JazzRnRuntimeBinding {
   ): void;
   onSyncMessageReceived(messageJson: string, seq?: number | null): void;
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
-  query(queryJson: string, sessionJson: string | undefined, tier: string | undefined): string;
+  query(
+    queryJson: string,
+    sessionJson: string | undefined,
+    tier: string | undefined,
+  ): Promise<string>;
   removeServer(): void;
   setClientRole(clientId: string, role: string): void;
   createSubscription(
@@ -296,7 +300,11 @@ export class JazzRnRuntimeAdapter implements Runtime {
     tier?: string | null,
   ): Promise<any> {
     try {
-      const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
+      const rowsJson = await this.binding.query(
+        query_json,
+        session_json ?? undefined,
+        tier ?? undefined,
+      );
       return JSON.parse(rowsJson);
     } catch (error) {
       throw normalizeJazzRnError(error);

@@ -35,8 +35,6 @@ fn memory_size_separates_sync_state_buckets() {
 
     sm.row_batch_interest
         .insert(row_key, HashSet::from([client_id]));
-    sm.received_row_batch_acks
-        .push((row_key, DurabilityTier::Local));
     sm.query_origin
         .insert(QueryId(7), HashSet::from([client_id]));
     sm.clients

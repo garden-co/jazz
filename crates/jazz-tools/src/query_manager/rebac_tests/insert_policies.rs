@@ -115,8 +115,6 @@ fn rebac_insert_denied_by_simple_policy() {
     let reason = client_write_rejection_reason(
         &outbox,
         client_id,
-        obj_id,
-        "main",
         row_batch_id_for_commit(obj_id, "main", &commit),
     )
     .expect("Should receive rejection response");
@@ -204,8 +202,6 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        obj_id,
-        &branch,
         row_batch_id_for_commit(obj_id, &branch, &commit),
     );
     assert!(
@@ -276,8 +272,6 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        obj_id,
-        &branch,
         row_batch_id_for_commit(obj_id, &branch, &commit),
     );
     assert!(
@@ -373,8 +367,6 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        obj_id,
-        &branch,
         row_batch_id_for_commit(obj_id, &branch, &commit),
     );
     assert!(
@@ -443,8 +435,6 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
     let reason = client_write_rejection_reason(
         &outbox,
         client_id,
-        obj_id,
-        &branch,
         row_batch_id_for_commit(obj_id, &branch, &commit),
     )
     .expect("Timed-out schema wait should return a rejection to the client");
@@ -512,8 +502,6 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        obj_id,
-        "main",
         row_batch_id_for_commit(obj_id, "main", &commit),
     );
     assert!(
@@ -593,8 +581,6 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        obj_id,
-        "main",
         row_batch_id_for_commit(obj_id, "main", &commit),
     );
     assert!(
@@ -737,8 +723,6 @@ fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_po
         client_write_was_rejected(
             &outbox,
             client_id,
-            obj_id,
-            "main",
             row_batch_id_for_commit(obj_id, "main", &commit),
         ),
         "loaded empty permissions bundle should reject sync writes without explicit permission"

@@ -140,6 +140,9 @@ export interface Runtime {
    * Options are parsed at attach time; `bridge.init()` is parameter-less.
    */
   createWorkerBridge?(worker: Worker, options: object): unknown;
+  /** Drive a synchronous batched tick. Used by callers that need to flush
+   * pending state before a synchronous teardown. */
+  batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
@@ -175,6 +178,8 @@ export interface AuthConfig {
   backend_secret?: string;
   /** Admin secret for privileged sync and `/admin/*` catalogue operations. */
   admin_secret?: string;
+  /** Shared server-to-server secret for peer sync. */
+  peer_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
 }
@@ -244,13 +249,7 @@ interface TimestampOverrideOptions {
 
 export type BatchMode = "direct" | "transactional";
 
-export interface VisibleBatchMember {
-  objectId: string;
-  branchName: string;
-  batchId: string;
-}
-
-export type BatchSettlement =
+export type BatchFate =
   | {
       kind: "missing";
       batchId: string;
@@ -265,20 +264,18 @@ export type BatchSettlement =
       kind: "durableDirect";
       batchId: string;
       confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
     }
   | {
       kind: "acceptedTransaction";
       batchId: string;
       confirmedTier: DurabilityTier;
-      visibleMembers: VisibleBatchMember[];
     };
 
 export interface LocalBatchRecord {
   batchId: string;
   mode: BatchMode;
   sealed: boolean;
-  latestSettlement: BatchSettlement | null;
+  latestSettlement: BatchFate | null;
 }
 
 export interface CreateOptions extends TimestampOverrideOptions {
@@ -757,7 +754,7 @@ function durabilityTierRank(tier: DurabilityTier): number {
 }
 
 function settlementSatisfiesTier(
-  settlement: BatchSettlement | null | undefined,
+  settlement: BatchFate | null | undefined,
   tier: DurabilityTier,
 ): boolean {
   if (!settlement) {
@@ -772,7 +769,7 @@ function settlementSatisfiesTier(
 }
 
 function rejectionFromSettlement(
-  settlement: BatchSettlement | null | undefined,
+  settlement: BatchFate | null | undefined,
 ): PersistedWriteRejectedError | null {
   if (!settlement || settlement.kind !== "rejected") {
     return null;

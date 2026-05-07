@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::BatchFate;
 use crate::catalogue::CatalogueEntry;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
@@ -19,6 +19,7 @@ use crate::sync_manager::{
     RowBatchKey, SchemaWarning, SyncManager,
 };
 
+use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::{Operation, PolicyExpr};
@@ -1075,6 +1076,44 @@ impl QueryManager {
         }
     }
 
+    fn mark_visible_rows_updated_for_batch<H: Storage>(&mut self, storage: &H, batch_id: BatchId) {
+        let mut rows = Vec::new();
+        for subscription in self.subscriptions.values() {
+            let table = subscription.graph.table.as_str().to_string();
+            for branch in &subscription.branches {
+                let Ok(visible_rows) = storage.scan_visible_region(&table, branch.as_str()) else {
+                    continue;
+                };
+                rows.extend(
+                    visible_rows
+                        .into_iter()
+                        .filter(|row| row.batch_id == batch_id)
+                        .map(|row| (table.clone(), row.row_id)),
+                );
+            }
+        }
+        rows.sort();
+        rows.dedup();
+        for (table, row_id) in rows {
+            self.mark_local_row_updated_in_subscriptions(&table, row_id);
+        }
+    }
+
+    pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
+        &mut self,
+        confirmed_tier: DurabilityTier,
+    ) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription
+                .durability_tier
+                .is_some_and(|required_tier| confirmed_tier >= required_tier)
+            {
+                subscription.needs_visibility_recompute = true;
+                subscription.graph.mark_all_dirty();
+            }
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
@@ -1121,6 +1160,22 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
+        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
+        for settlement in &batch_fates {
+            if let Some(confirmed_tier) = settlement.confirmed_tier() {
+                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+            }
+            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
+            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
+            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
+                for member in record.members {
+                    self.mark_local_row_updated_in_subscriptions(
+                        member.table_name.as_str(),
+                        member.object_id,
+                    );
+                }
+            }
+        }
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1162,6 +1217,18 @@ impl QueryManager {
 
         // 4b. Settle policy graphs and finalize completed checks
         self.settle_policy_checks(storage);
+
+        let post_permission_row_visibility_changes =
+            self.sync_manager.take_pending_row_visibility_changes();
+        if !post_permission_row_visibility_changes.is_empty() {
+            tracing::debug!(
+                count = post_permission_row_visibility_changes.len(),
+                "processing row visibility changes from accepted permission checks"
+            );
+        }
+        for update in post_permission_row_visibility_changes {
+            self.handle_row_update(storage, update);
+        }
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
         // sequenced sync updates. Watermarked settlements stay queued for
@@ -1302,7 +1369,6 @@ impl QueryManager {
                 // initial upstream frontier has been replayed — or until every
                 // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
                 // which means nothing upstream is going to replay.
-                tracing::trace!("query frontier incomplete, holding first delivery");
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1365,11 +1431,6 @@ impl QueryManager {
                 );
                 subscription.current_ordered_ids = ordered.ordered_ids_after;
                 subscription.current_visible_rows = visible_rows_by_id;
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = visible_delta.added.len(),
-                    "first delivery (snapshot)"
-                );
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: sub_id,
                     delta: visible_delta,
@@ -1416,10 +1477,6 @@ impl QueryManager {
 
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
-    }
-
-    pub(crate) fn enqueue_row_visibility_change(&mut self, update: RowVisibilityChange) {
-        self.pending_row_visibility_changes.push(update);
     }
 
     pub(super) fn handle_row_update_with_origin(
@@ -1684,7 +1741,113 @@ impl QueryManager {
         if local_update {
             self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
         } else {
+            let self_referential_table_update = old_row.is_some()
+                && table_schema.columns.columns.iter().any(|column| {
+                    column.references.as_ref().is_some_and(|referenced| {
+                        referenced.as_str() == logical_table.as_str()
+                            || referenced.as_str() == original_table.as_str()
+                            || referenced.as_str() == branch_table.as_str()
+                    })
+                });
+            if self_referential_table_update
+                || Self::select_policy_columns_changed(
+                    table_schema.policies.select_policy(),
+                    &table_name,
+                    &descriptor,
+                    old_row.map(|row| row.data.as_ref()),
+                    new_data,
+                )
+            {
+                self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
+            }
             self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
+        }
+    }
+
+    fn select_policy_columns_changed(
+        policy: Option<&PolicyExpr>,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        old_data: Option<&[u8]>,
+        new_data: &[u8],
+    ) -> bool {
+        let Some(policy) = policy else {
+            return false;
+        };
+        let Some(old_data) = old_data else {
+            return !matches!(policy, PolicyExpr::True);
+        };
+        let columns = Self::policy_local_columns(policy);
+        let Ok(old_values) = decode_row(descriptor, old_data) else {
+            return true;
+        };
+        let Ok(new_values) = decode_row(descriptor, new_data) else {
+            return true;
+        };
+        if descriptor
+            .columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| {
+                column
+                    .references
+                    .as_ref()
+                    .is_some_and(|referenced| referenced == table_name)
+                    && old_values.get(index) != new_values.get(index)
+            })
+        {
+            return true;
+        }
+        if columns.is_empty() {
+            return false;
+        }
+
+        columns.into_iter().any(|column| {
+            descriptor
+                .column_index(&column)
+                .is_some_and(|index| old_values.get(index) != new_values.get(index))
+        })
+    }
+
+    fn policy_local_columns(policy: &PolicyExpr) -> HashSet<String> {
+        let mut columns = HashSet::new();
+        Self::collect_policy_local_columns(policy, &mut columns);
+        columns
+    }
+
+    fn collect_policy_local_columns(policy: &PolicyExpr, columns: &mut HashSet<String>) {
+        match policy {
+            PolicyExpr::Cmp { column, .. }
+            | PolicyExpr::IsNull { column }
+            | PolicyExpr::IsNotNull { column }
+            | PolicyExpr::Contains { column, .. }
+            | PolicyExpr::In { column, .. }
+            | PolicyExpr::InList { column, .. }
+            | PolicyExpr::Inherits {
+                via_column: column, ..
+            } => {
+                columns.insert(column.clone());
+            }
+            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+                for expr in exprs {
+                    Self::collect_policy_local_columns(expr, columns);
+                }
+            }
+            PolicyExpr::Not(expr)
+            | PolicyExpr::Exists {
+                condition: expr, ..
+            } => {
+                Self::collect_policy_local_columns(expr, columns);
+            }
+            PolicyExpr::SessionCmp { .. }
+            | PolicyExpr::SessionIsNull { .. }
+            | PolicyExpr::SessionIsNotNull { .. }
+            | PolicyExpr::SessionContains { .. }
+            | PolicyExpr::SessionInList { .. }
+            | PolicyExpr::ExistsRel { .. }
+            | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::True
+            | PolicyExpr::False => {}
         }
     }
 
@@ -1731,7 +1894,7 @@ impl QueryManager {
     /// Mark a row as updated in all subscriptions for a table.
     /// This triggers content change detection during settle().
     /// Checks all tables involved in the subscription (including joined tables).
-    pub(super) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         // Mark local subscriptions
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
@@ -1746,7 +1909,7 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+    pub(crate) fn mark_local_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_updated(id);
@@ -2359,14 +2522,14 @@ impl QueryManager {
 
     fn transactional_batch_complete_for_query_scope(
         storage: &dyn Storage,
-        settlement_cache: &mut HashMap<BatchId, Option<BatchSettlement>>,
+        settlement_cache: &mut HashMap<BatchId, Option<BatchFate>>,
         batch_id: BatchId,
         local_scope: &HashSet<(ObjectId, BranchName)>,
         query_scope: &HashSet<(ObjectId, BranchName)>,
     ) -> bool {
         let settlement = settlement_cache
             .entry(batch_id)
-            .or_insert_with(|| match storage.load_authoritative_batch_settlement(batch_id) {
+            .or_insert_with(|| match storage.load_authoritative_batch_fate(batch_id) {
                 Ok(settlement) => settlement,
                 Err(error) => {
                     tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
@@ -2374,15 +2537,8 @@ impl QueryManager {
                 }
             });
 
-        match settlement {
-            Some(BatchSettlement::AcceptedTransaction {
-                visible_members, ..
-            }) => visible_members
-                .iter()
-                .filter(|member| query_scope.contains(&(member.object_id, member.branch_name)))
-                .all(|member| local_scope.contains(&(member.object_id, member.branch_name))),
-            _ => true,
-        }
+        !matches!(settlement, Some(BatchFate::AcceptedTransaction { .. }))
+            || query_scope.is_subset(local_scope)
     }
 
     fn filter_transaction_visible_tuples(
@@ -2399,7 +2555,7 @@ impl QueryManager {
         let mut query_scope = local_scope.clone();
         query_scope.extend(self.sync_manager.remote_query_scope(query_id));
 
-        let mut settlement_cache: HashMap<BatchId, Option<BatchSettlement>> = HashMap::new();
+        let mut settlement_cache: HashMap<BatchId, Option<BatchFate>> = HashMap::new();
 
         tuples
             .into_iter()

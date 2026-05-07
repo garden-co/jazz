@@ -87,6 +87,13 @@ impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
             let flag = self.scheduled.clone();
 
             tokio::spawn(async move {
+                // Give bursty transports (notably WebSocket frames emitted back-to-back)
+                // one scheduler turn to enqueue related messages before the runtime drains.
+                // Without this, a large subscription burst can be observed as many
+                // one-message ticks, causing per-query result flushing and delayed
+                // tier-settled first deliveries.
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
                 // Acquire the core lock FIRST, then clear the debounce flag
                 // immediately before running batched_tick.
                 //
@@ -639,6 +646,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_as_backend(client_id);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Peer without resetting state.
+    pub fn ensure_client_as_peer(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_peer(client_id);
         Ok(())
     }
 

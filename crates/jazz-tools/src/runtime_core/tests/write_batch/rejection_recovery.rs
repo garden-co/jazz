@@ -44,8 +44,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
 
     core.push_sync_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Rejected {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
                 batch_id,
                 code: "permission_denied".to_string(),
                 reason: "writer lacks publish rights".to_string(),
@@ -76,8 +76,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         core.storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .and_then(|record| record.latest_settlement),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+            .and_then(|record| record.latest_fate),
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
             reason: "writer lacks publish rights".to_string(),
@@ -100,7 +100,110 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
 }
 
 #[test]
-fn rc_worker_peer_relays_rejected_batch_settlement_to_downstream_peer() {
+fn rc_direct_update_rejection_restores_previous_visible_row() {
+    let mut core = create_runtime_with_schema(test_schema(), "direct-update-reject-restore-test");
+
+    let ((row_id, _row_values), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let update_batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("update should be visible optimistically")
+        .batch_id;
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id: update_batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lost update rights".to_string(),
+            },
+        },
+    });
+    core.immediate_tick();
+
+    let visible = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("rejecting an update should restore the previous visible row");
+    assert_ne!(visible.batch_id, update_batch_id);
+
+    let query = Query::new("users");
+    let results = execute_query(&mut core, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Carol".into()))],
+        None,
+    )
+    .expect("restored rows should remain writable after a rejected update");
+}
+
+#[test]
+fn rc_direct_delete_rejection_restores_previous_visible_row() {
+    let mut core = create_runtime_with_schema(test_schema(), "direct-delete-reject-restore-test");
+
+    let ((row_id, _row_values), _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let delete_batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("delete should be visible optimistically")
+        .batch_id;
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id: delete_batch_id,
+                code: "permission_denied".to_string(),
+                reason: "writer lost delete rights".to_string(),
+            },
+        },
+    });
+    core.immediate_tick();
+
+    let visible = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("rejecting a delete should restore the previous visible row");
+    assert_ne!(visible.batch_id, delete_batch_id);
+
+    let query = Query::new("users");
+    let results = execute_query(&mut core, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Carol".into()))],
+        None,
+    )
+    .expect("restored rows should remain writable after a rejected delete");
+}
+
+#[test]
+fn rc_worker_peer_relays_rejected_batch_fate_to_downstream_peer() {
     let mut s = create_3tier_rc();
 
     let ((row_id, _row_values), mut receiver) =
@@ -123,8 +226,8 @@ fn rc_worker_peer_relays_rejected_batch_settlement_to_downstream_peer() {
 
     s.b.push_sync_inbox(InboxEntry {
         source: Source::Server(s.c_server_for_b),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Rejected {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
                 batch_id,
                 code: "permission_denied".to_string(),
                 reason: "writer lacks publish rights".to_string(),
@@ -216,7 +319,7 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
     s.a.seal_batch(batch_id).unwrap();
 
     s.b.storage_mut()
-        .upsert_authoritative_batch_settlement(&crate::batch_fate::BatchSettlement::Rejected {
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
             reason: "writer lacks publish rights".to_string(),
@@ -233,8 +336,8 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
             .unwrap()
             .expect("rejected transactional batch record should still be present");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+        settled_record.latest_fate,
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
             reason: "writer lacks publish rights".to_string(),
@@ -307,8 +410,7 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. },
+                payload: SyncPayload::BatchFate { fate: crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. },
                 },
             } if *id == client_id && *settled_batch_id == batch_id
         )),
@@ -354,8 +456,8 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
             .storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .and_then(|record| record.latest_settlement),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+            .and_then(|record| record.latest_fate),
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
             reason,
@@ -436,8 +538,7 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. },
+                payload: SyncPayload::BatchFate { fate: crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. },
                 },
             } if *id == client_id && *settled_batch_id == batch_id
         )),
@@ -473,8 +574,8 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
             .storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .and_then(|record| record.latest_settlement),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+            .and_then(|record| record.latest_fate),
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
             reason,
@@ -558,8 +659,7 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
         entry,
         OutboxEntry {
             destination: Destination::Client(id),
-            payload: SyncPayload::BatchSettlement {
-                settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. },
+            payload: SyncPayload::BatchFate { fate: crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. },
             },
         } if *id == client_id && *settled_batch_id == batch_id
     )));
@@ -576,12 +676,12 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
 
     let worker_settlement = worker
         .storage()
-        .load_authoritative_batch_settlement(batch_id)
+        .load_authoritative_batch_fate(batch_id)
         .unwrap()
         .expect("worker should persist the rejected settlement");
     assert!(matches!(
         &worker_settlement,
-        crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, code, reason }
+        crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, code, reason }
             if *settled_batch_id == batch_id
                 && code == "permission_denied"
                 && reason.contains("denied")
@@ -593,8 +693,8 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
         .unwrap()
         .expect("alice should keep the rejected batch record");
     assert!(matches!(
-        alice_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, code, reason })
+        alice_record.latest_fate,
+        Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, code, reason })
             if settled_batch_id == batch_id
                 && code == "permission_denied"
                 && reason.contains("denied")
@@ -692,8 +792,7 @@ fn rc_worker_path_overlapping_insert_and_delete_rejects_delete() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(client_id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: crate::batch_fate::BatchSettlement::Rejected { batch_id, .. },
+                payload: SyncPayload::BatchFate { fate: crate::batch_fate::BatchFate::Rejected { batch_id, .. },
                 },
             } if *client_id == s.b_client_of_c && *batch_id == delete_batch_id
         )),
@@ -903,8 +1002,8 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
             .storage()
             .load_local_batch_record(batch_id)
             .unwrap()
-            .and_then(|record| record.latest_settlement),
-        Some(crate::batch_fate::BatchSettlement::Rejected { batch_id: settled_batch_id, .. })
+            .and_then(|record| record.latest_fate),
+        Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. })
             if settled_batch_id == batch_id
     ));
     assert_eq!(
@@ -975,7 +1074,7 @@ fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
         .load_local_batch_record(batch_id)
         .unwrap()
         .expect("insert_persisted should create a local batch record");
-    record.latest_settlement = Some(crate::batch_fate::BatchSettlement::Rejected {
+    record.latest_fate = Some(crate::batch_fate::BatchFate::Rejected {
         batch_id,
         code: "permission_denied".to_string(),
         reason: "simulated post-insert rejection".to_string(),
@@ -1085,9 +1184,9 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
     assert_eq!(
         restarted
             .storage()
-            .load_authoritative_batch_settlement(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .unwrap(),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "invalid_batch_submission".to_string(),
             reason: "sealed batch rows must belong to the declared target branch".to_string(),
@@ -1228,9 +1327,9 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
     assert_eq!(
         restarted
             .storage()
-            .load_authoritative_batch_settlement(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .unwrap(),
-        Some(crate::batch_fate::BatchSettlement::Rejected {
+        Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "transaction_conflict".to_string(),
             reason: "family-visible frontier changed since batch was sealed".to_string(),

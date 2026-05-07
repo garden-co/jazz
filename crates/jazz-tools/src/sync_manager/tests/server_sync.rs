@@ -161,6 +161,73 @@ fn add_server_with_storage_skips_rows_already_confirmed_upstream() {
 }
 
 #[test]
+fn add_server_with_storage_skips_rows_confirmed_by_authoritative_batch_fate() {
+    let mut io = MemoryStorage::new();
+    seed_users_schema(&mut io);
+
+    let rows: Vec<_> = (0..3)
+        .map(|index| {
+            let row_id = ObjectId::new();
+            let row = visible_row(
+                row_id,
+                "main",
+                Vec::new(),
+                1_000 + index,
+                format!("upstream-{index}").as_bytes(),
+            );
+            io.put_row_locator(
+                row_id,
+                Some(
+                    &crate::storage::row_locator_from_metadata(&row_metadata("users"))
+                        .expect("row metadata should produce a row locator"),
+                ),
+            )
+            .unwrap();
+            io.append_history_region_rows("users", std::slice::from_ref(&row))
+                .unwrap();
+            io.upsert_visible_region_rows(
+                "users",
+                std::slice::from_ref(&VisibleRowEntry::rebuild(
+                    row.clone(),
+                    std::slice::from_ref(&row),
+                )),
+            )
+            .unwrap();
+            io.upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
+                batch_id: row.batch_id(),
+                confirmed_tier: DurabilityTier::GlobalServer,
+            })
+            .unwrap();
+            row
+        })
+        .collect();
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    let outbox = sm.take_outbox();
+    let row_syncs = outbox
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                OutboxEntry {
+                    destination: Destination::Server(id),
+                    payload: SyncPayload::RowBatchCreated { .. },
+                } if *id == server_id
+            )
+        })
+        .count();
+    assert_eq!(
+        row_syncs,
+        0,
+        "warm reconnect should not replay locally persisted rows whose batches already have authoritative global fate; rows={:?}",
+        rows.iter().map(|row| row.batch_id()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn add_server_with_storage_sends_skipped_parent_before_child() {
     let mut io = MemoryStorage::new();
     let row_id = ObjectId::new();

@@ -796,20 +796,14 @@ impl Storage for MemoryStorage {
             return Ok(None);
         };
         let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
-        if entry
-            .current_row
-            .confirmed_tier
-            .is_some_and(|tier| tier >= required_tier)
-            || entry.batch_id_for_tier(required_tier).is_some()
-        {
-            return entry.materialize_preview_for_tier_with_storage(
-                self,
-                table,
-                context.user_descriptor.as_ref(),
-                required_tier,
-            );
+        let current_tier = row_confirmed_tier_with_batch_fate(self, &entry.current_row)?;
+        if current_tier.is_some_and(|tier| tier >= required_tier) {
+            let mut current_row = entry.current_row.clone();
+            current_row.confirmed_tier = current_tier;
+            return Ok(Some(current_row));
         }
-        let history_rows = regions.history_rows_for(branch, row_id);
+        let mut history_rows = regions.history_rows_for(branch, row_id);
+        apply_batch_fate_tiers_to_rows(self, &mut history_rows)?;
         crate::row_histories::visible_row_preview_from_history_rows(
             context.user_descriptor.as_ref(),
             &history_rows,
@@ -2873,9 +2867,7 @@ mod tests {
 
     #[test]
     fn local_batch_records_store_artifacts_in_dedicated_tables_only() {
-        use crate::batch_fate::{
-            BatchMode, LocalBatchMember, SealedBatchMember, VisibleBatchMember,
-        };
+        use crate::batch_fate::{BatchMode, LocalBatchMember, SealedBatchMember};
 
         let mut storage = MemoryStorage::new();
         let batch_id = BatchId::new();
@@ -2901,16 +2893,11 @@ mod tests {
             Vec::new(),
         );
         record.mark_sealed(submission.clone());
-        let settlement = BatchSettlement::AcceptedTransaction {
+        let settlement = BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
-            visible_members: vec![VisibleBatchMember {
-                object_id,
-                branch_name: BranchName::new("main"),
-                batch_id,
-            }],
         };
-        record.apply_settlement(settlement.clone());
+        record.apply_fate(settlement.clone());
 
         storage.upsert_local_batch_record(&record).unwrap();
 
@@ -2933,7 +2920,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .load_authoritative_batch_settlement(batch_id)
+                .load_authoritative_batch_fate(batch_id)
                 .unwrap()
                 .expect("authoritative settlement"),
             settlement
@@ -3267,6 +3254,18 @@ mod tests {
         storage
             .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
             .unwrap();
+        for (row, confirmed_tier) in [
+            (&base, DurabilityTier::GlobalServer),
+            (&edge_title, DurabilityTier::EdgeServer),
+            (&worker_done, DurabilityTier::Local),
+        ] {
+            storage
+                .upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                })
+                .unwrap();
+        }
 
         let worker_preview = Storage::load_visible_region_row_for_tier(
             &storage,
@@ -3307,6 +3306,229 @@ mod tests {
         assert_eq!(
             decode_row(&user_descriptor, &global_preview.data).unwrap(),
             vec![Value::Text("task".into()), Value::Boolean(false)]
+        );
+    }
+
+    #[test]
+    fn exact_visible_row_tier_load_uses_authoritative_batch_fate() {
+        use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
+        use crate::row_format::decode_row;
+        use crate::row_histories::{RowState, VisibleRowEntry};
+
+        let mut storage = MemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let schema_hash = persist_test_schema(&mut storage, &schema);
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "tasks".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let row = StoredRowBatch::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("settled".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        );
+        let entry =
+            VisibleRowEntry::rebuild_with_descriptor(&user_descriptor, std::slice::from_ref(&row))
+                .unwrap()
+                .expect("visible entry");
+        storage
+            .append_history_region_rows("tasks", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+            .unwrap();
+        storage
+            .upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
+                batch_id: row.batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+            })
+            .unwrap();
+
+        let global_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("global preview");
+
+        assert_eq!(
+            global_preview.confirmed_tier,
+            Some(DurabilityTier::GlobalServer)
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &global_preview.data).unwrap(),
+            vec![Value::Text("settled".into()), Value::Boolean(false)]
+        );
+    }
+
+    #[test]
+    fn exact_visible_row_tier_loads_legacy_authoritative_batch_settlement_rows() {
+        use crate::query_manager::types::{SchemaBuilder, TableSchema, Value};
+        use crate::row_format::{decode_row, encode_row};
+        use crate::row_histories::{RowState, VisibleRowEntry};
+
+        let mut storage = MemoryStorage::new();
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let user_descriptor = schema[&"tasks".into()].columns.clone();
+        let schema_hash = persist_test_schema(&mut storage, &schema);
+        let row_id = ObjectId::new();
+        storage
+            .put_row_locator(
+                row_id,
+                Some(&RowLocator {
+                    table: "tasks".into(),
+                    origin_schema_hash: Some(schema_hash),
+                }),
+            )
+            .unwrap();
+
+        let row = StoredRowBatch::new(
+            row_id,
+            "main",
+            Vec::new(),
+            encode_row(
+                &user_descriptor,
+                &[Value::Text("legacy".into()), Value::Boolean(false)],
+            )
+            .unwrap(),
+            RowProvenance::for_insert("alice".to_string(), 10),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        );
+        let entry =
+            VisibleRowEntry::rebuild_with_descriptor(&user_descriptor, std::slice::from_ref(&row))
+                .unwrap()
+                .expect("visible entry");
+        storage
+            .append_history_region_rows("tasks", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("tasks", std::slice::from_ref(&entry))
+            .unwrap();
+
+        storage
+            .upsert_raw_table_header(
+                AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+                &RawTableHeader::system(
+                    STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
+                    AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
+                ),
+            )
+            .unwrap();
+        let legacy_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "kind",
+                ColumnType::Enum {
+                    variants: vec![
+                        "missing".to_string(),
+                        "rejected".to_string(),
+                        "durable_direct".to_string(),
+                        "accepted_transaction".to_string(),
+                    ],
+                },
+            ),
+            ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+            ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+            ColumnDescriptor::new(
+                "confirmed_tier",
+                ColumnType::Enum {
+                    variants: vec![
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+            ColumnDescriptor::new(
+                "visible_members",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Row {
+                        columns: Box::new(RowDescriptor::new(vec![
+                            ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                            ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ])),
+                    }),
+                },
+            ),
+        ]);
+        let legacy_bytes = encode_row(
+            &legacy_descriptor,
+            &[
+                Value::Text("durable_direct".to_string()),
+                Value::BatchId(*row.batch_id.as_bytes()),
+                Value::Null,
+                Value::Null,
+                Value::Text("global".to_string()),
+                Value::Array(vec![Value::Row {
+                    id: None,
+                    values: vec![
+                        Value::Bytea(row_id.uuid().as_bytes().to_vec()),
+                        Value::Text("main".to_string()),
+                    ],
+                }]),
+            ],
+        )
+        .unwrap();
+        storage
+            .raw_table_put(
+                AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+                &local_batch_record_key(row.batch_id),
+                &legacy_bytes,
+            )
+            .unwrap();
+
+        let global_preview = Storage::load_visible_region_row_for_tier(
+            &storage,
+            "tasks",
+            "main",
+            row_id,
+            DurabilityTier::GlobalServer,
+        )
+        .unwrap()
+        .expect("legacy global preview");
+
+        assert_eq!(
+            global_preview.confirmed_tier,
+            Some(DurabilityTier::GlobalServer)
+        );
+        assert_eq!(
+            decode_row(&user_descriptor, &global_preview.data).unwrap(),
+            vec![Value::Text("legacy".into()), Value::Boolean(false)]
         );
     }
 

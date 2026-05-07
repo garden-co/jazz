@@ -3,7 +3,8 @@ name: Expo Android E2E (Maestro Cloud)
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - changeset-release/*
   pull_request:
     branches: [main]
     paths:
@@ -27,6 +28,7 @@ permissions:
 jobs:
   build-rn:
     name: Build jazz-rn (Android) artifacts
+    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     uses: ./.github/workflows/rn-build-reusable.yml
     with:
       concurrency: e2e-rn-test
@@ -35,6 +37,7 @@ jobs:
 
   build-jazz-tools-sandbox:
     name: Build jazz-tools sandbox binary (${{ matrix.target }})
+    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
@@ -53,9 +56,10 @@ jobs:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
 
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: mlugg/setup-zig@v2
         with:
           version: 0.14.0
+          cache-key: ${{ matrix.target }}
 
       - uses: taiki-e/install-action@v2
         with:
@@ -80,6 +84,7 @@ jobs:
 
   expo-android-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     needs:
       - build-rn
       - build-jazz-tools-sandbox

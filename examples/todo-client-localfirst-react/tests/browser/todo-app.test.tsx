@@ -36,6 +36,14 @@ function typeInto(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function todoTitles(el: HTMLDivElement): Array<string | null> {
+  return [...el.querySelectorAll("#todo-list li span")].map((span) => span.textContent);
+}
+
+function hasTodoTitle(el: HTMLDivElement, title: string): boolean {
+  return todoTitles(el).includes(title);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -300,20 +308,14 @@ describe("React Todo App E2E", () => {
       form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    await waitFor(
-      () => el1.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear in app 1",
-    );
+    await waitFor(() => hasTodoTitle(el1, "Synced todo"), 3000, "Todo should appear in app 1");
 
     // Wait for it to appear in app 2 via server sync
     await waitFor(
-      () => el2.querySelectorAll("#todo-list li").length === 1,
+      () => hasTodoTitle(el2, "Synced todo"),
       20000,
       "Todo should sync to app 2 through the server",
     );
-
-    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
   });
 
   // -------------------------------------------------------------------------

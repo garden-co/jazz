@@ -1028,6 +1028,7 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
+            let had_dirty_graph = sub.graph.has_dirty_nodes();
 
             // Row loader for this subscription
             let new_scope = {
@@ -1093,7 +1094,6 @@ impl QueryManager {
                     )
                 }
             };
-            let scope_unavailable = new_scope.is_none();
             if let Some(new_scope) = new_scope {
                 let scope_changed = new_scope != sub.last_scope;
                 if scope_changed {
@@ -1117,7 +1117,7 @@ impl QueryManager {
                         .max_local_durability_tier()
                         .unwrap_or(DurabilityTier::Local);
                     settled_notifications.push((client_id, query_id, settled_tier, new_scope));
-                } else if scope_changed {
+                } else if scope_changed || had_dirty_graph {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
@@ -1129,14 +1129,6 @@ impl QueryManager {
                         sub.last_scope.clone(),
                     ));
                 }
-            }
-
-            if scope_unavailable {
-                tracing::trace!(
-                    ?query_id,
-                    %client_id,
-                    "server subscription scope unavailable; holding QuerySettled"
-                );
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
@@ -1516,7 +1508,7 @@ impl QueryManager {
     fn evaluate_update_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
         request: UpdatePermissionRequest<'_>,
     ) {
         let UpdatePermissionRequest {
@@ -1535,6 +1527,19 @@ impl QueryManager {
             self.sync_manager
                 .reject_permission_check(storage, check, err.to_string());
             return;
+        }
+
+        if check
+            .old_content
+            .as_ref()
+            .is_none_or(|content| content.is_empty())
+            && let Ok(Some(previous_row)) = storage.load_visible_region_row(
+                table_name.as_str(),
+                branch_name.as_str(),
+                object_id,
+            )
+        {
+            check.old_content = Some(previous_row.data.to_vec());
         }
 
         let Some(table_schema) = auth_schema.get(&table_name) else {

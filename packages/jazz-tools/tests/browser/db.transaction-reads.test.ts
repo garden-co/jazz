@@ -200,12 +200,13 @@ describe("db transaction reads browser integration", () => {
 });
 
 describe("db batch reads browser integration", () => {
-  it("changes in an uncommited batch are visible globally", async () => {
+  it("keeps uncommitted batch changes out of global reads", async () => {
     const batch = db.beginBatch();
     const insertedTodo = batch.insert(todos, { title: "Batch", done: false });
 
-    // Changes are visible globally even without a batch.commit()
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
+    batch.commit();
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
@@ -233,9 +234,13 @@ describe("db batch reads browser integration", () => {
       title: "Alice staged screenshots",
       done: false,
     });
-    const visibleRows = await db.all<Todo>(makeTodoQuery());
-    expect(visibleRows).toHaveLength(3);
-    expect(visibleRows).toEqual(
+    expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
+
+    batch.commit();
+
+    const committedRows = await db.all<Todo>(makeTodoQuery());
+    expect(committedRows).toHaveLength(3);
+    expect(committedRows).toEqual(
       expect.arrayContaining([
         {
           id: existingTodo.id,
@@ -250,8 +255,6 @@ describe("db batch reads browser integration", () => {
         },
       ]),
     );
-
-    batch.commit();
   });
 
   it("rejects partial upserts for missing rows inside direct batches", async () => {
@@ -272,18 +275,15 @@ describe("db batch reads browser integration", () => {
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
     });
 
-    it("does not rollback changes if the callback rejects", async () => {
-      let insertedTodo: Todo | undefined;
+    it("rolls back changes if the callback rejects", async () => {
       expect(() =>
         db.batch((batch) => {
-          insertedTodo = batch.insert(todos, { title: "Batch", done: false });
+          batch.insert(todos, { title: "Batch", done: false });
           throw new Error("callback failed");
         }),
       ).toThrow("callback failed");
 
-      const globalTodo = await db.one<Todo>(makeTodoQuery());
-      expect(globalTodo).toBeDefined();
-      expect(globalTodo).toEqual(insertedTodo);
+      expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
     });
   });
 });

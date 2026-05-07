@@ -38,10 +38,14 @@ client sends QuerySubscription
   -> QueryManager compiles a server-side graph
   -> graph settles against current visible rows
   -> matching rows are sent as RowBatchNeeded
+  -> matching rows' BatchFate records are sent after row entries
   -> QuerySettled marks the first snapshot as ready at a given tier
 ```
 
 The point of `RowBatchNeeded` is straightforward: a newly subscribed client may need rows that already existed before the subscription was created.
+The point of `BatchFate` is separate: a newly subscribed client may need the whole-batch
+durability or rejection outcome for rows it already received. Batch fate does not carry the query
+result set; that is `QuerySettled.scope`.
 
 ## Live Update Flow
 
@@ -54,6 +58,8 @@ When a row changes:
 3. the graph settles incrementally
 4. the runtime figures out which rows entered, changed inside, or left the result
 5. sync payloads are sent only for the affected rows
+6. batch fate carries the durability/rejection outcome that lets receivers decide when those known
+   rows satisfy tiered delivery
 
 That is how Jazz avoids treating every remote subscription update as a full snapshot.
 
@@ -82,6 +88,11 @@ main thread subscribes
 ```
 
 The implementation also threads per-connection sequence information through these signals so a `QuerySettled` message is not treated as valid before earlier row payloads on the same stream have been applied.
+
+Because batch fate is the active durability signal, server-side subscriptions may emit a new
+`QuerySettled` when their settled graph was dirtied even if the object-id scope did not change. That
+lets downstream runtimes release updated rows whose `batch_id` changed but whose query membership
+stayed the same.
 
 ## Reconnect and Replay
 

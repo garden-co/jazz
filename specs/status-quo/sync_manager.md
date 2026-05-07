@@ -16,7 +16,14 @@ Sync is intentionally different in the two directions:
 
 ### Upward, toward trusted servers
 
-Jazz forwards row batch entries, explicit batch seals, replayable batch fate, and catalogue updates so the server can build the same relational view and answer forwarded queries.
+Jazz forwards row batch entries, explicit batch seals, replayable batch fate, and
+query subscriptions so the server can build the same relational view and answer
+forwarded queries.
+
+Catalogue updates use the same sync payload lane, but publication authority is
+core-only in edge deployments. Edges receive schema, migration, and permissions
+catalogue entries from core; they do not accept local admin catalogue writes and
+proxy them upstream.
 
 ### Downward, toward clients
 
@@ -54,7 +61,11 @@ Admin writes can take the direct server-side path.
 
 ### Peer
 
-Peer is used for trusted runtime-to-runtime links such as browser main-thread to worker or server-to-server communication.
+Peer is used for trusted runtime-to-runtime links such as browser main-thread to
+worker or server-to-server communication. Server-to-server WebSocket links use
+the peer-secret handshake and are registered as `ClientRole::Peer`, preserving
+the normal sync state for the connection while allowing trusted catalogue and
+row sync payloads.
 
 ## What Moves Over Sync
 
@@ -63,10 +74,9 @@ The sync payloads now speak in row-history and query terms:
 - `CatalogueEntryUpdated`
 - `RowBatchCreated`
 - `RowBatchNeeded`
-- `RowBatchStateChanged`
 - `SealBatch`
-- `BatchSettlement`
-- `BatchSettlementNeeded`
+- `BatchFate`
+- `BatchFateNeeded`
 - `QuerySubscription`
 - `QueryUnsubscription`
 - `QueryScopeSnapshot`
@@ -80,8 +90,29 @@ That payload set matches the table-first runtime model:
 - initial query fill can explicitly ask for needed row batch entries
 - direct and transactional batches are explicitly sealed upstream
 - replayable whole-batch fate travels separately from concrete row entries
-- row-state and durability progression travel as row-state changes
+- durability and rejection travel as `BatchFate`
+- row/query visibility is derived from row delivery, query scopes, and local or sealed batch
+  membership, not from fate payload members
 - schemas and lenses travel as catalogue entries
+- permissions bundles and permissions heads travel as catalogue entries
+
+## Server Tiers
+
+Server durability identity is configured by topology:
+
+- a server without an upstream URL is the core/global node and owns
+  `GlobalServer`
+- a server with an upstream URL is an edge node and owns `EdgeServer`
+
+Because `GlobalServer` is higher than `EdgeServer`, the core can satisfy both
+global-tier and edge-tier durability. An edge can satisfy edge-tier work locally
+after it has durable edge state, but global-tier writes and global-tier query
+settlement continue upstream to the core.
+
+Edges connect to core as peer clients over the existing WebSocket transport.
+That means reconnect/backoff, active subscription replay, batch-settlement
+replay, and catalogue-digest optimization all stay inside the same transport
+and SyncManager paths used by other runtime links.
 
 ## A Typical Flow
 
@@ -91,8 +122,10 @@ That payload set matches the table-first runtime model:
 2. Storage updates the flat visible row and indices.
 3. Query subscriptions settle locally.
 4. The writer seals the direct batch, sending `SealBatch` upstream. Simple write APIs do this immediately.
-5. The Sync Manager queues `RowBatchCreated` (and later state changes if needed) for peers and servers.
-6. Replayable durability eventually converges through `BatchSettlement::DurableDirect`.
+5. The Sync Manager queues `RowBatchCreated` for peers and servers.
+6. Replayable durability eventually converges through `BatchFate::DurableDirect`.
+7. If authority rejects any member write in that direct batch, the whole batch resolves as
+   `BatchFate::Rejected`; independent write fate requires independent batches.
 
 ### Transactional write
 
@@ -100,7 +133,7 @@ That payload set matches the table-first runtime model:
 2. Ordinary readers ignore those `StagingPending` rows.
 3. The writer explicitly seals the batch, sending `SealBatch` upstream.
 4. The authority decides replayable batch fate.
-5. Accepted output becomes visible and is replayable as `BatchSettlement::AcceptedTransaction`.
+5. Accepted output becomes visible and is replayable as `BatchFate::AcceptedTransaction`.
 6. Rejection or missing authority truth is replayable as `Rejected` or `Missing`.
 
 ### New query subscription
@@ -109,14 +142,22 @@ That payload set matches the table-first runtime model:
 2. The Sync Manager records that desired state.
 3. The Query Manager compiles and settles the server-side query.
 4. For each matching object/branch, initial replay sends the current visible row as `RowBatchNeeded`.
-5. If that current row has replayable batch fate, the current `BatchSettlement` is replayed too.
+5. If that current row has replayable batch fate, the current `BatchFate` is replayed too.
 6. A `QuerySettled` signal tells the downstream runtime when the first snapshot is safe to deliver for a requested durability tier.
 
-### Later visibility/state change
+### Later visibility/fate change
 
-When a row already known to a peer changes durability or state, the runtime can send `RowBatchStateChanged` without pretending the row is brand new.
+When a row already known to a peer becomes durable, accepted, or rejected, the runtime sends the
+batch fate that proves the new whole-batch outcome. Successful fate applies to every known row with
+that `batch_id`; receivers use their own delivered row batches, local batch records, sealed
+submissions, and `QuerySettled.scope` to decide which concrete rows or subscriptions are affected.
 
-The row-level identity for those changes is `RowBatchKey { row_id, branch_name, batch_id }`.
+The legacy `visible_members` field is deprecated. It may be read for compatibility
+with old storage or old sync peers, but new logic should not need to decode or scan it on a
+per-row read path.
+
+The row-level identity for local interest remains `RowBatchKey { row_id, branch_name, batch_id }`,
+but active sync does not send a row-state-change payload for it.
 
 ## Query-Scoped Delivery
 
@@ -152,6 +193,11 @@ main thread subscribes
 
 The key point is that row delivery and "safe to publish first snapshot" are related, but not identical.
 
+For an edge client requesting `GlobalServer`, the first snapshot is not released
+just because the edge has a local answer. The edge forwards the subscription
+upstream and relays `QuerySettled(GlobalServer)` only after the core settles the
+query at the global tier.
+
 ## Reconnect Behavior
 
 Active query subscriptions are treated as desired state.
@@ -161,6 +207,8 @@ When an upstream server is re-added:
 - the Sync Manager records the new link
 - the Query Manager replays active forwarded subscriptions
 - the server rebuilds scope and resends the rows the client still needs
+- pending batch-settlement requests and catalogue state are replayed or skipped
+  according to the upstream connection state and catalogue digest
 
 This is what makes reconnect feel reliable without every app having to remember which queries to resubscribe manually.
 

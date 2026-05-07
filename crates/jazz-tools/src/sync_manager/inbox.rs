@@ -1,13 +1,13 @@
 use super::*;
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchSubmission,
-    VisibleBatchMember,
+    BatchFate, BatchMode, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
+    SealedBatchSubmission,
 };
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::row_histories::{
-    BatchId, RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, patch_row_batch_state,
+    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, patch_row_batch_state,
 };
 use crate::storage::{Storage, metadata_from_row_locator};
 use std::collections::{HashMap, HashSet};
@@ -25,6 +25,62 @@ enum SealedBatchMode {
 }
 
 impl SyncManager {
+    fn queue_batch_durability_ack_to_server(
+        &mut self,
+        server_id: ServerId,
+        tier: DurabilityTier,
+        row: &StoredRowBatch,
+        _branch_name: BranchName,
+    ) {
+        if !row.state.is_visible() {
+            return;
+        }
+
+        let is_transactional = matches!(row.state, RowState::VisibleTransactional);
+
+        for entry in self.outbox.iter_mut().rev() {
+            if entry.destination != Destination::Server(server_id) {
+                continue;
+            }
+            let SyncPayload::BatchFate { fate } = &mut entry.payload else {
+                continue;
+            };
+
+            match fate {
+                BatchFate::DurableDirect {
+                    batch_id,
+                    confirmed_tier,
+                } if !is_transactional && *batch_id == row.batch_id && *confirmed_tier == tier => {
+                    return;
+                }
+                BatchFate::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier,
+                } if is_transactional && *batch_id == row.batch_id && *confirmed_tier == tier => {
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let fate = if is_transactional {
+            BatchFate::AcceptedTransaction {
+                batch_id: row.batch_id,
+                confirmed_tier: tier,
+            }
+        } else {
+            BatchFate::DurableDirect {
+                batch_id: row.batch_id,
+                confirmed_tier: tier,
+            }
+        };
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::BatchFate { fate },
+        });
+    }
+
     fn client_batch_mode(row: &StoredRowBatch) -> BatchMode {
         match row.state {
             RowState::StagingPending | RowState::VisibleTransactional => BatchMode::Transactional,
@@ -35,7 +91,7 @@ impl SyncManager {
     }
 
     fn retain_client_local_batch_row<H: Storage>(
-        &self,
+        &mut self,
         storage: &mut H,
         metadata: &HashMap<String, String>,
         row: &StoredRowBatch,
@@ -84,20 +140,78 @@ impl SyncManager {
             schema_hash,
             row_digest: row.content_digest(),
         });
+        if let Some(fate) = record.latest_fate.clone()
+            && let Some(submission) =
+                Self::seal_direct_client_record_from_fate(storage, &mut record, &fate)
+        {
+            self.seal_batch_to_servers(submission);
+        }
         let _ = storage.upsert_local_batch_record(&record);
     }
 
-    fn retain_client_batch_settlement<H: Storage>(
-        &self,
-        storage: &mut H,
-        settlement: &BatchSettlement,
-    ) {
-        let batch_id = settlement.batch_id();
-        let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) else {
-            return;
+    fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) {
+        let batch_id = fate.batch_id();
+        let mut record = match storage.load_local_batch_record(batch_id) {
+            Ok(Some(record)) => record,
+            Ok(None) if matches!(fate, BatchFate::DurableDirect { .. }) => {
+                LocalBatchRecord::new(batch_id, BatchMode::Direct, false, None)
+            }
+            Ok(None) | Err(_) => return,
         };
-        record.apply_settlement(settlement.clone());
+        if let Some(submission) =
+            Self::seal_direct_client_record_from_fate(storage, &mut record, fate)
+        {
+            self.seal_batch_to_servers(submission);
+        }
+        record.apply_fate(fate.clone());
         let _ = storage.upsert_local_batch_record(&record);
+    }
+
+    fn seal_direct_client_record_from_fate<H: Storage>(
+        storage: &H,
+        record: &mut LocalBatchRecord,
+        fate: &BatchFate,
+    ) -> Option<SealedBatchSubmission> {
+        if matches!(fate, BatchFate::DurableDirect { .. })
+            && record.mode == BatchMode::Direct
+            && record.sealed_submission.is_none()
+            && let Some(submission) =
+                Self::direct_submission_from_client_record(storage, fate, record)
+        {
+            record.mark_sealed(submission.clone());
+            return Some(submission);
+        }
+        None
+    }
+
+    fn direct_submission_from_client_record<H: Storage>(
+        _storage: &H,
+        _fate: &BatchFate,
+        record: &LocalBatchRecord,
+    ) -> Option<SealedBatchSubmission> {
+        let first_member = record.members.first()?;
+        let target_branch_name = first_member.branch_name;
+        if record
+            .members
+            .iter()
+            .any(|member| member.branch_name != target_branch_name)
+        {
+            return None;
+        };
+        let members = record
+            .members
+            .iter()
+            .map(|member| SealedBatchMember {
+                object_id: member.object_id,
+                row_digest: member.row_digest,
+            })
+            .collect();
+        Some(SealedBatchSubmission::new(
+            record.batch_id,
+            target_branch_name,
+            members,
+            Vec::new(),
+        ))
     }
 
     fn retain_client_sealed_batch_submission<H: Storage>(
@@ -115,9 +229,9 @@ impl SyncManager {
     fn validate_sealed_batch_submission(
         &self,
         submission: &SealedBatchSubmission,
-    ) -> Result<BranchName, BatchSettlement> {
+    ) -> Result<BranchName, BatchFate> {
         if submission.members.is_empty() {
-            return Err(BatchSettlement::Rejected {
+            return Err(BatchFate::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
                 reason: "sealed batch must declare at least one member".to_string(),
@@ -127,7 +241,7 @@ impl SyncManager {
         if submission.batch_digest
             != SealedBatchSubmission::compute_batch_digest(&submission.members)
         {
-            return Err(BatchSettlement::Rejected {
+            return Err(BatchFate::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
                 reason: "sealed batch digest does not match declared members".to_string(),
@@ -137,11 +251,8 @@ impl SyncManager {
         Ok(submission.target_branch_name)
     }
 
-    fn frontier_conflict_settlement(
-        &self,
-        batch_id: crate::row_histories::BatchId,
-    ) -> BatchSettlement {
-        BatchSettlement::Rejected {
+    fn frontier_conflict_fate(&self, batch_id: crate::row_histories::BatchId) -> BatchFate {
+        BatchFate::Rejected {
             batch_id,
             code: "transaction_conflict".to_string(),
             reason: "family-visible frontier changed since batch was sealed".to_string(),
@@ -152,12 +263,12 @@ impl SyncManager {
         &self,
         submission: &SealedBatchSubmission,
         batch_rows: &[(String, StoredRowBatch)],
-    ) -> Result<(), BatchSettlement> {
+    ) -> Result<(), BatchFate> {
         if batch_rows.iter().any(|(_, row)| {
             row.batch_id == submission.batch_id
                 && row.branch.as_str() != submission.target_branch_name.as_str()
         }) {
-            return Err(BatchSettlement::Rejected {
+            return Err(BatchFate::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
                 reason: "sealed batch rows must belong to the declared target branch".to_string(),
@@ -171,14 +282,14 @@ impl SyncManager {
         &self,
         submission: &SealedBatchSubmission,
         batch_rows: &[(String, StoredRowBatch)],
-    ) -> Result<Option<SealedBatchMode>, BatchSettlement> {
+    ) -> Result<Option<SealedBatchMode>, BatchFate> {
         let mut mode = None;
         for (_, row) in batch_rows {
             let row_mode = match row.state {
                 RowState::VisibleDirect => SealedBatchMode::Direct,
                 RowState::StagingPending => SealedBatchMode::Transactional,
                 _ => {
-                    return Err(BatchSettlement::Rejected {
+                    return Err(BatchFate::Rejected {
                         batch_id: submission.batch_id,
                         code: "invalid_batch_submission".to_string(),
                         reason: "sealed batch rows must be visible direct or staging pending"
@@ -189,7 +300,7 @@ impl SyncManager {
 
             match mode {
                 Some(existing) if existing != row_mode => {
-                    return Err(BatchSettlement::Rejected {
+                    return Err(BatchFate::Rejected {
                         batch_id: submission.batch_id,
                         code: "invalid_batch_submission".to_string(),
                         reason: "sealed batch mixes direct and transactional rows".to_string(),
@@ -203,59 +314,37 @@ impl SyncManager {
         Ok(mode)
     }
 
-    fn sealed_visible_members(submission: &SealedBatchSubmission) -> Vec<VisibleBatchMember> {
-        let mut visible_members = submission
-            .members
-            .iter()
-            .map(|member| VisibleBatchMember {
-                object_id: member.object_id,
-                branch_name: submission.target_branch_name,
-                batch_id: submission.batch_id,
-            })
-            .collect::<Vec<_>>();
-        visible_members.sort_by(|left, right| {
-            left.object_id
-                .uuid()
-                .as_bytes()
-                .cmp(right.object_id.uuid().as_bytes())
-                .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-                .then_with(|| left.batch_id.as_bytes().cmp(right.batch_id.as_bytes()))
-        });
-        visible_members.dedup();
-        visible_members
-    }
-
     fn validate_captured_frontier<H: Storage>(
         &self,
         storage: &H,
         submission: &SealedBatchSubmission,
-    ) -> Result<(), BatchSettlement> {
+    ) -> Result<(), BatchFate> {
         let current_frontier = storage
             .capture_family_visible_frontier(submission.target_branch_name)
-            .map_err(|error| BatchSettlement::Rejected {
+            .map_err(|error| BatchFate::Rejected {
                 batch_id: submission.batch_id,
                 code: "invalid_batch_submission".to_string(),
                 reason: format!("failed to capture family-visible frontier: {error}"),
             })?;
         if current_frontier != submission.captured_frontier {
-            return Err(self.frontier_conflict_settlement(submission.batch_id));
+            return Err(self.frontier_conflict_fate(submission.batch_id));
         }
 
         Ok(())
     }
 
-    fn persist_authoritative_batch_settlement<H: Storage>(
+    fn persist_authoritative_batch_fate<H: Storage>(
         &self,
         storage: &mut H,
-        settlement: &BatchSettlement,
+        fate: &BatchFate,
     ) -> Result<(), crate::storage::StorageError> {
         storage
-            .upsert_authoritative_batch_settlement(settlement)
+            .upsert_authoritative_batch_fate(fate)
             .map_err(|error| {
                 tracing::warn!(
-                    batch_id = ?settlement.batch_id(),
+                    batch_id = ?fate.batch_id(),
                     %error,
-                    "failed to persist authoritative batch settlement"
+                    "failed to persist authoritative batch fate"
                 );
                 error
             })
@@ -381,13 +470,15 @@ impl SyncManager {
         storage: &mut H,
         metadata: Option<RowMetadata>,
         mut row: StoredRowBatch,
+        record_local_fate: bool,
     ) -> Option<AppliedRowBatch> {
-        if let Some(local_tier) = self.max_local_durability_tier() {
-            row.confirmed_tier = Some(match row.confirmed_tier {
-                Some(existing) => existing.max(local_tier),
-                None => local_tier,
-            });
-        }
+        let authoritative_tier = match (row.confirmed_tier, self.max_local_durability_tier()) {
+            (Some(incoming), Some(local)) => Some(incoming.max(local)),
+            (Some(incoming), None) => Some(incoming),
+            (None, Some(local)) => Some(local),
+            (None, None) => None,
+        };
+        row.confirmed_tier = None;
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         self.ensure_object_metadata(storage, row.row_id, metadata.clone());
@@ -405,6 +496,30 @@ impl SyncManager {
                     return None;
                 }
             };
+        if record_local_fate
+            && let Some(confirmed_tier) = authoritative_tier
+            && row.state.is_visible()
+        {
+            let fate = match row.state {
+                RowState::VisibleDirect => BatchFate::DurableDirect {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                },
+                RowState::VisibleTransactional => BatchFate::AcceptedTransaction {
+                    batch_id: row.batch_id,
+                    confirmed_tier,
+                },
+                RowState::StagingPending | RowState::Superseded | RowState::Rejected => {
+                    unreachable!("row.state.is_visible() guarded non-visible states")
+                }
+            };
+            if self
+                .persist_authoritative_batch_fate(storage, &fate)
+                .is_ok()
+            {
+                self.pending_batch_fates.push(fate.clone());
+            }
+        }
 
         Some(AppliedRowBatch {
             metadata,
@@ -413,241 +528,59 @@ impl SyncManager {
         })
     }
 
-    fn apply_row_batch_state_changed<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        row_id: ObjectId,
-        branch_name: BranchName,
-        batch_id: BatchId,
-        state: Option<RowState>,
-        confirmed_tier: Option<DurabilityTier>,
-    ) {
-        if confirmed_tier.is_none() && state.is_none() {
-            return;
-        }
-
-        let row_update = match patch_row_batch_state(
-            storage,
-            row_id,
-            &branch_name,
-            batch_id,
-            state,
-            confirmed_tier,
-        ) {
-            Ok(update) => update,
-            Err(err) => {
-                tracing::error!(
-                    %row_id,
-                    %branch_name,
-                    ?batch_id,
-                    ?state,
-                    ?confirmed_tier,
-                    ?err,
-                    "failed to apply row batch state change"
-                );
-                return;
-            }
-        };
-
-        if let Some(tier) = confirmed_tier {
-            self.received_row_batch_acks
-                .push((RowBatchKey::new(row_id, branch_name, batch_id), tier));
-        }
-
-        if let Some(update) = row_update {
-            self.pending_row_visibility_changes.push(update);
-        }
-    }
-
-    fn replayable_visible_batch_settlement<H: Storage>(
-        &self,
-        storage: &H,
-        row_id: ObjectId,
-        branch_name: BranchName,
-    ) -> Option<BatchSettlement> {
-        let row_locator = storage.load_row_locator(row_id).ok().flatten()?;
-        self.load_current_batch_settlement_from_storage(storage, row_id, &branch_name, &row_locator)
-    }
-
-    fn settlement_for_row_batch_state_change<H: Storage>(
-        &self,
-        storage: &H,
-        row_id: ObjectId,
-        branch_name: BranchName,
-        batch_id: BatchId,
-        confirmed_tier: Option<DurabilityTier>,
-    ) -> Option<BatchSettlement> {
-        self.replayable_visible_batch_settlement(storage, row_id, branch_name)
-            .map(|settlement| match (settlement, confirmed_tier) {
-                (
-                    BatchSettlement::DurableDirect {
-                        batch_id,
-                        confirmed_tier: existing_tier,
-                        visible_members,
-                    },
-                    Some(incoming_tier),
-                ) if incoming_tier > existing_tier => BatchSettlement::DurableDirect {
-                    batch_id,
-                    confirmed_tier: incoming_tier,
-                    visible_members,
-                },
-                (
-                    BatchSettlement::AcceptedTransaction {
-                        batch_id,
-                        confirmed_tier: existing_tier,
-                        visible_members,
-                    },
-                    Some(incoming_tier),
-                ) if incoming_tier > existing_tier => BatchSettlement::AcceptedTransaction {
-                    batch_id,
-                    confirmed_tier: incoming_tier,
-                    visible_members,
-                },
-                (settlement, _) => settlement,
-            })
-            .or_else(|| {
-                let confirmed_tier = confirmed_tier?;
-                let record = storage.load_local_batch_record(batch_id).ok().flatten()?;
-                if !record
-                    .members
-                    .iter()
-                    .any(|member| member.object_id == row_id && member.branch_name == branch_name)
-                {
-                    return None;
-                }
-                let visible_members = record
-                    .members
-                    .iter()
-                    .map(|member| VisibleBatchMember {
-                        object_id: member.object_id,
-                        branch_name: member.branch_name,
-                        batch_id,
-                    })
-                    .collect::<Vec<_>>();
-                match record.mode {
-                    crate::batch_fate::BatchMode::Direct => Some(BatchSettlement::DurableDirect {
-                        batch_id,
-                        confirmed_tier,
-                        visible_members,
-                    }),
-                    crate::batch_fate::BatchMode::Transactional => {
-                        Some(BatchSettlement::AcceptedTransaction {
-                            batch_id,
-                            confirmed_tier,
-                            visible_members,
-                        })
-                    }
-                }
-            })
-    }
-
-    fn respond_to_batch_settlement_request<H: Storage>(
+    pub(super) fn respond_to_batch_fate_request<H: Storage>(
         &mut self,
         storage: &H,
         destination: Destination,
-        batch_ids: Vec<crate::row_histories::BatchId>,
+        mut batch_ids: Vec<crate::row_histories::BatchId>,
     ) {
+        batch_ids.sort();
+        batch_ids.dedup();
         for batch_id in batch_ids {
-            let settlement = self
-                .load_batch_settlement_by_batch_id_from_storage(storage, batch_id)
-                .unwrap_or(BatchSettlement::Missing { batch_id });
-            let settlement = match destination {
+            let fate = self
+                .load_batch_fate_by_batch_id_from_storage(storage, batch_id)
+                .unwrap_or(BatchFate::Missing { batch_id });
+            match destination {
                 Destination::Client(client_id) => {
-                    let Some(settlement) = self.batch_settlement_for_client(client_id, &settlement)
-                    else {
-                        continue;
-                    };
-                    settlement
+                    self.queue_batch_fate_to_client_unfiltered(client_id, fate);
                 }
-                Destination::Server(_) => settlement,
-            };
-            self.outbox.push(OutboxEntry {
-                destination: destination.clone(),
-                payload: SyncPayload::BatchSettlement { settlement },
-            });
+                Destination::Server(_) => {
+                    self.outbox.push(OutboxEntry {
+                        destination: destination.clone(),
+                        payload: SyncPayload::BatchFate { fate },
+                    });
+                }
+            }
         }
     }
 
-    pub(super) fn batch_settlement_for_client(
+    pub(super) fn batch_fate_for_client(
         &self,
         client_id: ClientId,
-        settlement: &BatchSettlement,
-    ) -> Option<BatchSettlement> {
+        fate: &BatchFate,
+    ) -> Option<BatchFate> {
         self.clients.get(&client_id)?;
-        match settlement {
-            BatchSettlement::DurableDirect {
-                batch_id,
-                confirmed_tier,
-                visible_members,
-            } => {
-                let visible_members = visible_members
-                    .iter()
-                    .filter(|member| {
-                        let key =
-                            RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
-                        self.row_batch_interest
-                            .get(&key)
-                            .is_some_and(|clients| clients.contains(&client_id))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (!visible_members.is_empty()).then_some(BatchSettlement::DurableDirect {
-                    batch_id: *batch_id,
-                    confirmed_tier: *confirmed_tier,
-                    visible_members,
-                })
-            }
-            BatchSettlement::AcceptedTransaction {
-                batch_id,
-                confirmed_tier,
-                visible_members,
-            } => {
-                let visible_members = visible_members
-                    .iter()
-                    .filter(|member| {
-                        let key =
-                            RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
-                        self.row_batch_interest
-                            .get(&key)
-                            .is_some_and(|clients| clients.contains(&client_id))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (!visible_members.is_empty()).then_some(BatchSettlement::AcceptedTransaction {
-                    batch_id: *batch_id,
-                    confirmed_tier: *confirmed_tier,
-                    visible_members,
-                })
-            }
-            BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => {
-                Some(settlement.clone())
-            }
+        match fate {
+            BatchFate::DurableDirect { batch_id, .. }
+            | BatchFate::AcceptedTransaction { batch_id, .. }
+            | BatchFate::Rejected { batch_id, .. } => self
+                .row_batch_interest
+                .iter()
+                .any(|(key, clients)| key.batch_id == *batch_id && clients.contains(&client_id))
+                .then(|| fate.clone()),
+            BatchFate::Missing { .. } => Some(fate.clone()),
         }
     }
 
-    fn interested_clients_for_batch_settlement<H: Storage>(
+    pub(super) fn interested_clients_for_batch_fate<H: Storage>(
         &self,
         _storage: &H,
-        settlement: &BatchSettlement,
+        fate: &BatchFate,
     ) -> HashSet<ClientId> {
-        match settlement {
-            BatchSettlement::DurableDirect {
-                visible_members, ..
-            }
-            | BatchSettlement::AcceptedTransaction {
-                visible_members, ..
-            } => {
-                let mut interested = HashSet::new();
-                for member in visible_members {
-                    let key =
-                        RowBatchKey::new(member.object_id, member.branch_name, member.batch_id);
-                    if let Some(clients) = self.row_batch_interest.get(&key) {
-                        interested.extend(clients.iter().copied());
-                    }
-                }
-                interested
-            }
-            BatchSettlement::Rejected { batch_id, .. } => {
+        match fate {
+            BatchFate::DurableDirect { batch_id, .. }
+            | BatchFate::AcceptedTransaction { batch_id, .. }
+            | BatchFate::Rejected { batch_id, .. } => {
                 let mut interested = HashSet::new();
                 for (key, clients) in &self.row_batch_interest {
                     if key.batch_id == *batch_id {
@@ -656,7 +589,7 @@ impl SyncManager {
                 }
                 interested
             }
-            BatchSettlement::Missing { .. } => HashSet::new(),
+            BatchFate::Missing { .. } => HashSet::new(),
         }
     }
 
@@ -695,21 +628,44 @@ impl SyncManager {
         rows
     }
 
-    fn apply_transactional_batch_settlement_to_rows<H: Storage>(
+    fn known_transactional_batch_rows_for_fate<H: Storage>(
+        &self,
+        storage: &H,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<(String, StoredRowBatch)> {
+        let mut object_ids = HashSet::new();
+        for scope in self.remote_query_scopes.values() {
+            object_ids.extend(scope.iter().map(|(object_id, _)| *object_id));
+        }
+        for key in self.row_batch_interest.keys() {
+            if key.batch_id == batch_id {
+                object_ids.insert(key.row_id);
+            }
+        }
+        if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
+            object_ids.extend(record.members.iter().map(|member| member.object_id));
+        }
+        self.transactional_batch_rows(
+            storage,
+            batch_id,
+            &object_ids.into_iter().collect::<Vec<_>>(),
+        )
+    }
+
+    fn apply_transactional_batch_fate_to_rows<H: Storage>(
         &mut self,
         storage: &mut H,
         origin_client_id: Option<ClientId>,
-        settlement: &BatchSettlement,
+        fate: &BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
         let server_ids: Vec<_> = self.servers.keys().copied().collect();
-        match settlement {
-            BatchSettlement::AcceptedTransaction { confirmed_tier, .. } => {
+        match fate {
+            BatchFate::AcceptedTransaction { confirmed_tier, .. } => {
                 for (_table, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
                     let accepted_row = row.accepted_transaction_output(*confirmed_tier);
-                    let accepted_batch_id = accepted_row.batch_id;
                     let applied =
                         apply_row_batch(storage, row_id, &branch_name, accepted_row.clone(), &[])
                             .ok();
@@ -719,19 +675,6 @@ impl SyncManager {
                         .ok()
                         .flatten()
                         .map(|locator| metadata_from_row_locator(&locator));
-
-                    if let Some(client_id) = origin_client_id {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::RowBatchStateChanged {
-                                row_id,
-                                branch_name,
-                                batch_id: accepted_batch_id,
-                                state: Some(RowState::VisibleTransactional),
-                                confirmed_tier: Some(*confirmed_tier),
-                            },
-                        });
-                    }
 
                     if let Some(metadata) = metadata {
                         for server_id in &server_ids {
@@ -772,17 +715,14 @@ impl SyncManager {
                 for server_id in &server_ids {
                     self.outbox.push(OutboxEntry {
                         destination: Destination::Server(*server_id),
-                        payload: SyncPayload::BatchSettlement {
-                            settlement: settlement.clone(),
-                        },
+                        payload: SyncPayload::BatchFate { fate: fate.clone() },
                     });
                 }
             }
-            BatchSettlement::Rejected { .. } => {
+            BatchFate::Rejected { .. } => {
                 for (_, row) in batch_rows {
                     let row_id = row.row_id;
                     let branch_name = BranchName::new(&row.branch);
-                    let batch_id = row.batch_id;
                     let row_batch_id = row.batch_id();
 
                     let visibility_change = patch_row_batch_state(
@@ -795,19 +735,6 @@ impl SyncManager {
                     )
                     .ok()
                     .flatten();
-
-                    if let Some(client_id) = origin_client_id {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::RowBatchStateChanged {
-                                row_id,
-                                branch_name,
-                                batch_id,
-                                state: Some(RowState::Rejected),
-                                confirmed_tier: None,
-                            },
-                        });
-                    }
 
                     if let Some(update) = visibility_change {
                         self.pending_row_visibility_changes.push(update);
@@ -828,46 +755,69 @@ impl SyncManager {
                     }
                 }
             }
-            BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => return,
+            BatchFate::DurableDirect { .. } | BatchFate::Missing { .. } => return,
         }
 
         if let Some(client_id) = origin_client_id {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(client_id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: settlement.clone(),
-                },
+                payload: SyncPayload::BatchFate { fate: fate.clone() },
             });
         }
+    }
+
+    fn apply_authoritative_transaction_fate_for_row<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        row: &StoredRowBatch,
+    ) {
+        let fate = match storage.load_authoritative_batch_fate(row.batch_id) {
+            Ok(Some(fate @ BatchFate::AcceptedTransaction { .. })) => fate,
+            Ok(Some(_)) | Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    batch_id = ?row.batch_id,
+                    %error,
+                    "failed to load authoritative batch fate for received row"
+                );
+                return;
+            }
+        };
+
+        let rows = vec![(
+            storage
+                .load_row_locator(row.row_id)
+                .ok()
+                .flatten()
+                .map(|locator| locator.table.to_string())
+                .unwrap_or_default(),
+            row.clone(),
+        )];
+        self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
     }
 
     fn reject_sealed_transactional_batch<H: Storage>(
         &mut self,
         storage: &mut H,
         origin_client_id: Option<ClientId>,
-        settlement: BatchSettlement,
+        fate: BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
         if self
-            .persist_authoritative_batch_settlement(storage, &settlement)
+            .persist_authoritative_batch_fate(storage, &fate)
             .is_err()
         {
             return;
         }
-        self.pending_batch_settlements.push(settlement.clone());
-        if let Err(error) = storage.delete_sealed_batch_submission(settlement.batch_id()) {
+        self.pending_batch_fates.push(fate.clone());
+        if let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id()) {
             tracing::warn!(
-                batch_id = ?settlement.batch_id(),
+                batch_id = ?fate.batch_id(),
                 %error,
                 "failed to delete rejected sealed batch submission"
             );
         }
-        self.apply_transactional_batch_settlement_to_rows(
-            storage,
-            origin_client_id,
-            &settlement,
-            batch_rows,
-        );
+        self.apply_transactional_batch_fate_to_rows(storage, origin_client_id, &fate, batch_rows);
     }
 
     fn settle_sealed_batch<H: Storage>(
@@ -893,80 +843,88 @@ impl SyncManager {
                     .cloned()
             })
             .collect();
-        let settlement = match storage.load_authoritative_batch_settlement(batch_id) {
-            Ok(Some(BatchSettlement::DurableDirect { confirmed_tier, .. }))
+        let fate = match storage.load_authoritative_batch_fate(batch_id) {
+            Ok(Some(BatchFate::DurableDirect { confirmed_tier, .. }))
                 if mode == SealedBatchMode::Direct =>
             {
-                let settlement = BatchSettlement::DurableDirect {
+                let confirmed_tier = self
+                    .my_tiers
+                    .iter()
+                    .copied()
+                    .max()
+                    .map(|authority_tier| authority_tier.max(confirmed_tier))
+                    .unwrap_or(confirmed_tier);
+                let fate = BatchFate::DurableDirect {
                     batch_id,
                     confirmed_tier,
-                    visible_members: Self::sealed_visible_members(&submission),
                 };
                 if self
-                    .persist_authoritative_batch_settlement(storage, &settlement)
+                    .persist_authoritative_batch_fate(storage, &fate)
                     .is_err()
                 {
                     return;
                 }
-                settlement
+                fate
             }
-            Ok(Some(existing_settlement)) => existing_settlement,
+            Ok(Some(existing_fate)) => existing_fate,
             Ok(None) => {
                 if batch_rows.is_empty() {
-                    BatchSettlement::Missing { batch_id }
+                    BatchFate::Missing { batch_id }
                 } else {
                     let Some(confirmed_tier) = self.my_tiers.iter().copied().max() else {
                         return;
                     };
-                    let visible_members = Self::sealed_visible_members(&submission);
-                    let settlement = match mode {
-                        SealedBatchMode::Direct => BatchSettlement::DurableDirect {
+                    let fate = match mode {
+                        SealedBatchMode::Direct => BatchFate::DurableDirect {
                             batch_id,
                             confirmed_tier,
-                            visible_members,
                         },
-                        SealedBatchMode::Transactional => BatchSettlement::AcceptedTransaction {
+                        SealedBatchMode::Transactional => BatchFate::AcceptedTransaction {
                             batch_id,
                             confirmed_tier,
-                            visible_members,
                         },
                     };
                     if self
-                        .persist_authoritative_batch_settlement(storage, &settlement)
+                        .persist_authoritative_batch_fate(storage, &fate)
                         .is_err()
                     {
                         return;
                     }
-                    settlement
+                    fate
                 }
             }
             Err(error) => {
-                tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
+                tracing::warn!(?batch_id, %error, "failed to load authoritative batch fate");
                 return;
             }
         };
 
-        if !matches!(settlement, BatchSettlement::Missing { .. }) {
-            self.pending_batch_settlements.push(settlement.clone());
+        if !matches!(fate, BatchFate::Missing { .. }) {
+            self.pending_batch_fates.push(fate.clone());
             if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
                 tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
             }
         }
-        if matches!(settlement, BatchSettlement::DurableDirect { .. }) {
+        if matches!(fate, BatchFate::DurableDirect { .. }) {
+            let mut interested_clients = self.interested_clients_for_batch_fate(storage, &fate);
             if let Some(client_id) = origin_client_id {
-                self.queue_batch_settlement_to_client(client_id, settlement);
+                self.queue_batch_fate_to_client_unfiltered(client_id, fate.clone());
+                interested_clients.remove(&client_id);
+            }
+            for client_id in interested_clients {
+                self.queue_batch_fate_to_client(client_id, fate.clone());
             }
             return;
         }
-        let rows_to_patch: &[(String, StoredRowBatch)] = match settlement {
-            BatchSettlement::AcceptedTransaction { .. } => &declared_rows,
-            BatchSettlement::Rejected { .. } => &batch_rows,
-            BatchSettlement::DurableDirect { .. } | BatchSettlement::Missing { .. } => &[],
+        let rows_to_patch: &[(String, StoredRowBatch)] = match fate {
+            BatchFate::AcceptedTransaction { .. } => &declared_rows,
+            BatchFate::Rejected { .. } => &batch_rows,
+            BatchFate::DurableDirect { .. } | BatchFate::Missing { .. } => &[],
         };
-        self.apply_transactional_batch_settlement_to_rows(
+        self.apply_transactional_batch_fate_to_rows(
             storage,
             origin_client_id,
-            &settlement,
+            &fate,
             rows_to_patch,
         );
     }
@@ -985,6 +943,44 @@ impl SyncManager {
                 return;
             }
         };
+        match storage.load_authoritative_batch_fate(batch_id) {
+            Ok(Some(fate)) => {
+                let highest_authority_tier = self.my_tiers.iter().copied().max();
+                if matches!(
+                    fate,
+                    BatchFate::DurableDirect { confirmed_tier, .. }
+                        if highest_authority_tier
+                            .is_some_and(|authority_tier| confirmed_tier < authority_tier)
+                ) {
+                    // Continue into seal validation so this authority can promote a
+                    // previously local direct fate to its own durability tier.
+                } else {
+                    let should_prune_submission = matches!(fate, BatchFate::Rejected { .. })
+                        || fate
+                            .confirmed_tier()
+                            .is_some_and(|tier| tier >= DurabilityTier::GlobalServer);
+                    let prune_result = if should_prune_submission {
+                        storage.delete_sealed_batch_submission(batch_id)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(error) = prune_result {
+                        tracing::warn!(
+                            ?batch_id,
+                            %error,
+                            "failed to delete sealed batch submission"
+                        );
+                    }
+                    self.queue_batch_fate_to_client_unfiltered(client_id, fate);
+                    return;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(?batch_id, %error, "failed to load authoritative batch fate");
+                return;
+            }
+        }
 
         let batch_rows = self.transactional_batch_rows(
             storage,
@@ -1158,25 +1154,27 @@ impl SyncManager {
             | SyncPayload::RowBatchNeeded { metadata, row } => {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
+                let incoming_confirmed_tier = row.confirmed_tier;
                 tracing::debug!(
                     %object_id,
                     %branch_name,
                     "server→row-batch payload"
                 );
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
-                    let batch_id = applied.row.batch_id;
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), true)
+                {
+                    self.apply_authoritative_transaction_fate_for_row(storage, &applied.row);
 
-                    for tier in self.my_tiers.iter().copied() {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Server(server_id),
-                            payload: SyncPayload::RowBatchStateChanged {
-                                row_id: object_id,
-                                branch_name,
-                                batch_id,
-                                state: None,
-                                confirmed_tier: Some(tier),
-                            },
-                        });
+                    let local_tiers = self.my_tiers.iter().copied().collect::<Vec<_>>();
+                    for tier in local_tiers {
+                        if incoming_confirmed_tier.is_some_and(|confirmed| confirmed >= tier) {
+                            continue;
+                        }
+                        self.queue_batch_durability_ack_to_server(
+                            server_id,
+                            tier,
+                            &applied.row,
+                            branch_name,
+                        );
                     }
 
                     if let Some(update) = applied.visibility_change {
@@ -1189,85 +1187,30 @@ impl SyncManager {
                     }
                 }
             }
-            SyncPayload::RowBatchStateChanged {
-                row_id,
-                branch_name,
-                batch_id,
-                state,
-                confirmed_tier,
-            } => {
-                tracing::debug!(
-                    %row_id,
-                    %branch_name,
-                    ?batch_id,
-                    ?state,
-                    ?confirmed_tier,
-                    "server→RowBatchStateChanged"
-                );
-                self.apply_row_batch_state_changed(
-                    storage,
-                    row_id,
-                    branch_name,
-                    batch_id,
-                    state,
-                    confirmed_tier,
-                );
-
-                let key = RowBatchKey::new(row_id, branch_name, batch_id);
-                let mut interested = HashSet::new();
-                if let Some(clients) = self.row_batch_interest.get(&key) {
-                    interested.extend(clients);
-                }
-                let settlement = self.settlement_for_row_batch_state_change(
-                    storage,
-                    row_id,
-                    branch_name,
-                    batch_id,
-                    confirmed_tier,
-                );
-                let persisted_settlement = settlement.clone().filter(|settlement| {
-                    self.persist_authoritative_batch_settlement(storage, settlement)
-                        .is_ok()
-                });
-                if let Some(settlement) = persisted_settlement.clone() {
-                    self.pending_batch_settlements.push(settlement);
-                }
-                for cid in interested {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Client(cid),
-                        payload: SyncPayload::RowBatchStateChanged {
-                            row_id,
-                            branch_name,
-                            batch_id,
-                            state,
-                            confirmed_tier,
-                        },
-                    });
-                    if let Some(settlement) = persisted_settlement.clone() {
-                        self.queue_batch_settlement_to_client(cid, settlement);
-                    }
-                }
-            }
-            SyncPayload::BatchSettlement { settlement } => {
+            SyncPayload::BatchFate { fate } => {
                 if self
-                    .persist_authoritative_batch_settlement(storage, &settlement)
+                    .persist_authoritative_batch_fate(storage, &fate)
                     .is_err()
                 {
                     return;
                 }
-                self.pending_batch_settlements.push(settlement.clone());
-                let interested = self.interested_clients_for_batch_settlement(storage, &settlement);
+                self.pending_batch_fates.push(fate.clone());
+                if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
+                    let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
+                    self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
+                }
+                let interested = self.interested_clients_for_batch_fate(storage, &fate);
                 for cid in interested {
-                    if let Some(settlement) = self.batch_settlement_for_client(cid, &settlement) {
+                    if let Some(fate) = self.batch_fate_for_client(cid, &fate) {
                         self.outbox.push(OutboxEntry {
                             destination: Destination::Client(cid),
-                            payload: SyncPayload::BatchSettlement { settlement },
+                            payload: SyncPayload::BatchFate { fate },
                         });
                     }
                 }
             }
-            SyncPayload::BatchSettlementNeeded { batch_ids } => {
-                self.respond_to_batch_settlement_request(
+            SyncPayload::BatchFateNeeded { batch_ids } => {
+                self.respond_to_batch_fate_request(
                     storage,
                     Destination::Server(server_id),
                     batch_ids,
@@ -1506,14 +1449,10 @@ impl SyncManager {
                                 client_id,
                                 row.batch_id,
                             );
-                            if let Some(settlement) = self
-                                .load_batch_settlement_by_batch_id_from_storage(
-                                    storage,
-                                    row.batch_id,
-                                )
-                            {
-                                self.queue_batch_settlement_to_client(client_id, settlement);
-                            }
+                            self.pending_client_batch_fates
+                                .entry(client_id)
+                                .or_default()
+                                .insert(row.batch_id);
                             return;
                         }
 
@@ -1628,27 +1567,12 @@ impl SyncManager {
                         query_id: *query_id,
                     });
             }
-            SyncPayload::RowBatchStateChanged {
-                row_id,
-                branch_name,
-                batch_id,
-                state,
-                confirmed_tier,
-            } => {
-                self.apply_row_batch_state_changed(
-                    storage,
-                    *row_id,
-                    *branch_name,
-                    *batch_id,
-                    *state,
-                    *confirmed_tier,
-                );
+            SyncPayload::BatchFate { fate } => {
+                self.retain_client_batch_fate(storage, fate);
+                self.pending_batch_fates.push(fate.clone());
             }
-            SyncPayload::BatchSettlement { settlement } => {
-                self.pending_batch_settlements.push(settlement.clone());
-            }
-            SyncPayload::BatchSettlementNeeded { batch_ids } => {
-                self.respond_to_batch_settlement_request(
+            SyncPayload::BatchFateNeeded { batch_ids } => {
+                self.respond_to_batch_fate_request(
                     storage,
                     Destination::Client(client_id),
                     batch_ids.clone(),
@@ -1712,7 +1636,8 @@ impl SyncManager {
                     .or_default()
                     .insert(client_id);
 
-                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), false)
+                {
                     self.retain_client_local_batch_row(storage, &applied.metadata, &applied.row);
                     self.forward_row_batch_to_servers(
                         storage,
@@ -1741,17 +1666,20 @@ impl SyncManager {
                     tracing::warn!(batch_id = ?submission.batch_id, "ignoring SealBatch with no declared members");
                     return;
                 }
-                match storage.load_authoritative_batch_settlement(submission.batch_id) {
-                    Ok(Some(settlement)) => {
-                        self.queue_batch_settlement_to_client(client_id, settlement);
+                match storage.load_authoritative_batch_fate(submission.batch_id) {
+                    Ok(Some(fate @ BatchFate::Rejected { .. }))
+                    | Ok(Some(fate @ BatchFate::AcceptedTransaction { .. }))
+                    | Ok(Some(fate @ BatchFate::Missing { .. })) => {
+                        self.queue_batch_fate_to_client(client_id, fate);
                         return;
                     }
+                    Ok(Some(BatchFate::DurableDirect { .. })) => {}
                     Ok(None) => {}
                     Err(error) => {
                         tracing::warn!(
                             batch_id = ?submission.batch_id,
                             %error,
-                            "failed to load authoritative batch settlement"
+                            "failed to load authoritative batch fate"
                         );
                         return;
                     }
@@ -1788,12 +1716,12 @@ impl SyncManager {
                     submission.batch_id,
                 );
             }
-            SyncPayload::BatchSettlement { settlement } => {
-                self.retain_client_batch_settlement(storage, &settlement);
-                self.pending_batch_settlements.push(settlement);
+            SyncPayload::BatchFate { fate } => {
+                self.retain_client_batch_fate(storage, &fate);
+                self.pending_batch_fates.push(fate.clone());
             }
-            SyncPayload::BatchSettlementNeeded { batch_ids } => {
-                self.respond_to_batch_settlement_request(
+            SyncPayload::BatchFateNeeded { batch_ids } => {
+                self.respond_to_batch_fate_request(
                     storage,
                     Destination::Client(client_id),
                     batch_ids,

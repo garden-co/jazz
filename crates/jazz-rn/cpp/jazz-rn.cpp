@@ -3,13 +3,14 @@
 #include "generated/jazz_rn.hpp"
 
 namespace jazzrn {
-using namespace facebook;
+	using namespace facebook;
 
-uint8_t installRustCrate(jsi::Runtime &runtime,
-                         std::shared_ptr<react::CallInvoker> callInvoker) {
-  NativeJazzRn::registerModule(runtime, callInvoker);
-  return true;
+	uint8_t installRustCrate(jsi::Runtime &runtime, std::shared_ptr<react::CallInvoker> callInvoker) {
+		NativeJazzRn::registerModule(runtime, callInvoker);
+		return true;
+	}
+
+	uint8_t cleanupRustCrate(jsi::Runtime &runtime) {
+		return false;
+	}
 }
-
-uint8_t cleanupRustCrate(jsi::Runtime &runtime) { return false; }
-} // namespace jazzrn

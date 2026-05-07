@@ -6,7 +6,8 @@ This is the simplest way to think about Jazz today:
 - every logical row has a stable row id
 - edits create row batch entries
 - current reads come from a compact visible entry
-- history stays around so sync, reconnect, and replay can speak in row-batch terms
+- history stays around so sync, reconnect, and replay can speak in row-batch terms, while
+  durability and rejection fate are recorded at the batch level
 
 For the full direct/transactional batch lifecycle, replayable settlement model, and app-facing
 batch APIs, read this together with [Batches](batches.md).
@@ -102,7 +103,8 @@ The important engine fields are:
 - `(row_id, branch_name, batch_id)` — the stable identity of one stored row batch entry
 - `_jazz_parents` — parent batch ids for row-local ancestry
 - `_jazz_state` — whether the version is visible, staging, or rejected
-- `_jazz_confirmed_tier` — highest durability tier known for that version
+- `_jazz_confirmed_tier` — legacy/derived per-row tier metadata; authoritative durability is now
+  read from `BatchFate` where available
 - `_jazz_is_deleted` — tombstone marker
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
@@ -181,6 +183,15 @@ The visible-entry sidecar intentionally stays coarse even for non-`lww` strategi
 That work produces an `ApplyRowBatchResult`, including any `RowVisibilityChange` that downstream
 systems care about.
 
+Authority settlement remains batch-scoped even for direct writes. A direct row may be visible
+optimistically before its batch settles, but the authoritative accepted/rejected answer is
+`BatchFate::DurableDirect` or `BatchFate::Rejected`.
+Successful fate is whole-batch truth; row-history readers should not need to scan legacy
+`visible_members` to decide whether a known row in that batch has reached the fate's tier. If a
+rejected direct update had replaced an older visible row, receivers mark the rejected history entry
+non-visible and rebuild the visible entry from the remaining history instead of deleting the object
+outright.
+
 ## How a Transactional Write Lands
 
 Transactional writes reuse the same `StoredRowBatch` shape, but they stage first:
@@ -198,6 +209,8 @@ Two exclusion rules matter for merge behavior:
 - accepted transactional rows can participate in visible-row merges just like direct rows
 - conflicted transactional batches never participate in merging anywhere; rejected or still-staged
   rows do not affect merge previews, merge-on-write bases, or tier-specific visible resolution
+- rejection is batch-wide: if any member of a transactional batch is rejected, no member in that
+  batch becomes visible
 
 Merge strategy selection is schema-relative rather than history-relative:
 
