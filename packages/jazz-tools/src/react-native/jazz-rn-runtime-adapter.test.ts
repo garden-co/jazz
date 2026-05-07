@@ -3,6 +3,7 @@ import { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runti
 import { decodeFFIRowFromJson, encodeFFIRecordToJson } from "../runtime/ffi-value.js";
 
 function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRuntimeBinding {
+  const sealBatch = overrides.sealBatch ?? vi.fn();
   return {
     addClient: vi.fn(() => "client-1"),
     addServer: vi.fn(),
@@ -36,6 +37,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     update: vi.fn(() => JSON.stringify({ batchId: "batch-update-1" })),
     updateWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-update-2" })),
     ...overrides,
+    sealBatch,
   };
 }
 

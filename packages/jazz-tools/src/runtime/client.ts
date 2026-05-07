@@ -84,7 +84,7 @@ export interface Runtime {
   loadLocalBatchRecords?(): LocalBatchRecord[];
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
-  sealBatch?(batch_id: string): void;
+  sealBatch(batch_id: string): void;
   waitForBatch(batch_id: string, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -1671,7 +1671,7 @@ export class JazzClient {
   }
 
   sealBatch(batchId: string): WriteHandle {
-    this.requireBatchRecordMethod("sealBatch")(batchId);
+    this.runtime.sealBatch(batchId);
     return new WriteHandle(batchId, this);
   }
 
@@ -1779,7 +1779,7 @@ export class JazzClient {
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
+      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
