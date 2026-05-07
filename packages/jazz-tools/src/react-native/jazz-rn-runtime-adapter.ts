@@ -377,10 +377,9 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.binding.onSyncMessageReceived(message_json, seq);
   }
 
-  onSyncMessageToSend(_callback: Function): void {
-    // Server sync is handled by the Rust-owned WebSocket transport (runtime.connect()).
-    // The outbox callback is no longer wired through UniFFI for RN.
-  }
+  // No outbox-target attachment on RN — server sync is handled by the
+  // Rust-owned WebSocket transport (runtime.connect()), and there is no
+  // worker `postMessage` channel.
 
   connect(url: string, authJson: string): void {
     if (this.closed) return;

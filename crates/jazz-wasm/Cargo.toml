@@ -35,6 +35,13 @@ base64 = "0.22"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+web-sys = { version = "0.3", features = [
+  "Worker",
+  "WorkerOptions",
+  "DedicatedWorkerGlobalScope",
+  "MessageEvent",
+  "MessagePort",
+] }
 
 
 [dev-dependencies]
