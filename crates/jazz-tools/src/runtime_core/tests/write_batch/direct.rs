@@ -81,11 +81,9 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
     core.seal_batch(batch_id).unwrap();
     let sealed_submission = core
         .storage()
-        .load_local_batch_record(batch_id)
+        .load_sealed_batch_submission(batch_id)
         .unwrap()
-        .expect("offline write should retain a local batch record")
-        .sealed_submission
-        .expect("offline direct write should still seal the local batch");
+        .expect("offline direct write should persist one sealed submission");
 
     core.add_server(server_id);
     core.batched_tick();
@@ -285,14 +283,12 @@ fn rc_worker_direct_batch_persists_batch_fate_on_seal() {
     s.b.seal_batch(batch_id).unwrap();
 
     let branch_name = s.b.schema_manager().branch_name();
-    let local_record =
-        s.b.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("sealed direct batch should persist one record for shared writes");
-    assert!(local_record.sealed);
-
-    match local_record.latest_fate {
+    match s
+        .b
+        .storage()
+        .load_authoritative_batch_fate(batch_id)
+        .unwrap()
+    {
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: settled_batch_id,
             confirmed_tier,
@@ -347,19 +343,13 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
 
     core.seal_batch(batch_id).unwrap();
 
-    let record = core
+    let submission = core
         .storage()
-        .load_local_batch_record(batch_id)
+        .load_sealed_batch_submission(batch_id)
         .unwrap()
-        .expect("sealed direct batch should keep its local record");
-    assert_eq!(record.mode, crate::batch_fate::BatchMode::Direct);
-    assert!(record.sealed);
+        .expect("sealed direct batch should keep its sealed submission");
     assert_eq!(
-        record
-            .sealed_submission
-            .as_ref()
-            .expect("sealed direct batch should persist a submission")
-            .captured_frontier,
+        submission.captured_frontier,
         Vec::<CapturedFrontierMember>::new(),
         "direct batch seals should not capture transactional frontier state"
     );

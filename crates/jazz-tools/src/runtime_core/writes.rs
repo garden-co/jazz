@@ -181,7 +181,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(members)
     }
 
-    fn local_batch_member_schema_hash(
+    pub(crate) fn local_batch_member_schema_hash(
         &self,
         branch_name: BranchName,
         row_id: ObjectId,
@@ -717,6 +717,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("scan local batch records: {err}")))
     }
 
+    pub fn batch_fate(&self, batch_id: BatchId) -> Result<Option<BatchFate>, RuntimeError> {
+        self.storage
+            .load_authoritative_batch_fate(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))
+    }
+
     /// Drain replayable rejected batch ids that should be surfaced by bindings.
     pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
         self.durability.drain_rejected()
@@ -726,22 +732,20 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// batch record that kept it alive across reconnect and restart.
     pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
         self.local_batch_record_cache.remove(&batch_id);
-        let Some(record) = self
-            .storage
-            .load_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
-        else {
+        if self.acknowledged_rejected_batches.contains(&batch_id) {
             return Ok(false);
-        };
-
-        if !matches!(record.latest_fate, Some(BatchFate::Rejected { .. })) {
+        }
+        if !matches!(
+            self.storage
+                .load_authoritative_batch_fate(batch_id)
+                .map_err(|err| { RuntimeError::WriteError(format!("load batch fate: {err}")) })?,
+            Some(BatchFate::Rejected { .. })
+        ) {
             return Ok(false);
         }
 
-        self.storage
-            .delete_local_batch_record(batch_id)
-            .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
         self.durability.forget_batch(batch_id);
+        self.acknowledged_rejected_batches.insert(batch_id);
         self.mark_storage_write_pending_flush();
         Ok(true)
     }
@@ -779,11 +783,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 confirmed_tier,
             };
             record.apply_fate(settlement.clone());
+            self.storage
+                .upsert_authoritative_batch_fate(&settlement)
+                .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
         }
         self.storage
-            .upsert_local_batch_record(&record)
+            .upsert_sealed_batch_submission(&submission)
             .map_err(|err| {
-                RuntimeError::WriteError(format!("persist local batch record: {err}"))
+                RuntimeError::WriteError(format!("persist sealed batch submission: {err}"))
             })?;
         self.local_batch_record_cache.insert(batch_id, record);
         self.schema_manager

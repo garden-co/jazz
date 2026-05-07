@@ -96,10 +96,16 @@ function replayNewlyRejectedBatchesToMain(): void {
   try {
     const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
     for (const batchId of batchIds) {
-      const batch = runtime.loadLocalBatchRecord?.(batchId);
-      if (batch?.latestSettlement?.kind !== "rejected") {
+      const fate = runtime.loadBatchFate?.(batchId) ?? null;
+      if (fate?.kind !== "rejected") {
         continue;
       }
+      const batch = runtime.loadLocalBatchRecord?.(batchId) ?? {
+        batchId,
+        mode: "direct",
+        sealed: true,
+        latestSettlement: fate,
+      };
       post({ type: "mutation-error-replay", batch });
     }
   } catch (error) {
