@@ -434,6 +434,11 @@ pub struct QueryManager {
     /// reached yet.
     pub(super) pending_local_row_batches: HashMap<ObjectId, RowBatchKey>,
 
+    /// Visible rows observed through normal row visibility processing, keyed by
+    /// batch. Batch fate processing uses this to mark affected query rows
+    /// without rescanning and decoding every subscribed visible region.
+    pub(super) visible_rows_by_batch: HashMap<BatchId, Vec<(String, ObjectId)>>,
+
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
@@ -536,6 +541,7 @@ impl QueryManager {
             branch_schema_map: HashMap::new(),
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
+            visible_rows_by_batch: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
             pending_catalogue_schema_hashes: HashSet::new(),
             catalogued_storage_namespaces: HashSet::new(),
@@ -1076,59 +1082,39 @@ impl QueryManager {
         }
     }
 
-    fn mark_visible_rows_updated_for_batch<H: Storage>(&mut self, storage: &H, batch_id: BatchId) {
-        let mut rows = Vec::new();
-        let mut subscription_tables = Vec::new();
-        subscription_tables.extend(self.subscriptions.values().map(|subscription| {
-            (
-                subscription.graph.table.as_str().to_string(),
-                subscription.branches.clone(),
-            )
-        }));
-        subscription_tables.extend(self.server_subscriptions.values().map(|subscription| {
-            (
-                subscription.graph.table.as_str().to_string(),
-                subscription.branches.clone(),
-            )
-        }));
-        subscription_tables.sort();
-        subscription_tables.dedup();
-
-        for (table, branches) in subscription_tables {
-            for branch in &branches {
-                let Ok(visible_rows) = storage.scan_visible_region(&table, branch.as_str()) else {
-                    continue;
-                };
-                rows.extend(
-                    visible_rows
-                        .into_iter()
-                        .filter(|row| row.batch_id == batch_id)
-                        .map(|row| (table.clone(), row.row_id)),
-                );
-            }
-        }
-        rows.sort();
-        rows.dedup();
-        for (table, row_id) in rows {
-            self.mark_local_row_updated_in_subscriptions(&table, row_id);
-        }
-    }
-
     fn apply_pending_batch_fate_effects<H: Storage>(&mut self, storage: &H) {
         let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
-        for settlement in &batch_fates {
-            if let Some(confirmed_tier) = settlement.confirmed_tier() {
-                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
-            }
-            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
-            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
-            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
+        let max_confirmed_tier = batch_fates
+            .iter()
+            .filter_map(BatchFate::confirmed_tier)
+            .max();
+        if let Some(confirmed_tier) = max_confirmed_tier {
+            self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+        }
+
+        let mut batch_ids = batch_fates
+            .iter()
+            .map(BatchFate::batch_id)
+            .collect::<Vec<_>>();
+        batch_ids.sort();
+        batch_ids.dedup();
+
+        for batch_id in batch_ids {
+            self.mark_subscriptions_visibility_recompute_for_batch(batch_id);
+            let mut rows = self
+                .visible_rows_by_batch
+                .get(&batch_id)
+                .cloned()
+                .unwrap_or_default();
+            if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
                 for member in record.members {
-                    self.mark_local_row_updated_in_subscriptions(
-                        member.table_name.as_str(),
-                        member.object_id,
-                    );
+                    rows.push((member.table_name, member.object_id));
                 }
+            }
+            rows.sort();
+            rows.dedup();
+            for (table_name, object_id) in rows {
+                self.mark_local_row_updated_in_subscriptions(table_name.as_str(), object_id);
             }
         }
     }
@@ -1586,6 +1572,28 @@ impl QueryManager {
         let old_row = update.previous_row.as_ref();
         let current_batch_id = update.row.batch_id;
         let current_row_key = RowBatchKey::from_row(&update.row);
+
+        if let Some(previous_row) = old_row
+            && previous_row.state.is_visible()
+            && let Some(rows) = self.visible_rows_by_batch.get_mut(&previous_row.batch_id)
+        {
+            rows.retain(|(table, row_id)| {
+                table.as_str() != logical_table.as_str() || *row_id != update.object_id
+            });
+            if rows.is_empty() {
+                self.visible_rows_by_batch.remove(&previous_row.batch_id);
+            }
+        }
+        if update.row.state.is_visible() {
+            let rows = self
+                .visible_rows_by_batch
+                .entry(current_batch_id)
+                .or_default();
+            let member = (logical_table.clone(), update.object_id);
+            if !rows.contains(&member) {
+                rows.push(member);
+            }
+        }
 
         if local_update {
             self.pending_local_row_batches

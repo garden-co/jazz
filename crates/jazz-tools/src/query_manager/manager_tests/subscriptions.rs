@@ -65,6 +65,45 @@ fn settled_clean_subscription_does_not_request_visibility_recompute_on_idle_proc
 }
 
 #[test]
+fn batch_fate_processing_does_not_scan_visible_regions_to_find_members() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema, "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(seeded_memory_storage(
+        &qm.schema_context().current_schema,
+    ));
+
+    let query = qm.query("users").build();
+    qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+    qm.take_updates();
+    storage.reset_visible_region_scans();
+
+    qm.sync_manager_mut()
+        .push_pending_batch_fate(crate::batch_fate::BatchFate::DurableDirect {
+            batch_id: handle.batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        });
+
+    qm.process(&mut storage);
+
+    assert_eq!(
+        storage.visible_region_scans(),
+        0,
+        "batch fate processing should use batch records and subscription provenance, not scan/decode every visible row"
+    );
+}
+
+#[test]
 fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
