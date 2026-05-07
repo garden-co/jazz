@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
-    "maplibre-gl": "^5.4.0",
     "vue": "^3.5.0"
   },
   "devDependencies": {
