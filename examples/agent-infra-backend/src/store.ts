@@ -974,6 +974,11 @@ export const CURSOR_REVIEW_OPERATION_TYPES = [
   "paste-review-context-file",
   "open-review-context-chat",
   "tail-review-sessions",
+  "summarize-codex-session",
+  "sticky-cursor-explain",
+  "mark-branch-file-happy",
+  "mark-branch-file-needs-work",
+  "clear-branch-file-review-state",
 ] as const;
 
 export type CursorReviewOperationType =

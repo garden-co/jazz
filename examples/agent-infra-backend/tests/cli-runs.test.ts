@@ -171,15 +171,36 @@ describe("agent-infra backend CLI run commands", () => {
         "/Users/nikitavoloboev/.cursor/plans/telemetry_review_understanding_019df3bb.md",
       );
 
+      const fileStateOperation = runCliJson("record-cursor-review-op", {
+        operationId: "cursor-op-file-state",
+        operationType: "mark-branch-file-needs-work",
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        workspaceRoot: "/Users/nikitavoloboev/code/prom",
+        bookmark: "review/nikiv-designer-telemetry-pr1-main",
+        relPath: "ide/designer/src/telemetry/log.ts",
+        note: "event names are still too noisy",
+        sourceSessionId: "cursor:553b99a2-f3ae-402d-bde5-d2fe93e25ab0",
+        sourceChatKind: "cursor",
+      });
+
+      expect(fileStateOperation.operationId).toBe("cursor-op-file-state");
+      expect(fileStateOperation.operationType).toBe(
+        "mark-branch-file-needs-work",
+      );
+      expect(fileStateOperation.relPath).toBe(
+        "ide/designer/src/telemetry/log.ts",
+      );
+
       const pending = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",
         "/Users/nikitavoloboev/code/prom",
       ]);
-      expect(pending).toHaveLength(2);
+      expect(pending).toHaveLength(3);
       expect(pending.map((item: any) => item.operationType)).toEqual(
         expect.arrayContaining([
           "delete-branch-path",
           "open-review-context-chat",
+          "mark-branch-file-needs-work",
         ]),
       );
 
@@ -201,6 +222,15 @@ describe("agent-infra backend CLI run commands", () => {
       });
       expect(contextResult.operationId).toBe("cursor-op-context-chat");
 
+      const fileStateResult = runCliJson("record-cursor-review-result", {
+        operationId: "cursor-op-file-state",
+        status: "completed",
+        clientId: "flow-window-cli",
+        repoRoot: "/Users/nikitavoloboev/code/prom",
+        message: "marked file needs work",
+      });
+      expect(fileStateResult.operationId).toBe("cursor-op-file-state");
+
       const filtered = runCliJson("list-cursor-review-ops", undefined, [
         "--repo-root",
         "/Users/nikitavoloboev/code/prom",
@@ -212,7 +242,7 @@ describe("agent-infra backend CLI run commands", () => {
         "/Users/nikitavoloboev/code/prom",
         "--include-processed",
       ]);
-      expect(withProcessed).toHaveLength(2);
+      expect(withProcessed).toHaveLength(3);
       expect(
         withProcessed.map((item: any) => [
           item.operationType,
@@ -222,6 +252,7 @@ describe("agent-infra backend CLI run commands", () => {
         expect.arrayContaining([
           ["delete-branch-path", "completed"],
           ["open-review-context-chat", "completed"],
+          ["mark-branch-file-needs-work", "completed"],
         ]),
       );
     },
