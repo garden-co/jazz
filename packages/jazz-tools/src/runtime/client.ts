@@ -830,7 +830,7 @@ type RunInBatchResult<TResult> =
     ? Promise<WriteResult<Awaited<TResult>>>
     : WriteResult<TResult>;
 
-type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
+export type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
 
 function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
   return new Proxy(batchOrTx, {
@@ -1023,6 +1023,7 @@ export type TransactionScope = Scoped<Transaction>;
 
 export class DirectBatch {
   private committedHandle: WriteHandle | null = null;
+  private batchStatus: "active" | "rolledBack" = "active";
 
   constructor(
     private readonly client: JazzClient,
@@ -1039,15 +1040,21 @@ export class DirectBatch {
     if (this.committedHandle) {
       throw new Error(`Direct batch ${this.batchContext.batchId} is already committed`);
     }
+    if (this.batchStatus === "rolledBack") {
+      throw new Error(`Direct batch ${this.batchContext.batchId} has already been rolled back`);
+    }
   }
 
   commit(): WriteHandle {
-    if (this.committedHandle) {
-      return this.committedHandle;
-    }
+    this.ensureActive();
     const handle = this.client.sealBatch(this.batchId());
     this.committedHandle = handle;
     return handle;
+  }
+
+  rollback(): void {
+    this.ensureActive();
+    this.batchStatus = "rolledBack";
   }
 
   create(table: string, values: InsertValues, options?: CreateOptions): Row {

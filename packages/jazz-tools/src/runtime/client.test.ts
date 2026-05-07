@@ -358,6 +358,33 @@ describe("JazzClient transactions", () => {
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
+  it("rolls back an open batch without sealing the batch", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.rollback();
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+    expect(() => batch.commit()).toThrow(/rolled back/i);
+    expect(() => batch.rollback()).toThrow(/rolled back/i);
+    expect(() =>
+      batch.create("todos", {
+        title: { type: "Text", value: "Nope" },
+      }),
+    ).toThrow(/rolled back/i);
+  });
+
+  it("rejects rollback after a batch has been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.commit();
+
+    expect(() => batch.rollback()).toThrow(/committed/i);
+  });
+
   it("commits a sync callback transaction and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
