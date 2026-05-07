@@ -118,18 +118,6 @@ declare module "jazz-wasm" {
     ): number;
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string, seq?: number | null): void;
-    attachOutboxTarget(
-      target: unknown,
-      mainClientId?: string | null,
-      peerRoutingLookup?: ((clientId: string) => { peerId: string; term: number } | null) | null,
-      onMainSyncFlushed?: (() => void) | null,
-    ): void;
-    setServerPayloadForwarder(
-      forwarder:
-        | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
-        | null,
-    ): void;
-    setBootstrapCatalogueForwarding(enabled: boolean): void;
     /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
      * are parsed at attach time per spec; `init()` is parameter-less. */
     createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;

@@ -403,20 +403,21 @@ fn build_schema_manager(
     .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))
 }
 
-/// Wire up scheduler, sync sender, and `RuntimeCore` into a `WasmRuntime`.
-/// Shared by `open_persistent` and `open_ephemeral`.
+/// Wire up scheduler and `RuntimeCore` into a `WasmRuntime`. The outbox
+/// `SyncSender` is now installed by the worker bridge or host directly via
+/// `core.set_sync_sender(...)` once it knows the postMessage target — so
+/// `assemble_wasm_runtime` no longer constructs one. Shared by
+/// `open_persistent` and `open_ephemeral`.
 #[cfg(target_arch = "wasm32")]
 fn assemble_wasm_runtime(
     schema_manager: SchemaManager,
     storage: Box<dyn Storage>,
     tier_label: &'static str,
-    use_binary_encoding: bool,
+    _use_binary_encoding: bool,
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
-    let outbox_sender = RustOutboxSender::new(use_binary_encoding);
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
-    core.set_sync_sender(Box::new(outbox_sender.clone()));
     let core_rc = Rc::new(RefCell::new(core));
     {
         let mut core_guard = core_rc.borrow_mut();
@@ -427,7 +428,6 @@ fn assemble_wasm_runtime(
     core_rc.borrow_mut().persist_schema();
     WasmRuntime {
         core: core_rc,
-        outbox_sender,
         upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
     }
@@ -602,7 +602,7 @@ pub struct RustOutboxSender {
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 impl RustOutboxSender {
-    fn new(use_binary_encoding: bool) -> Self {
+    pub(crate) fn new(use_binary_encoding: bool) -> Self {
         Self {
             inner: Rc::new(RustOutboxSenderInner {
                 target: RefCell::new(JsValue::NULL),
@@ -621,18 +621,18 @@ impl RustOutboxSender {
         }
     }
 
-    fn set_init_gate(&self, open: bool) {
+    pub(crate) fn set_init_gate(&self, open: bool) {
         *self.inner.init_gate_open.borrow_mut() = open;
     }
 
-    fn open_init_gate_and_flush(&self) {
+    pub(crate) fn open_init_gate_and_flush(&self) {
         *self.inner.init_gate_open.borrow_mut() = true;
         if !self.inner.pending_sync_entries.borrow().is_empty() {
             self.schedule_flush();
         }
     }
 
-    fn attach_target(
+    pub(crate) fn attach_target(
         &self,
         target: JsValue,
         main_client_id: Option<String>,
@@ -645,11 +645,11 @@ impl RustOutboxSender {
         *self.inner.on_main_sync_flushed.borrow_mut() = on_main_sync_flushed;
     }
 
-    fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
+    pub(crate) fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
         *self.inner.server_payload_forwarder.borrow_mut() = forwarder;
     }
 
-    fn set_bootstrap_catalogue_forwarding(&self, enabled: bool) {
+    pub(crate) fn set_bootstrap_catalogue_forwarding(&self, enabled: bool) {
         *self.inner.bootstrap_catalogue_forwarding.borrow_mut() = enabled;
     }
 }
@@ -955,13 +955,6 @@ fn post_message_with_transfer(
 #[wasm_bindgen]
 pub struct WasmRuntime {
     pub(crate) core: Rc<RefCell<WasmCoreType>>,
-    /// Rust-owned outbox sender. Posts directly to a JS `postMessage`-bearing
-    /// target (Worker on the main side, `DedicatedWorkerGlobalScope` on the
-    /// worker side). Configured via `attach_outbox_target`,
-    /// `set_server_payload_forwarder`, and `set_bootstrap_catalogue_forwarding`.
-    /// Server sync goes through `connect()`.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    pub(crate) outbox_sender: RustOutboxSender,
     /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
     /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
     /// — those updates must be visible through the original handle too.
@@ -974,7 +967,6 @@ impl Clone for WasmRuntime {
     fn clone(&self) -> Self {
         Self {
             core: Rc::clone(&self.core),
-            outbox_sender: self.outbox_sender.clone(),
             upstream_server_id: Rc::clone(&self.upstream_server_id),
             tier_label: self.tier_label,
         }
@@ -1053,17 +1045,15 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let outbox_sender = RustOutboxSender::new(use_binary_encoding.unwrap_or(false));
+        // The outbox `SyncSender` is installed by the worker bridge or host
+        // when they know the postMessage target. Direct (non-worker) clients
+        // open a transport via `connect()`; their server-bound traffic goes
+        // through the transport handle and never visits the sync_sender slot.
+        let _ = use_binary_encoding;
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
-        // Install the Rust-owned outbox sender so `batched_tick` drains outbox
-        // entries through `postMessage` (no transport handle here). Only on
-        // wasm32: the sender holds `Rc<JsValue>` which isn't `Send`, and the
-        // multi-threaded native backend's `set_sync_sender` requires `+ Send`.
-        #[cfg(target_arch = "wasm32")]
-        core.set_sync_sender(Box::new(outbox_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -1081,7 +1071,6 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
-            outbox_sender,
             upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
         })
@@ -1198,65 +1187,6 @@ impl WasmRuntime {
         Ok(Some(sequence as u64))
     }
 
-    /// Attach the JS `postMessage`-bearing target the outbox sender will post
-    /// to. On the main side, `target` is the `Worker` instance. On the worker
-    /// side, `target` is `globalThis` / `DedicatedWorkerGlobalScope`.
-    ///
-    /// Worker-side parameters (ignored on the main side):
-    /// - `main_client_id`: the runtime client id assigned to the main-thread
-    ///   peer. Client-bound payloads with this destination id are batched and
-    ///   posted as `{type:"sync", payload:[...]}` to the main thread.
-    /// - `peer_routing_lookup`: `(clientId: string) => { peerId, term } | null`.
-    ///   Looks up the follower-tab peer mapping for a given runtime client id;
-    ///   client-bound payloads to other clients post as `peer-sync` immediately.
-    ///   Returning `null`/`undefined` drops the message; throwing logs and drops.
-    /// - `on_main_sync_flushed`: `() => void` invoked after each batch flush
-    ///   that contained at least one main-bound entry. Used by the TS shim
-    ///   to debounce the rejected-batch replay walk.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = attachOutboxTarget)]
-    pub fn attach_outbox_target(
-        &self,
-        target: JsValue,
-        main_client_id: Option<String>,
-        peer_routing_lookup: Option<Function>,
-        on_main_sync_flushed: Option<Function>,
-    ) {
-        self.outbox_sender.attach_target(
-            target,
-            main_client_id,
-            peer_routing_lookup,
-            on_main_sync_flushed,
-        );
-    }
-
-    /// Install a JS forwarder for **server-bound** payloads. When set, server-
-    /// bound outbox entries bypass `target.postMessage` and go through the
-    /// forwarder instead. Used by the leader/follower coordinator on the main
-    /// side to route upstream traffic through a BroadcastChannel.
-    ///
-    /// Forwarder signature:
-    /// `(payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void`.
-    ///
-    /// Pass `None` / `undefined` to clear.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = setServerPayloadForwarder)]
-    pub fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
-        self.outbox_sender.set_server_payload_forwarder(forwarder);
-    }
-
-    /// Worker-side bootstrap-catalogue forwarding flag. While `true`,
-    /// server-bound outbox entries with `isCatalogue=true` are queued into
-    /// the main-bound sync batch (instead of being delivered by the Rust
-    /// transport). Used by the worker shim around the
-    /// `addServer/removeServer` bootstrap dance.
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = setBootstrapCatalogueForwarding)]
-    pub fn set_bootstrap_catalogue_forwarding(&self, enabled: bool) {
-        self.outbox_sender
-            .set_bootstrap_catalogue_forwarding(enabled);
-    }
-
     /// Attach a `WasmWorkerBridge` to this runtime. Convenience helper so the
     /// TS-side `WorkerBridge` adapter can construct the Rust bridge without
     /// importing `WasmWorkerBridge` directly — it gets it back from the
@@ -1272,24 +1202,6 @@ impl WasmRuntime {
         options: JsValue,
     ) -> Result<crate::worker_bridge::WasmWorkerBridge, JsError> {
         crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
-    }
-
-    // -------------------------------------------------------------------------
-    // Outbox-init-gate plumbing for the bridge
-    // -------------------------------------------------------------------------
-
-    /// Bridge-only: while `false`, the outbox sender accumulates outbound
-    /// entries but does not schedule a flush. Used to hold main → worker sync
-    /// until `init-ok` arrives.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn set_outbox_init_gate(&self, open: bool) {
-        self.outbox_sender.set_init_gate(open);
-    }
-
-    /// Bridge-only: open the gate and flush any accumulated entries.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn open_outbox_init_gate(&self) {
-        self.outbox_sender.open_init_gate_and_flush();
     }
 
     /// Bridge/host shutdown: replace the active sync sender with a noop so

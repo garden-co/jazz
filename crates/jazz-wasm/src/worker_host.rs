@@ -50,7 +50,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
-use crate::runtime::WasmRuntime;
+use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
     parse_main_to_worker, worker_to_main_post, InitPayload, MainToWorkerMessage, MainToWorkerWire,
     WorkerLifecycleEvent, WorkerToMainWire,
@@ -277,26 +277,34 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         cell.borrow_mut().main_client_id = Some(main_client_id.clone());
     });
 
-    // 4. Attach outbox target.
+    // 4. Construct the outbox sender, configure for worker-side routing
+    //    (main client id + peer table + rejected-batch replay trigger), and
+    //    install on the runtime core. Binary encoding is required (the bridge
+    //    decodes via `parse_worker_to_main`).
+    let sender = RustOutboxSender::new(true);
     let global: JsValue = global_worker_scope().into();
     let peer_lookup = make_peer_routing_lookup();
     let on_main_flushed = make_on_main_sync_flushed();
-    runtime_rc.attach_outbox_target(
+    sender.attach_target(
         global,
         Some(main_client_id.clone()),
         Some(peer_lookup),
         Some(on_main_flushed),
     );
+    runtime_rc
+        .core
+        .borrow_mut()
+        .set_sync_sender(Box::new(sender.clone()));
 
     // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
     //    Must run BEFORE upstream connect — once a transport handle is
     //    installed, server-bound outbox traffic routes there and bypasses
     //    the bootstrap-catalogue forwarder.
-    runtime_rc.set_bootstrap_catalogue_forwarding(true);
+    sender.set_bootstrap_catalogue_forwarding(true);
     let _ = runtime_rc.add_server(None, None);
     runtime_rc.remove_server();
-    runtime_rc.set_bootstrap_catalogue_forwarding(false);
+    sender.set_bootstrap_catalogue_forwarding(false);
 
     // 6. Connect upstream BEFORE draining pending sync. Drained main writes
     //    park into the inbox and process on the next batched_tick (microtask).
@@ -783,7 +791,9 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
             rt.flush_wal();
         }
         rt.install_noop_sync_sender();
-        rt.set_server_payload_forwarder(None);
+        // (No forwarder on worker side — `install_noop_sync_sender` below
+        // replaces the active sender wholesale, so any future outbox emission
+        // is dropped silently.)
     }
 
     // Clear self.onmessage explicitly. `Closure::drop` invalidates the call
