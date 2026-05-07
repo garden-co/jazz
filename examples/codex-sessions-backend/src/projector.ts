@@ -585,38 +585,18 @@ async function collectRolloutPaths(root: string): Promise<string[]> {
 }
 
 async function collectNewestRolloutPaths(root: string, limit: number): Promise<string[]> {
-  const paths: string[] = [];
-  await collectNewestRolloutPathsInto(root, limit, paths);
-  return paths;
-}
-
-async function collectNewestRolloutPathsInto(
-  root: string,
-  limit: number,
-  paths: string[],
-): Promise<void> {
-  if (paths.length >= limit) {
-    return;
-  }
-
-  const entries = (await readdir(root, { withFileTypes: true }))
-    .slice()
-    .sort((left, right) => right.name.localeCompare(left.name));
-
-  for (const entry of entries) {
-    if (paths.length >= limit) {
-      return;
-    }
-
-    const absolutePath = join(root, entry.name);
-    if (entry.isDirectory()) {
-      await collectNewestRolloutPathsInto(absolutePath, limit, paths);
-      continue;
-    }
-    if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
-      paths.push(absolutePath);
-    }
-  }
+  const paths = await collectRolloutPaths(root);
+  const stats = await Promise.all(
+    paths.map(async (path) => {
+      const fileStat = await stat(path).catch(() => null);
+      return fileStat?.isFile() ? { path, mtimeMs: fileStat.mtimeMs } : null;
+    }),
+  );
+  return stats
+    .filter((row): row is { path: string; mtimeMs: number } => row !== null)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || right.path.localeCompare(left.path))
+    .slice(0, Math.max(1, limit))
+    .map((row) => row.path);
 }
 
 async function findRolloutPathForSession(

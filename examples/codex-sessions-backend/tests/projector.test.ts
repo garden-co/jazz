@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -238,6 +238,43 @@ describe("codex session projector", () => {
 
     expect(result).toEqual({ scanned: 1, synced: 0 });
     expect(await store.getSessionSummary("019d0000-0000-7000-8000-000000000001")).toBeNull();
+  });
+
+  it("syncs newest rollouts by file activity instead of session start date", async () => {
+    const activeOldDayPath = await writeRolloutAt(
+      "2026/04/05",
+      "rollout-2026-04-05T09-00-00-019d0000-0000-7000-8000-000000000121.jsonl",
+      createRolloutLines({
+        sessionId: "019d0000-0000-7000-8000-000000000121",
+        cwd: "/tmp/active-old-day",
+        message: "active old-day session",
+        timestamp: "2026-04-05T09:00:00.000Z",
+      }),
+    );
+    const inactiveNewDayPath = await writeRolloutAt(
+      "2026/04/08",
+      "rollout-2026-04-08T09-00-00-019d0000-0000-7000-8000-000000000122.jsonl",
+      createRolloutLines({
+        sessionId: "019d0000-0000-7000-8000-000000000122",
+        cwd: "/tmp/inactive-new-day",
+        message: "inactive new-day session",
+        timestamp: "2026-04-08T09:00:00.000Z",
+      }),
+    );
+
+    await utimes(inactiveNewDayPath, new Date("2026-04-08T09:00:00.000Z"), new Date("2026-04-08T09:00:00.000Z"));
+    await utimes(activeOldDayPath, new Date("2026-04-09T09:00:00.000Z"), new Date("2026-04-09T09:00:00.000Z"));
+
+    const result = await syncNewestCodexRollouts({
+      codexHome,
+      store,
+      limit: 1,
+    });
+
+    const activeSummary = await store.getSessionSummary("019d0000-0000-7000-8000-000000000121");
+    expect(result).toEqual({ scanned: 1, synced: 1 });
+    expect(activeSummary?.session.latest_user_message).toBe("active old-day session");
+    expect(await store.getSessionSummary("019d0000-0000-7000-8000-000000000122")).toBeNull();
   });
 
   it("syncs a single session without scanning every rollout body", async () => {
@@ -487,10 +524,12 @@ describe("codex session projector", () => {
     dayPath: string,
     fileName: string,
     lines: unknown[],
-  ): Promise<void> {
+  ): Promise<string> {
     const nestedDir = join(codexHome, "sessions", dayPath);
+    const nestedPath = join(nestedDir, fileName);
     await mkdir(nestedDir, { recursive: true });
-    await writeFile(join(nestedDir, fileName), lines.map((line) => JSON.stringify(line)).join("\n"));
+    await writeFile(nestedPath, lines.map((line) => JSON.stringify(line)).join("\n"));
+    return nestedPath;
   }
 
   async function appendRollout(lines: unknown[]): Promise<void> {
