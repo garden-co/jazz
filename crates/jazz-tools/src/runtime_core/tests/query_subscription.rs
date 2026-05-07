@@ -216,7 +216,7 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
 }
 
 #[test]
-fn rc_query_synced_nullable_update_to_null_preserves_null_snapshot() {
+fn rc_query_synced_update_to_null_is_preserved() {
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -230,17 +230,11 @@ fn rc_query_synced_nullable_update_to_null_preserves_null_snapshot() {
     let ((todo_id, _), _) =
         s.a.insert(
             "todos",
-            HashMap::from([
-                (
-                    "title".to_string(),
-                    Value::Text("nullable-description-repro".into()),
-                ),
-                ("done".to_string(), Value::Boolean(false)),
-                (
-                    "description".to_string(),
-                    Value::Text("server-original".into()),
-                ),
-            ]),
+            crate::row_input!(
+                "title" => "nullable-description-repro",
+                "done" => false,
+                "description" => "server-original",
+            ),
             None,
         )
         .unwrap();
