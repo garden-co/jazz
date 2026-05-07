@@ -42,5 +42,4 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 const stopWithVenueQuery = app.stops.include({ venue: true });
 
 export type Venue = s.RowOf<typeof app.venues>;
-export type Stop = s.RowOf<typeof app.stops>;
 export type StopWithVenue = s.RowOf<typeof stopWithVenueQuery>;
