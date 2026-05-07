@@ -25,8 +25,11 @@ const schema = {
       title: s.string(),
       done: s.boolean(),
       tags: s.array(s.string()),
+      checkpoints: s.array(s.int()),
+      flags: s.array(s.boolean()),
       project: s.ref("projects"),
       owner: s.ref("users").optional(),
+      assigneeIds: s.array(s.ref("users")),
     })
     .index("by_done", ["done"]),
 };
@@ -276,13 +279,33 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
     expectTypeOf<TodoWhere["project"]>().toEqualTypeOf<
-      string | { eq?: string; ne?: string } | undefined
+      string | { eq?: string; ne?: string; in?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
-      string | null | { eq?: string | null; ne?: string | null; isNull?: boolean } | undefined
+      | string
+      | null
+      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string } | undefined
+      string[] | { eq?: string[]; ne?: string[]; in?: string[][]; contains?: string } | undefined
+    >();
+    expectTypeOf<TodoWhere["checkpoints"]>().branded.toEqualTypeOf<
+      number[] | { eq?: number[]; ne?: number[]; in?: number[][]; contains?: number } | undefined
+    >();
+    expectTypeOf<TodoWhere["flags"]>().branded.toEqualTypeOf<
+      | boolean[]
+      | { eq?: boolean[]; ne?: boolean[]; in?: boolean[][]; contains?: boolean }
+      | undefined
+    >();
+    expectTypeOf<TodoWhere["assigneeIds"]>().branded.toEqualTypeOf<
+      string[] | { eq?: string[]; ne?: string[]; in?: string[][]; contains?: string } | undefined
+    >();
+    expectTypeOf<TodoWhere["title"]>().branded.toEqualTypeOf<
+      string | { eq?: string; ne?: string; in?: string[]; contains?: string } | undefined
+    >();
+    expectTypeOf<TodoWhere["done"]>().branded.toEqualTypeOf<
+      boolean | { eq?: boolean; ne?: boolean; in?: boolean[] } | undefined
     >();
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
@@ -393,6 +416,7 @@ describe("typed app prototype", () => {
           gte?: number;
           lt?: number;
           lte?: number;
+          in?: number[];
         }
       | undefined
     >();

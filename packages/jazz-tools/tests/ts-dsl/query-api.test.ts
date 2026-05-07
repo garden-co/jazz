@@ -41,6 +41,42 @@ describe("TS Query API", () => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("filters scalar and reference columns with in lists", async () => {
+      const launchProject = insertProject(db, "Launch");
+      const archiveProject = insertProject(db, "Archive");
+      const alice = insertUser(db, "Alice");
+      const bob = insertUser(db, "Bob");
+      const writePlan = insertTodo(db, {
+        title: "Write launch plan",
+        done: false,
+        projectId: launchProject.id,
+        ownerId: alice.id,
+      });
+      const reviewPlan = insertTodo(db, {
+        title: "Review launch plan",
+        done: true,
+        projectId: launchProject.id,
+        ownerId: bob.id,
+      });
+      insertTodo(db, {
+        title: "Archive launch notes",
+        done: true,
+        projectId: archiveProject.id,
+        ownerId: alice.id,
+      });
+
+      const results = await db.all(
+        app.todos.where({
+          title: { in: ["Write launch plan", "Review launch plan"] },
+          done: { in: [false, true] },
+          projectId: { in: [launchProject.id] },
+          ownerId: { in: [alice.id, bob.id] },
+        }),
+      );
+
+      expect(results.map((todo) => todo.id)).toEqual([writePlan.id, reviewPlan.id]);
+    });
+
     it("filters nullable columns with isNull:true", async () => {
       const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",
@@ -140,6 +176,40 @@ describe("TS Query API", () => {
         expect(todosWithTags.length).toBe(2);
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id1 }));
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id3 }));
+      });
+
+      it("using contains with number, boolean, and ref array elements", async () => {
+        const alice = insertUser(db, "Alice");
+        const bob = insertUser(db, "Bob");
+        const { id: id1 } = insertTodo(db, {
+          title: "Todo 1",
+          checkpoints: [1, 3],
+          flags: [false],
+          assigneesIds: [alice.id],
+        });
+        const { id: id2 } = insertTodo(db, {
+          title: "Todo 2",
+          checkpoints: [2, 3],
+          flags: [true],
+          assigneesIds: [alice.id, bob.id],
+        });
+        insertTodo(db, {
+          title: "Todo 3",
+          checkpoints: [5],
+          flags: [false],
+          assigneesIds: [bob.id],
+        });
+
+        const todosWithCheckpoint = await db.all(app.todos.where({ checkpoints: { contains: 3 } }));
+        expect(todosWithCheckpoint.map((todo) => todo.id)).toEqual([id1, id2]);
+
+        const todosWithFlag = await db.all(app.todos.where({ flags: { contains: true } }));
+        expect(todosWithFlag.map((todo) => todo.id)).toEqual([id2]);
+
+        const todosAssignedToAlice = await db.all(
+          app.todos.where({ assigneesIds: { contains: alice.id } }),
+        );
+        expect(todosAssignedToAlice.map((todo) => todo.id)).toEqual([id1, id2]);
       });
     });
   });
@@ -483,6 +553,8 @@ describe("TS Query API", () => {
         title: "Write tests",
         done: false,
         tags: ["dev"],
+        checkpoints: [],
+        flags: [],
         projectId,
         ownerId,
         assigneesIds: [],
@@ -585,6 +657,8 @@ describe("TS Query API", () => {
         title: "Draft docs",
         done: false,
         tags: ["dev"],
+        checkpoints: [],
+        flags: [],
         projectId,
         ownerId: null,
         assigneesIds: [],
