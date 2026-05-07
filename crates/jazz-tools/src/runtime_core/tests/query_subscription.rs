@@ -216,6 +216,72 @@ fn rc_query_remote_tier_immediate_local_updates_survives_empty_remote_scope_snap
 }
 
 #[test]
+fn rc_query_synced_update_to_null_is_preserved() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .nullable_column("description", ColumnType::Text),
+        )
+        .build();
+    let mut s = create_3tier_rc_with_schema(schema);
+
+    let ((todo_id, _), _) =
+        s.a.insert(
+            "todos",
+            crate::row_input!(
+                "title" => "nullable-description-repro",
+                "done" => false,
+                "description" => "server-original",
+            ),
+            None,
+        )
+        .unwrap();
+    pump_3tier(&mut s);
+
+    let update_batch_id =
+        s.a.update(
+            todo_id,
+            vec![("description".to_string(), Value::Null)],
+            None,
+        )
+        .unwrap();
+
+    let mut future = s.a.query_with_propagation(
+        Query::new("todos"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Local),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Full-propagation Local query should wait for the local server frontier"
+    );
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(results.len(), 1, "synced query should return the todo");
+            assert_eq!(results[0].0, todo_id);
+            assert_eq!(results[0].1[2], Value::Null);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => {
+            panic!("Local query should resolve after server settlement for {update_batch_id:?}")
+        }
+    }
+}
+
+#[test]
 fn rc_query_local_transaction_overlay_shows_only_the_requested_staged_insert() {
     let mut core = create_runtime_with_schema(test_schema(), "query-local-transaction-overlay");
     let branch_name = core.schema_manager().branch_name();
