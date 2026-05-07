@@ -647,8 +647,6 @@ export type DbTransactionScope = Omit<DbTransaction, "commit" | "rollback">;
 /**
  * Direct batches group a set of writes that should settle immediately, without an authority,
  * while still being part of the same batch.
- *
- * Data written through this direct batch is globally visible immediately.
  */
 export class DbDirectBatch {
   private committedHandle: WriteHandle | null = null;
@@ -688,8 +686,8 @@ export class DbDirectBatch {
   }
 
   /**
-   * Commit the direct batch. Data is visible optimistically immediately and can
-   * be waited on through the returned handle.
+   * Commit the direct batch. Data is visible optimistically once committed and
+   * can be waited on through the returned handle.
    *
    * Only available on transactions created with {@link Db.beginTransaction}.
    * When using {@link Db.transaction}, the transaction is committed automatically
@@ -843,7 +841,7 @@ export class Db {
   };
 
   /**
-   * Protected constructor - use createDb() in regular app code.
+   * Protected constructor - use {@link createDb} in regular app code.
    */
   protected constructor(
     config: DbConfig,
@@ -969,7 +967,7 @@ export class Db {
    * The worker runs a persistent WASM runtime (OPFS).
    * WorkerBridge wires them together via postMessage.
    *
-   * @internal Use createDb() instead — it auto-detects browser.
+   * @internal Use {@link createDb} instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
     const db = new Db(config, runtimeModule);

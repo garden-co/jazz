@@ -1,4 +1,5 @@
 use super::*;
+use crate::row_histories::RowState;
 
 #[test]
 fn send_query_subscription_includes_session() {
@@ -102,4 +103,82 @@ fn remove_client_cleans_pending_query_subscriptions() {
 
     assert_eq!(sm.pending_query_subscriptions.len(), 1);
     assert_eq!(sm.pending_query_subscriptions[0].client_id, bob);
+}
+
+#[test]
+fn initial_query_scope_sends_one_settlement_per_batch() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+    let branch = BranchName::new("main");
+
+    add_client(&mut sm, &io, client_id);
+
+    let rows: Vec<_> = (0..3)
+        .map(|index| {
+            let row_id = ObjectId::new();
+            let row = visible_row(
+                row_id,
+                "main",
+                Vec::new(),
+                1_000 + index,
+                format!("user-{index}").as_bytes(),
+            );
+            let row = row_with_batch_state(
+                row,
+                batch_id,
+                RowState::VisibleDirect,
+                Some(DurabilityTier::GlobalServer),
+            );
+            seed_visible_row(&mut sm, &mut io, "users", row.clone());
+            (row_id, row)
+        })
+        .collect();
+
+    io.upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
+        batch_id,
+        confirmed_tier: DurabilityTier::GlobalServer,
+    })
+    .unwrap();
+
+    set_client_query_scope(
+        &mut sm,
+        &io,
+        client_id,
+        QueryId(1),
+        rows.iter()
+            .map(|(object_id, _)| (*object_id, branch))
+            .collect(),
+        None,
+    );
+
+    let outbox = sm.take_outbox();
+    assert_eq!(
+        outbox
+            .iter()
+            .filter(|entry| matches!(entry.payload, SyncPayload::RowBatchNeeded { .. }))
+            .count(),
+        3
+    );
+
+    let settlements: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::BatchFate { fate } => Some(fate),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        settlements.len(),
+        1,
+        "initial scope replay should coalesce settlement delivery by batch"
+    );
+    assert!(matches!(
+        settlements[0],
+        BatchFate::DurableDirect {
+            batch_id: settled_batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        } if *settled_batch_id == batch_id
+    ));
 }

@@ -145,6 +145,7 @@ pub struct AuthConfig {
     pub jwt_token: Option<String>,
     pub backend_secret: Option<String>,
     pub admin_secret: Option<String>,
+    pub peer_secret: Option<String>,
     pub backend_session: Option<serde_json::Value>,
 }
 
@@ -159,6 +160,10 @@ impl std::fmt::Debug for AuthConfig {
             .field(
                 "admin_secret",
                 &self.admin_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "peer_secret",
+                &self.peer_secret.as_ref().map(|_| "<redacted>"),
             )
             // backend_session may itself contain secrets; redact presence only.
             .field(
@@ -245,6 +250,21 @@ mod handshake_tests {
         .expect("pre-versioned connected response should deserialize");
 
         assert_eq!(response.sync_protocol_version, 0);
+    }
+
+    #[test]
+    fn auth_config_serializes_peer_secret_and_redacts_it_from_debug() {
+        let auth = AuthConfig {
+            peer_secret: Some("cluster-secret".to_string()),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&auth).expect("serialize auth");
+        assert_eq!(encoded["peer_secret"], "cluster-secret");
+
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("peer_secret"));
+        assert!(!debug.contains("cluster-secret"));
     }
 }
 
@@ -474,6 +494,48 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 
         HandshakeResult::NetworkError("unexpected handshake response".to_string())
     }
+
+    fn dispatch_server_event(&mut self, event: crate::transport_protocol::ServerEvent) {
+        match event {
+            crate::transport_protocol::ServerEvent::SyncUpdate { seq, payload } => {
+                self.dispatch_sync_update(seq, *payload);
+            }
+            crate::transport_protocol::ServerEvent::SyncUpdateBatch { updates } => {
+                for update in updates {
+                    self.dispatch_sync_update(update.seq, update.payload);
+                }
+            }
+            crate::transport_protocol::ServerEvent::Heartbeat => {}
+            crate::transport_protocol::ServerEvent::Connected { .. } => {
+                tracing::warn!("unexpected Connected frame mid-stream; ignoring");
+            }
+            crate::transport_protocol::ServerEvent::Error { message, code } => {
+                tracing::warn!(message, ?code, "server reported error");
+            }
+            other => {
+                tracing::debug!(
+                    variant = other.variant_name(),
+                    "received non-sync ServerEvent; skipping"
+                );
+            }
+        }
+    }
+
+    fn dispatch_sync_update(
+        &mut self,
+        sequence: Option<u64>,
+        payload: crate::sync_manager::types::SyncPayload,
+    ) {
+        let entry = InboxEntry {
+            source: crate::sync_manager::types::Source::Server(self.server_id),
+            payload,
+        };
+        let _ = self.inbound_tx.unbounded_send(TransportInbound::Sync {
+            entry: Box::new(entry),
+            sequence,
+        });
+        self.tick.notify();
+    }
 }
 
 #[cfg(feature = "runtime-tokio")]
@@ -658,29 +720,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
                             let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
-                            match event {
-                                crate::transport_protocol::ServerEvent::SyncUpdate { seq, payload } => {
-                                    let entry = InboxEntry {
-                                        source: crate::sync_manager::types::Source::Server(self.server_id),
-                                        payload: *payload,
-                                    };
-                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Sync {
-                                        entry: Box::new(entry),
-                                        sequence: seq,
-                                    });
-                                    self.tick.notify();
-                                }
-                                crate::transport_protocol::ServerEvent::Heartbeat => {}
-                                crate::transport_protocol::ServerEvent::Connected { .. } => {
-                                    tracing::warn!("unexpected Connected frame mid-stream; ignoring");
-                                }
-                                crate::transport_protocol::ServerEvent::Error { message, code } => {
-                                    tracing::warn!(message, ?code, "server reported error");
-                                }
-                                other => {
-                                    tracing::debug!(variant = other.variant_name(), "received non-sync ServerEvent; skipping");
-                                }
-                            }
+                            self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
                     }
@@ -867,29 +907,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
                             let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
-                            match event {
-                                crate::transport_protocol::ServerEvent::SyncUpdate { seq, payload } => {
-                                    let entry = InboxEntry {
-                                        source: crate::sync_manager::types::Source::Server(self.server_id),
-                                        payload: *payload,
-                                    };
-                                    let _ = self.inbound_tx.unbounded_send(TransportInbound::Sync {
-                                        entry: Box::new(entry),
-                                        sequence: seq,
-                                    });
-                                    self.tick.notify();
-                                }
-                                crate::transport_protocol::ServerEvent::Heartbeat => {}
-                                crate::transport_protocol::ServerEvent::Connected { .. } => {
-                                    tracing::warn!("unexpected Connected frame mid-stream; ignoring");
-                                }
-                                crate::transport_protocol::ServerEvent::Error { message, code } => {
-                                    tracing::warn!(message, ?code, "server reported error");
-                                }
-                                other => {
-                                    tracing::debug!(variant = other.variant_name(), "received non-sync ServerEvent; skipping");
-                                }
-                            }
+                            self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
                     }

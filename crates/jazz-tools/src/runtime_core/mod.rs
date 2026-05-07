@@ -306,7 +306,6 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     next_expected_server_seq: HashMap<ServerId, u64>,
     /// Highest per-server stream sequence already applied to the inbox.
     last_applied_server_seq: HashMap<ServerId, u64>,
-
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
     /// Reverse map for routing updates.
@@ -349,8 +348,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     .into_iter()
                     .filter_map(|record| {
                         matches!(
-                            record.latest_settlement,
-                            Some(crate::batch_fate::BatchSettlement::Rejected { .. })
+                            record.latest_fate,
+                            Some(crate::batch_fate::BatchFate::Rejected { .. })
                         )
                         .then_some(record.batch_id)
                     })

@@ -35,6 +35,7 @@ use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -367,6 +368,8 @@ struct DevServerStartOptions {
     jwks_url: Option<String>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
+    upstream_url: Option<String>,
+    peer_secret: Option<String>,
     allow_local_first_auth: Option<bool>,
     catalogue_authority: Option<String>,
     catalogue_authority_url: Option<String>,
@@ -445,12 +448,19 @@ impl NapiScheduler {
 impl Scheduler for NapiScheduler {
     fn schedule_batched_tick(&self) {
         if !self.scheduled.swap(true, Ordering::SeqCst) {
-            if let Some(ref tsfn) = self.tsfn {
-                // CalleeHandled = false: pass value directly, not wrapped in Result
-                tsfn.call((), ThreadsafeFunctionCallMode::NonBlocking);
-            } else {
-                self.scheduled.store(false, Ordering::SeqCst);
-            }
+            let scheduled = Arc::clone(&self.scheduled);
+            let core_ref = self.core_ref.clone();
+            std::thread::spawn(move || {
+                // Give bursts of inbound websocket frames a chance to coalesce
+                // before the runtime drains the queue.
+                std::thread::sleep(Duration::from_millis(1));
+                scheduled.store(false, Ordering::SeqCst);
+                if let Some(core_arc) = core_ref.upgrade()
+                    && let Ok(mut core) = core_arc.lock()
+                {
+                    core.batched_tick();
+                }
+            });
         }
     }
 }
@@ -1317,9 +1327,13 @@ impl NapiRuntime {
     /// Disconnect from the Jazz server and drop the transport handle.
     #[napi]
     pub fn disconnect(&self) {
+        let server_id = self.upstream_server_id.lock().ok().and_then(|slot| *slot);
         if let Ok(mut core) = self.core.lock() {
             if let Some(handle) = core.transport() {
                 handle.disconnect();
+            }
+            if let Some(server_id) = server_id {
+                core.remove_server(server_id);
             }
             core.clear_transport();
         }
@@ -1543,7 +1557,7 @@ impl DevServer {
     #[napi(factory, ts_return_type = "Promise<DevServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
+            ts_arg_type = "{ appId: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; allowLocalFirstAuth?: boolean; backendSecret?: string; adminSecret?: string; upstreamUrl?: string; peerSecret?: string; catalogueAuthority?: 'local' | 'forward'; catalogueAuthorityUrl?: string; catalogueAuthorityAdminSecret?: string; telemetryCollectorUrl?: string }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -1578,6 +1592,7 @@ impl DevServer {
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: opts.backend_secret.clone(),
             admin_secret: opts.admin_secret.clone(),
+            peer_secret: opts.peer_secret.clone(),
             ..Default::default()
         };
 
@@ -1591,6 +1606,9 @@ impl DevServer {
         let mut server_builder = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
             .with_catalogue_authority(catalogue_authority);
+        if let Some(upstream_url) = opts.upstream_url.clone() {
+            server_builder = server_builder.with_upstream_url(upstream_url);
+        }
 
         if in_memory {
             server_builder = server_builder.with_storage(StorageBackend::InMemory);

@@ -66,7 +66,7 @@ All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) thro
 
 When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
 
-At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically.
+At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically. See the [schemas, lenses and branches diagram](/docs/schemas/migrations#schemas-lenses-and-branches) for how schema versions, lenses and per-hash branches fit together.
 
 ## Environments and user branches are fully isolated
 

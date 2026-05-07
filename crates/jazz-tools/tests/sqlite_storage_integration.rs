@@ -6,8 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use jazz_tools::batch_fate::{
-    BatchSettlement, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
-    VisibleBatchMember,
+    BatchFate, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
 };
 use jazz_tools::catalogue::CatalogueEntry;
 use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
@@ -1116,16 +1115,11 @@ async fn sealed_batch_acceptance_recovers_after_restart() {
     let reopened = SqliteStorage::open(&db_path).expect("reopen sqlite storage");
     assert_eq!(
         reopened
-            .load_authoritative_batch_settlement(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .expect("load authoritative settlement"),
-        Some(BatchSettlement::AcceptedTransaction {
+        Some(BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
-            visible_members: vec![VisibleBatchMember {
-                object_id: row_id,
-                branch_name: BranchName::new("main"),
-                batch_id,
-            }],
         })
     );
     assert_eq!(
@@ -1176,9 +1170,9 @@ async fn sealed_batch_frontier_conflict_rejects_after_restart() {
     let reopened = SqliteStorage::open(&db_path).expect("reopen sqlite storage");
     assert_eq!(
         reopened
-            .load_authoritative_batch_settlement(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .expect("load rejected settlement"),
-        Some(BatchSettlement::Rejected {
+        Some(BatchFate::Rejected {
             batch_id,
             code: "transaction_conflict".to_string(),
             reason: "family-visible frontier changed since batch was sealed".to_string(),

@@ -26,6 +26,8 @@ export interface StartLocalJazzServerOptions {
   jwksUrl?: string;
   backendSecret?: string;
   adminSecret?: string;
+  upstreamUrl?: string;
+  peerSecret?: string;
   allowLocalFirstAuth?: boolean;
   catalogueAuthority?: "local" | "forward";
   catalogueAuthorityUrl?: string;
@@ -109,6 +111,8 @@ export async function startLocalJazzServer(
       jwksUrl: options.jwksUrl,
       backendSecret: options.backendSecret,
       adminSecret: options.adminSecret,
+      upstreamUrl: options.upstreamUrl,
+      peerSecret: options.peerSecret,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       catalogueAuthority: options.catalogueAuthority,
       catalogueAuthorityUrl: options.catalogueAuthorityUrl,

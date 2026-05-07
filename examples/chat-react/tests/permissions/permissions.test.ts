@@ -70,8 +70,8 @@ describe("chat permissions", () => {
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
     const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
 
-    testApp.expectAllowed(() =>
-      aliceDb.insert(app.messages, {
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.messages, {
         chatId: privateChat.id,
         text: "hello from alice",
         senderId: aliceProfile.id,
@@ -79,8 +79,8 @@ describe("chat permissions", () => {
       }),
     );
 
-    testApp.expectDenied(() =>
-      bobDb.insert(app.messages, {
+    bobDb.expectDenied((db) =>
+      db.insert(app.messages, {
         chatId: privateChat.id,
         text: "hello from bob",
         senderId: bobProfile.id,
@@ -96,8 +96,8 @@ describe("chat permissions", () => {
       });
     });
 
-    testApp.expectAllowed(() =>
-      bobDb.insert(app.messages, {
+    bobDb.expectAllowed((db) =>
+      db.insert(app.messages, {
         chatId: privateChat.id,
         text: "hello from bob after joining",
         senderId: bobProfile.id,

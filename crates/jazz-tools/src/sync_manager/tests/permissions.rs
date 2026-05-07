@@ -25,17 +25,17 @@ fn row_batch_created_from_user_with_exact_history_match_skips_permission_check()
     );
     sm.take_outbox();
 
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
             row: row.clone(),
         },
-    );
+    });
+    sm.process_inbox(&mut io);
 
     let pending = sm.take_pending_permission_checks();
     assert!(
@@ -50,8 +50,7 @@ fn row_batch_created_from_user_with_exact_history_match_skips_permission_check()
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == batch_id
         )),
@@ -182,12 +181,78 @@ fn approved_user_row_retries_waiting_sealed_batch() {
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == batch_id
         )),
         "approving the row after SealBatch should settle the waiting batch, got {outbox:?}",
+    );
+}
+
+#[test]
+fn rejecting_one_user_write_rejects_the_whole_direct_batch() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    seed_users_schema(&mut io);
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+    let alice_id = ObjectId::new();
+    let bob_id = ObjectId::new();
+    let alice_row = row_with_batch_state(
+        visible_row(alice_id, "main", Vec::new(), 1_000, b"alice"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+    let bob_row = row_with_batch_state(
+        visible_row(bob_id, "main", Vec::new(), 1_001, b"bob"),
+        batch_id,
+        crate::row_histories::RowState::VisibleDirect,
+        Some(DurabilityTier::Local),
+    );
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::User);
+    sm.set_client_session(
+        client_id,
+        crate::query_manager::session::Session::new("alice"),
+    );
+    sm.take_outbox();
+
+    for (row_id, row) in [(alice_id, alice_row.clone()), (bob_id, bob_row.clone())] {
+        sm.process_from_client(
+            &mut io,
+            client_id,
+            SyncPayload::RowBatchCreated {
+                metadata: Some(RowMetadata {
+                    id: row_id,
+                    metadata: row_metadata("users"),
+                }),
+                row,
+            },
+        );
+    }
+
+    let mut pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 2);
+    sm.approve_permission_check(&mut io, pending.remove(0));
+    sm.reject_permission_check(&mut io, pending.remove(0), "bob denied".to_string());
+
+    assert!(matches!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::Rejected { batch_id: settled, .. }) if settled == batch_id
+    ));
+    assert_eq!(
+        io.load_history_row_batch("users", "main", alice_id, batch_id)
+            .unwrap()
+            .expect("approved member should have been stored")
+            .state,
+        crate::row_histories::RowState::Rejected,
+        "rejecting one member should roll back the previously approved member in the same batch",
+    );
+    assert!(
+        sm.take_pending_permission_checks().is_empty(),
+        "later queued checks for the rejected batch should be cancelled"
     );
 }
 
@@ -237,17 +302,17 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
     );
     sm.take_outbox();
 
-    sm.process_from_client(
-        &mut io,
-        client_id,
-        SyncPayload::RowBatchCreated {
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::RowBatchCreated {
             metadata: Some(RowMetadata {
                 id: row_id,
                 metadata: row_metadata("users"),
             }),
             row: older_row.clone(),
         },
-    );
+    });
+    sm.process_inbox(&mut io);
 
     let pending = sm.take_pending_permission_checks();
     assert!(
@@ -261,8 +326,7 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
             entry,
             OutboxEntry {
                 destination: Destination::Client(id),
-                payload: SyncPayload::BatchSettlement {
-                    settlement: BatchSettlement::DurableDirect { batch_id: settled, .. },
+                payload: SyncPayload::BatchFate { fate: BatchFate::DurableDirect { batch_id: settled, .. },
                 },
             } if *id == client_id && *settled == older_row.batch_id
         )),

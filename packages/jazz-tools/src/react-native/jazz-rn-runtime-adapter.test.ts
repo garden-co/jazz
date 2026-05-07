@@ -27,7 +27,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
-    query: vi.fn(() => JSON.stringify([{ id: "row-1", values: [] }])),
+    query: vi.fn(() => Promise.resolve(JSON.stringify([{ id: "row-1", values: [] }]))),
     removeServer: vi.fn(),
     setClientRole: vi.fn(),
     subscribe: vi.fn(() => 7n),
@@ -75,6 +75,34 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.delete_).toHaveBeenCalledWith("row-1");
 
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
+  });
+
+  it("yields the JS event loop while a query is in flight", async () => {
+    // Simulates a slow native query: the binding returns a Promise that we
+    // resolve only from a setTimeout(0), i.e. after the event loop has had a
+    // chance to run other tasks. A correct adapter awaits the binding's
+    // Promise, so the timeout fires, resolves the binding, and the query
+    // returns. A blocking adapter (e.g. one that parses the result without
+    // awaiting) never yields and the query never settles.
+    let resolveBinding!: (value: string) => void;
+    const queryMock = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveBinding = resolve;
+        }),
+    );
+    const binding = createBinding({ query: queryMock });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    let otherJsDidRun = false;
+    const queryPromise = adapter.query("{}", null, null);
+    setTimeout(() => {
+      otherJsDidRun = true;
+      resolveBinding(JSON.stringify([{ id: "row-1", values: [] }]));
+    }, 0);
+
+    await expect(queryPromise).resolves.toEqual([{ id: "row-1", values: [] }]);
+    expect(otherJsDidRun).toBe(true);
   });
 
   it("encodes Bytea mutations with an explicit FFI transport shape", () => {
@@ -296,9 +324,7 @@ describe("JazzRnRuntimeAdapter", () => {
       insert: vi.fn(() => {
         throw runtimeError;
       }),
-      query: vi.fn(() => {
-        throw runtimeError;
-      }),
+      query: vi.fn(() => Promise.reject(runtimeError)),
       update: vi.fn(() => {
         throw runtimeError;
       }),

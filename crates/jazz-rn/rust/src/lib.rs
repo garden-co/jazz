@@ -5,10 +5,11 @@
 uniffi::setup_scaffolding!();
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures::executor::block_on;
+use futures::future::FutureExt;
 use serde::Deserialize;
 
 use jazz_tools::binding_support::{
@@ -81,20 +82,34 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     "non-string panic payload".to_string()
 }
 
+fn panic_to_jazz_error(
+    context: &'static str,
+    payload: Box<dyn std::any::Any + Send>,
+) -> JazzRnError {
+    let panic_message = panic_payload_to_string(payload);
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    JazzRnError::Internal {
+        message: format!("panic in {context}: {panic_message}\n{backtrace}"),
+    }
+}
+
 fn with_panic_boundary<T, F>(context: &'static str, f: F) -> Result<T, JazzRnError>
 where
     F: FnOnce() -> Result<T, JazzRnError>,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(payload) => {
-            let panic_message = panic_payload_to_string(payload);
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            Err(JazzRnError::Internal {
-                message: format!("panic in {context}: {panic_message}\n{backtrace}"),
-            })
-        }
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|payload| Err(panic_to_jazz_error(context, payload)))
+}
+
+async fn with_async_panic_boundary<T, F, Fut>(context: &'static str, f: F) -> Result<T, JazzRnError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, JazzRnError>>,
+{
+    std::panic::AssertUnwindSafe(f())
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|payload| Err(panic_to_jazz_error(context, payload)))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -582,20 +597,24 @@ impl RnRuntime {
 
     /// One-shot query returning a JSON string:
     /// `[{ "id": "<uuid>", "values": [ {type, value}, ... ] }, ...]`.
-    pub fn query(
+    ///
+    /// `async` so the JS thread is not blocked while the query future is
+    /// waiting on a later `batched_tick` to settle (which is itself driven
+    /// from JS via the `on_batched_tick_needed` callback). A synchronous
+    /// `block_on` here can deadlock for any query that needs more than the
+    /// inline `immediate_tick` to resolve.
+    pub async fn query(
         &self,
         query_json: String,
         session_json: Option<String>,
         tier: Option<String>,
     ) -> Result<String, JazzRnError> {
-        with_panic_boundary("query", || {
+        with_async_panic_boundary("query", || async move {
             let query = parse_query(&query_json)?;
             let query_for_alignment = query.clone();
             let session = parse_session(session_json)?;
             let tier = tier.as_deref().map(parse_tier).transpose()?;
 
-            // NOTE: query() triggers immediate_tick() internally.
-            // We then block for the first callback result to be delivered.
             let (fut, runtime_schema) = {
                 let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                     message: "lock poisoned".into(),
@@ -610,7 +629,7 @@ impl RnRuntime {
                     core.current_schema().clone(),
                 )
             };
-            let results = block_on(fut).map_err(runtime_err)?;
+            let results = fut.await.map_err(runtime_err)?;
             let results = align_query_rows_to_declared_schema(
                 &self.declared_schema,
                 &runtime_schema,
@@ -630,6 +649,7 @@ impl RnRuntime {
 
             serde_json::to_string(&rows_json).map_err(json_err)
         })
+        .await
     }
 
     // =========================================================================
