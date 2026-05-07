@@ -345,7 +345,7 @@ const SESSION_SERVICE_STALE_LOCK_GRACE_MS = 30_000;
 const SESSION_SERVICE_REQUEST_TIMEOUT_MS = 2_500;
 const ACTIVE_SESSION_RECENT_SYNC_LIMIT = 32;
 const ACTIVE_SESSION_RECENT_SYNC_BUDGET_MS = 400;
-const DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_BACKGROUND_PROJECTION_POLL_INTERVAL_MS = 5_000;
 
 function logBackgroundError(label: string, error: unknown): void {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -377,15 +377,26 @@ function activeSessionFreshSyncLimit(limit: number): number {
 }
 
 function backgroundProjectionMaxRolloutBytes(): number | undefined {
-  const raw = process.env.FLOW_CODEX_SESSION_PROJECTION_MAX_ROLLOUT_BYTES;
+  const raw = process.env.FLOW_CODEX_SESSION_PROJECTION_MAX_ROLLOUT_BYTES?.trim();
+  if (!raw) {
+    return undefined;
+  }
   if (raw === "0" || raw === "false" || raw === "unlimited") {
     return undefined;
   }
-  const parsed = Number(raw ?? String(DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES));
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
-    return DEFAULT_BACKGROUND_PROJECTION_MAX_ROLLOUT_BYTES;
+    return undefined;
   }
   return Math.max(1, Math.trunc(parsed));
+}
+
+function backgroundProjectionPollIntervalMs(basePollIntervalMs: number): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_PROJECTION_POLL_INTERVAL_MS ?? "");
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(250, Math.trunc(parsed));
+  }
+  return Math.max(basePollIntervalMs, DEFAULT_BACKGROUND_PROJECTION_POLL_INTERVAL_MS);
 }
 
 function warmActiveSessionPresenceInBackground(
@@ -2865,14 +2876,11 @@ async function serveSessionQueries(options: {
       promises.push(streamRolloutPromise);
     }
 
-    const shouldWatchRolloutsInBackground =
-      process.env.FLOW_CODEX_SESSION_BACKGROUND_ROLLOUT_WATCH === "1" ||
-      process.env.FLOW_CODEX_SESSION_BACKGROUND_ROLLOUT_WATCH === "true";
-    if (options.watchRollouts && shouldWatchRolloutsInBackground) {
+    if (options.watchRollouts) {
       const syncPromise = watchCodexRollouts({
         codexHome: options.codexHome,
         store: getRuntimeDeps().store,
-        pollIntervalMs: options.pollIntervalMs,
+        pollIntervalMs: backgroundProjectionPollIntervalMs(options.pollIntervalMs),
         recentScanLimit: 16,
         fullRescanEveryMs: 24 * 60 * 60 * 1000,
         maxRolloutBytes: backgroundProjectionMaxRolloutBytes(),
@@ -3577,7 +3585,7 @@ async function main(): Promise<void> {
   );
   const pollIntervalMs = Number(readFlag("--poll-interval-ms") ?? "1000");
   const bootstrapWindowMs = Number(readFlag("--bootstrap-window-ms") ?? "15000");
-  const watchRollouts = readBooleanFlag("--watch-rollouts", command == "serve" ? false : true);
+  const watchRollouts = readBooleanFlag("--watch-rollouts", true);
   const watchStreamRollouts = readBooleanFlag("--watch-stream-rollouts", command === "serve");
   const warmStreamStore = readBooleanFlag("--warm-stream-store", false);
 

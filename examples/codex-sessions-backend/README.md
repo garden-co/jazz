@@ -69,6 +69,21 @@ node examples/codex-sessions-backend/dist/src/cli.js sync-session \
 directory at that path, so do not pre-create a plain file there or startup will
 fail.
 
+Socket service:
+
+```sh
+node examples/codex-sessions-backend/dist/src/cli.js serve \
+  --codex-home ~/.codex \
+  --data-path ~/Library/Caches/Flow/codex-sessions.sqlite \
+  --socket-path "$HOME/Library/Application Support/Flow/codex-sessions.sock"
+```
+
+`serve` watches both full Codex rollout projections and incremental stream
+events by default. Use `--watch-rollouts false` or `--watch-stream-rollouts
+false` only for tests or explicit debugging. Full projection has no default
+rollout-size cap; set `FLOW_CODEX_SESSION_PROJECTION_MAX_ROLLOUT_BYTES` when a
+deployment intentionally wants to skip very large historical rollouts.
+
 Continuous watch:
 
 ```sh

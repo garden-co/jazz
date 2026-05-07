@@ -167,7 +167,9 @@ describe("codex completion session service", () => {
         "--codex-home",
         codexHome,
         "--watch-rollouts",
-        "true",
+        "false",
+        "--watch-stream-rollouts",
+        "false",
         "--warm-stream-store",
         "false",
         "--poll-interval-ms",
@@ -195,9 +197,56 @@ describe("codex completion session service", () => {
       ok: true,
       result: {
         status: "ok",
+        watchRollouts: false,
+        watchStreamRollouts: false,
       },
     });
     expect(existsSync(coldDataPath)).toBe(false);
+  }, 30_000);
+
+  it("automatically watches rollout projections and stream events by default", async () => {
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const health = await sendSocketRequest(socketPath, {
+      id: "health-default-watchers",
+      method: "health",
+    });
+    expect(health).toMatchObject({
+      id: "health-default-watchers",
+      ok: true,
+      result: {
+        status: "ok",
+        watchRollouts: true,
+        watchStreamRollouts: true,
+      },
+    });
   }, 30_000);
 
   it("records stream events over the socket without waiting for the sync server", async () => {
