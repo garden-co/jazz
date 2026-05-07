@@ -74,9 +74,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
     );
     assert_eq!(
         core.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
@@ -276,10 +275,17 @@ fn rc_worker_peer_retains_replayable_batch_record_for_downstream_direct_write() 
 
     pump_a_to_b(&mut s);
 
-    let record = s.b.storage().load_local_batch_record(batch_id).unwrap();
     assert!(
-        record.is_some(),
-        "worker peers should retain a replayable local batch record for downstream direct writes"
+        s.b.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_some()
+            || s.b
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap()
+                .is_some(),
+        "worker peers should retain sealed/fate state for downstream direct writes"
     );
 }
 
@@ -330,13 +336,10 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("rejected transactional batch record should still be present");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
@@ -454,9 +457,8 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
     assert!(matches!(
         alice
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
@@ -572,9 +574,8 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
     assert!(matches!(
         alice
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
@@ -687,13 +688,8 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
                 && reason.contains("denied")
     ));
 
-    let alice_record = alice
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("alice should keep the rejected batch record");
     assert!(matches!(
-        alice_record.latest_fate,
+        alice.storage().load_authoritative_batch_fate(batch_id).unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, code, reason })
             if settled_batch_id == batch_id
                 && code == "permission_denied"
@@ -895,12 +891,14 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     alice.batched_tick();
 
     assert!(
-        alice
-            .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .is_some(),
-        "rejected batch should be replayably persisted before acknowledgement"
+        matches!(
+            alice
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected { .. })
+        ),
+        "rejected batch fate should be persisted before acknowledgement"
     );
 
     assert!(
@@ -909,8 +907,7 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     );
     assert_eq!(
         alice.storage().load_local_batch_record(batch_id).unwrap(),
-        None,
-        "acknowledged rejected batch should no longer remain in local batch storage"
+        None
     );
     assert!(
         !alice.acknowledge_rejected_batch(batch_id).unwrap(),
@@ -1000,9 +997,8 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     assert!(matches!(
         restarted
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. })
             if settled_batch_id == batch_id
     ));
@@ -1069,19 +1065,13 @@ fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
         .expect("insert_persisted should create one visible row");
     let batch_id = visible_row_before.batch_id;
 
-    let mut record = alice
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("insert_persisted should create a local batch record");
-    record.latest_fate = Some(crate::batch_fate::BatchFate::Rejected {
-        batch_id,
-        code: "permission_denied".to_string(),
-        reason: "simulated post-insert rejection".to_string(),
-    });
     alice
         .storage_mut()
-        .upsert_local_batch_record(&record)
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "simulated post-insert rejection".to_string(),
+        })
         .unwrap();
 
     let storage = alice.into_storage();

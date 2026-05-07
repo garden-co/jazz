@@ -82,7 +82,8 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{
-    parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
+    parse_batch_id_input, serialize_batch_fate, serialize_local_batch_record,
+    serialize_local_batch_records,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -1306,6 +1307,25 @@ impl WasmRuntime {
                 let serializer =
                     serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
                 serialize_local_batch_record(&record)
+                    .serialize(&serializer)
+                    .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+            }
+            None => Ok(JsValue::null()),
+        }
+    }
+
+    #[wasm_bindgen(js_name = loadBatchFate)]
+    pub fn load_batch_fate(&self, batch_id: &str) -> Result<JsValue, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let fate = core
+            .batch_fate(batch_id)
+            .map_err(|e| JsError::new(&format!("Load batch fate failed: {e}")))?;
+        match fate {
+            Some(fate) => {
+                let serializer =
+                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                serialize_batch_fate(&fate)
                     .serialize(&serializer)
                     .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
             }

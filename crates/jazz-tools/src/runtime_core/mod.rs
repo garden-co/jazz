@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -312,6 +312,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Per-batch durability bookkeeping: ack watchers + rejection set.
     pub(crate) durability: DurabilityTracker,
 
+    acknowledged_rejected_batches: HashSet<BatchId>,
+
     /// Recently mutated local batch records. Large direct batches append one
     /// member per write, so reloading the record from storage on every insert
     /// means repeatedly decoding the full accumulated member array.
@@ -334,16 +336,13 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
         let rejected_batch_ids: BTreeSet<BatchId> = storage
-            .scan_local_batch_records()
-            .map(|records| {
-                records
+            .scan_authoritative_batch_fates()
+            .map(|fates| {
+                fates
                     .into_iter()
-                    .filter_map(|record| {
-                        matches!(
-                            record.latest_fate,
-                            Some(crate::batch_fate::BatchFate::Rejected { .. })
-                        )
-                        .then_some(record.batch_id)
+                    .filter_map(|fate| {
+                        matches!(fate, crate::batch_fate::BatchFate::Rejected { .. })
+                            .then_some(fate.batch_id())
                     })
                     .collect()
             })
@@ -366,6 +365,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             durability: DurabilityTracker::with_initial_rejections(rejected_batch_ids.clone()),
+            acknowledged_rejected_batches: HashSet::new(),
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,

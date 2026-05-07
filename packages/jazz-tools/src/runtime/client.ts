@@ -82,6 +82,7 @@ export interface Runtime {
   ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
+  loadBatchFate?(batch_id: string): BatchFate | null;
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
@@ -1569,13 +1570,29 @@ export class JazzClient {
     return [...records.values()].sort((left, right) => left.batchId.localeCompare(right.batchId));
   }
 
+  batchFate(batchId: string): BatchFate | null {
+    const runtimeFate = this.runtime.loadBatchFate
+      ? this.runtime.loadBatchFate(batchId)
+      : (this.localBatchRecord(batchId)?.latestSettlement ?? null);
+    const replayedFate = this.replayedRejectedBatchRecords.get(batchId)?.latestSettlement ?? null;
+    if (replayedFate?.kind === "rejected" && runtimeFate?.kind !== "rejected") {
+      return replayedFate;
+    }
+    return runtimeFate ?? replayedFate;
+  }
+
+  private batchRecordForFate(fate: BatchFate): LocalBatchRecord {
+    return {
+      batchId: fate.batchId,
+      mode: fate.kind === "acceptedTransaction" ? "transactional" : "direct",
+      sealed: true,
+      latestSettlement: fate,
+    };
+  }
+
   hasPendingHydratedBatchReconciliation(tier: DurabilityTier): boolean {
     for (const batchId of this.hydratedWorkerBatchIds) {
-      const record = this.localBatchRecord(batchId);
-      if (!record) {
-        continue;
-      }
-      const settlement = record.latestSettlement;
+      const settlement = this.batchFate(batchId);
       if (rejectionFromSettlement(settlement)) {
         continue;
       }
@@ -1603,7 +1620,7 @@ export class JazzClient {
   }
 
   private acknowledgeRejectedBatchInternal(batchId: string): boolean {
-    const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
+    const rejection = rejectionFromSettlement(this.batchFate(batchId));
     const acknowledgedInRuntime = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(
       batchId,
     );
@@ -1773,7 +1790,11 @@ export class JazzClient {
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
+      | "loadLocalBatchRecord"
+      | "loadLocalBatchRecords"
+      | "loadBatchFate"
+      | "acknowledgeRejectedBatch"
+      | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -2477,7 +2498,7 @@ export class JazzClient {
       return { settled: true, error: null };
     }
 
-    const settlement = this.localBatchRecord(batchId)?.latestSettlement;
+    const settlement = this.batchFate(batchId);
     const rejection = rejectionFromSettlement(settlement);
     if (rejection) {
       return { settled: true, error: rejection };
@@ -2592,25 +2613,22 @@ export class JazzClient {
     batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
   ): void {
     for (const batchId of rejectedBatchIds) {
-      const record = this.localBatchRecord(batchId);
-      if (!record) {
-        continue;
-      }
-      const settlement = record.latestSettlement;
+      const settlement = this.batchFate(batchId);
       if (!settlement || settlement.kind !== "rejected") {
         continue;
       }
-      if (batchesHandledByLiveWaiters.has(record.batchId)) {
+      if (batchesHandledByLiveWaiters.has(batchId)) {
         continue;
       }
-      if ((this.pendingBatchWaiters.get(record.batchId)?.length ?? 0) > 0) {
+      if ((this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0) {
         continue;
       }
 
+      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
       const event: MutationErrorEvent = {
         code: settlement.code,
         reason: settlement.reason,
-        batch: record,
+        batch,
       };
 
       if (this.mutationErrorListeners.size === 0) {
@@ -2622,7 +2640,7 @@ export class JazzClient {
         }
       }
 
-      this.acknowledgeRejectedBatchInternal(record.batchId);
+      this.acknowledgeRejectedBatchInternal(batchId);
     }
   }
 

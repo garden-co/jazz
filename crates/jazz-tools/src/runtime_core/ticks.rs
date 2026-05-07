@@ -27,31 +27,71 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
-        let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id) else {
+        let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) else {
             return Vec::new();
         };
 
         let mut rows = Vec::new();
-        for member in record.members {
-            let row_locator = self
+        for sealed_member in submission.members {
+            let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
+            else {
+                continue;
+            };
+            let Some(row) = self
                 .storage
-                .load_row_locator(member.object_id)
+                .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
                 .ok()
-                .flatten()
-                .unwrap_or_else(|| crate::storage::RowLocator {
-                    table: member.table_name.clone().into(),
-                    origin_schema_hash: None,
-                });
-            let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                member.table_name.as_str(),
-                member.schema_hash,
-                member.branch_name.as_str(),
-                member.object_id,
+                .and_then(|rows| {
+                    rows.into_iter().find(|row| {
+                        row.batch_id == batch_id
+                            && row.branch.as_str() == submission.target_branch_name.as_str()
+                            && row.content_digest() == sealed_member.row_digest
+                    })
+                })
+            else {
+                continue;
+            };
+            let Ok(schema_hash) = self.local_batch_member_schema_hash(
+                submission.target_branch_name,
+                sealed_member.object_id,
                 batch_id,
             ) else {
                 continue;
             };
+            let member = LocalBatchMember {
+                object_id: sealed_member.object_id,
+                table_name: row_locator.table.to_string(),
+                branch_name: submission.target_branch_name,
+                schema_hash,
+                row_digest: sealed_member.row_digest,
+            };
             rows.push((member, row_locator, row));
+        }
+
+        if rows.is_empty()
+            && let Some(record) = self.local_batch_record_cache.get(&batch_id)
+        {
+            for member in record.members.clone() {
+                let row_locator = self
+                    .storage
+                    .load_row_locator(member.object_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| crate::storage::RowLocator {
+                        table: member.table_name.clone().into(),
+                        origin_schema_hash: None,
+                    });
+                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
+                    batch_id,
+                ) else {
+                    continue;
+                };
+                rows.push((member, row_locator, row));
+            }
         }
 
         rows.sort_by(
@@ -82,15 +122,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     fn apply_received_batch_fate(&mut self, fate: crate::batch_fate::BatchFate) {
         let batch_id = fate.batch_id();
-        if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
-            record.apply_fate(fate.clone());
-            if let Err(error) = self.storage.upsert_local_batch_record(&record) {
-                tracing::warn!(
-                    ?batch_id,
-                    %error,
-                    "failed to persist local batch fate"
-                );
-            }
+        if let Err(error) = self.storage.upsert_authoritative_batch_fate(&fate) {
+            tracing::warn!(
+                ?batch_id,
+                %error,
+                "failed to persist batch fate"
+            );
         }
 
         if let crate::batch_fate::BatchFate::Rejected { code, reason, .. } = &fate {
@@ -264,10 +301,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     ) {
         let sealed_submission = self
             .storage
-            .load_local_batch_record(batch_id)
+            .load_sealed_batch_submission(batch_id)
             .ok()
-            .flatten()
-            .and_then(|record| record.sealed.then_some(record.sealed_submission).flatten());
+            .flatten();
 
         let rows_to_retransmit = self
             .local_batch_rows(batch_id)

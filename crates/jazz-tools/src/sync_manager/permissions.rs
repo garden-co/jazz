@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::{BatchFate, LocalBatchMember};
+use crate::batch_fate::BatchFate;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
@@ -153,24 +153,28 @@ impl SyncManager {
         fallback_row: StoredRowBatch,
     ) -> Vec<StoredRowBatch> {
         let mut rows = storage
-            .load_local_batch_record(batch_id)
+            .load_sealed_batch_submission(batch_id)
             .ok()
             .flatten()
-            .map(|record| {
-                record
+            .map(|submission| {
+                submission
                     .members
                     .into_iter()
-                    .filter_map(|member: LocalBatchMember| {
-                        storage
-                            .load_history_row_batch_for_schema_hash(
-                                member.table_name.as_str(),
-                                member.schema_hash,
-                                member.branch_name.as_str(),
-                                member.object_id,
-                                batch_id,
-                            )
+                    .filter_map(|member| {
+                        let table = storage
+                            .load_row_locator(member.object_id)
                             .ok()
-                            .flatten()
+                            .flatten()?
+                            .table;
+                        storage
+                            .scan_history_row_batches(table.as_str(), member.object_id)
+                            .ok()?
+                            .into_iter()
+                            .find(|row| {
+                                row.batch_id == batch_id
+                                    && row.branch.as_str() == submission.target_branch_name.as_str()
+                                    && row.content_digest() == member.row_digest
+                            })
                     })
                     .collect::<Vec<_>>()
             })
@@ -203,10 +207,6 @@ impl SyncManager {
             return;
         }
 
-        if let Ok(Some(mut record)) = storage.load_local_batch_record(batch_id) {
-            record.apply_fate(fate.clone());
-            let _ = storage.upsert_local_batch_record(&record);
-        }
         let _ = storage.delete_sealed_batch_submission(batch_id);
         self.pending_permission_checks.retain(|pending| {
             !matches!(
