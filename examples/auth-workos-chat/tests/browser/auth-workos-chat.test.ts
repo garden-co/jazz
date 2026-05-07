@@ -1,3 +1,15 @@
+/**
+ * Jazz permission-DSL tests for auth-workos-chat.
+ *
+ * Mints WorkOS-shaped JWTs (role under `claims`, ES256) against a local
+ * JWKS and asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID
+ * vs CHAT_ID.
+ *
+ * NOT covered by `pnpm test`: the WorkOS OAuth flow, the
+ * `@workos-inc/authkit-react` hook, or token refresh. Those are WorkOS's
+ * responsibility — what matters here is that a verified JWT with a
+ * `role` claim is honoured by `definePermissions`.
+ */
 import { afterEach, describe, expect, it } from "vitest";
 import { type JazzClient, createJazzClient } from "jazz-tools/react";
 import { app } from "../../schema.js";
