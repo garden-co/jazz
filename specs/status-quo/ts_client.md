@@ -130,7 +130,7 @@ Open batch writes are intentionally not individually waitable:
 - `tx.insert(...)` and `batch.insert(...)` return the inserted row
 - `tx.update(...)`, `tx.delete(...)`, `batch.update(...)`, and `batch.delete(...)` return `void`
 - `tx.commit()` and `batch.commit()` return the batch-shaped write handle
-- `tx.rollback()` closes an open transaction handle without sealing or committing the batch
+- `tx.rollback()` and `batch.rollback()` close an open handle without sealing or committing the batch
 
 That makes the common durable path explicit in the type shape:
 
@@ -155,9 +155,14 @@ Both explicit batch handles add the explicit completion step:
 - `tx.commit()` in TypeScript
 - `batch.commit()` in TypeScript
 
-Transactional handles also expose `tx.rollback()` / `DbTransaction.rollback()`. Rollback only marks
-that transaction handle as rolled back: it does not seal the batch, does not remove pending staged
-rows, and makes any later write, read, `commit()`, or `rollback()` call on the same transaction fail.
+Explicit transaction and batch handles also expose rollback:
+
+- `tx.rollback()` / `DbTransaction.rollback()`
+- `batch.rollback()` / `DbDirectBatch.rollback()`
+
+Rollback only marks that handle as rolled back: it does not seal the batch, does not remove pending
+staged rows, and makes any later write, read, `commit()`, or `rollback()` call on the same handle
+fail.
 
 Persisted writes are batch-shaped too:
 
