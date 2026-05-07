@@ -30,6 +30,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
+  Scoped,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
@@ -642,11 +643,11 @@ export class DbTransaction {
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Omit<DbTransaction, "commit" | "rollback">;
+export type DbTransactionScope = Scoped<DbTransaction>;
 
 /**
- * Direct batches group a set of writes that should settle immediately, without an authority,
- * while still being part of the same batch.
+ * Direct batches group a set of writes that should become visible together on batch commit,
+ * without waiting for an authority approval.
  */
 export class DbDirectBatch {
   private committedHandle: WriteHandle | null = null;
@@ -689,8 +690,8 @@ export class DbDirectBatch {
    * Commit the direct batch. Data is visible optimistically once committed and
    * can be waited on through the returned handle.
    *
-   * Only available on transactions created with {@link Db.beginTransaction}.
-   * When using {@link Db.transaction}, the transaction is committed automatically
+   * Only available on batches created with {@link Db.beginBatch}.
+   * When using {@link Db.batch}, the batch is committed automatically
    * once the callback finishes running.
    */
   commit(): WriteHandle {
@@ -700,6 +701,19 @@ export class DbDirectBatch {
     const handle = this.requireRuntimeBatch("commit").commit();
     this.committedHandle = handle;
     return handle;
+  }
+
+  /**
+   * Roll back this direct batch locally.
+   *
+   * Pending rows remain pending, but this batch handle can no longer be committed.
+   *
+   * Only available on batches created with {@link Db.beginBatch}.
+   * When using {@link Db.batch}, throw an error inside the callback
+   * to roll back the batch.
+   */
+  rollback(): void {
+    this.requireRuntimeBatch("rollback").rollback();
   }
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
@@ -752,7 +766,7 @@ export class DbDirectBatch {
 /**
  * Batch object available inside {@link Db.batch}'s callback.
  */
-export type DbBatchScope = Omit<DbDirectBatch, "commit">;
+export type DbBatchScope = Scoped<DbDirectBatch>;
 
 /**
  * High-level database interface for typed queries and mutations.
