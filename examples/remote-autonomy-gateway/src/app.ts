@@ -445,6 +445,9 @@ export function createRemoteAutonomyGateway(
       const events = await codexStore.listCodexStreamEvents({
         sessionId: optionalQueryString(query.sessionId),
         turnId: optionalQueryString(query.turnId),
+        eventKind: optionalQueryString(query.eventKind),
+        sourceId: optionalQueryString(query.sourceId),
+        payloadReadCursorKey: optionalQueryString(query.payloadReadCursorKey),
         afterSequence: intQueryOptional(query.afterSequence),
         limit: intQuery(query.limit, 200),
       });
@@ -2148,6 +2151,7 @@ function serializeStreamEvent(event: CodexStreamEvent) {
     sourceHost: event.source_host,
     sourcePath: event.source_path,
     textDelta: event.text_delta,
+    payloadReadCursorKey: event.payload_read_cursor_key,
     payloadJson: event.payload_json,
     rawJson: event.raw_json,
     schemaHash: event.schema_hash,

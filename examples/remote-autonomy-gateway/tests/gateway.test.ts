@@ -189,7 +189,7 @@ describe("remote autonomy gateway", () => {
       sourceHost: "gpu-a",
       sourcePath: "/srv/.codex/session.jsonl",
       textDelta: "live from linux",
-      payloadJson: { delta: "live from linux" },
+      payloadJson: { delta: "live from linux", readCursorKey: "cursor-designer" },
       rawJson: '{"type":"event_msg"}',
       schemaHash: "schema-hash-test",
       createdAt: "2026-05-02T20:00:00.000Z",
@@ -220,6 +220,16 @@ describe("remote autonomy gateway", () => {
       sessionId: "codex-session-1",
       sequence: 7,
       textDelta: "live from linux",
+    });
+
+    const cursorListed = await requestJson(
+      "GET",
+      "/v1/codex/stream-events?eventKind=event_msg&sourceId=rollout%3A%2Fsrv%2F.codex%2Fsession.jsonl&payloadReadCursorKey=cursor-designer",
+    );
+    expect(cursorListed.events).toHaveLength(1);
+    expect(cursorListed.events[0]).toMatchObject({
+      eventId: recorded.event.eventId,
+      payloadReadCursorKey: "cursor-designer",
     });
   });
 
