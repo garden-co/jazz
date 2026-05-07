@@ -29,9 +29,33 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, Worker};
 
 use crate::runtime::WasmRuntime;
+use crate::worker_protocol::{
+    main_to_worker_post, parse_worker_to_main, MainToWorkerWire, ParsedWorkerToMain, SyncEntry,
+    WorkerLifecycleEvent, WorkerToMainWire,
+};
 
 const INIT_RESPONSE_TIMEOUT_MS: i32 = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS: i32 = 5_000;
+
+fn parse_lifecycle_event(s: &str) -> Option<WorkerLifecycleEvent> {
+    Some(match s {
+        "visibility-hidden" => WorkerLifecycleEvent::VisibilityHidden,
+        "visibility-visible" => WorkerLifecycleEvent::VisibilityVisible,
+        "pagehide" => WorkerLifecycleEvent::Pagehide,
+        "freeze" => WorkerLifecycleEvent::Freeze,
+        "resume" => WorkerLifecycleEvent::Resume,
+        _ => return None,
+    })
+}
+
+/// Build a `Uint8Array` of postcard-encoded `MainToWorkerWire` bytes plus a
+/// transfer list, then post via `worker.postMessage(value, transfer)`.
+fn post_wire(worker: &Worker, msg: &MainToWorkerWire) {
+    let Ok((value, transfer)) = main_to_worker_post(msg) else {
+        return;
+    };
+    let _ = worker.post_message_with_transfer(&value, transfer.as_ref());
+}
 
 // =============================================================================
 // Public bridge
@@ -114,12 +138,10 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"update-auth".into());
-        if let Some(jwt) = jwt_token {
-            let _ = Reflect::set(&msg, &"jwtToken".into(), &JsValue::from_str(&jwt));
-        }
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::UpdateAuth { jwt_token },
+        );
     }
 
     #[wasm_bindgen(js_name = sendLifecycleHint)]
@@ -127,15 +149,17 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"lifecycle-hint".into());
-        let _ = Reflect::set(&msg, &"event".into(), &JsValue::from_str(event));
-        let _ = Reflect::set(
-            &msg,
-            &"sentAtMs".into(),
-            &JsValue::from_f64(js_sys::Date::now()),
+        let Some(parsed) = parse_lifecycle_event(event) else {
+            tracing::warn!("unknown lifecycle event {event}");
+            return;
+        };
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::LifecycleHint {
+                event: parsed,
+                sent_at_ms: js_sys::Date::now(),
+            },
         );
-        let _ = self.inner.worker.post_message(&msg);
     }
 
     #[wasm_bindgen(js_name = openPeer)]
@@ -143,10 +167,12 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"peer-open".into());
-        let _ = Reflect::set(&msg, &"peerId".into(), &JsValue::from_str(peer_id));
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::PeerOpen {
+                peer_id: peer_id.to_string(),
+            },
+        );
     }
 
     #[wasm_bindgen(js_name = sendPeerSync)]
@@ -157,21 +183,23 @@ impl WasmWorkerBridge {
         if payload.length() == 0 {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"peer-sync".into());
-        let _ = Reflect::set(&msg, &"peerId".into(), &JsValue::from_str(peer_id));
-        let _ = Reflect::set(&msg, &"term".into(), &JsValue::from_f64(term as f64));
-        let _ = Reflect::set(&msg, &"payload".into(), &payload);
-        let transfer = Array::new();
+        let mut payloads: Vec<serde_bytes::ByteBuf> = Vec::with_capacity(payload.length() as usize);
         for entry in payload.iter() {
             if let Some(arr) = entry.dyn_ref::<Uint8Array>() {
-                transfer.push(&arr.buffer().into());
+                payloads.push(serde_bytes::ByteBuf::from(arr.to_vec()));
             }
         }
-        let _ = self
-            .inner
-            .worker
-            .post_message_with_transfer(&msg, transfer.as_ref());
+        if payloads.is_empty() {
+            return;
+        }
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::PeerSync {
+                peer_id: peer_id.to_string(),
+                term,
+                payloads,
+            },
+        );
     }
 
     #[wasm_bindgen(js_name = closePeer)]
@@ -179,10 +207,12 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"peer-close".into());
-        let _ = Reflect::set(&msg, &"peerId".into(), &JsValue::from_str(peer_id));
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::PeerClose {
+                peer_id: peer_id.to_string(),
+            },
+        );
     }
 
     #[wasm_bindgen(js_name = setServerPayloadForwarder)]
@@ -242,9 +272,7 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"disconnect-upstream".into());
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(&self.inner.worker, &MainToWorkerWire::DisconnectUpstream);
     }
 
     #[wasm_bindgen(js_name = reconnectUpstream)]
@@ -252,9 +280,7 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"reconnect-upstream".into());
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(&self.inner.worker, &MainToWorkerWire::ReconnectUpstream);
     }
 
     #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
@@ -262,10 +288,12 @@ impl WasmWorkerBridge {
         if self.inner.is_disposed_like() {
             return;
         }
-        let msg = Object::new();
-        let _ = Reflect::set(&msg, &"type".into(), &"acknowledge-rejected-batch".into());
-        let _ = Reflect::set(&msg, &"batchId".into(), &JsValue::from_str(batch_id));
-        let _ = self.inner.worker.post_message(&msg);
+        post_wire(
+            &self.inner.worker,
+            &MainToWorkerWire::AcknowledgeRejectedBatch {
+                batch_id: batch_id.to_string(),
+            },
+        );
     }
 
     #[wasm_bindgen(js_name = setListeners)]
@@ -364,9 +392,7 @@ async fn run_shutdown(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
     let (tx, rx) = oneshot::channel::<()>();
     *inner.shutdown_resolver.borrow_mut() = Some(tx);
 
-    let msg = Object::new();
-    let _ = Reflect::set(&msg, &"type".into(), &"shutdown".into());
-    let _ = inner.worker.post_message(&msg);
+    post_wire(&inner.worker, &MainToWorkerWire::Shutdown);
 
     let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
     let _ = select(rx, timeout).await;
@@ -533,101 +559,118 @@ impl BridgeInner {
 
     fn handle_message(&self, event: MessageEvent) {
         let data = event.data();
-        let Some(type_str) = Reflect::get(&data, &"type".into())
-            .ok()
-            .and_then(|v| v.as_string())
-        else {
-            return;
-        };
+        match parse_worker_to_main(&data) {
+            ParsedWorkerToMain::Ready => {}
+            ParsedWorkerToMain::Wire(wire) => self.dispatch_wire(wire),
+            ParsedWorkerToMain::UnknownJsObject(t) => {
+                tracing::warn!("ignoring unknown JS-object worker→main message {t}")
+            }
+            ParsedWorkerToMain::DecodeError(e) => {
+                tracing::warn!("worker→main decode error: {e}")
+            }
+            ParsedWorkerToMain::Malformed => {
+                tracing::warn!("worker→main message neither Uint8Array nor known JS object")
+            }
+        }
+    }
 
-        match type_str.as_str() {
-            "ready" => {}
-            "init-ok" => {
-                let client_id = Reflect::get(&data, &"clientId".into())
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
+    fn dispatch_wire(&self, wire: WorkerToMainWire) {
+        match wire {
+            WorkerToMainWire::InitOk { client_id } => {
                 if let Some(tx) = self.init_resolver.borrow_mut().take() {
                     let _ = tx.send(Ok(client_id));
                 }
             }
-            "error" => {
-                let msg = Reflect::get(&data, &"message".into())
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
+            WorkerToMainWire::Error { message } => {
                 if let Some(tx) = self.init_resolver.borrow_mut().take() {
-                    let _ = tx.send(Err(msg));
+                    let _ = tx.send(Err(message));
+                } else {
+                    tracing::warn!("worker error: {message}");
                 }
             }
-            "upstream-connected" => self.mark_upstream_connected(),
-            "upstream-disconnected" => self.mark_upstream_disconnected(),
-            "auth-failed" => {
+            WorkerToMainWire::UpstreamConnected => self.mark_upstream_connected(),
+            WorkerToMainWire::UpstreamDisconnected => self.mark_upstream_disconnected(),
+            WorkerToMainWire::AuthFailed { reason } => {
                 let cb = self.listeners.borrow().on_auth_failure.clone();
                 if let Some(cb) = cb {
-                    let reason = Reflect::get(&data, &"reason".into()).unwrap_or(JsValue::NULL);
-                    let _ = cb.call1(&JsValue::NULL, &reason);
+                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&reason));
                 }
             }
-            "local-batch-records-sync" => {
+            WorkerToMainWire::LocalBatchRecordsSync { batches_json } => {
                 let cb = self.listeners.borrow().on_local_batch_records_sync.clone();
                 if let Some(cb) = cb {
-                    let batches = Reflect::get(&data, &"batches".into()).unwrap_or(JsValue::NULL);
+                    let batches = json_parse(&batches_json);
                     let _ = cb.call1(&JsValue::NULL, &batches);
                 }
             }
-            "mutation-error-replay" => {
+            WorkerToMainWire::MutationErrorReplay { batch_json } => {
                 let cb = self.listeners.borrow().on_mutation_error_replay.clone();
                 if let Some(cb) = cb {
-                    let batch = Reflect::get(&data, &"batch".into()).unwrap_or(JsValue::NULL);
+                    let batch = json_parse(&batch_json);
                     let _ = cb.call1(&JsValue::NULL, &batch);
                 }
             }
-            "peer-sync" => {
+            WorkerToMainWire::PeerSync {
+                peer_id,
+                term,
+                payloads,
+            } => {
                 let cb = self.listeners.borrow().on_peer_sync.clone();
                 if let Some(cb) = cb {
+                    let payload_array = Array::new();
+                    for entry in &payloads {
+                        let arr = Uint8Array::from(entry.as_ref());
+                        payload_array.push(&arr);
+                    }
                     let batch = Object::new();
-                    let peer_id = Reflect::get(&data, &"peerId".into()).unwrap_or(JsValue::NULL);
-                    let term = Reflect::get(&data, &"term".into()).unwrap_or(JsValue::NULL);
-                    let payload = Reflect::get(&data, &"payload".into()).unwrap_or(JsValue::NULL);
-                    let _ = Reflect::set(&batch, &"peerId".into(), &peer_id);
-                    let _ = Reflect::set(&batch, &"term".into(), &term);
-                    let _ = Reflect::set(&batch, &"payload".into(), &payload);
+                    let _ = Reflect::set(&batch, &"peerId".into(), &JsValue::from_str(&peer_id));
+                    let _ = Reflect::set(&batch, &"term".into(), &JsValue::from_f64(term as f64));
+                    let _ = Reflect::set(&batch, &"payload".into(), &payload_array);
                     let _ = cb.call1(&JsValue::NULL, &batch.into());
                 }
             }
-            "sync" => self.handle_sync_to_main(&data),
-            "shutdown-ok" => {
+            WorkerToMainWire::Sync { payloads } => {
+                for entry in payloads {
+                    match entry {
+                        SyncEntry::BareBytes(bytes) => {
+                            let arr = Uint8Array::from(bytes.as_ref());
+                            let _ = self.runtime.on_sync_message_received(arr.into(), None);
+                        }
+                        SyncEntry::BareString(s) => {
+                            let _ = self
+                                .runtime
+                                .on_sync_message_received(JsValue::from_str(&s), None);
+                        }
+                        SyncEntry::SequencedBytes { payload, sequence } => {
+                            let arr = Uint8Array::from(payload.as_ref());
+                            let _ = self
+                                .runtime
+                                .on_sync_message_received(arr.into(), Some(sequence as f64));
+                        }
+                        SyncEntry::SequencedString { payload, sequence } => {
+                            let _ = self.runtime.on_sync_message_received(
+                                JsValue::from_str(&payload),
+                                Some(sequence as f64),
+                            );
+                        }
+                    }
+                }
+            }
+            WorkerToMainWire::ShutdownOk => {
                 if let Some(tx) = self.shutdown_resolver.borrow_mut().take() {
                     let _ = tx.send(());
                 }
             }
-            _ => {}
-        }
-    }
-
-    fn handle_sync_to_main(&self, data: &JsValue) {
-        let Ok(payload) = Reflect::get(data, &"payload".into()) else {
-            return;
-        };
-        let Ok(arr) = payload.dyn_into::<Array>() else {
-            return;
-        };
-        for entry in arr.iter() {
-            if entry.is_instance_of::<Uint8Array>() || entry.is_string() {
-                let _ = self.runtime.on_sync_message_received(entry, None);
-            } else {
-                let inner_payload =
-                    Reflect::get(&entry, &"payload".into()).unwrap_or(JsValue::NULL);
-                let sequence = Reflect::get(&entry, &"sequence".into())
-                    .ok()
-                    .and_then(|v| v.as_f64());
-                let _ = self
-                    .runtime
-                    .on_sync_message_received(inner_payload, sequence);
+            WorkerToMainWire::DebugSchemaStateOk { .. }
+            | WorkerToMainWire::DebugSeedLiveSchemaOk => {
+                // Test-only debug responses; no listener slot in the bridge.
             }
         }
     }
+}
+
+fn json_parse(s: &str) -> JsValue {
+    js_sys::JSON::parse(s).unwrap_or(JsValue::NULL)
 }
 
 // =============================================================================
