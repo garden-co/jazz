@@ -236,13 +236,17 @@ impl WasmWorkerBridge {
         let has_forwarder = callback.is_some();
         self.inner.has_forwarder.set(has_forwarder);
         self.inner.sender.set_server_payload_forwarder(callback);
-        // A forwarder install short-circuits the upstream wait gate (a
-        // follower tab routes through the leader instead of the worker's own
-        // upstream). Release any awaiters without flipping
-        // `upstream_connected` — the gate is checked at call-time, and a
-        // later `setServerPayloadForwarder(null)` should re-arm waiting.
         if has_forwarder {
+            // Forwarder install short-circuits the upstream wait gate (a
+            // follower tab routes through the leader instead of the worker's
+            // own upstream). Release any current awaiters without flipping
+            // `upstream_connected` — the gate is checked at call-time.
             self.inner.release_upstream_waiters();
+        } else if self.inner.expects_upstream.get() && !self.inner.upstream_connected.get() {
+            // Forwarder removed and the upstream isn't actually live yet —
+            // re-arm a fresh ready-promise so subsequent
+            // `waitForUpstreamServerConnection` calls actually wait.
+            self.inner.rearm_upstream_ready_promise();
         }
     }
 
@@ -294,6 +298,24 @@ impl WasmWorkerBridge {
             return;
         }
         post_wire(&self.inner.worker, &MainToWorkerWire::ReconnectUpstream);
+    }
+
+    /// Test-only: post `MainToWorkerWire::SimulateCrash` to the worker. The
+    /// worker host releases OPFS handles without flushing a snapshot and
+    /// posts `ShutdownOk`. Returns a Promise that resolves when the ack
+    /// arrives (or after `SHUTDOWN_ACK_TIMEOUT_MS` regardless). Used by
+    /// browser tests to validate WAL replay.
+    #[wasm_bindgen(js_name = simulateCrash)]
+    pub fn simulate_crash(&self) -> js_sys::Promise {
+        let inner = Rc::clone(&self.inner);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (tx, rx) = oneshot::channel::<()>();
+            *inner.shutdown_resolver.borrow_mut() = Some(tx);
+            post_wire(&inner.worker, &MainToWorkerWire::SimulateCrash);
+            let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
+            let _ = select(rx, timeout).await;
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
@@ -363,6 +385,10 @@ async fn run_init(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
     *inner.init_resolver.borrow_mut() = Some(tx);
 
     if let Err(e) = inner.worker.post_message(&inner.init_message) {
+        // Drop the resolver we just installed so a subsequent `init-ok`
+        // (which can no longer arrive — the post failed) doesn't fire on a
+        // dead `Sender` or, worse, race the next init attempt.
+        inner.init_resolver.borrow_mut().take();
         inner.transition_init_failed();
         return Err(JsValue::from_str(&format!("postMessage init: {e:?}")));
     }
@@ -553,6 +579,18 @@ impl BridgeInner {
         if let Some(resolver) = resolver {
             let _ = resolver.call0(&JsValue::NULL);
         }
+    }
+
+    /// Re-arm a fresh upstream-ready promise. Used when a forwarder is
+    /// removed while the worker's upstream still hasn't connected — fresh
+    /// `waitForUpstreamServerConnection` calls need to actually block again.
+    fn rearm_upstream_ready_promise(&self) {
+        if self.upstream_ready_resolver.borrow().is_some() {
+            return;
+        }
+        let (promise, resolver) = make_deferred_promise();
+        *self.upstream_ready_promise.borrow_mut() = promise;
+        *self.upstream_ready_resolver.borrow_mut() = Some(resolver);
     }
 
     fn mark_upstream_disconnected(&self) {

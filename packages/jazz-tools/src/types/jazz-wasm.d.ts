@@ -56,6 +56,7 @@ declare module "jazz-wasm" {
     disconnectUpstream(): void;
     reconnectUpstream(): void;
     acknowledgeRejectedBatch(batchId: string): void;
+    simulateCrash(): Promise<void>;
     setListeners(listeners: object): void;
     shutdown(): Promise<void>;
     getWorkerClientId(): string | null;

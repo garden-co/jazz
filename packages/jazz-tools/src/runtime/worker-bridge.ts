@@ -62,6 +62,7 @@ interface WasmBridgeHandle {
   disconnectUpstream(): void;
   reconnectUpstream(): void;
   acknowledgeRejectedBatch(batchId: string): void;
+  simulateCrash(): Promise<void>;
   setListeners(listeners: ListenerSlots): void;
   shutdown(): Promise<void>;
   getWorkerClientId(): string | null;
@@ -146,7 +147,7 @@ export class WorkerBridge {
     this.bridge?.sendLifecycleHint(event);
   }
 
-  async shutdown(_worker: Worker): Promise<void> {
+  async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     if (this.bridge) {
@@ -171,12 +172,10 @@ export class WorkerBridge {
   }
 
   private installForwarderInternal(forwarder: ServerPayloadForwarder): void {
+    // Server-bound payloads are always binary postcard; the Rust outbox sender
+    // calls the forwarder with a single `Uint8Array`.
     this.bridge?.setServerPayloadForwarder((payload) => {
-      if (typeof payload === "string") {
-        forwarder(new TextEncoder().encode(payload));
-      } else {
-        forwarder(payload);
-      }
+      forwarder(payload as Uint8Array);
     });
   }
 
@@ -203,6 +202,14 @@ export class WorkerBridge {
 
   acknowledgeRejectedBatch(batchId: string): void {
     this.bridge?.acknowledgeRejectedBatch(batchId);
+  }
+
+  /** Test-only: posts `simulate-crash` so the worker releases OPFS handles
+   * without a clean snapshot, and resolves on `shutdown-ok` (or after the
+   * shutdown-ack timeout). Used to validate WAL replay. */
+  async simulateCrash(): Promise<void> {
+    if (!this.bridge) return;
+    await this.bridge.simulateCrash();
   }
 
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
