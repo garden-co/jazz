@@ -119,6 +119,13 @@ type StopElement = {
 
 export class MapController {
   private container: HTMLElement;
+  private containerPositionWasSet = false;
+  /**
+   * Per-frame projection state. Computed once at the top of render() and
+   * read by each renderX() helper. Lives on the instance so the hot path
+   * doesn't allocate.
+   */
+  private proj = { cf: 0, sf: 0, ct: 0, st: 0, radius: 0, cx: 0, cy: 0, cssW: 0, cssH: 0 };
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private overlay: HTMLDivElement;
@@ -161,6 +168,7 @@ export class MapController {
     this.container = container;
     if (getComputedStyle(this.container).position === "static") {
       this.container.style.position = "relative";
+      this.containerPositionWasSet = true;
     }
 
     this.canvas = document.createElement("canvas");
@@ -318,6 +326,10 @@ export class MapController {
     this.stopElements.clear();
     this.overlay.remove();
     this.canvas.remove();
+    if (this.containerPositionWasSet) {
+      this.container.style.removeProperty("position");
+      this.containerPositionWasSet = false;
+    }
     this.mapClickListeners = [];
     this.stopClickListeners = [];
   }
@@ -365,32 +377,45 @@ export class MapController {
   };
 
   private render(): void {
-    const ctx = this.ctx;
     const cssW = this.container.clientWidth;
     const cssH = this.container.clientHeight;
     if (cssW === 0 || cssH === 0) return;
 
-    ctx.clearRect(0, 0, cssW, cssH);
+    const p = this.proj;
+    p.cssW = cssW;
+    p.cssH = cssH;
+    p.cf = Math.cos(this.phi);
+    p.sf = Math.sin(this.phi);
+    p.ct = Math.cos(this.theta);
+    p.st = Math.sin(this.theta);
+    p.radius = (Math.min(cssW, cssH) / 2) * this.scale * GLOBE_FIT;
+    p.cx = cssW / 2;
+    p.cy = cssH / 2;
 
-    const cf = Math.cos(this.phi);
-    const sf = Math.sin(this.phi);
-    const ct = Math.cos(this.theta);
-    const st = Math.sin(this.theta);
+    this.ctx.clearRect(0, 0, cssW, cssH);
+    this.renderGlow();
+    this.renderOcean();
+    this.renderLandDots();
+    this.renderRouteArcs();
+    this.renderStopsAndOverlay();
+  }
 
-    const radius = (Math.min(cssW, cssH) / 2) * this.scale * GLOBE_FIT;
-    const cx = cssW / 2;
-    const cy = cssH / 2;
-
-    // 1. Atmospheric limb glow (soft halo just outside the disc).
+  /** Soft halo just outside the visible disc. */
+  private renderGlow(): void {
+    const { cx, cy, radius, cssW, cssH } = this.proj;
+    const ctx = this.ctx;
     const glow = ctx.createRadialGradient(cx, cy, radius * 0.94, cx, cy, radius * 1.18);
     glow.addColorStop(0, "rgba(255, 45, 123, 0)");
     glow.addColorStop(0.4, COLOR_LIMB_GLOW);
     glow.addColorStop(1, "rgba(255, 45, 123, 0)");
     ctx.fillStyle = glow;
     ctx.fillRect(0, 0, cssW, cssH);
+  }
 
-    // 2. Earth disc — dark with a slight centre-bright shading so the sphere
-    // reads as a body, not a transparent dot field in space.
+  /** Dark globe disc with subtle centre-bright shading so the sphere reads as a body. */
+  private renderOcean(): void {
+    const { cx, cy, radius } = this.proj;
+    const ctx = this.ctx;
     const ocean = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
     ocean.addColorStop(0, COLOR_OCEAN_INNER);
     ocean.addColorStop(1, COLOR_OCEAN_OUTER);
@@ -398,10 +423,16 @@ export class MapController {
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
     ctx.fill();
+  }
 
-    // 3. Land dots, alpha modulated by camera-facing depth so the limb is
-    // dimmer than the centre — fakes diffuse lighting without a shader.
-    // Bucketed by depth tier so we batch fillStyle changes.
+  /**
+   * Land dots, alpha modulated by camera-facing depth so the limb dims —
+   * fakes diffuse lighting without a shader. Bucketed by depth tier to
+   * batch fillStyle changes.
+   */
+  private renderLandDots(): void {
+    const { cf, sf, ct, st, radius, cx, cy } = this.proj;
+    const ctx = this.ctx;
     const r = MAP_DOT_RADIUS_PX;
     const d = r * 2;
     const buckets = this.dotBuckets;
@@ -419,8 +450,7 @@ export class MapController {
       const sx = cx + x1 * radius;
       const sy = cy - y2 * radius;
       const bin = Math.min(bins - 1, Math.floor(z2 * bins));
-      const arr = buckets[bin];
-      arr.push(sx, sy);
+      buckets[bin].push(sx, sy);
     }
     for (let b = 0; b < bins; b++) {
       const arr = buckets[b];
@@ -431,46 +461,49 @@ export class MapController {
         ctx.fillRect(arr[i] - r, arr[i + 1] - r, d, d);
       }
     }
+  }
 
-    // 2. Route arcs
-    if (this.routeLegs.length > 0) {
-      ctx.strokeStyle = COLOR_PATH;
-      ctx.lineWidth = PATH_LINE_WIDTH_PX;
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-      for (const leg of this.routeLegs) {
-        ctx.beginPath();
-        let started = false;
-        for (let s = 0; s < leg.points.length; s++) {
-          const [px, py, pz] = leg.points[s];
-
-          const x1 = cf * px + sf * pz;
-          const y1 = py;
-          const z1 = -sf * px + cf * pz;
-          const y2 = ct * y1 - st * z1;
-          const z2 = st * y1 + ct * z1;
-          const distSq = x1 * x1 + y2 * y2;
-          // Arc points are visible if on the front of the globe OR outside
-          // the visible disc — this lets tall arcs that loop above the horizon
-          // render correctly.
-          if (z2 < 0 && distSq < 1) {
-            started = false;
-            continue;
-          }
-          const sx = cx + x1 * radius;
-          const sy = cy - y2 * radius;
-          if (!started) {
-            ctx.moveTo(sx, sy);
-            started = true;
-          } else {
-            ctx.lineTo(sx, sy);
-          }
+  private renderRouteArcs(): void {
+    if (this.routeLegs.length === 0) return;
+    const { cf, sf, ct, st, radius, cx, cy } = this.proj;
+    const ctx = this.ctx;
+    ctx.strokeStyle = COLOR_PATH;
+    ctx.lineWidth = PATH_LINE_WIDTH_PX;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (const leg of this.routeLegs) {
+      ctx.beginPath();
+      let started = false;
+      for (let s = 0; s < leg.points.length; s++) {
+        const [px, py, pz] = leg.points[s];
+        const x1 = cf * px + sf * pz;
+        const y1 = py;
+        const z1 = -sf * px + cf * pz;
+        const y2 = ct * y1 - st * z1;
+        const z2 = st * y1 + ct * z1;
+        // Visible if on the front hemisphere OR outside the unit-sphere disc —
+        // lets tall arcs that loop above the horizon render correctly.
+        if (z2 < 0 && x1 * x1 + y2 * y2 < 1) {
+          started = false;
+          continue;
         }
-        ctx.stroke();
+        const sx = cx + x1 * radius;
+        const sy = cy - y2 * radius;
+        if (started) {
+          ctx.lineTo(sx, sy);
+        } else {
+          ctx.moveTo(sx, sy);
+          started = true;
+        }
       }
+      ctx.stroke();
     }
+  }
 
-    // 3. Stop markers + DOM overlay positions
+  /** Draws each stop's marker dot AND positions its DOM overlay wrapper. */
+  private renderStopsAndOverlay(): void {
+    const { cf, sf, ct, st, radius, cx, cy } = this.proj;
+    const ctx = this.ctx;
     for (let i = 0; i < this.stops.length; i++) {
       const stop = this.stops[i];
       const [px, py, pz] = this.stopVecs[i];
@@ -480,7 +513,6 @@ export class MapController {
       const y2 = ct * y1 - st * z1;
       const z2 = st * y1 + ct * z1;
       const visible = z2 >= 0;
-
       const sx = cx + x1 * radius;
       const sy = cy - y2 * radius;
 
@@ -679,7 +711,7 @@ export class MapController {
       height: rect.height,
       phi: this.phi,
       theta: this.theta,
-      scale: this.scale,
+      scale: this.scale * GLOBE_FIT,
     });
     if (!result) return;
     this.emitMapClick({ lat: result.lat, lng: result.lng, x: cssX, y: cssY });
