@@ -81,6 +81,7 @@ pub fn subscribe_trace_entries(callback: Function) -> Function {
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use jazz_tools::batch_fate::LocalBatchRecord;
 use jazz_tools::binding_support::{
     parse_batch_id_input, serialize_batch_fate, serialize_local_batch_record,
     serialize_local_batch_records,
@@ -1314,6 +1315,35 @@ impl WasmRuntime {
         }
     }
 
+    #[wasm_bindgen(js_name = loadLocalBatchRecordStorageRow)]
+    pub fn load_local_batch_record_storage_row(&self, batch_id: &str) -> Result<JsValue, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let record = core
+            .local_batch_record(batch_id)
+            .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
+        match record {
+            Some(record) => {
+                let bytes = record
+                    .encode_storage_row()
+                    .map_err(|e| JsError::new(&format!("Encode local batch record failed: {e}")))?;
+                Ok(Uint8Array::from(bytes.as_slice()).into())
+            }
+            None => Ok(JsValue::null()),
+        }
+    }
+
+    #[wasm_bindgen(js_name = hydrateLocalBatchRecordStorageRow)]
+    pub fn hydrate_local_batch_record_storage_row(&self, bytes: Uint8Array) -> Result<(), JsError> {
+        let mut data = vec![0; bytes.length() as usize];
+        bytes.copy_to(&mut data);
+        let record = LocalBatchRecord::decode_storage_row(&data)
+            .map_err(|e| JsError::new(&format!("Decode local batch record failed: {e}")))?;
+        let mut core = self.core.borrow_mut();
+        core.hydrate_local_batch_record(record)
+            .map_err(|e| JsError::new(&format!("Hydrate local batch record failed: {e}")))
+    }
+
     #[wasm_bindgen(js_name = loadBatchFate)]
     pub fn load_batch_fate(&self, batch_id: &str) -> Result<JsValue, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
@@ -1331,6 +1361,19 @@ impl WasmRuntime {
             }
             None => Ok(JsValue::null()),
         }
+    }
+
+    #[wasm_bindgen(js_name = replayBatchRejection)]
+    pub fn replay_batch_rejection(
+        &self,
+        batch_id: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.replay_batch_rejection(batch_id, code, reason)
+            .map_err(|e| JsError::new(&format!("Replay batch rejection failed: {e}")))
     }
 
     #[wasm_bindgen(js_name = loadLocalBatchRecords)]

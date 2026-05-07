@@ -88,6 +88,45 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     member.object_id,
                     batch_id,
                 ) else {
+                    let Some(row) = self
+                        .storage
+                        .scan_history_row_batches(member.table_name.as_str(), member.object_id)
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter().find(|row| {
+                                row.batch_id == batch_id
+                                    && row.branch.as_str() == member.branch_name.as_str()
+                            })
+                        })
+                    else {
+                        continue;
+                    };
+                    rows.push((member, row_locator, row));
+                    continue;
+                };
+                rows.push((member, row_locator, row));
+            }
+        }
+        if rows.is_empty()
+            && let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id)
+        {
+            for member in record.members {
+                let row_locator = self
+                    .storage
+                    .load_row_locator(member.object_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| crate::storage::RowLocator {
+                        table: member.table_name.clone().into(),
+                        origin_schema_hash: None,
+                    });
+                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
+                    batch_id,
+                ) else {
                     continue;
                 };
                 rows.push((member, row_locator, row));
@@ -160,7 +199,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(super) fn mark_local_batch_rows_rejected(
+    pub(crate) fn mark_local_batch_rows_rejected(
         &mut self,
         batch_id: crate::row_histories::BatchId,
     ) {
