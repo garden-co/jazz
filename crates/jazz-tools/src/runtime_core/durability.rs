@@ -1,5 +1,5 @@
-//! [`DurabilityTracker`] — owns the per-batch ack-watcher map and the set of
-//! rejected replayable batch ids that bindings still need to surface.
+//! [`DurabilityTracker`] — owns durability waiters and the set of rejected
+//! replayable batch ids that bindings still need to surface.
 //!
 //! Extracted from `RuntimeCore` so the orchestrator no longer carries the
 //! bookkeeping for who-is-waiting-on-which-tier; it only delegates the
@@ -19,6 +19,8 @@ use super::{PersistedWriteAck, PersistedWriteRejection};
 pub(crate) struct DurabilityTracker {
     /// Watchers waiting for a row+batch to be confirmed at a requested tier.
     ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
+    /// Watchers waiting for a whole batch to settle at a requested tier.
+    batch_watchers: HashMap<BatchId, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
     /// Rejected replayable batch ids surfaced once to bindings on next drain.
     rejected_batch_ids: BTreeSet<BatchId>,
 }
@@ -29,6 +31,7 @@ impl DurabilityTracker {
     pub(crate) fn with_initial_rejections(rejected: BTreeSet<BatchId>) -> Self {
         Self {
             ack_watchers: HashMap::new(),
+            batch_watchers: HashMap::new(),
             rejected_batch_ids: rejected,
         }
     }
@@ -42,6 +45,19 @@ impl DurabilityTracker {
     ) {
         self.ack_watchers
             .entry(key)
+            .or_default()
+            .push((tier, sender));
+    }
+
+    /// Register a watcher that resolves when `batch_id` reaches `tier` (or higher).
+    pub(crate) fn register_batch_watcher(
+        &mut self,
+        batch_id: BatchId,
+        tier: DurabilityTier,
+        sender: oneshot::Sender<PersistedWriteAck>,
+    ) {
+        self.batch_watchers
+            .entry(batch_id)
             .or_default()
             .push((tier, sender));
     }
@@ -78,6 +94,27 @@ impl DurabilityTracker {
         for key in affected_keys {
             self.record_ack(key, acked_tier);
         }
+
+        let Some(watchers) = self.batch_watchers.remove(&batch_id) else {
+            return;
+        };
+        let mut remaining = Vec::new();
+        for (requested_tier, sender) in watchers {
+            if acked_tier >= requested_tier {
+                tracing::debug!(
+                    ?batch_id,
+                    ?acked_tier,
+                    ?requested_tier,
+                    "batch watcher resolved"
+                );
+                let _ = sender.send(Ok(()));
+            } else {
+                remaining.push((requested_tier, sender));
+            }
+        }
+        if !remaining.is_empty() {
+            self.batch_watchers.insert(batch_id, remaining);
+        }
     }
 
     /// Mark `batch_id` rejected and notify every watcher whose key references
@@ -104,6 +141,12 @@ impl DurabilityTracker {
                 }
             }
         }
+
+        if let Some(watchers) = self.batch_watchers.remove(&batch_id) {
+            for (_requested_tier, sender) in watchers {
+                let _ = sender.send(Err(rejection.clone()));
+            }
+        }
     }
 
     /// Drain every rejection id pending surface; subsequent calls return an
@@ -119,6 +162,7 @@ impl DurabilityTracker {
     /// the local batch record.
     pub(crate) fn forget_batch(&mut self, batch_id: BatchId) {
         self.ack_watchers.retain(|key, _| key.batch_id != batch_id);
+        self.batch_watchers.remove(&batch_id);
         self.rejected_batch_ids.remove(&batch_id);
     }
 }

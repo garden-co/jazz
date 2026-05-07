@@ -823,6 +823,14 @@ export interface RnRuntimeInterface {
     valuesJson: string,
     writeContextJson: string | undefined
   ) /*throws*/ : string;
+  /**
+   * Wait for a local batch to settle at the requested durability tier.
+   */
+  waitForBatch(
+    batchId: string,
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ) /*throws*/ : Promise<void>;
 }
 
 export class RnRuntime
@@ -1492,6 +1500,45 @@ export class RnRuntime
   }
 
   /**
+   * Wait for a local batch to settle at the requested durability tier.
+   */
+  async waitForBatch(
+    batchId: string,
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
+            FfiConverterString.lower(tier)
+          );
+        },
+        /*pollFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_poll_void,
+        /*cancelFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_cancel_void,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_complete_void,
+        /*freeFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_free_void,
+        /*liftFunc:*/ (_v) => {},
+        /*liftString:*/ FfiConverterString.lift,
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        )
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
+  }
+
+  /**
    * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
    */
   uniffiDestroy(): void {
@@ -1888,6 +1935,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_update_with_session'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch() !==
+    15795
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch'
     );
   }
   if (

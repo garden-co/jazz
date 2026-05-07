@@ -1294,6 +1294,32 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    /// Wait for a batch to settle at the requested durability tier.
+    #[wasm_bindgen(js_name = waitForBatch)]
+    pub fn wait_for_batch(&self, batch_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let tier = parse_tier(tier)?;
+        let receiver = {
+            let mut core = self.core.borrow_mut();
+            core.wait_for_batch(batch_id, tier)
+                .map_err(|e| JsError::new(&format!("Wait for batch failed: {e}")))?
+        };
+
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            match receiver.await {
+                Ok(Ok(())) => Ok(JsValue::undefined()),
+                Ok(Err(rejection)) => Err(serde_wasm_bindgen::to_value(&serde_json::json!({
+                    "kind": "rejected",
+                    "batchId": rejection.batch_id.to_string(),
+                    "code": rejection.code,
+                    "reason": rejection.reason,
+                }))
+                .unwrap_or_else(|_| JsValue::from_str("Persisted batch was rejected"))),
+                Err(_) => Err(JsValue::from_str("Wait for batch cancelled")),
+            }
+        }))
+    }
+
     #[wasm_bindgen(js_name = loadLocalBatchRecord)]
     pub fn load_local_batch_record(&self, batch_id: &str) -> Result<JsValue, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;

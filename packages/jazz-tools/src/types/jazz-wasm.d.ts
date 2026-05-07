@@ -83,6 +83,7 @@ declare module "jazz-wasm" {
     drainRejectedBatchIds(): string[];
     acknowledgeRejectedBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
+    waitForBatch(batchId: string, tier: string): Promise<void>;
     query(
       queryJson: string,
       sessionJson?: string | null,

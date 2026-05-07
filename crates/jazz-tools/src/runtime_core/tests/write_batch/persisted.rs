@@ -234,6 +234,115 @@ fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
 }
 
 #[test]
+fn rc_wait_for_batch_resolves_from_existing_settlement() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut batch_receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
+
+    assert_eq!(
+        batch_receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "late batch wait should resolve from the retained local settlement"
+    );
+}
+
+#[test]
+fn rc_wait_for_batch_resolves_when_requested_tier_settles() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut batch_receiver =
+        s.a.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .unwrap();
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+    assert_eq!(
+        batch_receiver.try_recv(),
+        Ok(None),
+        "worker-local settlement should not satisfy an edge batch wait"
+    );
+
+    pump_b_to_c(&mut s);
+    pump_c_to_b_to_a(&mut s);
+    assert_eq!(
+        batch_receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "edge settlement should resolve the batch wait"
+    );
+}
+
+#[test]
+fn rc_wait_for_batch_rejects_when_batch_is_rejected() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut batch_receiver =
+        s.a.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "Alice cannot publish this row".to_string(),
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    match batch_receiver.try_recv() {
+        Ok(Some(Err(rejection))) => {
+            assert_eq!(rejection.batch_id, batch_id);
+            assert_eq!(rejection.code, "permission_denied");
+            assert_eq!(rejection.reason, "Alice cannot publish this row");
+        }
+        other => panic!("expected rejected batch wait, got {other:?}"),
+    }
+}
+
+#[test]
+fn rc_wait_for_batch_missing_fate_remains_pending() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut batch_receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
+    assert_eq!(
+        batch_receiver.try_recv(),
+        Ok(Some(Ok(()))),
+        "local batch wait should resolve immediately from the local direct settlement"
+    );
+
+    let mut edge_receiver =
+        s.a.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .unwrap();
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(
+        edge_receiver.try_recv(),
+        Ok(None),
+        "missing fate should trigger recovery without settling the batch wait"
+    );
+}
+
+#[test]
 fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
     let (_id, mut receiver) =

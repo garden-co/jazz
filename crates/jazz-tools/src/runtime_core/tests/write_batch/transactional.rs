@@ -563,6 +563,47 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
 }
 
 #[test]
+fn rc_wait_for_batch_resolves_transactional_accepted_settlement() {
+    let mut s = create_3tier_rc();
+    let write_context = WriteContext {
+        session: None,
+        attribution: None,
+        updated_at: None,
+        batch_mode: Some(crate::batch_fate::BatchMode::Transactional),
+        batch_id: None,
+        target_branch_name: None,
+    };
+
+    let ((row_id, _row_values), _receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    let history_rows =
+        s.a.storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+
+    s.a.seal_batch(batch_id).unwrap();
+    let mut batch_receiver = s.a.wait_for_batch(batch_id, DurabilityTier::Local).unwrap();
+
+    pump_a_to_b(&mut s);
+    assert_eq!(
+        batch_receiver.try_recv(),
+        Ok(None),
+        "transactional batch wait should resolve only once alice receives the accepted settlement"
+    );
+
+    pump_b_to_a(&mut s);
+    assert_eq!(batch_receiver.try_recv(), Ok(Some(Ok(()))));
+}
+
+#[test]
 fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
     // alice -> worker
     //   alice seals the transactional batch

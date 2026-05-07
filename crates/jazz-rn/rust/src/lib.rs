@@ -591,6 +591,35 @@ impl RnRuntime {
         })
     }
 
+    /// Wait for a local batch to settle at the requested durability tier.
+    pub async fn wait_for_batch(&self, batch_id: String, tier: String) -> Result<(), JazzRnError> {
+        with_async_panic_boundary("wait_for_batch", || async move {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let tier = parse_tier(&tier)?;
+            let receiver = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                core.wait_for_batch(batch_id, tier).map_err(runtime_err)?
+            };
+
+            match receiver.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(rejection)) => Err(JazzRnError::Runtime {
+                    message: format!(
+                        "Persisted batch {} was rejected ({}): {}",
+                        rejection.batch_id, rejection.code, rejection.reason
+                    ),
+                }),
+                Err(_) => Err(JazzRnError::Runtime {
+                    message: "Wait for batch cancelled".into(),
+                }),
+            }
+        })
+        .await
+    }
+
     // =========================================================================
     // Queries
     // =========================================================================
