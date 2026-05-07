@@ -18,13 +18,37 @@
  *     After that call, Rust owns `self.onmessage` / `self.postMessage`.
  */
 
-import type { InitMessage } from "./worker-protocol.js";
+import type { RuntimeSourcesConfig } from "../runtime/context.js";
 import {
   readWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "../runtime/runtime-config.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
+
+/**
+ * Init message: the only worker-protocol envelope that stays a JS object
+ * (everything else rides as binary postcard inside `MainToWorkerWire`).
+ * Stays JS because `runtimeSources` carries bundler-resolved JS module/blob
+ * refs that don't postcard-serialise, and the shim consumes them locally
+ * before handing off to Rust.
+ */
+interface InitMessage {
+  type: "init";
+  schemaJson: string;
+  appId: string;
+  env: string;
+  userBranch: string;
+  dbName: string;
+  clientId: string;
+  serverUrl?: string;
+  jwtToken?: string;
+  adminSecret?: string;
+  runtimeSources?: RuntimeSourcesConfig;
+  fallbackWasmUrl?: string;
+  logLevel?: "error" | "warn" | "info" | "debug" | "trace";
+  telemetryCollectorUrl?: string;
+}
 
 declare const self: {
   postMessage(msg: unknown, transfer?: Transferable[]): void;
