@@ -1179,7 +1179,6 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
-        self.apply_pending_batch_fate_effects(storage);
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
