@@ -1,7 +1,7 @@
 use super::*;
 use crate::batch_fate::{
-    BatchMode, BatchSettlement, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
-    SealedBatchSubmission, VisibleBatchMember,
+    BatchFate, BatchMode, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
+    SealedBatchSubmission,
 };
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
@@ -734,10 +734,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(false);
         };
 
-        if !matches!(
-            record.latest_settlement,
-            Some(BatchSettlement::Rejected { .. })
-        ) {
+        if !matches!(record.latest_fate, Some(BatchFate::Rejected { .. })) {
             return Ok(false);
         }
 
@@ -777,21 +774,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         record.mark_sealed(submission.clone());
         if record.mode == BatchMode::Direct {
             let confirmed_tier = self.local_write_confirmed_tier();
-            let visible_members: Vec<_> = record
-                .members
-                .iter()
-                .map(|member| VisibleBatchMember {
-                    object_id: member.object_id,
-                    branch_name: member.branch_name,
-                    batch_id,
-                })
-                .collect();
-            let settlement = BatchSettlement::DurableDirect {
+            let settlement = BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier,
-                visible_members,
             };
-            record.apply_settlement(settlement.clone());
+            record.apply_fate(settlement.clone());
         }
         self.storage
             .upsert_local_batch_record(&record)

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::batch_fate::{BatchMode, BatchSettlement, VisibleBatchMember};
+use crate::batch_fate::{BatchFate, BatchMode};
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
@@ -323,8 +323,8 @@ impl QueryManager {
     fn maybe_record_local_direct_settlement<H: Storage>(
         &self,
         storage: &mut H,
-        branch_name: &BranchName,
-        row_id: ObjectId,
+        _branch_name: &BranchName,
+        _row_id: ObjectId,
         batch_id: BatchId,
         write_context: Option<&WriteContext>,
         visibility_change: &Option<RowVisibilityChange>,
@@ -343,14 +343,9 @@ impl QueryManager {
         };
 
         storage
-            .upsert_authoritative_batch_settlement(&BatchSettlement::DurableDirect {
+            .upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier,
-                visible_members: vec![VisibleBatchMember {
-                    object_id: row_id,
-                    branch_name: *branch_name,
-                    batch_id,
-                }],
             })
             .map_err(|err| QueryError::EncodingError(format!("persist batch settlement: {err}")))
     }
