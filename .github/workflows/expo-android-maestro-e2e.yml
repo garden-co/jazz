@@ -4,18 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - changeset-release/*
   pull_request:
     branches: [main]
     paths:
-      - crates/**
-      - packages/jazz-tools/**
-      - examples/todo-client-localfirst-expo/**
-      - Cargo.toml
-      - Cargo.lock
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - turbo.json
+      - crates/jazz-rn/**
+      - packages/jazz-tools/src/react-native/**
       - .github/workflows/expo-android-maestro-e2e.yml
 
 concurrency:
@@ -28,7 +23,6 @@ permissions:
 jobs:
   build-rn:
     name: Build jazz-rn (Android) artifacts
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     uses: ./.github/workflows/rn-build-reusable.yml
     with:
       concurrency: e2e-rn-test
@@ -37,7 +31,6 @@ jobs:
 
   build-jazz-tools-sandbox:
     name: Build jazz-tools sandbox binary (${{ matrix.target }})
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
@@ -84,7 +77,6 @@ jobs:
 
   expo-android-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     needs:
       - build-rn
       - build-jazz-tools-sandbox
