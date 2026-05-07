@@ -1049,17 +1049,29 @@ impl<F: SyncFile> OpfsBTree<F> {
             )));
         }
 
-        let run_pages =
-            (self.total_pages - page_id).min(self.options.read_coalesce_pages as u64) as usize;
+        let file_len = self.file.len()?;
+        let page_offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
+        let available_pages = file_len
+            .saturating_sub(page_offset)
+            .checked_div(self.options.page_size as u64)
+            .unwrap_or(0);
+        if available_pages == 0 {
+            return Err(BTreeError::Io(format!(
+                "unexpected eof: page {} at offset {} beyond file length {}",
+                page_id, page_offset, file_len
+            )));
+        }
+
+        let run_pages = (self.total_pages - page_id)
+            .min(available_pages)
+            .min(self.options.read_coalesce_pages as u64) as usize;
         let run_bytes = run_pages
             .checked_mul(self.options.page_size)
             .ok_or_else(|| BTreeError::Io("read run size overflow".to_string()))?;
-        let offset = page_id
-            .checked_mul(self.options.page_size as u64)
-            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
-
         let mut raw = vec![0u8; run_bytes];
-        self.file.read_exact_at(offset, &mut raw)?;
+        self.file.read_exact_at(page_offset, &mut raw)?;
         let allowance = self.max_cached_pages() / 4;
 
         for i in 0..run_pages {
@@ -2174,6 +2186,30 @@ mod tests {
             "expected coalesced reads ({}) to be < baseline ({})",
             coalesced_reads,
             baseline_reads
+        );
+    }
+
+    #[test]
+    fn coalesced_read_clamps_to_file_length() {
+        let file = CountingFile::new();
+        let mut options = small_options();
+        options.read_coalesce_pages = 8;
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"k00000", b"value").expect("put");
+        tree.checkpoint().expect("checkpoint");
+        drop(tree);
+
+        // Simulate an OPFS handle observing a shorter file than the superblock's
+        // total_pages would otherwise allow. Coalesced reads must still be able
+        // to read the requested first page without over-reading into EOF.
+        let readable_len = 3 * options.page_size as u64;
+        file.truncate(readable_len).expect("truncate");
+
+        let mut reopened = OpfsBTree::open(file, options).expect("reopen");
+        assert_eq!(
+            reopened.get(b"k00000").expect("get"),
+            Some(b"value".to_vec())
         );
     }
 
