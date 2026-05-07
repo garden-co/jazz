@@ -1058,6 +1058,10 @@ export class Db {
       client.hydrateLocalBatchRecords(batches);
     });
     bridge.onMutationErrorReplay((batch) => {
+      if (client.hasAcknowledgedRejectedBatch(batch.batchId)) {
+        this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+        return;
+      }
       const existingRecord = client.localBatchRecord(batch.batchId);
       const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
       client.replayRejectedBatchRecord(batch);

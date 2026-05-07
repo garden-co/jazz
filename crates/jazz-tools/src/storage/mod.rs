@@ -71,10 +71,10 @@ pub(super) fn row_confirmed_tier_with_batch_fate<H: Storage + ?Sized>(
     storage: &H,
     row: &StoredRowBatch,
 ) -> Result<Option<DurabilityTier>, StorageError> {
-    Ok(storage
-        .load_authoritative_batch_fate(row.batch_id)?
-        .as_ref()
-        .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row)))
+    Ok(match storage.load_authoritative_batch_fate(row.batch_id)? {
+        Some(settlement) => batch_fate_confirmed_tier_for_row(&settlement, row),
+        None => row.confirmed_tier,
+    })
 }
 
 pub(super) fn apply_batch_fate_tiers_to_rows<H: Storage + ?Sized>(
@@ -93,9 +93,10 @@ pub(super) fn apply_batch_fate_tiers_to_rows<H: Storage + ?Sized>(
                 .expect("settlement cache should contain inserted batch")
         };
 
-        row.confirmed_tier = settlement
-            .as_ref()
-            .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row));
+        row.confirmed_tier = match settlement {
+            Some(settlement) => batch_fate_confirmed_tier_for_row(settlement, row),
+            None => row.confirmed_tier,
+        };
     }
     Ok(())
 }

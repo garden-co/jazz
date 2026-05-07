@@ -1676,6 +1676,10 @@ export class JazzClient {
     return acknowledged;
   }
 
+  hasAcknowledgedRejectedBatch(batchId: string): boolean {
+    return this.acknowledgedRejectedBatchErrors.has(batchId);
+  }
+
   sealBatch(batchId: string): WriteHandle {
     this.requireBatchRecordMethod("sealBatch")(batchId);
     return new WriteHandle(batchId, this);
