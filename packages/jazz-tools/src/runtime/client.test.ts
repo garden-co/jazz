@@ -16,6 +16,14 @@ function makeFakeRuntime() {
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(),
+    insertWithSession: vi.fn((table: string, values: any, writeContextJson?: string | null) => {
+      const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+      return {
+        id: "todo-batch-query",
+        values: [],
+        batchId: writeContext.batch_id ?? "batch-query",
+      };
+    }),
     update: vi.fn(),
     delete: vi.fn(),
     query:
@@ -356,6 +364,56 @@ describe("JazzClient transactions", () => {
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
     expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
+  });
+
+  it("rolls back an open batch without sealing the batch", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.rollback();
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+    expect(() => batch.commit()).toThrow(/rolled back/i);
+    expect(() => batch.rollback()).toThrow(/rolled back/i);
+    expect(() =>
+      batch.create("todos", {
+        title: { type: "Text", value: "Nope" },
+      }),
+    ).toThrow(/rolled back/i);
+  });
+
+  it("rejects rollback after a batch has been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.commit();
+
+    expect(() => batch.rollback()).toThrow(/committed/i);
+  });
+
+  it("supports raw reads scoped to the open batch", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([{ id: "todo-batch-query", values: [] }]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.create("todos", {});
+
+    await expect(
+      batch.query({ _build: () => JSON.stringify({ table: "todos" }) }),
+    ).resolves.toEqual([{ id: "todo-batch-query", values: [] }]);
+
+    expect(runtime.query).toHaveBeenCalledTimes(1);
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      local_updates: "deferred",
+      transaction_overlay: {
+        batch_id: batch.batchId(),
+        row_ids: ["todo-batch-query"],
+      },
+    });
   });
 
   it("commits a sync callback transaction and returns the callback result handle", async () => {
