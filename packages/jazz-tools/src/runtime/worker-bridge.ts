@@ -11,14 +11,17 @@
  * `init()`.
  */
 
-import type { Runtime } from "./client.js";
+import type { LocalBatchRecord, Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
-import type {
-  LocalBatchRecordsSyncMessage,
-  MutationErrorReplayMessage,
-  WorkerLifecycleEvent,
-} from "../worker/worker-protocol.js";
+
+/** Page lifecycle hint forwarded to the worker runtime. */
+export type WorkerLifecycleEvent =
+  | "visibility-hidden"
+  | "visibility-visible"
+  | "pagehide"
+  | "freeze"
+  | "resume";
 
 export interface WorkerBridgeOptions {
   schemaJson: string;
@@ -71,8 +74,8 @@ interface RuntimeWithWorkerBridge extends Runtime {
 interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  onLocalBatchRecordsSync?: (batches: LocalBatchRecordsSyncMessage["batches"]) => void;
-  onMutationErrorReplay?: (batch: MutationErrorReplayMessage["batch"]) => void;
+  onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
+  onMutationErrorReplay?: (batch: LocalBatchRecord) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
@@ -212,14 +215,12 @@ export class WorkerBridge {
     this.bridge?.setListeners(this.listeners);
   }
 
-  onLocalBatchRecordsSync(
-    listener: (batches: LocalBatchRecordsSyncMessage["batches"]) => void,
-  ): void {
+  onLocalBatchRecordsSync(listener: (batches: LocalBatchRecord[]) => void): void {
     this.listeners.onLocalBatchRecordsSync = listener;
     this.bridge?.setListeners(this.listeners);
   }
 
-  onMutationErrorReplay(listener: (batch: MutationErrorReplayMessage["batch"]) => void): void {
+  onMutationErrorReplay(listener: (batch: LocalBatchRecord) => void): void {
     this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
   }
