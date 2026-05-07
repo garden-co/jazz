@@ -1144,6 +1144,103 @@ describe("codex completion session service", () => {
     });
   }, 30_000);
 
+  it("replaces a running service when the startup runtime config differs", async () => {
+    const firstProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    serviceProcess = firstProcess;
+    firstProcess.stderr.setEncoding("utf8");
+    firstProcess.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, firstProcess, () => serviceStderr);
+    const firstHealth = await sendSocketRequest(socketPath, {
+      id: "health-first",
+      method: "health",
+    });
+    expect(firstHealth).toMatchObject({
+      id: "health-first",
+      ok: true,
+      result: {
+        watchRollouts: false,
+        watchStreamRollouts: true,
+      },
+    });
+
+    let secondStderr = "";
+    const secondProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "true",
+        "--watch-stream-rollouts",
+        "true",
+      ],
+      {
+        cwd: packageRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    secondProcess.stderr.setEncoding("utf8");
+    secondProcess.stderr.on("data", (chunk: string) => {
+      secondStderr += chunk;
+    });
+
+    await waitForHealth(socketPath, secondProcess, () => secondStderr, (health) =>
+      health.result?.watchRollouts === true &&
+      health.result?.watchStreamRollouts === true
+    );
+    if (firstProcess.exitCode === null && !firstProcess.killed) {
+      await once(firstProcess, "exit");
+    }
+    serviceProcess = secondProcess;
+
+    expect(secondStderr).toContain("replacing mismatched Jazz2 session service");
+    const secondHealth = await sendSocketRequest(socketPath, {
+      id: "health-second",
+      method: "health",
+    });
+    expect(secondHealth).toMatchObject({
+      id: "health-second",
+      ok: true,
+      result: {
+        watchRollouts: true,
+        watchStreamRollouts: true,
+      },
+    });
+  }, 30_000);
+
   it("reclaims a stale lock from a live pid when no socket ever comes up", async () => {
     await writeFile(
       `${socketPath}.lock`,
@@ -1214,6 +1311,48 @@ async function waitForSocket(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`timed out waiting for session socket at ${socketPath}\n${stderr()}`);
+}
+
+async function waitForHealth(
+  socketPath: string,
+  process: ChildProcessWithoutNullStreams,
+  stderr: () => string,
+  predicate: (response: {
+    id?: string;
+    ok: boolean;
+    result?: Record<string, unknown>;
+    error?: string;
+  }) => boolean,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  let lastResponse: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await sendSocketRequest(socketPath, {
+        id: "health-wait",
+        method: "health",
+      });
+      lastResponse = response;
+      const normalized = {
+        ...response,
+        result: typeof response.result === "object" && response.result !== null
+          ? response.result as Record<string, unknown>
+          : undefined,
+      };
+      if (predicate(normalized)) {
+        return;
+      }
+    } catch (error) {
+      lastResponse = error;
+    }
+    if (process.exitCode != null) {
+      throw new Error(stderr() || `session service exited with code ${process.exitCode}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `timed out waiting for session health at ${socketPath}: ${JSON.stringify(lastResponse)}\n${stderr()}`,
+  );
 }
 
 async function sendSocketRequest(

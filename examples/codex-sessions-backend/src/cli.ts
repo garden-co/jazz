@@ -181,6 +181,19 @@ interface SessionServiceRuntimeInfo {
   streamDataPath: string;
 }
 
+interface SessionServiceExpectedRuntime {
+  dataPath: string;
+  streamDataPath: string;
+  watchRollouts: boolean;
+  watchStreamRollouts: boolean;
+}
+
+interface SessionServiceHealthProbe extends SessionServiceExpectedRuntime {
+  pid: number;
+  status: string;
+  socketPath: string;
+}
+
 type CodexSessionStoreHandle = ReturnType<typeof createCodexSessionStore>;
 type CodexStreamEventRow = Awaited<ReturnType<CodexSessionStoreHandle["listCodexStreamEvents"]>>[number];
 
@@ -2474,13 +2487,13 @@ async function canConnectToSocket(socketPath: string): Promise<boolean> {
   });
 }
 
-async function canQuerySessionServiceHealth(socketPath: string): Promise<boolean> {
+async function querySessionServiceHealth(socketPath: string): Promise<SessionServiceHealthProbe | null> {
   return await new Promise((resolve) => {
     const socket = createConnection({ path: socketPath });
     let settled = false;
     let buffer = "";
 
-    const finish = (result: boolean) => {
+    const finish = (result: SessionServiceHealthProbe | null) => {
       if (settled) {
         return;
       }
@@ -2501,37 +2514,68 @@ async function canQuerySessionServiceHealth(socketPath: string): Promise<boolean
       }
       const line = buffer.slice(0, newlineIndex).trim();
       if (!line) {
-        finish(false);
+        finish(null);
         return;
       }
       try {
         const response = JSON.parse(line) as {
           ok?: unknown;
-          result?: { status?: unknown };
+          result?: Partial<SessionServiceHealthProbe>;
         };
-        finish(response.ok === true && response.result?.status === "ok");
+        const result = response.result;
+        if (
+          response.ok === true &&
+          result?.status === "ok" &&
+          typeof result.pid === "number" &&
+          Number.isFinite(result.pid) &&
+          typeof result.socketPath === "string" &&
+          typeof result.dataPath === "string" &&
+          typeof result.streamDataPath === "string" &&
+          typeof result.watchRollouts === "boolean" &&
+          typeof result.watchStreamRollouts === "boolean"
+        ) {
+          finish({
+            pid: result.pid,
+            status: result.status,
+            socketPath: result.socketPath,
+            dataPath: result.dataPath,
+            streamDataPath: result.streamDataPath,
+            watchRollouts: result.watchRollouts,
+            watchStreamRollouts: result.watchStreamRollouts,
+          });
+          return;
+        }
+        finish(null);
       } catch {
-        finish(false);
+        finish(null);
       }
     });
     socket.once("error", () => {
-      finish(false);
+      finish(null);
     });
     socket.setTimeout(500, () => {
-      finish(false);
+      finish(null);
     });
   });
 }
 
-async function waitForSocketReady(socketPath: string, timeoutMs: number): Promise<boolean> {
+async function canQuerySessionServiceHealth(socketPath: string): Promise<boolean> {
+  return (await querySessionServiceHealth(socketPath)) !== null;
+}
+
+async function waitForSessionServiceHealth(
+  socketPath: string,
+  timeoutMs: number,
+): Promise<SessionServiceHealthProbe | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await canQuerySessionServiceHealth(socketPath)) {
-      return true;
+    const health = await querySessionServiceHealth(socketPath);
+    if (health) {
+      return health;
     }
     await delay(50);
   }
-  return await canQuerySessionServiceHealth(socketPath);
+  return await querySessionServiceHealth(socketPath);
 }
 
 function isSessionServiceLockStale(metadata: SessionServiceLockMetadata): boolean {
@@ -2542,7 +2586,82 @@ function isSessionServiceLockStale(metadata: SessionServiceLockMetadata): boolea
   return Date.now() - startedAtMs >= SESSION_SERVICE_STALE_LOCK_GRACE_MS;
 }
 
-async function acquireSessionServiceLock(socketPath: string): Promise<SessionServiceInstanceLock> {
+function sessionServiceHealthMatchesExpected(
+  health: SessionServiceHealthProbe,
+  expected: SessionServiceExpectedRuntime,
+): boolean {
+  return health.dataPath === expected.dataPath &&
+    health.streamDataPath === expected.streamDataPath &&
+    health.watchRollouts === expected.watchRollouts &&
+    health.watchStreamRollouts === expected.watchStreamRollouts;
+}
+
+function sessionServiceRuntimeSummary(runtime: SessionServiceExpectedRuntime): string {
+  return `dataPath=${runtime.dataPath} streamDataPath=${runtime.streamDataPath} ` +
+    `watchRollouts=${runtime.watchRollouts} watchStreamRollouts=${runtime.watchStreamRollouts}`;
+}
+
+async function waitForProcessToExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) {
+      return true;
+    }
+    await delay(50);
+  }
+  return !processExists(pid);
+}
+
+async function terminateSessionServicePid(pid: number): Promise<boolean> {
+  if (pid <= 0 || pid === process.pid) {
+    return false;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return !processExists(pid);
+  }
+  if (await waitForProcessToExit(pid, 2_000)) {
+    return true;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return !processExists(pid);
+  }
+  return await waitForProcessToExit(pid, 2_000);
+}
+
+async function replaceMismatchedSessionService(options: {
+  socketPath: string;
+  lockPath: string;
+  existingPid: number;
+  health: SessionServiceHealthProbe;
+  expected: SessionServiceExpectedRuntime;
+  cleanupLock?: boolean;
+}): Promise<boolean> {
+  const pid = options.health.pid || options.existingPid;
+  console.error(
+    "warning: replacing mismatched Jazz2 session service " +
+      `pid ${pid} at ${options.socketPath}; ` +
+      `current ${sessionServiceRuntimeSummary(options.health)}; ` +
+      `expected ${sessionServiceRuntimeSummary(options.expected)}`,
+  );
+  const stopped = await terminateSessionServicePid(pid);
+  if (!stopped) {
+    return false;
+  }
+  if (options.cleanupLock ?? true) {
+    cleanupInstanceLock(options.lockPath);
+  }
+  cleanupSocketPath(options.socketPath);
+  return true;
+}
+
+async function acquireSessionServiceLock(
+  socketPath: string,
+  expectedRuntime?: SessionServiceExpectedRuntime,
+): Promise<SessionServiceInstanceLock> {
   const lockPath = lockPathForSocket(socketPath);
   const metadata: SessionServiceLockMetadata = {
     pid: process.pid,
@@ -2584,7 +2703,21 @@ async function acquireSessionServiceLock(socketPath: string): Promise<SessionSer
       }
       continue;
     }
-    if (await waitForSocketReady(socketPath, SESSION_SERVICE_STARTUP_WAIT_MS)) {
+    const health = await waitForSessionServiceHealth(socketPath, SESSION_SERVICE_STARTUP_WAIT_MS);
+    if (health) {
+      if (
+        expectedRuntime &&
+        !sessionServiceHealthMatchesExpected(health, expectedRuntime) &&
+        await replaceMismatchedSessionService({
+          socketPath,
+          lockPath,
+          existingPid: existing.pid,
+          health,
+          expected: expectedRuntime,
+        })
+      ) {
+        continue;
+      }
       throw new Error(`session service already running at ${socketPath}`);
     }
     if (!processExists(existing.pid)) {
@@ -2610,9 +2743,30 @@ async function acquireSessionServiceLock(socketPath: string): Promise<SessionSer
   }
 }
 
-async function prepareSocketPath(socketPath: string): Promise<void> {
-  const alreadyServing = await canQuerySessionServiceHealth(socketPath);
-  if (alreadyServing) {
+async function prepareSocketPath(
+  socketPath: string,
+  lockPath: string,
+  expectedRuntime: SessionServiceExpectedRuntime,
+): Promise<void> {
+  const existingHealth = await querySessionServiceHealth(socketPath);
+  if (!existingHealth) {
+    cleanupSocketPath(socketPath);
+    return;
+  }
+  if (!sessionServiceHealthMatchesExpected(existingHealth, expectedRuntime)) {
+    const replaced = await replaceMismatchedSessionService({
+      socketPath,
+      lockPath,
+      existingPid: existingHealth.pid,
+      health: existingHealth,
+      expected: expectedRuntime,
+      cleanupLock: false,
+    });
+    if (replaced) {
+      return;
+    }
+  }
+  if (existingHealth) {
     throw new Error(`session service already running at ${socketPath}`);
   }
   cleanupSocketPath(socketPath);
@@ -2774,7 +2928,16 @@ async function serveSessionQueries(options: {
   warmStreamStore: boolean;
 }): Promise<void> {
   await mkdir(dirname(options.socketPath), { recursive: true });
-  const instanceLock = await acquireSessionServiceLock(options.socketPath);
+  const expectedRuntime: SessionServiceExpectedRuntime = {
+    dataPath: options.dataPath,
+    streamDataPath: options.streamDataPath,
+    watchRollouts: options.watchRollouts,
+    watchStreamRollouts: options.watchStreamRollouts,
+  };
+  const instanceLock = await acquireSessionServiceLock(
+    options.socketPath,
+    expectedRuntime,
+  );
   const completionBroadcaster = new CompletionBroadcaster();
   let runtimeDeps: SessionServiceRuntimeDeps | null = null;
   const getRuntimeDeps = (): SessionServiceRuntimeDeps => {
@@ -2848,7 +3011,11 @@ async function serveSessionQueries(options: {
   };
 
   try {
-    await prepareSocketPath(options.socketPath);
+    await prepareSocketPath(
+      options.socketPath,
+      instanceLock.lockPath,
+      expectedRuntime,
+    );
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(options.socketPath, () => {
