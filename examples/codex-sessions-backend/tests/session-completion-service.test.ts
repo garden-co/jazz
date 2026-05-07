@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,7 +87,7 @@ describe("codex completion session service", () => {
             duration_ms: 1000,
           },
         }),
-      ].join("\n"),
+      ].join("\n") + "\n",
     );
 
     await syncCodexRollouts({ codexHome, store: store! });
@@ -410,7 +410,7 @@ describe("codex completion session service", () => {
             delta: "rollout sidecar",
           },
         }),
-      ].join("\n"),
+      ].join("\n") + "\n",
     );
 
     const events = await waitForStreamEvents(socketPath, sessionId, 2);
@@ -512,6 +512,107 @@ describe("codex completion session service", () => {
           eventType: "agent_message_delta",
           turnId: "turn-stream-old-day",
           textDelta: "old-day sidecar",
+        }),
+      ]),
+    );
+  }, 30_000);
+
+  it("streams appended rollout events without waiting for the next path rescan", async () => {
+    const sessionId = "019d0000-0000-7000-8000-000000000096";
+    const rolloutDir = join(codexHome, "sessions/2026/04/01");
+    const liveRolloutPath = join(
+      rolloutDir,
+      `rollout-2026-04-01T12-00-00-${sessionId}.jsonl`,
+    );
+    await mkdir(rolloutDir, { recursive: true });
+    const now = new Date().toISOString();
+    await writeFile(
+      liveRolloutPath,
+      [
+        JSON.stringify({
+          timestamp: now,
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            timestamp: now,
+            cwd: "/tmp/stream-append-rollout",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-append",
+            delta: "before append",
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE: "backfill",
+          FLOW_CODEX_SESSION_STREAM_WATCH_SCAN_INTERVAL_MS: "60000",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+    await waitForStreamEvents(socketPath, sessionId, 2);
+
+    await appendFile(
+      liveRolloutPath,
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: "event_msg",
+        payload: {
+          type: "agent_message_delta",
+          turn_id: "turn-stream-append",
+          delta: "after append",
+        },
+      })}\n`,
+    );
+
+    const events = await waitForStreamEvents(socketPath, sessionId, 3);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sequence: 3,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          turnId: "turn-stream-append",
+          textDelta: "after append",
         }),
       ]),
     );

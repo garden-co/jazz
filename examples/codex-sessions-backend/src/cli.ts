@@ -1073,6 +1073,7 @@ async function listRolloutEventRowsFromFile(
       const byteLength = Buffer.byteLength(rawLine, "utf8") + 1;
       lineNumber += 1;
       if (
+        rawLine.trim() !== "" &&
         (input.afterLineNumber === undefined || lineNumber > input.afterLineNumber) &&
         (input.afterByteOffset === undefined || lineOffset > input.afterByteOffset)
       ) {
@@ -1103,6 +1104,7 @@ async function listRolloutEventRowsFromFile(
   if (pending) {
     lineNumber += 1;
     if (
+      pending.trim() !== "" &&
       (input.afterLineNumber === undefined || lineNumber > input.afterLineNumber) &&
       (input.afterByteOffset === undefined || pendingOffset > input.afterByteOffset)
     ) {
@@ -3388,6 +3390,7 @@ interface StreamRolloutWatcherOptions {
 
 interface StreamRolloutCursor {
   mtimeMs: number;
+  size?: number;
   lastLineNumber?: number;
   lastByteOffset?: number;
   hasBacklog?: boolean;
@@ -3418,7 +3421,7 @@ function streamWatchScanIntervalMs(pollIntervalMs: number): number {
   if (Number.isFinite(parsed) && parsed > 0) {
     return Math.max(50, Math.trunc(parsed));
   }
-  return Math.max(pollIntervalMs, DEFAULT_STREAM_WATCH_SCAN_INTERVAL_MS);
+  return Math.max(50, Math.min(Math.trunc(pollIntervalMs), DEFAULT_STREAM_WATCH_SCAN_INTERVAL_MS));
 }
 
 function streamWatchBootstrapGraceMs(): number {
@@ -3487,26 +3490,29 @@ async function watchRecentRolloutStreamEvents(
         return;
       }
       await delay(0, options.signal);
-      let cursor = cursors.get(rolloutPath.path);
-      if (cursor && !cursor.hasBacklog && rolloutPath.mtimeMs <= cursor.mtimeMs) {
+      const fileStat = await stat(rolloutPath.path).catch(() => null);
+      if (!fileStat?.isFile()) {
         continue;
       }
+      const currentMtimeMs = fileStat.mtimeMs;
+      const currentSize = fileStat.size;
+      let cursor = cursors.get(rolloutPath.path);
       if (!cursor) {
         cursor = await latestRecordedStreamCursor({
           store: options.store,
           rolloutPath: rolloutPath.path,
-          mtimeMs: rolloutPath.mtimeMs,
+          mtimeMs: currentMtimeMs,
           backfillMaxBytes: bootstrapBackfillMaxBytes,
         });
       }
       if (!cursor && bootstrapMode === "tail") {
-        const fileStat = await stat(rolloutPath.path).catch(() => null);
         const shouldTail =
-          rolloutPath.mtimeMs < watcherStartedAtMs - bootstrapGraceMs ||
+          currentMtimeMs < watcherStartedAtMs - bootstrapGraceMs ||
           !!fileStat?.isFile() && fileStat.size > bootstrapBackfillMaxBytes;
         if (shouldTail) {
           cursors.set(rolloutPath.path, {
-            mtimeMs: rolloutPath.mtimeMs,
+            mtimeMs: currentMtimeMs,
+            size: currentSize,
             lastByteOffset: fileStat?.isFile() && fileStat.size > 0 ? fileStat.size - 1 : undefined,
           });
           continue;
@@ -3545,7 +3551,8 @@ async function watchRecentRolloutStreamEvents(
       }
 
       cursors.set(rolloutPath.path, {
-        mtimeMs: rolloutPath.mtimeMs,
+        mtimeMs: currentMtimeMs,
+        size: currentSize,
         lastLineNumber: result.lastLineNumber ?? cursor?.lastLineNumber,
         lastByteOffset: result.lastByteOffset ?? cursor?.lastByteOffset,
         hasBacklog: !!result.hasMore,
@@ -3589,6 +3596,7 @@ async function latestRecordedStreamCursor(options: {
 
   return {
     mtimeMs: options.mtimeMs,
+    size: fileStat?.isFile() ? fileStat.size : undefined,
     lastLineNumber: latestForPath.sequence,
     lastByteOffset: shouldResumeByLine ? undefined : fileEndByteOffset(fileStat),
     hasBacklog: true,
