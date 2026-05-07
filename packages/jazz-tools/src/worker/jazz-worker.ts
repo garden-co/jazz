@@ -18,7 +18,7 @@
  *     After that call, Rust owns `self.onmessage` / `self.postMessage`.
  */
 
-import type { InitMessage, MainToWorkerMessage } from "./worker-protocol.js";
+import type { InitMessage } from "./worker-protocol.js";
 import {
   readWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -56,13 +56,22 @@ ensureVitestWorkerImportShim();
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let initMessage: InitMessage | null = null;
-const pendingMessages: MainToWorkerMessage[] = [];
+// Pre-handoff buffer. Init arrives as a JS object; everything else now arrives
+// as Uint8Array (postcard-encoded `MainToWorkerWire`). Rust parses each entry
+// post-handoff inside `runAsWorker`.
+const pendingMessages: unknown[] = [];
 let wasmInitialized = false;
 
-self.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
+self.onmessage = (event: MessageEvent) => {
   const data = event.data;
-  if (!initMessage && data?.type === "init") {
-    initMessage = data;
+  if (
+    !initMessage &&
+    typeof data === "object" &&
+    data !== null &&
+    !(data instanceof Uint8Array) &&
+    (data as { type?: unknown }).type === "init"
+  ) {
+    initMessage = data as InitMessage;
     void bootstrapAndHandoff(initMessage);
     return;
   }

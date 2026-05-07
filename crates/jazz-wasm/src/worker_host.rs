@@ -52,9 +52,8 @@ use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
 use crate::runtime::WasmRuntime;
 use crate::worker_protocol::{
-    build_auth_failed, build_debug_schema_state_ok, build_debug_seed_live_schema_ok, build_error,
-    build_init_ok, build_local_batch_records_sync, build_mutation_error_replay, build_shutdown_ok,
-    parse_main_to_worker, InitPayload, MainToWorkerMessage, WorkerLifecycleEvent,
+    parse_main_to_worker, worker_to_main_post, InitPayload, MainToWorkerMessage, MainToWorkerWire,
+    WorkerLifecycleEvent, WorkerToMainWire,
 };
 
 // =============================================================================
@@ -132,14 +131,18 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     let init = match parse_main_to_worker(&init_message) {
         Ok(MainToWorkerMessage::Init(payload)) => payload,
         Ok(other) => {
-            post_to_main(&build_error(&format!(
-                "first message must be `init`, got {}",
-                describe_main_message(&other)
-            )));
+            post_to_main(&WorkerToMainWire::Error {
+                message: format!(
+                    "first message must be `init`, got {}",
+                    describe_main_message(&other)
+                ),
+            });
             return Ok(());
         }
         Err(e) => {
-            post_to_main(&build_error(&format!("init parse error: {e}")));
+            post_to_main(&WorkerToMainWire::Error {
+                message: format!("init parse error: {e}"),
+            });
             return Ok(());
         }
     };
@@ -152,7 +155,9 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
         match parse_main_to_worker(&entry) {
             Ok(MainToWorkerMessage::Init(_)) => {
                 tracing::warn!("ignoring duplicate init in pending pre-bootstrap messages");
-                post_to_main(&build_error("ignoring duplicate init"));
+                post_to_main(&WorkerToMainWire::Error {
+                    message: "ignoring duplicate init".to_string(),
+                });
             }
             Ok(parsed) => host.pending_messages.push_back(parsed),
             Err(e) => tracing::warn!("malformed pending message during bootstrap: {e}"),
@@ -165,7 +170,9 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
         let data = event.data();
         match parse_main_to_worker(&data) {
             Ok(msg) => handle_main_message(msg),
-            Err(e) => post_to_main(&build_error(&format!("malformed worker message: {e}"))),
+            Err(e) => post_to_main(&WorkerToMainWire::Error {
+                message: format!("malformed worker message: {e}"),
+            }),
         }
     });
     global.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -176,7 +183,9 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
     // Spawn async runtime open + init.
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = run_init(*init).await {
-            post_to_main(&build_error(&format!("Init failed: {e}")));
+            post_to_main(&WorkerToMainWire::Error {
+                message: format!("Init failed: {e}"),
+            });
         }
     });
 
@@ -186,20 +195,22 @@ pub fn run_as_worker(init_message: JsValue, pending_messages: Array) -> Result<(
 fn describe_main_message(msg: &MainToWorkerMessage) -> &'static str {
     match msg {
         MainToWorkerMessage::Init(_) => "init",
-        MainToWorkerMessage::Sync { .. } => "sync",
-        MainToWorkerMessage::PeerOpen { .. } => "peer-open",
-        MainToWorkerMessage::PeerSync { .. } => "peer-sync",
-        MainToWorkerMessage::PeerClose { .. } => "peer-close",
-        MainToWorkerMessage::LifecycleHint { .. } => "lifecycle-hint",
-        MainToWorkerMessage::UpdateAuth { .. } => "update-auth",
-        MainToWorkerMessage::DisconnectUpstream => "disconnect-upstream",
-        MainToWorkerMessage::ReconnectUpstream => "reconnect-upstream",
-        MainToWorkerMessage::Shutdown => "shutdown",
-        MainToWorkerMessage::AcknowledgeRejectedBatch { .. } => "acknowledge-rejected-batch",
-        MainToWorkerMessage::SimulateCrash => "simulate-crash",
-        MainToWorkerMessage::DebugSchemaState => "debug-schema-state",
-        MainToWorkerMessage::DebugSeedLiveSchema { .. } => "debug-seed-live-schema",
         MainToWorkerMessage::Unknown(_) => "<unknown>",
+        MainToWorkerMessage::Wire(wire) => match wire {
+            MainToWorkerWire::Sync { .. } => "sync",
+            MainToWorkerWire::PeerOpen { .. } => "peer-open",
+            MainToWorkerWire::PeerSync { .. } => "peer-sync",
+            MainToWorkerWire::PeerClose { .. } => "peer-close",
+            MainToWorkerWire::LifecycleHint { .. } => "lifecycle-hint",
+            MainToWorkerWire::UpdateAuth { .. } => "update-auth",
+            MainToWorkerWire::DisconnectUpstream => "disconnect-upstream",
+            MainToWorkerWire::ReconnectUpstream => "reconnect-upstream",
+            MainToWorkerWire::Shutdown => "shutdown",
+            MainToWorkerWire::AcknowledgeRejectedBatch { .. } => "acknowledge-rejected-batch",
+            MainToWorkerWire::SimulateCrash => "simulate-crash",
+            MainToWorkerWire::DebugSchemaState => "debug-schema-state",
+            MainToWorkerWire::DebugSeedLiveSchema { .. } => "debug-seed-live-schema",
+        },
     }
 }
 
@@ -251,8 +262,10 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     // Auth-failure callback.
     let auth_cb = Closure::<dyn FnMut(JsValue)>::new(|reason: JsValue| {
         let raw = reason.as_string().unwrap_or_default();
-        post_to_main(&crate::worker_protocol::build_upstream_disconnected());
-        post_to_main(&build_auth_failed(&map_auth_reason(&raw)));
+        post_to_main(&WorkerToMainWire::UpstreamDisconnected);
+        post_to_main(&WorkerToMainWire::AuthFailed {
+            reason: map_auth_reason(&raw).to_string(),
+        });
     })
     .into_js_value();
     runtime.on_auth_failure(auth_cb.unchecked_into());
@@ -343,7 +356,9 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
 
     // 10. Post init-ok last so main can rely on Ready being persistent by
     //     the time it dispatches subsequent traffic.
-    post_to_main(&build_init_ok(&main_client_id));
+    post_to_main(&WorkerToMainWire::InitOk {
+        client_id: main_client_id.clone(),
+    });
 
     Ok(())
 }
@@ -364,10 +379,10 @@ fn drain_pending_messages() {
 
 fn perform_upstream_connect(runtime: &Rc<WasmRuntime>, ws_url: &str, auth_json: &str) {
     match runtime.connect(ws_url.to_string(), auth_json.to_string()) {
-        Ok(()) => post_to_main(&crate::worker_protocol::build_upstream_connected()),
+        Ok(()) => post_to_main(&WorkerToMainWire::UpstreamConnected),
         Err(err) => {
             tracing::error!("runtime.connect failed: {:?}", err);
-            post_to_main(&crate::worker_protocol::build_upstream_disconnected());
+            post_to_main(&WorkerToMainWire::UpstreamDisconnected);
         }
     }
 }
@@ -444,8 +459,9 @@ fn make_on_main_sync_flushed() -> Function {
 fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
     match runtime.load_local_batch_records() {
         Ok(batches) => {
-            let msg = build_local_batch_records_sync(&batches);
-            post_to_main(&msg);
+            post_to_main(&WorkerToMainWire::LocalBatchRecordsSync {
+                batches_json: js_value_to_json(&batches),
+            });
         }
         Err(err) => tracing::warn!("loadLocalBatchRecords failed: {err:?}"),
     }
@@ -498,7 +514,9 @@ fn queue_rejected_batch_replay() {
                     if !is_rejected_settlement(&batch) {
                         continue;
                     }
-                    post_to_main(&build_mutation_error_replay(&batch));
+                    post_to_main(&WorkerToMainWire::MutationErrorReplay {
+                        batch_json: js_value_to_json(&batch),
+                    });
                 }
                 Err(err) => tracing::warn!("loadLocalBatchRecord {batch_id}: {err:?}"),
             }
@@ -528,7 +546,9 @@ fn handle_main_message(msg: MainToWorkerMessage) {
     // Init at any time other than during the initial bootstrap is a programming
     // error — post error and ignore (spec).
     if matches!(msg, MainToWorkerMessage::Init(_)) {
-        post_to_main(&build_error("ignoring duplicate init"));
+        post_to_main(&WorkerToMainWire::Error {
+            message: "ignoring duplicate init".to_string(),
+        });
         return;
     }
 
@@ -551,17 +571,28 @@ fn handle_main_message(msg: MainToWorkerMessage) {
 fn process_main_message(msg: MainToWorkerMessage) {
     let runtime = RUNTIME.with(|cell| cell.borrow().clone());
 
-    match msg {
+    let wire = match msg {
         MainToWorkerMessage::Init(_) => {
-            post_to_main(&build_error("ignoring duplicate init"));
+            post_to_main(&WorkerToMainWire::Error {
+                message: "ignoring duplicate init".to_string(),
+            });
+            return;
         }
-        MainToWorkerMessage::Sync { payloads } => {
+        MainToWorkerMessage::Unknown(t) => {
+            tracing::warn!("ignoring unknown worker message type {t}");
+            return;
+        }
+        MainToWorkerMessage::Wire(wire) => wire,
+    };
+
+    match wire {
+        MainToWorkerWire::Sync { payloads } => {
             let Some(rt) = runtime.as_ref() else { return };
             let Some(main_client_id) = get_main_client_id() else {
                 return;
             };
             for payload in payloads {
-                let arr = Uint8Array::from(payload.as_slice());
+                let arr = Uint8Array::from(payload.as_ref());
                 if let Err(err) =
                     rt.on_sync_message_received_from_client(&main_client_id, arr.into())
                 {
@@ -569,12 +600,12 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 }
             }
         }
-        MainToWorkerMessage::PeerOpen { peer_id } => {
+        MainToWorkerWire::PeerOpen { peer_id } => {
             if let Some(rt) = runtime.as_ref() {
                 let _ = ensure_peer_client(rt, &peer_id);
             }
         }
-        MainToWorkerMessage::PeerSync {
+        MainToWorkerWire::PeerSync {
             peer_id,
             term,
             payloads,
@@ -586,7 +617,7 @@ fn process_main_message(msg: MainToWorkerMessage) {
                         cell.borrow_mut().peer_terms.insert(peer_id.clone(), term);
                     });
                     for payload in payloads {
-                        let arr = Uint8Array::from(payload.as_slice());
+                        let arr = Uint8Array::from(payload.as_ref());
                         if let Err(err) =
                             rt.on_sync_message_received_from_client(&client, arr.into())
                         {
@@ -597,20 +628,20 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 Err(err) => tracing::warn!("ensure peer client: {err}"),
             }
         }
-        MainToWorkerMessage::PeerClose { peer_id } => close_peer(&peer_id),
-        MainToWorkerMessage::LifecycleHint { event, .. } => {
+        MainToWorkerWire::PeerClose { peer_id } => close_peer(&peer_id),
+        MainToWorkerWire::LifecycleHint { event, .. } => {
             handle_lifecycle_hint(event, runtime.as_ref());
         }
-        MainToWorkerMessage::UpdateAuth { jwt_token } => {
+        MainToWorkerWire::UpdateAuth { jwt_token } => {
             update_auth(jwt_token, runtime.as_ref());
         }
-        MainToWorkerMessage::DisconnectUpstream => {
+        MainToWorkerWire::DisconnectUpstream => {
             if let Some(rt) = runtime.as_ref() {
                 rt.disconnect();
-                post_to_main(&crate::worker_protocol::build_upstream_disconnected());
+                post_to_main(&WorkerToMainWire::UpstreamDisconnected);
             }
         }
-        MainToWorkerMessage::ReconnectUpstream => {
+        MainToWorkerWire::ReconnectUpstream => {
             if let Some(rt) = runtime.as_ref() {
                 let (ws_url, auth_json) = build_reconnect_auth();
                 if let Some(url) = ws_url {
@@ -618,49 +649,53 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 }
             }
         }
-        MainToWorkerMessage::Shutdown => handle_shutdown(runtime.as_ref(), false),
-        MainToWorkerMessage::SimulateCrash => handle_shutdown(runtime.as_ref(), true),
-        MainToWorkerMessage::AcknowledgeRejectedBatch { batch_id } => {
+        MainToWorkerWire::Shutdown => handle_shutdown(runtime.as_ref(), false),
+        MainToWorkerWire::SimulateCrash => handle_shutdown(runtime.as_ref(), true),
+        MainToWorkerWire::AcknowledgeRejectedBatch { batch_id } => {
             if let Some(rt) = runtime.as_ref() {
                 if let Err(err) = rt.acknowledge_rejected_batch(&batch_id) {
                     tracing::warn!("acknowledgeRejectedBatch: {err:?}");
                 }
             }
         }
-        MainToWorkerMessage::DebugSchemaState => match runtime.as_ref() {
+        MainToWorkerWire::DebugSchemaState => match runtime.as_ref() {
             Some(rt) => match rt.debug_schema_state() {
-                Ok(state_value) => post_to_main(&build_debug_schema_state_ok(&state_value)),
-                Err(err) => post_to_main(&build_error(&format!(
-                    "debug-schema-state failed: {}",
-                    js_error_message(&err.into())
-                ))),
+                Ok(state_value) => post_to_main(&WorkerToMainWire::DebugSchemaStateOk {
+                    state_json: js_value_to_json(&state_value),
+                }),
+                Err(err) => post_to_main(&WorkerToMainWire::Error {
+                    message: format!(
+                        "debug-schema-state failed: {}",
+                        js_error_message(&err.into())
+                    ),
+                }),
             },
             None => {
-                post_to_main(&build_error(
-                    "debug-schema-state requested before worker init complete",
-                ));
+                post_to_main(&WorkerToMainWire::Error {
+                    message: "debug-schema-state requested before worker init complete".to_string(),
+                });
             }
         },
-        MainToWorkerMessage::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
+        MainToWorkerWire::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
             Some(rt) => match rt.debug_seed_live_schema(&schema_json) {
                 Ok(()) => {
                     rt.flush_wal();
-                    post_to_main(&build_debug_seed_live_schema_ok());
+                    post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
                 }
-                Err(err) => post_to_main(&build_error(&format!(
-                    "debug-seed-live-schema failed: {}",
-                    js_error_message(&err.into())
-                ))),
+                Err(err) => post_to_main(&WorkerToMainWire::Error {
+                    message: format!(
+                        "debug-seed-live-schema failed: {}",
+                        js_error_message(&err.into())
+                    ),
+                }),
             },
             None => {
-                post_to_main(&build_error(
-                    "debug-seed-live-schema requested before worker init complete",
-                ));
+                post_to_main(&WorkerToMainWire::Error {
+                    message: "debug-seed-live-schema requested before worker init complete"
+                        .to_string(),
+                });
             }
         },
-        MainToWorkerMessage::Unknown(t) => {
-            tracing::warn!("ignoring unknown worker message type {t}");
-        }
     }
 }
 
@@ -730,7 +765,9 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     let json = serde_json::to_string(&auth).unwrap_or_else(|_| "{}".to_string());
     if let Err(err) = rt.update_auth(json) {
         tracing::error!("runtime.updateAuth failed: {err:?}");
-        post_to_main(&build_auth_failed("invalid"));
+        post_to_main(&WorkerToMainWire::AuthFailed {
+            reason: "invalid".to_string(),
+        });
     }
 }
 
@@ -764,7 +801,7 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
         g.main_client_id = None;
     });
 
-    post_to_main(&build_shutdown_ok());
+    post_to_main(&WorkerToMainWire::ShutdownOk);
     global.close();
     HOST.with(|cell| *cell.borrow_mut() = None);
 }
@@ -783,9 +820,20 @@ fn global_worker_scope() -> DedicatedWorkerGlobalScope {
         .expect("worker host expects a DedicatedWorkerGlobalScope")
 }
 
-fn post_to_main(message: &JsValue) {
+fn post_to_main(msg: &WorkerToMainWire) {
+    let Ok((value, transfer)) = worker_to_main_post(msg) else {
+        return;
+    };
     let global = global_worker_scope();
-    let _ = global.post_message(message);
+    let _ = global.post_message_with_transfer(&value, transfer.as_ref());
+}
+
+/// Serialise a JS-shaped `JsValue` to JSON. Returns `"null"` on failure.
+fn js_value_to_json(value: &JsValue) -> String {
+    js_sys::JSON::stringify(value)
+        .ok()
+        .and_then(|s| s.as_string())
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn is_security_error(err: &JsValue) -> bool {
