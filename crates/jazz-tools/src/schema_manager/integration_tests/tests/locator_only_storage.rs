@@ -12,7 +12,7 @@
 use std::ops::Bound;
 
 use crate::batch_fate::{
-    BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
+    BatchFate, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
@@ -210,22 +210,22 @@ impl Storage for LocatorOnlyStorage {
         self.inner.scan_sealed_batch_submissions()
     }
 
-    fn upsert_authoritative_batch_settlement(
+    fn upsert_authoritative_batch_fate(
         &mut self,
-        settlement: &BatchSettlement,
+        settlement: &BatchFate,
     ) -> Result<(), StorageError> {
-        self.inner.upsert_authoritative_batch_settlement(settlement)
+        self.inner.upsert_authoritative_batch_fate(settlement)
     }
 
-    fn load_authoritative_batch_settlement(
+    fn load_authoritative_batch_fate(
         &self,
         batch_id: BatchId,
-    ) -> Result<Option<BatchSettlement>, StorageError> {
-        self.inner.load_authoritative_batch_settlement(batch_id)
+    ) -> Result<Option<BatchFate>, StorageError> {
+        self.inner.load_authoritative_batch_fate(batch_id)
     }
 
-    fn scan_authoritative_batch_settlements(&self) -> Result<Vec<BatchSettlement>, StorageError> {
-        self.inner.scan_authoritative_batch_settlements()
+    fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {
+        self.inner.scan_authoritative_batch_fates()
     }
 
     fn append_history_region_row_bytes(

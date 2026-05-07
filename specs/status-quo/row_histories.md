@@ -104,7 +104,7 @@ The important engine fields are:
 - `_jazz_parents` — parent batch ids for row-local ancestry
 - `_jazz_state` — whether the version is visible, staging, or rejected
 - `_jazz_confirmed_tier` — legacy/derived per-row tier metadata; authoritative durability is now
-  read from `BatchSettlement` where available
+  read from `BatchFate` where available
 - `_jazz_is_deleted` — tombstone marker
 - `_jazz_metadata` — engine/user metadata blob
 - actor/provenance columns such as `_jazz_created_by` and `_jazz_updated_by`
@@ -185,9 +185,12 @@ systems care about.
 
 Authority settlement remains batch-scoped even for direct writes. A direct row may be visible
 optimistically before its batch settles, but the authoritative accepted/rejected answer is
-`BatchSettlement::DurableDirect` or `BatchSettlement::Rejected`. If a rejected direct update had
-replaced an older visible row, receivers mark the rejected history entry non-visible and rebuild
-the visible entry from the remaining history instead of deleting the object outright.
+`BatchFate::DurableDirect` or `BatchFate::Rejected`.
+Successful fate is whole-batch truth; row-history readers should not need to scan legacy
+`visible_members` to decide whether a known row in that batch has reached the fate's tier. If a
+rejected direct update had replaced an older visible row, receivers mark the rejected history entry
+non-visible and rebuild the visible entry from the remaining history instead of deleting the object
+outright.
 
 ## How a Transactional Write Lands
 

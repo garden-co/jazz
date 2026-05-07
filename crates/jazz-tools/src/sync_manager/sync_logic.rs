@@ -83,7 +83,14 @@ impl SyncManager {
             // stored row (including ones authored by other users that it only
             // observed via subscription) on every reconnect, which the server
             // rejects under row-level update policies.
-            let already_upstream = match (row.confirmed_tier, my_max_tier) {
+            let effective_confirmed_tier = row.confirmed_tier.or_else(|| {
+                storage
+                    .load_authoritative_batch_fate(row.batch_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|fate| fate.confirmed_tier())
+            });
+            let already_upstream = match (effective_confirmed_tier, my_max_tier) {
                 (None, _) => false,
                 (Some(_), None) => true,
                 (Some(row_tier), Some(local_tier)) => row_tier > local_tier,

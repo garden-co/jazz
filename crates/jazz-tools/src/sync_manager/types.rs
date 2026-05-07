@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -275,10 +275,10 @@ pub enum SyncPayload {
     },
 
     /// Replayable fate for one logical batch.
-    BatchSettlement { settlement: BatchSettlement },
+    BatchFate { fate: BatchFate },
 
     /// Request current replayable fate for specific batch ids.
-    BatchSettlementNeeded { batch_ids: Vec<BatchId> },
+    BatchFateNeeded { batch_ids: Vec<BatchId> },
 
     /// Explicitly seal a transactional batch so the authority can validate it.
     SealBatch { submission: SealedBatchSubmission },
@@ -303,7 +303,7 @@ pub enum SyncPayload {
     /// for the settled server result.
     ///
     /// This means the upstream server has reached a complete first frontier for the
-    /// subscription. Per-batch durability and visibility are replayed via `BatchSettlement`.
+    /// subscription. Per-batch durability and visibility are replayed via `BatchFate`.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -416,16 +416,8 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
-            SyncPayload::BatchSettlement { settlement } => match settlement {
-                BatchSettlement::DurableDirect {
-                    visible_members, ..
-                }
-                | BatchSettlement::AcceptedTransaction {
-                    visible_members, ..
-                } => visible_members.first().map(|member| member.object_id),
-                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
-            },
-            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::BatchFate { .. } => None,
+            SyncPayload::BatchFateNeeded { .. } => None,
             SyncPayload::SealBatch { submission } => {
                 submission.members.first().map(|member| member.object_id)
             }
@@ -442,16 +434,8 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(BranchName::new(&row.branch))
             }
-            SyncPayload::BatchSettlement { settlement } => match settlement {
-                BatchSettlement::DurableDirect {
-                    visible_members, ..
-                }
-                | BatchSettlement::AcceptedTransaction {
-                    visible_members, ..
-                } => visible_members.first().map(|member| member.branch_name),
-                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
-            },
-            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::BatchFate { .. } => None,
+            SyncPayload::BatchFateNeeded { .. } => None,
             SyncPayload::SealBatch { .. } => None,
             SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
@@ -467,7 +451,7 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. }
                 | SyncPayload::RowBatchCreated { .. }
                 | SyncPayload::RowBatchNeeded { .. }
-                | SyncPayload::BatchSettlement { .. }
+                | SyncPayload::BatchFate { .. }
                 | SyncPayload::SealBatch { .. }
         )
     }
@@ -506,8 +490,8 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
             SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
             SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
-            SyncPayload::BatchSettlement { .. } => "BatchSettlement",
-            SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
+            SyncPayload::BatchFate { .. } => "BatchFate",
+            SyncPayload::BatchFateNeeded { .. } => "BatchFateNeeded",
             SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",

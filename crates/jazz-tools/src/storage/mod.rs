@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use smolset::SmolSet;
 
 use crate::batch_fate::{
-    BatchSettlement, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
+    BatchFate, CapturedFrontierMember, LocalBatchRecord, SealedBatchSubmission,
 };
 use crate::catalogue::CatalogueEntry;
 use crate::digest::Digest32;
@@ -60,47 +60,33 @@ use crate::sync_manager::DurabilityTier;
 
 type EncodedTableRowHistories = BTreeMap<ObjectId, BTreeMap<(SharedString, BatchId), Vec<u8>>>;
 
-pub(super) fn batch_settlement_confirmed_tier_for_row(
-    settlement: &BatchSettlement,
-    row: &StoredRowBatch,
+pub(super) fn batch_fate_confirmed_tier_for_row(
+    settlement: &BatchFate,
+    _row: &StoredRowBatch,
 ) -> Option<DurabilityTier> {
-    let confirmed_tier = settlement.confirmed_tier()?;
-    let is_visible_member = match settlement {
-        BatchSettlement::DurableDirect {
-            visible_members, ..
-        }
-        | BatchSettlement::AcceptedTransaction {
-            visible_members, ..
-        } => visible_members.iter().any(|member| {
-            member.object_id == row.row_id
-                && member.branch_name.as_str() == row.branch.as_str()
-                && member.batch_id == row.batch_id
-        }),
-        BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => false,
-    };
-    is_visible_member.then_some(confirmed_tier)
+    settlement.confirmed_tier()
 }
 
-pub(super) fn row_confirmed_tier_with_batch_settlement<H: Storage + ?Sized>(
+pub(super) fn row_confirmed_tier_with_batch_fate<H: Storage + ?Sized>(
     storage: &H,
     row: &StoredRowBatch,
 ) -> Result<Option<DurabilityTier>, StorageError> {
     Ok(storage
-        .load_authoritative_batch_settlement(row.batch_id)?
+        .load_authoritative_batch_fate(row.batch_id)?
         .as_ref()
-        .and_then(|settlement| batch_settlement_confirmed_tier_for_row(settlement, row)))
+        .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row)))
 }
 
-pub(super) fn apply_batch_settlement_tiers_to_rows<H: Storage + ?Sized>(
+pub(super) fn apply_batch_fate_tiers_to_rows<H: Storage + ?Sized>(
     storage: &H,
     rows: &mut [StoredRowBatch],
 ) -> Result<(), StorageError> {
-    let mut settlement_cache = HashMap::<BatchId, Option<BatchSettlement>>::new();
+    let mut settlement_cache = HashMap::<BatchId, Option<BatchFate>>::new();
     for row in rows {
         let settlement = if let Some(settlement) = settlement_cache.get(&row.batch_id) {
             settlement
         } else {
-            let settlement = storage.load_authoritative_batch_settlement(row.batch_id)?;
+            let settlement = storage.load_authoritative_batch_fate(row.batch_id)?;
             settlement_cache.insert(row.batch_id, settlement);
             settlement_cache
                 .get(&row.batch_id)
@@ -109,7 +95,7 @@ pub(super) fn apply_batch_settlement_tiers_to_rows<H: Storage + ?Sized>(
 
         row.confirmed_tier = settlement
             .as_ref()
-            .and_then(|settlement| batch_settlement_confirmed_tier_for_row(settlement, row));
+            .and_then(|settlement| batch_fate_confirmed_tier_for_row(settlement, row));
     }
     Ok(())
 }
@@ -2750,7 +2736,7 @@ fn decode_local_batch_record_with_branch_ords<H: Storage + ?Sized>(
         sealed,
         members,
         sealed_submission: storage.load_sealed_batch_submission(batch_id)?,
-        latest_settlement: storage.load_authoritative_batch_settlement(batch_id)?,
+        latest_fate: storage.load_authoritative_batch_fate(batch_id)?,
     })
 }
 // ============================================================================

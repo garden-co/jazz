@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
@@ -81,11 +81,11 @@ pub struct SyncManager {
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
     /// Pending query rejections waiting for QueryManager to fail local subscriptions.
     pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
-    /// Pending replayable batch settlements for RuntimeCore to process.
-    pub(super) pending_batch_settlements: Vec<BatchSettlement>,
+    /// Pending replayable batch fates for RuntimeCore to process.
+    pub(super) pending_batch_fates: Vec<BatchFate>,
 
-    /// Batch settlements to send to clients after a full inbox batch has been processed.
-    pub(super) pending_client_batch_settlements: HashMap<ClientId, HashSet<BatchId>>,
+    /// Batch fates to send to clients after a full inbox batch has been processed.
+    pub(super) pending_client_batch_fates: HashMap<ClientId, HashSet<BatchId>>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -123,10 +123,10 @@ impl std::fmt::Debug for SyncManager {
             .field("remote_query_scopes", &self.remote_query_scopes)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("pending_query_rejections", &self.pending_query_rejections)
-            .field("pending_batch_settlements", &self.pending_batch_settlements)
+            .field("pending_batch_fates", &self.pending_batch_fates)
             .field(
-                "pending_client_batch_settlements",
-                &self.pending_client_batch_settlements,
+                "pending_client_batch_fates",
+                &self.pending_client_batch_fates,
             )
             .finish()
     }
@@ -225,8 +225,8 @@ impl SyncManager {
             remote_query_scope_dirty: HashSet::new(),
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
-            pending_batch_settlements: Vec::new(),
-            pending_client_batch_settlements: HashMap::new(),
+            pending_batch_fates: Vec::new(),
+            pending_client_batch_fates: HashMap::new(),
         }
     }
 
@@ -365,9 +365,9 @@ impl SyncManager {
                 * std::mem::size_of::<RowVisibilityChange>()
             + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
             + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
-            + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
+            + self.pending_batch_fates.len() * std::mem::size_of::<BatchFate>()
             + self
-                .pending_client_batch_settlements
+                .pending_client_batch_fates
                 .values()
                 .map(|batch_ids| {
                     std::mem::size_of::<ClientId>()
@@ -419,7 +419,7 @@ impl SyncManager {
             .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
     }
 
-    pub fn request_batch_settlements_from_server(
+    pub fn request_batch_fates_from_server(
         &mut self,
         server_id: ServerId,
         mut batch_ids: Vec<crate::row_histories::BatchId>,
@@ -432,7 +432,7 @@ impl SyncManager {
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         });
     }
 
@@ -582,10 +582,9 @@ impl SyncManager {
         for entry in entries {
             self.process_inbox_entry(storage, entry);
         }
-        let pending_client_batch_settlements =
-            std::mem::take(&mut self.pending_client_batch_settlements);
-        for (client_id, batch_ids) in pending_client_batch_settlements {
-            self.respond_to_batch_settlement_request(
+        let pending_client_batch_fates = std::mem::take(&mut self.pending_client_batch_fates);
+        for (client_id, batch_ids) in pending_client_batch_fates {
+            self.respond_to_batch_fate_request(
                 storage,
                 Destination::Client(client_id),
                 batch_ids.into_iter().collect(),
@@ -679,12 +678,10 @@ impl SyncManager {
 
         // Initial query scope delivery can include many rows from the same
         // sealed batch. Queue rows first so client interest is complete, then
-        // send one settlement per batch instead of one growing settlement per row.
+        // send one fate per batch instead of one growing fate per row.
         for batch_id in newly_visible_batch_ids {
-            if let Some(settlement) =
-                self.load_batch_settlement_by_batch_id_from_storage(storage, batch_id)
-            {
-                self.queue_batch_settlement_to_client(client_id, settlement);
+            if let Some(fate) = self.load_batch_fate_by_batch_id_from_storage(storage, batch_id) {
+                self.queue_batch_fate_to_client(client_id, fate);
             }
         }
     }
@@ -853,17 +850,17 @@ impl SyncManager {
         std::mem::take(&mut self.remote_query_scope_dirty)
     }
 
-    /// Take pending replayable batch settlements for RuntimeCore to process.
-    pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
-        std::mem::take(&mut self.pending_batch_settlements)
+    /// Take pending replayable batch fates for RuntimeCore to process.
+    pub fn take_pending_batch_fates(&mut self) -> Vec<BatchFate> {
+        std::mem::take(&mut self.pending_batch_fates)
     }
 
-    pub fn pending_batch_settlements(&self) -> &[BatchSettlement] {
-        &self.pending_batch_settlements
+    pub fn pending_batch_fates(&self) -> &[BatchFate] {
+        &self.pending_batch_fates
     }
 
-    pub fn push_pending_batch_settlement(&mut self, settlement: BatchSettlement) {
-        self.pending_batch_settlements.push(settlement);
+    pub fn push_pending_batch_fate(&mut self, fate: BatchFate) {
+        self.pending_batch_fates.push(fate);
     }
 
     /// Take pending row visibility changes for QueryManager to materialize

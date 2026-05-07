@@ -6,14 +6,9 @@ fn persist_direct_settlement_for_row(
     tier: DurabilityTier,
 ) {
     core.storage_mut()
-        .upsert_authoritative_batch_settlement(&crate::batch_fate::BatchSettlement::DurableDirect {
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::DurableDirect {
             batch_id: row.batch_id,
             confirmed_tier: tier,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row.row_id,
-                branch_name: BranchName::new(&row.branch),
-                batch_id: row.batch_id,
-            }],
         })
         .unwrap();
 }
@@ -1044,7 +1039,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
             payload @ SyncPayload::RowBatchNeeded { .. } => rows_to_a.push(payload),
-            payload @ SyncPayload::BatchSettlement { .. } => durability_to_a.push(payload),
+            payload @ SyncPayload::BatchFate { .. } => durability_to_a.push(payload),
             _ => {}
         }
     }
@@ -1570,8 +1565,8 @@ fn rc_transaction_visible_subscription_removes_local_pending_overlay_when_reject
 
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Rejected {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
                 batch_id,
                 code: "permission_denied".to_string(),
                 reason: "writer lacks publish rights".to_string(),
@@ -1704,7 +1699,7 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
                     remaining_row_payloads.push(payload);
                 }
             }
-            payload @ SyncPayload::BatchSettlement { .. }
+            payload @ SyncPayload::BatchFate { .. }
             | payload @ SyncPayload::QuerySettled { .. } => {
                 control_payloads.push(payload);
             }
@@ -1725,16 +1720,10 @@ fn rc_transaction_visible_subscription_hides_partial_accepted_batch_until_scope_
     assert!(
         control_payloads.iter().any(|payload| matches!(
             payload,
-            SyncPayload::BatchSettlement {
-                settlement: crate::batch_fate::BatchSettlement::AcceptedTransaction {
-                    batch_id: settled_batch_id,
-                    visible_members,
-                    ..
+            SyncPayload::BatchFate { fate: crate::batch_fate::BatchFate::AcceptedTransaction {
+                    batch_id: settled_batch_id,..
                 }
-            } if *settled_batch_id == batch_id
-                && visible_members.iter().any(|member| member.object_id == first_id)
-                && visible_members.iter().any(|member| member.object_id == second_id)
-        )),
+            } if *settled_batch_id == batch_id        )),
         "expected accepted transaction settlement for the shared batch"
     );
 
