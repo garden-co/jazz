@@ -28,7 +28,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, Worker};
 
-use crate::runtime::WasmRuntime;
+use crate::runtime::{RustOutboxSender, WasmRuntime};
 use crate::worker_protocol::{
     main_to_worker_post, parse_worker_to_main, MainToWorkerWire, ParsedWorkerToMain, SyncEntry,
     WorkerLifecycleEvent, WorkerToMainWire,
@@ -83,9 +83,27 @@ impl WasmWorkerBridge {
         let expects_upstream = opts.server_url.is_some();
         let runtime = runtime.clone();
 
+        // Construct the outbox sender and configure it for main-side use. The
+        // sender batches server-bound outbox entries into binary postcard
+        // `Sync` envelopes posted to the worker. Binary encoding for server-
+        // bound is required (the worker decodes via `parse_main_to_worker`).
+        let sender = RustOutboxSender::new(true);
+        sender.attach_target(worker.clone().into(), None, None, None);
+        sender.set_init_gate(false);
+
+        // Install the sender on the runtime's `RuntimeCore` so its outbox
+        // flush routes through us. We keep the `Rc<Inner>` clone in
+        // `BridgeInner` so the bridge can later flip the init-gate, swap the
+        // forwarder, etc.
+        runtime
+            .core
+            .borrow_mut()
+            .set_sync_sender(Box::new(sender.clone()));
+
         let inner = Rc::new(BridgeInner::new(
             worker.clone(),
             runtime.clone(),
+            sender,
             init_message,
             expects_upstream,
         ));
@@ -99,11 +117,6 @@ impl WasmWorkerBridge {
         };
         worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         *inner.on_message_closure.borrow_mut() = Some(on_message);
-
-        // Hand the worker to the runtime's outbox sender, with init-gate closed
-        // so pre-init outbox traffic accumulates instead of leaking through.
-        runtime.attach_outbox_target(worker.clone().into(), None, None, None);
-        runtime.set_outbox_init_gate(false);
 
         // Register the worker as the upstream server for the main runtime.
         runtime
@@ -222,7 +235,7 @@ impl WasmWorkerBridge {
         }
         let has_forwarder = callback.is_some();
         self.inner.has_forwarder.set(has_forwarder);
-        self.inner.runtime.set_server_payload_forwarder(callback);
+        self.inner.sender.set_server_payload_forwarder(callback);
         // A forwarder install short-circuits the upstream wait gate (a
         // follower tab routes through the leader instead of the worker's own
         // upstream). Release any awaiters without flipping
@@ -335,7 +348,7 @@ impl Drop for WasmWorkerBridge {
         // by the time `Drop` runs in an exception path, the receiver may be
         // gone, and posting from a destructor risks structured-clone errors.
         self.inner.runtime.install_noop_sync_sender();
-        self.inner.runtime.set_server_payload_forwarder(None);
+        self.inner.sender.set_server_payload_forwarder(None);
         self.inner.runtime.remove_server();
         self.inner.worker.set_onmessage(None);
     }
@@ -366,7 +379,7 @@ async fn run_init(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
         Ok(client_id) => {
             inner.transition_init_ok(client_id.clone());
             // Open the outbox init-gate so accumulated outbox traffic flushes.
-            inner.runtime.open_outbox_init_gate();
+            inner.sender.open_init_gate_and_flush();
             let result = Object::new();
             let _ = Reflect::set(&result, &"clientId".into(), &JsValue::from_str(&client_id));
             Ok(result.into())
@@ -386,7 +399,7 @@ async fn run_shutdown(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
 
     // Detach the outbox edge BEFORE posting shutdown. Spec line 528.
     inner.runtime.install_noop_sync_sender();
-    inner.runtime.set_server_payload_forwarder(None);
+    inner.sender.set_server_payload_forwarder(None);
     inner.runtime.remove_server();
 
     let (tx, rx) = oneshot::channel::<()>();
@@ -430,6 +443,11 @@ struct Listeners {
 struct BridgeInner {
     worker: Worker,
     runtime: WasmRuntime,
+    /// `Rc<Inner>`-shared clone of the outbox sender installed on the
+    /// runtime's `RuntimeCore`. The bridge mutates it directly to flip the
+    /// init-gate, install/clear the server-payload forwarder, and detach on
+    /// shutdown.
+    sender: RustOutboxSender,
     init_message: JsValue,
     state: Cell<BridgeState>,
     worker_client_id: RefCell<Option<String>>,
@@ -449,6 +467,7 @@ impl BridgeInner {
     fn new(
         worker: Worker,
         runtime: WasmRuntime,
+        sender: RustOutboxSender,
         init_message: JsValue,
         expects_upstream: bool,
     ) -> Self {
@@ -456,6 +475,7 @@ impl BridgeInner {
         Self {
             worker,
             runtime,
+            sender,
             init_message,
             state: Cell::new(BridgeState::Idle),
             worker_client_id: RefCell::new(None),

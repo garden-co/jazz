@@ -104,37 +104,6 @@ export interface Runtime {
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   /**
-   * Attach the JS `postMessage`-bearing target the Rust outbox sender posts to.
-   * Implemented by `WasmRuntime`; absent on NAPI/RN where Rust owns the transport.
-   *
-   * Worker-side params:
-   * - `mainClientId`: runtime client id assigned to the main-thread peer.
-   * - `peerRoutingLookup(clientId)`: returns `{peerId, term}` (or null) for follower peers.
-   * - `onMainSyncFlushed()`: invoked after each batch flush containing main-bound entries.
-   */
-  attachOutboxTarget?(
-    target: unknown,
-    mainClientId?: string | null,
-    peerRoutingLookup?: ((clientId: string) => { peerId: string; term: number } | null) | null,
-    onMainSyncFlushed?: (() => void) | null,
-  ): void;
-  /**
-   * Install a JS forwarder for server-bound outbox entries. When set, server-bound
-   * payloads bypass `target.postMessage` and go through the forwarder instead
-   * (used by the leader/follower coordinator on the main side).
-   */
-  setServerPayloadForwarder?(
-    forwarder:
-      | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
-      | null,
-  ): void;
-  /**
-   * Worker-side: while `true`, server-bound `isCatalogue=true` outbox entries
-   * are forwarded into the main-bound sync batch instead of being delivered by
-   * the Rust transport. Used during the bootstrap catalogue handoff.
-   */
-  setBootstrapCatalogueForwarding?(enabled: boolean): void;
-  /**
    * Construct a Rust-owned worker bridge attached to this runtime. Returns
    * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
    * Options are parsed at attach time; `bridge.init()` is parameter-less.
