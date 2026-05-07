@@ -212,17 +212,17 @@ describe("attachDevTools mutation bridge", () => {
       values: [{ type: "Text", value: "hello" }],
       batchId: "batch-insert-devtools",
     };
-    const waitForPersistedBatch = vi.fn(async () => undefined);
+    const waitForBatch = vi.fn(async () => undefined);
     const create = vi.fn(
       () =>
         new WriteResult(insertedRow, insertedRow.batchId, {
-          waitForPersistedBatch,
+          waitForBatch,
         } as any),
     );
     const fakeClient = {
       create,
-      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForPersistedBatch } as any)),
-      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForPersistedBatch } as any)),
+      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForBatch } as any)),
+      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForBatch } as any)),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -253,28 +253,26 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
     expect(create).toHaveBeenCalledWith("todos", { title: { type: "Text", value: "hello" } });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
+    expect(waitForBatch).toHaveBeenCalledWith("batch-insert-devtools", "local");
   });
 
   it("routes client.updateDurable to runtime update + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForPersistedBatch = vi.fn(async () => undefined);
-    const update = vi.fn(
-      () => new WriteHandle("batch-update-devtools", { waitForPersistedBatch } as any),
-    );
+    const waitForBatch = vi.fn(async () => undefined);
+    const update = vi.fn(() => new WriteHandle("batch-update-devtools", { waitForBatch } as any));
     const fakeClient = {
       create: vi.fn(
         () =>
           new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },
             "batch-insert-unused",
-            { waitForPersistedBatch } as any,
+            { waitForBatch } as any,
           ),
       ),
       update,
-      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForPersistedBatch } as any)),
+      delete: vi.fn(() => new WriteHandle("batch-delete-unused", { waitForBatch } as any)),
       unsubscribe: vi.fn(),
     };
     const fakeDb = {
@@ -307,16 +305,16 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ updated: true });
     expect(update).toHaveBeenCalledWith("row-1", { title: { type: "Text", value: "updated" } });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-update-devtools", "edge");
+    expect(waitForBatch).toHaveBeenCalledWith("batch-update-devtools", "edge");
   });
 
   it("routes client.deleteDurable to runtime delete + wait", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const waitForPersistedBatch = vi.fn(async () => undefined);
+    const waitForBatch = vi.fn(async () => undefined);
     const deleteMutation = vi.fn(
-      () => new WriteHandle("batch-delete-devtools", { waitForPersistedBatch } as any),
+      () => new WriteHandle("batch-delete-devtools", { waitForBatch } as any),
     );
     const fakeClient = {
       create: vi.fn(
@@ -324,10 +322,10 @@ describe("attachDevTools mutation bridge", () => {
           new WriteResult(
             { id: "row-1", values: [], batchId: "batch-insert-unused" },
             "batch-insert-unused",
-            { waitForPersistedBatch } as any,
+            { waitForBatch } as any,
           ),
       ),
-      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForPersistedBatch } as any)),
+      update: vi.fn(() => new WriteHandle("batch-update-unused", { waitForBatch } as any)),
       delete: deleteMutation,
       unsubscribe: vi.fn(),
     };
@@ -358,7 +356,7 @@ describe("attachDevTools mutation bridge", () => {
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual({ deleted: true });
     expect(deleteMutation).toHaveBeenCalledWith("row-1");
-    expect(waitForPersistedBatch).toHaveBeenCalledWith("batch-delete-devtools", "global");
+    expect(waitForBatch).toHaveBeenCalledWith("batch-delete-devtools", "global");
   });
 
   it("returns command-specific errors for invalid mutation payloads", async () => {

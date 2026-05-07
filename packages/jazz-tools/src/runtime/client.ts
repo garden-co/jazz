@@ -779,7 +779,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForPersistedBatch(this.batchId, options.tier) as Promise<T>;
+    return this.#client.waitForBatch(this.batchId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -2621,7 +2621,7 @@ export class JazzClient {
     return [...new Set([...runtimeBatchIds, ...replayedBatchIds])].sort();
   }
 
-  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+  waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     const outcome = this.batchWaitOutcome(batchId, tier);
     if (outcome.settled) {
       return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
