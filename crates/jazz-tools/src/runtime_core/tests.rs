@@ -1845,6 +1845,10 @@ struct ThreeTierRC {
 
 fn create_3tier_rc() -> ThreeTierRC {
     let schema = test_schema();
+    create_3tier_rc_with_schema(schema)
+}
+
+fn create_3tier_rc_with_schema(schema: Schema) -> ThreeTierRC {
     let app_id = AppId::from_name("durability-test");
 
     // A = client (no tier)
