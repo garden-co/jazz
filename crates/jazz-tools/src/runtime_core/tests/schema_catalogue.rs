@@ -398,6 +398,34 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
 }
 
 #[test]
+fn test_persist_schema_then_unprivileged_add_server_skips_catalogue() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = new_test_core(schema_manager, MemoryStorage::new(), NoopScheduler);
+
+    core.persist_schema();
+
+    let server_id = ServerId::new();
+    core.add_server_with_catalogue_state_hash_and_permission(server_id, None, false);
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m.payload, SyncPayload::CatalogueEntryUpdated { .. })),
+        "clients without catalogue authority should not replay catalogue entries. Messages found: {}",
+        messages
+            .iter()
+            .map(|m| format!("{:?}", m.payload))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+#[test]
 fn test_batched_tick_keeps_outbox_when_no_transport_or_sync_sender_is_installed() {
     let schema = test_schema();
     let app_id = AppId::from_name("test-app");
