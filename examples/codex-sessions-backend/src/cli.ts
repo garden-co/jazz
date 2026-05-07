@@ -346,6 +346,7 @@ const SESSION_SERVICE_REQUEST_TIMEOUT_MS = 2_500;
 const ACTIVE_SESSION_RECENT_SYNC_LIMIT = 32;
 const ACTIVE_SESSION_RECENT_SYNC_BUDGET_MS = 400;
 const DEFAULT_BACKGROUND_PROJECTION_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_STREAM_WATCH_SCAN_INTERVAL_MS = 5_000;
 
 function logBackgroundError(label: string, error: unknown): void {
   const message = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -3235,11 +3236,6 @@ function streamWatchRolloutLimit(): number {
   return Math.max(1, Math.min(128, Math.trunc(Number.isFinite(parsed) ? parsed : 24)));
 }
 
-function streamWatchDayCount(): number {
-  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_DAYS ?? "2");
-  return Math.max(1, Math.min(14, Math.trunc(Number.isFinite(parsed) ? parsed : 2)));
-}
-
 function streamWatchBatchLimit(): number {
   const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_BATCH_LIMIT ?? "100");
   return Math.max(1, Math.min(5000, Math.trunc(Number.isFinite(parsed) ? parsed : 100)));
@@ -3248,6 +3244,14 @@ function streamWatchBatchLimit(): number {
 function streamWatchErrorBackoffMs(): number {
   const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_ERROR_BACKOFF_MS ?? "500");
   return Math.max(50, Math.min(30_000, Math.trunc(Number.isFinite(parsed) ? parsed : 500)));
+}
+
+function streamWatchScanIntervalMs(pollIntervalMs: number): number {
+  const parsed = Number(process.env.FLOW_CODEX_SESSION_STREAM_WATCH_SCAN_INTERVAL_MS ?? "");
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(50, Math.trunc(parsed));
+  }
+  return Math.max(pollIntervalMs, DEFAULT_STREAM_WATCH_SCAN_INTERVAL_MS);
 }
 
 function streamWatchBootstrapGraceMs(): number {
@@ -3269,12 +3273,9 @@ function streamWatchBootstrapMode(): "tail" | "backfill" {
 
 async function collectRecentlyModifiedRolloutPaths(
   codexHome: string,
-  dayCount: number,
   limit: number,
 ): Promise<RecentRolloutPathStat[]> {
-  const paths = await collectRecentRolloutPaths(codexHome, dayCount, {
-    recursive: false,
-  });
+  const paths = await collectRolloutPathsUnder(join(codexHome, "sessions"));
   const rows = await Promise.all(
     paths.map(async (path): Promise<RecentRolloutPathStat | null> => {
       const fileStat = await stat(path).catch(() => null);
@@ -3300,13 +3301,19 @@ async function watchRecentRolloutStreamEvents(
   const bootstrapGraceMs = streamWatchBootstrapGraceMs();
   const bootstrapBackfillMaxBytes = streamWatchBootstrapBackfillMaxBytes();
   const watcherStartedAtMs = Date.now();
+  const scanIntervalMs = streamWatchScanIntervalMs(options.pollIntervalMs);
+  let nextScanAtMs = 0;
+  let rolloutPaths: RecentRolloutPathStat[] = [];
 
   while (!options.signal?.aborted) {
-    const rolloutPaths = await collectRecentlyModifiedRolloutPaths(
-      options.codexHome,
-      streamWatchDayCount(),
-      streamWatchRolloutLimit(),
-    );
+    const nowMs = Date.now();
+    if (nowMs >= nextScanAtMs) {
+      rolloutPaths = await collectRecentlyModifiedRolloutPaths(
+        options.codexHome,
+        streamWatchRolloutLimit(),
+      );
+      nextScanAtMs = nowMs + scanIntervalMs;
+    }
 
     for (const rolloutPath of rolloutPaths) {
       if (options.signal?.aborted) {

@@ -429,6 +429,94 @@ describe("codex completion session service", () => {
     expect(existsSync(join(tempDir, "codex-sessions.stream.db"))).toBe(true);
   }, 30_000);
 
+  it("replicates active old-day rollout stream events by file activity", async () => {
+    const sessionId = "019d0000-0000-7000-8000-000000000095";
+    const oldRolloutDir = join(codexHome, "sessions/2026/04/01");
+    const activeOldRolloutPath = join(
+      oldRolloutDir,
+      `rollout-2026-04-01T12-00-00-${sessionId}.jsonl`,
+    );
+    await mkdir(oldRolloutDir, { recursive: true });
+
+    serviceProcess = spawn(
+      "pnpm",
+      [
+        "exec",
+        "tsx",
+        "src/cli.ts",
+        "serve",
+        "--data-path",
+        dataPath,
+        "--socket-path",
+        socketPath,
+        "--codex-home",
+        codexHome,
+        "--watch-rollouts",
+        "false",
+        "--watch-stream-rollouts",
+        "true",
+        "--poll-interval-ms",
+        "50",
+      ],
+      {
+        cwd: packageRoot,
+        env: {
+          ...globalThis.process.env,
+          FLOW_CODEX_SESSION_STREAM_WATCH_BOOTSTRAP_MODE: "backfill",
+          FLOW_CODEX_SESSION_STREAM_WATCH_SCAN_INTERVAL_MS: "50",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const process = serviceProcess;
+    process.stderr.setEncoding("utf8");
+    process.stderr.on("data", (chunk: string) => {
+      serviceStderr += chunk;
+    });
+
+    await waitForSocket(socketPath, process, () => serviceStderr);
+
+    const now = new Date().toISOString();
+    await writeFile(
+      activeOldRolloutPath,
+      [
+        JSON.stringify({
+          timestamp: now,
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            timestamp: now,
+            cwd: "/tmp/stream-old-day-rollout",
+            source: "codex",
+          },
+        }),
+        JSON.stringify({
+          timestamp: now,
+          type: "event_msg",
+          payload: {
+            type: "agent_message_delta",
+            turn_id: "turn-stream-old-day",
+            delta: "old-day sidecar",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const events = await waitForStreamEvents(socketPath, sessionId, 2);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sequence: 2,
+          eventKind: "event_msg",
+          eventType: "agent_message_delta",
+          turnId: "turn-stream-old-day",
+          textDelta: "old-day sidecar",
+        }),
+      ]),
+    );
+  }, 30_000);
+
   it("resumes stream rollout replication from the latest recorded Jazz2 sequence", async () => {
     const today = new Date();
     const sessionId = "019d0000-0000-7000-8000-000000000093";
