@@ -30,6 +30,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .unwrap_or(DurabilityTier::Local)
     }
 
+    fn completed_persisted_write_receiver(
+        outcome: PersistedWriteAck,
+    ) -> oneshot::Receiver<PersistedWriteAck> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(outcome);
+        receiver
+    }
+
+    fn batch_wait_outcome(
+        fate: Option<&BatchFate>,
+        tier: DurabilityTier,
+    ) -> Option<PersistedWriteAck> {
+        match fate {
+            Some(BatchFate::Rejected {
+                batch_id,
+                code,
+                reason,
+            }) => Some(Err(PersistedWriteRejection {
+                batch_id: *batch_id,
+                code: code.clone(),
+                reason: reason.clone(),
+            })),
+            Some(fate) => match fate.confirmed_tier() {
+                Some(confirmed_tier) if confirmed_tier >= tier => Some(Ok(())),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
     fn should_auto_seal_direct_write(
         batch_mode: BatchMode,
         write_context: Option<&WriteContext>,
@@ -715,6 +745,31 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.storage
             .scan_local_batch_records()
             .map_err(|err| RuntimeError::WriteError(format!("scan local batch records: {err}")))
+    }
+
+    /// Wait for a batch to settle at `tier` or higher.
+    pub fn wait_for_batch(
+        &mut self,
+        batch_id: BatchId,
+        tier: DurabilityTier,
+    ) -> Result<oneshot::Receiver<PersistedWriteAck>, RuntimeError> {
+        let record = self
+            .storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+            .or_else(|| self.local_batch_record_cache.get(&batch_id).cloned())
+            .ok_or_else(|| {
+                RuntimeError::WriteError(format!("missing local batch record for {batch_id:?}"))
+            })?;
+
+        if let Some(outcome) = Self::batch_wait_outcome(record.latest_fate.as_ref(), tier) {
+            return Ok(Self::completed_persisted_write_receiver(outcome));
+        }
+
+        let (sender, receiver) = oneshot::channel();
+        self.durability
+            .register_batch_watcher(batch_id, tier, sender);
+        Ok(receiver)
     }
 
     /// Drain replayable rejected batch ids that should be surfaced by bindings.

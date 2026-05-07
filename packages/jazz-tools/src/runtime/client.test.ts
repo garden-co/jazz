@@ -5,7 +5,9 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
+  type LocalBatchRecord,
   WriteHandle,
+  PersistedWriteRejectedError,
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -65,6 +67,7 @@ function makeFakeRuntime() {
     drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
     acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     sealBatch: vi.fn<(batch_id: string) => void>(),
+    waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
     onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
@@ -514,6 +517,84 @@ describe("JazzClient transactions", () => {
     await expect(client.batch(async () => Promise.reject(error))).rejects.toBe(error);
 
     expect(runtime.sealBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("JazzClient runtime batch waits", () => {
+  function makePendingBatchRecord(batchId: string): LocalBatchRecord {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: null,
+    };
+  }
+
+  function makeRejectedBatchRecord(batchId: string): LocalBatchRecord {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: {
+        kind: "rejected" as const,
+        batchId,
+        code: "permission_denied",
+        reason: "write rejected by policy",
+      },
+    };
+  }
+
+  it("delegates unsettled waits to the runtime", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makePendingBatchRecord(batchId));
+    runtime.waitForBatch = vi.fn(async () => undefined);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await expect(client.waitForBatch("batch-runtime", "edge")).resolves.toBeUndefined();
+
+    expect(runtime.waitForBatch).toHaveBeenCalledWith("batch-runtime", "edge");
+  });
+
+  it("lets a runtime wait handle rejection without replaying onMutationError", async () => {
+    const runtime = makeFakeRuntime();
+    const batchId = "batch-runtime-rejected";
+    let record = makePendingBatchRecord(batchId);
+    let rejectWait!: (error: unknown) => void;
+    runtime.loadLocalBatchRecord = vi.fn(() => record);
+    runtime.drainRejectedBatchIds = vi
+      .fn<() => string[]>(() => [])
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([batchId]);
+    runtime.waitForBatch = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectWait = reject;
+        }),
+    );
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const seen: MutationErrorEvent[] = [];
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    const waitPromise = client.waitForBatch(batchId, "edge");
+    await Promise.resolve();
+    record = makeRejectedBatchRecord(batchId);
+
+    client.getRuntime().onSyncMessageReceived("sync-payload");
+    expect(seen).toEqual([]);
+
+    rejectWait({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "write rejected by policy",
+    });
+
+    await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith(batchId);
+    expect(seen).toEqual([]);
   });
 });
 

@@ -843,6 +843,29 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Seal batch failed: {e}")))
     }
 
+    #[napi(js_name = "waitForBatch", ts_return_type = "Promise<void>")]
+    pub async fn wait_for_batch(&self, batch_id: String, tier: String) -> napi::Result<()> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let tier = parse_binding_tier(&tier).map_err(napi::Error::from_reason)?;
+        let receiver = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.wait_for_batch(batch_id, tier)
+                .map_err(|e| napi::Error::from_reason(format!("Wait for batch failed: {e}")))?
+        };
+
+        match receiver.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(rejection)) => Err(napi::Error::from_reason(format!(
+                "Persisted batch {} was rejected ({}): {}",
+                rejection.batch_id, rejection.code, rejection.reason
+            ))),
+            Err(_) => Err(napi::Error::from_reason("Wait for batch cancelled")),
+        }
+    }
+
     // =========================================================================
     // Queries
     // =========================================================================

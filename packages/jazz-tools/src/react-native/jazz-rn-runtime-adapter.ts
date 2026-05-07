@@ -43,6 +43,7 @@ export interface JazzRnRuntimeBinding {
   loadLocalBatchRecord?(batchId: string): string | null;
   loadLocalBatchRecords?(): string;
   drainRejectedBatchIds?(): string[];
+  waitForBatch(batchId: string, tier: string): Promise<void>;
   onBatchedTickNeeded(
     callback:
       | {
@@ -162,6 +163,14 @@ export class JazzRnRuntimeAdapter implements Runtime {
           });
       },
     });
+  }
+
+  async waitForBatch(batch_id: string, tier: string): Promise<void> {
+    try {
+      await this.binding.waitForBatch(batch_id, tier);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   private requireWriteContextMethod<

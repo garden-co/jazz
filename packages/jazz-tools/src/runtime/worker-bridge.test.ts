@@ -76,6 +76,7 @@ function createRuntimeMock(): {
       batchId: "batch-id",
     }),
     query: async () => [],
+    waitForBatch: async () => undefined,
     subscribe: () => 1,
     unsubscribe: () => undefined,
     createSubscription: () => 1,

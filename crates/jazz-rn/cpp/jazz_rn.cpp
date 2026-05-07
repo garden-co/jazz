@@ -184,9 +184,9 @@ void uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
 void uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received_from_client(
     /*handle*/ uint64_t ptr, RustBuffer client_id, RustBuffer message_json,
     RustCallStatus *uniffi_out_err);
-RustBuffer uniffi_jazz_rn_fn_method_rnruntime_query(
+/*handle*/ uint64_t uniffi_jazz_rn_fn_method_rnruntime_query(
     /*handle*/ uint64_t ptr, RustBuffer query_json, RustBuffer session_json,
-    RustBuffer tier, RustCallStatus *uniffi_out_err);
+    RustBuffer tier);
 void uniffi_jazz_rn_fn_method_rnruntime_remove_server(
     /*handle*/ uint64_t ptr, RustCallStatus *uniffi_out_err);
 void uniffi_jazz_rn_fn_method_rnruntime_seal_batch(
@@ -209,6 +209,8 @@ void uniffi_jazz_rn_fn_method_rnruntime_update_auth(
 RustBuffer uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
     /*handle*/ uint64_t ptr, RustBuffer object_id, RustBuffer values_json,
     RustBuffer write_context_json, RustCallStatus *uniffi_out_err);
+/*handle*/ uint64_t uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+    /*handle*/ uint64_t ptr, RustBuffer batch_id, RustBuffer tier);
 void uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
     UniffiVTableCallbackInterfaceAuthFailureCallback *vtable);
 void uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
@@ -376,6 +378,7 @@ uint16_t uniffi_jazz_rn_checksum_method_rnruntime_unsubscribe();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_auth();
 uint16_t uniffi_jazz_rn_checksum_method_rnruntime_update_with_session();
+uint16_t uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch();
 uint16_t uniffi_jazz_rn_checksum_constructor_rnruntime_new();
 uint16_t uniffi_jazz_rn_checksum_method_authfailurecallback_on_failure();
 uint16_t
@@ -3311,6 +3314,17 @@ NativeJazzRn::NativeJazzRn(
                 ->cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
                     rt, thisVal, args, count);
           });
+  props["ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+                rt, thisVal, args, count);
+          });
   props["ubrn_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback"] =
       jsi::Function::createFromHostFunction(
           rt,
@@ -3390,6 +3404,530 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this->cpp_uniffi_jazz_rn_fn_func_mint_local_first_token(
                 rt, thisVal, args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_u8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_ffi_jazz_rn_rust_future_poll_u8"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_u8(rt, thisVal, args,
+                                                             count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_u8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_u8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_u8(rt, thisVal,
+                                                               args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_u8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_ffi_jazz_rn_rust_future_free_u8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_u8(rt, thisVal, args,
+                                                             count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_u8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_complete_u8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_u8(rt, thisVal,
+                                                                 args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_i8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_ffi_jazz_rn_rust_future_poll_i8"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_i8(rt, thisVal, args,
+                                                             count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_i8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_i8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_i8(rt, thisVal,
+                                                               args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_i8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, "ubrn_ffi_jazz_rn_rust_future_free_i8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_i8(rt, thisVal, args,
+                                                             count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_i8"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_complete_i8"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_i8(rt, thisVal,
+                                                                 args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_u16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_u16"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_u16(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_u16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_u16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_u16(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_u16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_u16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_u16(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_u16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_u16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_u16(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_i16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_i16"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_i16(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_i16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_i16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_i16(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_i16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_i16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_i16(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_i16"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_i16"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_i16(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_u32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_u32"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_u32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_u32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_u32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_u32(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_u32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_u32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_u32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_u32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_u32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_u32(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_i32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_i32"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_i32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_i32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_i32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_i32(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_i32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_i32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_i32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_i32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_i32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_i32(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_u64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_u64"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_u64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_u64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_u64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_u64(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_u64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_u64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_u64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_u64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_u64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_u64(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_i64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_i64"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_i64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_i64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_i64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_i64(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_i64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_i64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_i64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_i64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_i64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_i64(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_f32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_f32"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_f32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_f32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_f32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_f32(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_f32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_f32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_f32(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_f32"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_f32"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_f32(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_f64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_f64"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_f64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_f64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_f64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_f64(rt, thisVal,
+                                                                args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_f64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_f64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_f64(rt, thisVal, args,
+                                                              count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_f64"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_f64"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_f64(rt, thisVal,
+                                                                  args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_rust_buffer"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_poll_rust_buffer"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_rust_buffer(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_rust_buffer"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_cancel_rust_buffer"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_rust_buffer(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_rust_buffer"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_free_rust_buffer"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_rust_buffer(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_rust_buffer"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_rust_buffer"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_rust_buffer(
+                rt, thisVal, args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_poll_void"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_poll_void"),
+          3,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_poll_void(rt, thisVal,
+                                                               args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_cancel_void"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_cancel_void"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_cancel_void(rt, thisVal,
+                                                                 args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_free_void"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt,
+                                    "ubrn_ffi_jazz_rn_rust_future_free_void"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_free_void(rt, thisVal,
+                                                               args, count);
+          });
+  props["ubrn_ffi_jazz_rn_rust_future_complete_void"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt, "ubrn_ffi_jazz_rn_rust_future_complete_void"),
+          1,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this->cpp_ffi_jazz_rn_rust_future_complete_void(rt, thisVal,
+                                                                   args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_func_current_timestamp_ms"] =
       jsi::Function::createFromHostFunction(
@@ -3803,6 +4341,19 @@ NativeJazzRn::NativeJazzRn(
                  const jsi::Value *args, size_t count) -> jsi::Value {
             return this
                 ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(
+                    rt, thisVal, args, count);
+          });
+  props["ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch"] =
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(
+              rt,
+              "ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch"),
+          0,
+          [this](jsi::Runtime &rt, const jsi::Value &thisVal,
+                 const jsi::Value *args, size_t count) -> jsi::Value {
+            return this
+                ->cpp_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch(
                     rt, thisVal, args, count);
           });
   props["ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new"] =
@@ -4367,19 +4918,15 @@ jsi::Value NativeJazzRn::
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_query(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
-  RustCallStatus status =
-      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
   auto value = uniffi_jazz_rn_fn_method_rnruntime_query(
       uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
                                                         args[0]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
       uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]),
-      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]),
-      &status);
-  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
-                                                        args[count - 1]);
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[3]));
 
-  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_remove_server(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -4508,6 +5055,18 @@ NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
 
   return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
 }
+jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[1]),
+      uniffi::jazz_rn::Bridging<RustBuffer>::fromJs(rt, callInvoker, args[2]));
+
+  return uniffi_jsi::Bridging</*handle*/ uint64_t>::toJs(rt, callInvoker,
+                                                         value);
+}
 jsi::Value
 NativeJazzRn::cpp_uniffi_jazz_rn_fn_init_callback_vtable_authfailurecallback(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -4600,6 +5159,546 @@ jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_fn_func_mint_local_first_token(
                                                         args[count - 1]);
 
   return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_u8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_u8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_u8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_u8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_u8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_u8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_u8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_u8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<uint8_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_i8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_i8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_i8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_i8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_i8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_i8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_i8(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_i8(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<int8_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_u16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_u16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_u16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_u16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_u16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_u16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_u16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_u16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_i16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_i16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_i16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_i16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_i16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_i16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_i16(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_i16(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<int16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_u32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_u32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_u32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_u32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_u32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_u32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_u32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_u32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<uint32_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_i32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_i32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_i32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_i32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_i32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_i32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_i32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_i32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<int32_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_u64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_u64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_u64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_u64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_u64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_u64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_u64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_u64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<uint64_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_i64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_i64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_i64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_i64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_i64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_i64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_i64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_i64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<int64_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_f32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_f32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_f32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_f32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_f32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_f32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_f32(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_f32(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<float>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_f64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_f64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_f64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_f64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_f64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_f64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_f64(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_f64(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi_jsi::Bridging<double>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_rust_buffer(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_rust_buffer(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_rust_buffer(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_rust_buffer(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_rust_buffer(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_rust_buffer(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_rust_buffer(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  auto value = ffi_jazz_rn_rust_future_complete_rust_buffer(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return uniffi::jazz_rn::Bridging<RustBuffer>::toJs(rt, callInvoker, value);
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_poll_void(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_poll_void(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      uniffi::jazz_rn::Bridging<UniffiRustFutureContinuationCallback>::fromJs(
+          rt, callInvoker, args[1]),
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[2]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_cancel_void(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_cancel_void(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_free_void(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  ffi_jazz_rn_rust_future_free_void(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]));
+
+  return jsi::Value::undefined();
+}
+jsi::Value NativeJazzRn::cpp_ffi_jazz_rn_rust_future_complete_void(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  RustCallStatus status =
+      uniffi::jazz_rn::Bridging<RustCallStatus>::rustSuccess(rt);
+  ffi_jazz_rn_rust_future_complete_void(
+      uniffi_jsi::Bridging</*handle*/ uint64_t>::fromJs(rt, callInvoker,
+                                                        args[0]),
+      &status);
+  uniffi::jazz_rn::Bridging<RustCallStatus>::copyIntoJs(rt, callInvoker, status,
+                                                        args[count - 1]);
+
+  return jsi::Value::undefined();
 }
 jsi::Value NativeJazzRn::cpp_uniffi_jazz_rn_checksum_func_current_timestamp_ms(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
@@ -4874,6 +5973,14 @@ NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_update_with_session(
     jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
     size_t count) {
   auto value = uniffi_jazz_rn_checksum_method_rnruntime_update_with_session();
+
+  return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
+}
+jsi::Value
+NativeJazzRn::cpp_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch(
+    jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+    size_t count) {
+  auto value = uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch();
 
   return uniffi_jsi::Bridging<uint16_t>::toJs(rt, callInvoker, value);
 }
