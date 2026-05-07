@@ -1078,9 +1078,24 @@ impl QueryManager {
 
     fn mark_visible_rows_updated_for_batch<H: Storage>(&mut self, storage: &H, batch_id: BatchId) {
         let mut rows = Vec::new();
-        for subscription in self.subscriptions.values() {
-            let table = subscription.graph.table.as_str().to_string();
-            for branch in &subscription.branches {
+        let mut subscription_tables = Vec::new();
+        subscription_tables.extend(self.subscriptions.values().map(|subscription| {
+            (
+                subscription.graph.table.as_str().to_string(),
+                subscription.branches.clone(),
+            )
+        }));
+        subscription_tables.extend(self.server_subscriptions.values().map(|subscription| {
+            (
+                subscription.graph.table.as_str().to_string(),
+                subscription.branches.clone(),
+            )
+        }));
+        subscription_tables.sort();
+        subscription_tables.dedup();
+
+        for (table, branches) in subscription_tables {
+            for branch in &branches {
                 let Ok(visible_rows) = storage.scan_visible_region(&table, branch.as_str()) else {
                     continue;
                 };
@@ -1096,6 +1111,25 @@ impl QueryManager {
         rows.dedup();
         for (table, row_id) in rows {
             self.mark_local_row_updated_in_subscriptions(&table, row_id);
+        }
+    }
+
+    fn apply_pending_batch_fate_effects<H: Storage>(&mut self, storage: &H) {
+        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
+        for settlement in &batch_fates {
+            if let Some(confirmed_tier) = settlement.confirmed_tier() {
+                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+            }
+            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
+            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
+            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
+                for member in record.members {
+                    self.mark_local_row_updated_in_subscriptions(
+                        member.table_name.as_str(),
+                        member.object_id,
+                    );
+                }
+            }
         }
     }
 
@@ -1160,22 +1194,7 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
-        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
-        for settlement in &batch_fates {
-            if let Some(confirmed_tier) = settlement.confirmed_tier() {
-                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
-            }
-            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
-            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
-            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
-                for member in record.members {
-                    self.mark_local_row_updated_in_subscriptions(
-                        member.table_name.as_str(),
-                        member.object_id,
-                    );
-                }
-            }
-        }
+        self.apply_pending_batch_fate_effects(storage);
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1229,6 +1248,7 @@ impl QueryManager {
         for update in post_permission_row_visibility_changes {
             self.handle_row_update(storage, update);
         }
+        self.apply_pending_batch_fate_effects(storage);
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
         // sequenced sync updates. Watermarked settlements stay queued for

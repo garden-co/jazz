@@ -130,13 +130,6 @@ impl SyncManager {
             .load_authoritative_batch_fate(batch_id)
             .ok()
             .flatten()
-            .or_else(|| {
-                storage
-                    .load_local_batch_record(batch_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|record| record.latest_fate)
-            })
     }
 
     pub(super) fn queue_batch_fate_to_client(&mut self, client_id: ClientId, fate: BatchFate) {

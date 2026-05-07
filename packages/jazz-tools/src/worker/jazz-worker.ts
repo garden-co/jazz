@@ -82,11 +82,19 @@ function syncRetainedLocalBatchRecordsToMain(): void {
     return;
   }
   try {
-    const batches = runtime.loadLocalBatchRecords?.() ?? [];
+    const batches = (runtime.loadLocalBatchRecords?.() ?? []).map(attachEncodedLocalBatchRecord);
     post({ type: "local-batch-records-sync", batches });
   } catch (error) {
     console.warn("[worker] loadLocalBatchRecords failed:", error);
   }
+}
+
+function attachEncodedLocalBatchRecord(batch: any): any {
+  if (!runtime?.loadLocalBatchRecordStorageRow || !batch?.batchId) {
+    return batch;
+  }
+  const encodedRecord = runtime.loadLocalBatchRecordStorageRow(batch.batchId);
+  return encodedRecord ? { ...batch, encodedRecord } : batch;
 }
 
 function replayNewlyRejectedBatchesToMain(): void {
@@ -96,10 +104,18 @@ function replayNewlyRejectedBatchesToMain(): void {
   try {
     const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
     for (const batchId of batchIds) {
-      const batch = runtime.loadLocalBatchRecord?.(batchId);
-      if (batch?.latestSettlement?.kind !== "rejected") {
+      const fate = runtime.loadBatchFate?.(batchId) ?? null;
+      if (fate?.kind !== "rejected") {
         continue;
       }
+      const batch = attachEncodedLocalBatchRecord(
+        runtime.loadLocalBatchRecord?.(batchId) ?? {
+          batchId,
+          mode: "direct",
+          sealed: true,
+          latestSettlement: fate,
+        },
+      );
       post({ type: "mutation-error-replay", batch });
     }
   } catch (error) {
@@ -481,7 +497,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     }
 
     syncRetainedLocalBatchRecordsToMain();
-    queueRejectedBatchReplayToMain();
+    replayNewlyRejectedBatchesToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 

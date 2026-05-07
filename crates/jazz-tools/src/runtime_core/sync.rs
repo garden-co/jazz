@@ -13,26 +13,34 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
     fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
-        let Ok(records) = self.storage.scan_local_batch_records() else {
+        let Ok(submissions) = self.storage.scan_sealed_batch_submissions() else {
             return Vec::new();
         };
         let terminal_tier = self.retained_batch_terminal_tier();
 
-        let mut batch_ids = records
+        let mut batch_ids = submissions
             .into_iter()
-            .filter(|record| {
-                record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
+            .filter(|submission| {
+                match self
+                    .storage
+                    .load_authoritative_batch_fate(submission.batch_id)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                {
+                    None => true,
+                    Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
+                    Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
+                    Some(crate::batch_fate::BatchFate::DurableDirect {
+                        confirmed_tier, ..
+                    })
+                    | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
+                        confirmed_tier,
+                        ..
+                    }) => confirmed_tier < &terminal_tier,
+                }
             })
-            .filter(|record| match record.latest_fate.as_ref() {
-                None => true,
-                Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
-                Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
-                Some(crate::batch_fate::BatchFate::DurableDirect { confirmed_tier, .. })
-                | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
-                    confirmed_tier, ..
-                }) => confirmed_tier < &terminal_tier,
-            })
-            .map(|record| record.batch_id)
+            .map(|submission| submission.batch_id)
             .collect::<Vec<_>>();
         batch_ids.sort();
         batch_ids.dedup();

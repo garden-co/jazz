@@ -54,6 +54,9 @@ function makeFakeRuntime() {
     loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
       () => [],
     ),
+    loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
+      () => null,
+    ),
     drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
     acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
     sealBatch: vi.fn<(batch_id: string) => void>(),
@@ -489,7 +492,10 @@ describe("JazzClient mutation error handling", () => {
   it("replays queued rejected batches to new listeners without scanning all batch records", () => {
     const runtime = makeFakeRuntime();
     runtime.drainRejectedBatchIds = vi.fn(() => ["batch-rejected"]);
-    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadBatchFate = vi.fn(
+      (batchId: string) => makeRejectedBatchRecord(batchId).latestSettlement,
+    );
+    runtime.loadLocalBatchRecord = vi.fn(() => null);
     runtime.loadLocalBatchRecords = vi.fn(() => {
       throw new Error("should not scan all local batch records");
     });
@@ -506,7 +512,7 @@ describe("JazzClient mutation error handling", () => {
     });
 
     expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
-    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadBatchFate).toHaveBeenCalledWith("batch-rejected");
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
     expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
     expect(seen).toEqual([
@@ -524,7 +530,10 @@ describe("JazzClient mutation error handling", () => {
       .fn<() => string[]>(() => [])
       .mockReturnValueOnce([])
       .mockReturnValueOnce(["batch-rejected"]);
-    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    runtime.loadBatchFate = vi.fn(
+      (batchId: string) => makeRejectedBatchRecord(batchId).latestSettlement,
+    );
+    runtime.loadLocalBatchRecord = vi.fn(() => null);
     runtime.loadLocalBatchRecords = vi.fn(() => {
       throw new Error("should not scan all local batch records");
     });
@@ -542,7 +551,7 @@ describe("JazzClient mutation error handling", () => {
     client.getRuntime().onSyncMessageReceived("sync-payload");
 
     expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(2);
-    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    expect(runtime.loadBatchFate).toHaveBeenCalledWith("batch-rejected");
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
     expect(seen).toEqual([
       {
