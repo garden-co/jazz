@@ -4,8 +4,16 @@
  * Mounts small Vue components inside a JazzProvider against a Jazz client
  * connected to the per-suite TestingServer (see global-setup.ts), then
  * exercises the schema through the public composables (useDb, useAll,
- * useSession). Each test scopes its data with a unique marker so the
- * shared server state from prior tests doesn't bleed into assertions.
+ * useSession).
+ *
+ * ## Isolation
+ *
+ * Vitest browser mode runs tests inside Chromium, where jazz-tools/testing
+ * (Node-only) can't load — per-test fresh servers would require the vitest
+ * `commands` IPC pattern. Instead each test calls `scope()` to get a unique
+ * marker and a `queries` object whose `where()` filters are bound to it.
+ * Inserts use `scope.tag(...)` to stamp every row, so even though all tests
+ * share one server, every assertion only sees its own test's data.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { type App, createApp, defineComponent, h } from "vue";
@@ -21,6 +29,33 @@ import { app } from "../../schema.js";
 import { APP_ID, TEST_PORT } from "./test-constants.js";
 
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
+
+interface Scope {
+  marker: string;
+  /** Stamp a row payload's `name`/`publicDescription` field with the marker. */
+  tag<T extends { name?: string; publicDescription?: string }>(payload: T): T;
+  queries: {
+    venues: ReturnType<typeof app.venues.where>;
+    stops: ReturnType<typeof app.stops.where>;
+  };
+}
+
+function scope(label: string): Scope {
+  const marker = `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    marker,
+    tag(payload) {
+      const out = { ...payload };
+      if ("name" in out) out.name = marker;
+      if ("publicDescription" in out) out.publicDescription = marker;
+      return out;
+    },
+    queries: {
+      venues: app.venues.where({ name: marker }),
+      stops: app.stops.where({ publicDescription: marker }),
+    },
+  };
+}
 
 async function waitFor(check: () => boolean, ms: number, label: string): Promise<void> {
   const deadline = Date.now() + ms;
@@ -86,17 +121,12 @@ async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted
   return m;
 }
 
-function uniqueMarker(label: string): string {
-  return `${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 describe("world-tour Jazz + Vue integration", () => {
   it("useDb insert is observed by useAll in another component", async () => {
-    const marker = uniqueMarker("venue");
-
+    const s = scope("venue");
     const VenueList = defineComponent({
       setup() {
-        const venues = useAll(app.venues.where({ name: marker }));
+        const venues = useAll(s.queries.venues);
         return () =>
           h("ul", { id: "venues" }, venues.value?.map((v) => h("li", { key: v.id }, v.name)) ?? []);
       },
@@ -105,42 +135,39 @@ describe("world-tour Jazz + Vue integration", () => {
     const { el, client } = await mount(VenueList);
     expect(el.querySelectorAll("#venues li").length).toBe(0);
 
-    client.db.insert(app.venues, {
-      name: marker,
-      city: "London",
-      country: "UK",
-      lat: 51.5159,
-      lng: -0.1311,
-    });
+    client.db.insert(
+      app.venues,
+      s.tag({
+        name: "",
+        city: "London",
+        country: "UK",
+        lat: 51.5159,
+        lng: -0.1311,
+      }),
+    );
 
     await waitFor(
       () => el.querySelectorAll("#venues li").length === 1,
       5000,
       "venue should appear after insert",
     );
-    expect(el.querySelector("#venues li")!.textContent).toBe(marker);
+    expect(el.querySelector("#venues li")!.textContent).toBe(s.marker);
   });
 
   it("useAll resolves .include() relations and reflects later updates", async () => {
-    const marker = uniqueMarker("stop");
-
+    const s = scope("stop");
     const StopList = defineComponent({
       setup() {
-        const stops = useAll(
-          app.stops
-            .where({ publicDescription: marker })
-            .include({ venue: true })
-            .orderBy("date", "asc"),
-        );
+        const stops = useAll(s.queries.stops.include({ venue: true }).orderBy("date", "asc"));
         return () =>
           h(
             "ul",
             { id: "stops" },
-            stops.value?.map((s) =>
+            stops.value?.map((stop) =>
               h(
                 "li",
-                { key: s.id, "data-status": s.status },
-                `${s.venue?.name ?? "?"}: ${s.publicDescription}`,
+                { key: stop.id, "data-status": stop.status },
+                `${stop.venue?.name ?? "?"}: ${stop.publicDescription}`,
               ),
             ) ?? [],
           );
@@ -152,22 +179,25 @@ describe("world-tour Jazz + Vue integration", () => {
     const userId = client.session?.user_id;
     if (!userId) throw new Error("test session is missing user_id");
 
-    const { value: band } = client.db.insert(app.bands, { name: `${marker}-band` });
+    const { value: band } = client.db.insert(app.bands, { name: `${s.marker}-band` });
     client.db.insert(app.members, { bandId: band.id, userId });
     const { value: venue } = client.db.insert(app.venues, {
-      name: `${marker}-venue`,
+      name: `${s.marker}-venue`,
       city: "London",
       country: "UK",
       lat: 51.5159,
       lng: -0.1311,
     });
-    const { value: stop } = client.db.insert(app.stops, {
-      bandId: band.id,
-      venueId: venue.id,
-      date: new Date("2026-08-01"),
-      status: "confirmed",
-      publicDescription: marker,
-    });
+    const { value: stop } = client.db.insert(
+      app.stops,
+      s.tag({
+        bandId: band.id,
+        venueId: venue.id,
+        date: new Date("2026-08-01"),
+        status: "confirmed",
+        publicDescription: "",
+      }),
+    );
 
     await waitFor(
       () => el.querySelectorAll("#stops li").length === 1,
@@ -175,7 +205,7 @@ describe("world-tour Jazz + Vue integration", () => {
       "stop with included venue should appear",
     );
     const li = el.querySelector("#stops li")!;
-    expect(li.textContent).toBe(`${marker}-venue: ${marker}`);
+    expect(li.textContent).toBe(`${s.marker}-venue: ${s.marker}`);
     expect(li.getAttribute("data-status")).toBe("confirmed");
 
     client.db.update(app.stops, stop.id, { status: "tentative" });
@@ -206,20 +236,22 @@ describe("world-tour Jazz + Vue integration", () => {
   });
 
   it("useDb-driven insert from inside a child re-renders sibling useAll", async () => {
-    const marker = uniqueMarker("inserter");
-
+    const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
         const db = useDb();
-        const venues = useAll(app.venues.where({ name: marker }));
+        const venues = useAll(s.queries.venues);
         function add() {
-          db.insert(app.venues, {
-            name: marker,
-            city: "London",
-            country: "UK",
-            lat: 51.4659,
-            lng: -0.1149,
-          });
+          db.insert(
+            app.venues,
+            s.tag({
+              name: "",
+              city: "London",
+              country: "UK",
+              lat: 51.4659,
+              lng: -0.1149,
+            }),
+          );
         }
         return () =>
           h("div", null, [
