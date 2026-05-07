@@ -721,8 +721,7 @@ describe("Worker Bridge with OPFS", () => {
     // locks within the same page session — only a full page reload does.)
     await (db1 as any).ensureBridgeReady();
     const worker = (db1 as any).worker as Worker;
-    worker.postMessage({ type: "simulate-crash" });
-    await waitForWorkerMessageType(worker, "shutdown-ok", 5000, "simulate-crash");
+    await (db1 as any).workerBridge.simulateCrash();
     worker.terminate();
     // Null out dead worker bridge so Db shutdown only frees client-side resources.
     (db1 as any).worker = null;

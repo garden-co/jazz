@@ -282,3 +282,105 @@ pub fn main_to_worker_post(msg: &MainToWorkerWire) -> Result<(JsValue, Array), p
     let bytes = encode_main_to_worker(msg)?;
     Ok(encode_to_uint8array_with_transfer(&bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Postcard round-trip tests for the wire enums. These guard the protocol
+    //! from a regression where the receiver expects postcard but the sender
+    //! emits a JS object — the silent-drop class of bug.
+    use super::*;
+
+    fn rt_main(msg: &MainToWorkerWire) {
+        let bytes = postcard::to_allocvec(msg).expect("encode");
+        let decoded: MainToWorkerWire = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(format!("{:?}", msg), format!("{:?}", decoded));
+    }
+
+    fn rt_worker(msg: &WorkerToMainWire) {
+        let bytes = postcard::to_allocvec(msg).expect("encode");
+        let decoded: WorkerToMainWire = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(format!("{:?}", msg), format!("{:?}", decoded));
+    }
+
+    #[test]
+    fn main_to_worker_round_trips() {
+        rt_main(&MainToWorkerWire::Sync {
+            payloads: vec![ByteBuf::from(vec![1, 2, 3]), ByteBuf::from(vec![4, 5])],
+        });
+        rt_main(&MainToWorkerWire::PeerOpen {
+            peer_id: "tab-a".into(),
+        });
+        rt_main(&MainToWorkerWire::PeerSync {
+            peer_id: "tab-b".into(),
+            term: 7,
+            payloads: vec![ByteBuf::from(vec![9, 8, 7])],
+        });
+        rt_main(&MainToWorkerWire::PeerClose {
+            peer_id: "tab-c".into(),
+        });
+        rt_main(&MainToWorkerWire::LifecycleHint {
+            event: WorkerLifecycleEvent::VisibilityHidden,
+            sent_at_ms: 1_700_000_000_000.0,
+        });
+        rt_main(&MainToWorkerWire::UpdateAuth {
+            jwt_token: Some("jwt".into()),
+        });
+        rt_main(&MainToWorkerWire::UpdateAuth { jwt_token: None });
+        rt_main(&MainToWorkerWire::DisconnectUpstream);
+        rt_main(&MainToWorkerWire::ReconnectUpstream);
+        rt_main(&MainToWorkerWire::Shutdown);
+        rt_main(&MainToWorkerWire::AcknowledgeRejectedBatch {
+            batch_id: "b1".into(),
+        });
+        rt_main(&MainToWorkerWire::SimulateCrash);
+        rt_main(&MainToWorkerWire::DebugSchemaState);
+        rt_main(&MainToWorkerWire::DebugSeedLiveSchema {
+            schema_json: "{}".into(),
+        });
+    }
+
+    #[test]
+    fn worker_to_main_round_trips() {
+        rt_worker(&WorkerToMainWire::InitOk {
+            client_id: "c1".into(),
+        });
+        rt_worker(&WorkerToMainWire::UpstreamConnected);
+        rt_worker(&WorkerToMainWire::UpstreamDisconnected);
+        rt_worker(&WorkerToMainWire::Sync {
+            payloads: vec![
+                SyncEntry::BareBytes(ByteBuf::from(vec![1, 2])),
+                SyncEntry::BareString("hi".into()),
+                SyncEntry::SequencedBytes {
+                    payload: ByteBuf::from(vec![9]),
+                    sequence: 42,
+                },
+                SyncEntry::SequencedString {
+                    payload: "x".into(),
+                    sequence: 99,
+                },
+            ],
+        });
+        rt_worker(&WorkerToMainWire::PeerSync {
+            peer_id: "p".into(),
+            term: 1,
+            payloads: vec![ByteBuf::from(vec![0xff])],
+        });
+        rt_worker(&WorkerToMainWire::LocalBatchRecordsSync {
+            batches_json: "[]".into(),
+        });
+        rt_worker(&WorkerToMainWire::MutationErrorReplay {
+            batch_json: "{}".into(),
+        });
+        rt_worker(&WorkerToMainWire::Error {
+            message: "oops".into(),
+        });
+        rt_worker(&WorkerToMainWire::AuthFailed {
+            reason: "expired".into(),
+        });
+        rt_worker(&WorkerToMainWire::ShutdownOk);
+        rt_worker(&WorkerToMainWire::DebugSchemaStateOk {
+            state_json: "{}".into(),
+        });
+        rt_worker(&WorkerToMainWire::DebugSeedLiveSchemaOk);
+    }
+}

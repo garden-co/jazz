@@ -470,8 +470,9 @@ impl WasmScheduler {
 }
 
 fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
+    let flag_in_task = Rc::clone(&flag);
     let task = Closure::once_into_js(move || {
-        *flag.borrow_mut() = false;
+        *flag_in_task.borrow_mut() = false;
 
         let Some(core_rc) = core_ref.upgrade() else {
             return;
@@ -487,13 +488,13 @@ fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<Re
         if needs_retry {
             // Runtime is currently borrowed (e.g. during query/subscription setup).
             // Keep one retry queued rather than panicking on RefCell reborrow.
-            let mut scheduled = flag.borrow_mut();
+            let mut scheduled = flag_in_task.borrow_mut();
             if *scheduled {
                 return;
             }
             *scheduled = true;
             drop(scheduled);
-            schedule_batched_tick_task(core_ref.clone(), flag.clone());
+            schedule_batched_tick_task(core_ref.clone(), flag_in_task.clone());
         }
     });
 
@@ -501,6 +502,10 @@ fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<Re
     let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
         .and_then(|value| value.dyn_into::<Function>())
     else {
+        // Couldn't resolve `setTimeout`; reset the debounce flag so the
+        // next `schedule_batched_tick` call can retry instead of silently
+        // assuming a tick is already in flight.
+        *flag.borrow_mut() = false;
         return;
     };
     let _ = set_timeout.call2(&global, &task, &JsValue::from_f64(0.0));
@@ -537,13 +542,13 @@ impl Scheduler for WasmScheduler {
 /// `{type:"sync", payload:[...]}` post, mirroring the buffering the TS
 /// `WorkerBridge` used to do via `queueMicrotask`. Per-peer `peer-sync` posts
 /// fire immediately because peer routing already serialises one message per
-/// destination.
-enum SyncBatchEntry {
-    BareBytes(Vec<u8>),
-    BareString(String),
-    SequencedBytes { payload: Vec<u8>, sequence: u64 },
-    SequencedString { payload: String, sequence: u64 },
-}
+// Re-export the wire-protocol `SyncEntry` so the outbox sender stages
+// entries in the exact shape that postcard-encodes them. No more shadow
+// type — we accumulate, then `WorkerToMainWire::Sync { payloads: ... }`
+// (worker side) or `MainToWorkerWire::Sync { payloads: ... }` (main side)
+// goes straight through `postcard::to_allocvec`.
+use crate::worker_protocol::SyncEntry;
+use serde_bytes::ByteBuf;
 
 #[derive(Clone, Copy)]
 struct PeerRouting {
@@ -582,8 +587,8 @@ struct RustOutboxSenderInner {
     /// monotonically increasing sequence numbers to client-bound payloads
     /// so the receiver can detect drops.
     next_client_sequences: RefCell<HashMap<String, u64>>,
-    /// Pending entries for the next `{type:"sync", payload:[...]}` post.
-    pending_sync_entries: RefCell<Vec<SyncBatchEntry>>,
+    /// Pending entries for the next `Sync` postcard envelope.
+    pending_sync_entries: RefCell<Vec<SyncEntry>>,
     /// Per-entry routing metadata, parallel to `pending_sync_entries`.
     pending_sync_routing: RefCell<Vec<PeerRouting>>,
     /// Debounce flag for the microtask flush.
@@ -694,25 +699,25 @@ impl SyncSender for RustOutboxSender {
 
         // Encode: client-bound is always binary; server-bound respects use_binary_encoding.
         let use_binary = inner.use_binary_encoding || destination_kind == "client";
-        let encoded: SyncBatchEntry = if use_binary {
+        let encoded: SyncEntry = if use_binary {
             let Ok(bytes) = payload.to_bytes() else {
                 return;
             };
             match sequence {
-                Some(seq) => SyncBatchEntry::SequencedBytes {
-                    payload: bytes,
+                Some(seq) => SyncEntry::SequencedBytes {
+                    payload: ByteBuf::from(bytes),
                     sequence: seq,
                 },
-                None => SyncBatchEntry::BareBytes(bytes),
+                None => SyncEntry::BareBytes(ByteBuf::from(bytes)),
             }
         } else {
             let Ok(json) = payload.to_json() else { return };
             match sequence {
-                Some(seq) => SyncBatchEntry::SequencedString {
+                Some(seq) => SyncEntry::SequencedString {
                     payload: json,
                     sequence: seq,
                 },
-                None => SyncBatchEntry::BareString(json),
+                None => SyncEntry::BareString(json),
             }
         };
 
@@ -720,15 +725,7 @@ impl SyncSender for RustOutboxSender {
             // Forwarder takes priority on the main side (leader/follower swap).
             if let Some(forwarder) = inner.server_payload_forwarder.borrow().as_ref() {
                 let payload_js = sync_entry_payload_js(&encoded);
-                let seq_js = sequence
-                    .map(|s| JsValue::from_f64(s as f64))
-                    .unwrap_or(JsValue::NULL);
-                let _ = forwarder.call3(
-                    &JsValue::NULL,
-                    &payload_js,
-                    &JsValue::from_bool(is_catalogue),
-                    &seq_js,
-                );
+                let _ = forwarder.call1(&JsValue::NULL, &payload_js);
                 return;
             }
 
@@ -804,27 +801,27 @@ impl SyncSender for RustOutboxSender {
             return;
         };
 
-        // Post {type:"peer-sync", peerId, term, payload:[bytes]} immediately.
-        let (SyncBatchEntry::BareBytes(bytes)
-        | SyncBatchEntry::SequencedBytes { payload: bytes, .. }) = &encoded
-        else {
+        // Postcard-encode `WorkerToMainWire::PeerSync { peer_id, term, payloads:[bytes] }`
+        // and post the Uint8Array with the underlying ArrayBuffer transferred.
+        let bytes_payload = match encoded {
+            SyncEntry::BareBytes(b) | SyncEntry::SequencedBytes { payload: b, .. } => b,
             // Peer payloads are binary postcard only.
+            SyncEntry::BareString(_) | SyncEntry::SequencedString { .. } => return,
+        };
+        let wire = crate::worker_protocol::WorkerToMainWire::PeerSync {
+            peer_id,
+            term: term as u32,
+            payloads: vec![bytes_payload],
+        };
+        let Ok(bytes) = postcard::to_allocvec(&wire) else {
             return;
         };
         let arr = Uint8Array::from(bytes.as_slice());
-        let payload_array = js_sys::Array::new();
-        payload_array.push(&arr);
         let transferables = js_sys::Array::new();
         transferables.push(&arr.buffer().into());
 
-        let message = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&message, &"type".into(), &"peer-sync".into());
-        let _ = js_sys::Reflect::set(&message, &"peerId".into(), &JsValue::from_str(&peer_id));
-        let _ = js_sys::Reflect::set(&message, &"term".into(), &JsValue::from_f64(term));
-        let _ = js_sys::Reflect::set(&message, &"payload".into(), &payload_array);
-
         let target = inner.target.borrow();
-        let _ = post_message_with_transfer(&target, &message, &transferables);
+        let _ = post_message_with_transfer(&target, &arr, &transferables);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -863,53 +860,43 @@ fn flush_pending(inner: &Rc<RustOutboxSenderInner>) {
     if target.is_null() || target.is_undefined() {
         return;
     }
+    let had_main_entry = routing.iter().any(|r| r.is_main);
+    let is_main_side = inner.main_client_id.borrow().is_none();
 
-    let payload_array = js_sys::Array::new();
+    // Postcard-encode the appropriate `Sync` wire variant for this side and
+    // post a single `Uint8Array` with the underlying buffer transferred.
+    // Side discrimination: main side has no `main_client_id` and only ever
+    // queues server-bound `BareBytes` entries; worker side has a
+    // `main_client_id` and may queue heterogeneous entries (sequenced
+    // client-bound to main, plus bootstrap-catalogue server-bound).
+    let bytes = if is_main_side {
+        let payloads: Vec<ByteBuf> = entries
+            .into_iter()
+            .filter_map(|e| match e {
+                SyncEntry::BareBytes(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        if payloads.is_empty() {
+            return;
+        }
+        match postcard::to_allocvec(&crate::worker_protocol::MainToWorkerWire::Sync { payloads }) {
+            Ok(b) => b,
+            Err(_) => return,
+        }
+    } else {
+        match postcard::to_allocvec(&crate::worker_protocol::WorkerToMainWire::Sync {
+            payloads: entries,
+        }) {
+            Ok(b) => b,
+            Err(_) => return,
+        }
+    };
+
+    let arr = Uint8Array::from(bytes.as_slice());
     let transferables = js_sys::Array::new();
-    let mut had_main_entry = false;
-    for (entry, route) in entries.iter().zip(routing.iter()) {
-        if route.is_main {
-            had_main_entry = true;
-        }
-        match entry {
-            SyncBatchEntry::BareBytes(bytes) => {
-                let arr = Uint8Array::from(bytes.as_slice());
-                transferables.push(&arr.buffer().into());
-                payload_array.push(&arr);
-            }
-            SyncBatchEntry::BareString(s) => {
-                payload_array.push(&JsValue::from_str(s));
-            }
-            SyncBatchEntry::SequencedBytes { payload, sequence } => {
-                let arr = Uint8Array::from(payload.as_slice());
-                transferables.push(&arr.buffer().into());
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"payload".into(), &arr);
-                let _ = js_sys::Reflect::set(
-                    &obj,
-                    &"sequence".into(),
-                    &JsValue::from_f64(*sequence as f64),
-                );
-                payload_array.push(&obj);
-            }
-            SyncBatchEntry::SequencedString { payload, sequence } => {
-                let obj = js_sys::Object::new();
-                let _ = js_sys::Reflect::set(&obj, &"payload".into(), &JsValue::from_str(payload));
-                let _ = js_sys::Reflect::set(
-                    &obj,
-                    &"sequence".into(),
-                    &JsValue::from_f64(*sequence as f64),
-                );
-                payload_array.push(&obj);
-            }
-        }
-    }
-
-    let message = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&message, &"type".into(), &"sync".into());
-    let _ = js_sys::Reflect::set(&message, &"payload".into(), &payload_array);
-
-    let _ = post_message_with_transfer(&target, &message, &transferables);
+    transferables.push(&arr.buffer().into());
+    let _ = post_message_with_transfer(&target, &arr, &transferables);
 
     if had_main_entry {
         if let Some(cb) = inner.on_main_sync_flushed.borrow().as_ref() {
@@ -918,13 +905,12 @@ fn flush_pending(inner: &Rc<RustOutboxSenderInner>) {
     }
 }
 
-fn sync_entry_payload_js(entry: &SyncBatchEntry) -> JsValue {
+fn sync_entry_payload_js(entry: &SyncEntry) -> JsValue {
     match entry {
-        SyncBatchEntry::BareBytes(bytes)
-        | SyncBatchEntry::SequencedBytes { payload: bytes, .. } => {
-            Uint8Array::from(bytes.as_slice()).into()
+        SyncEntry::BareBytes(bytes) | SyncEntry::SequencedBytes { payload: bytes, .. } => {
+            Uint8Array::from(bytes.as_ref()).into()
         }
-        SyncBatchEntry::BareString(s) | SyncBatchEntry::SequencedString { payload: s, .. } => {
+        SyncEntry::BareString(s) | SyncEntry::SequencedString { payload: s, .. } => {
             JsValue::from_str(s)
         }
     }

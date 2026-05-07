@@ -880,6 +880,10 @@ fn http_url_to_ws(server_url: &str, app_id: &str) -> String {
         ("wss://", rest)
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
         ("ws://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("wss://") {
+        ("wss://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        ("ws://", rest)
     } else {
         ("ws://", trimmed)
     };
