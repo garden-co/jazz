@@ -328,8 +328,9 @@ pub(super) fn build_computed_visible_preview(
                     .as_ref()
                     .map(|values| candidate_value != &values[column_index])
                     .unwrap_or_else(|| {
-                        // With no common ancestor, Null is an explicit value,
-                        // not "unchanged from absence".
+                        // With no common ancestor, Null is an explicit value, not "unchanged from absence".
+                        // The only exception is counters: for counter merge logic, we don’t want a
+                        // missing/no-ancestor snapshot to look like a counter update of “null”.
                         !matches!(
                             (column.merge_strategy, candidate_value),
                             (Some(ColumnMergeStrategy::Counter), Value::Null)
