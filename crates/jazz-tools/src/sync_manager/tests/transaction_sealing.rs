@@ -257,23 +257,16 @@ fn direct_client_settlement_retains_replayable_sealed_submission() {
         },
     );
 
-    let record = io
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("client direct batch row should retain a local batch record");
-    let submission = record.sealed_submission.clone().unwrap_or_else(|| {
-        panic!("client direct settlement should retain a replayable sealed submission: {record:?}")
-    });
-    assert_eq!(submission.batch_id, batch_id);
-    assert_eq!(submission.target_branch_name, BranchName::new("main"));
-    assert_eq!(submission.captured_frontier, Vec::new());
     assert_eq!(
-        submission.members,
-        vec![SealedBatchMember {
-            object_id: row_id,
-            row_digest: row.content_digest(),
-        }]
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }),
+        "direct client fate should be retained without rebuilding a local batch record"
     );
+    assert_eq!(io.load_local_batch_record(batch_id).unwrap(), None);
+    assert_eq!(io.load_sealed_batch_submission(batch_id).unwrap(), None);
 }
 
 #[test]
@@ -319,23 +312,17 @@ fn direct_client_settlement_before_row_retains_replayable_sealed_submission_afte
         },
     );
 
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }),
+    );
     let outbox = sm.take_outbox();
     assert!(
-        outbox.iter().any(|entry| matches!(
-            entry,
-            OutboxEntry {
-                destination: Destination::Server(id),
-                payload: SyncPayload::SealBatch { submission },
-            } if *id == server_id
-                && submission.batch_id == batch_id
-                && submission.target_branch_name == BranchName::new("main")
-                && submission.captured_frontier.is_empty()
-                && submission.members == vec![SealedBatchMember {
-                    object_id: row_id,
-                    row_digest: row.content_digest(),
-                }]
-        )),
-        "direct settlement received before its row should replay a seal to the server; outbox={outbox:?}"
+        outbox.is_empty(),
+        "a fate received without SealBatch must not synthesize replayable membership; outbox={outbox:?}"
     );
 }
 
@@ -380,21 +367,17 @@ fn direct_client_settlement_before_row_keeps_sealed_submission_without_server() 
         },
     );
 
-    let record = io
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("offline client direct batch should retain a local batch record");
-    let submission = record.sealed_submission.clone().unwrap_or_else(|| {
-        panic!("offline client direct settlement should retain a reconnect seal: {record:?}")
-    });
-    assert_eq!(submission.batch_id, batch_id);
-    assert_eq!(submission.target_branch_name, BranchName::new("main"));
     assert_eq!(
-        submission.members,
-        vec![SealedBatchMember {
-            object_id: row_id,
-            row_digest: row.content_digest(),
-        }]
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        Some(BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        }),
+    );
+    assert_eq!(
+        io.load_sealed_batch_submission(batch_id).unwrap(),
+        None,
+        "a fate received without SealBatch must not synthesize replayable membership"
     );
 }
 
