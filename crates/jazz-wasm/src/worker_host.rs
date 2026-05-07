@@ -889,3 +889,90 @@ fn http_url_to_ws(server_url: &str, app_id: &str) -> String {
     };
     format!("{}{}/apps/{}/ws", scheme.0, scheme.1, app_id)
 }
+
+#[cfg(test)]
+mod tests {
+    //! In-source unit tests for the worker-host's pure helpers. These
+    //! cover the deleted `jazz-worker.test.ts` cases that have a Rust
+    //! analogue (`composeConnectUrl` → `http_url_to_ws`,
+    //! `mergeAuth`-related pieces are now folded into `update_auth` so
+    //! the closest equivalent is `map_auth_reason`).
+    use super::{http_url_to_ws, map_auth_reason};
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_normalises_https() {
+        assert_eq!(
+            http_url_to_ws("https://example.test", "app-1"),
+            "wss://example.test/apps/app-1/ws"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_normalises_http() {
+        assert_eq!(
+            http_url_to_ws("http://localhost:4000", "xyz"),
+            "ws://localhost:4000/apps/xyz/ws"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_passes_wss_through() {
+        assert_eq!(
+            http_url_to_ws("wss://relay.example", "x"),
+            "wss://relay.example/apps/x/ws",
+            "wss:// must NOT become wss://wss://...",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_passes_ws_through() {
+        assert_eq!(
+            http_url_to_ws("ws://relay.example", "x"),
+            "ws://relay.example/apps/x/ws"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_strips_trailing_slash() {
+        assert_eq!(
+            http_url_to_ws("https://example.test/", "a"),
+            "wss://example.test/apps/a/ws"
+        );
+        assert_eq!(
+            http_url_to_ws("https://example.test///", "a"),
+            "wss://example.test/apps/a/ws"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_url_to_ws_defaults_unknown_scheme_to_ws() {
+        // No recognised scheme → assume plain host:port and prefix `ws://`.
+        assert_eq!(
+            http_url_to_ws("example.test:4000", "a"),
+            "ws://example.test:4000/apps/a/ws"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn map_auth_reason_recognises_known_strings() {
+        // The Rust transport currently emits these strings on auth failure.
+        assert_eq!(map_auth_reason("Unauthorized"), "expired");
+        assert_eq!(map_auth_reason("expired"), "expired");
+        assert_eq!(map_auth_reason("missing"), "missing");
+        assert_eq!(map_auth_reason("Missing token"), "missing");
+        assert_eq!(map_auth_reason("disabled"), "disabled");
+        assert_eq!(map_auth_reason("Auth disabled"), "disabled");
+    }
+
+    #[wasm_bindgen_test]
+    fn map_auth_reason_falls_back_to_invalid() {
+        // Anything not in the known set maps to `invalid` so the main
+        // thread always gets one of the four `AuthFailureReason` values.
+        assert_eq!(map_auth_reason(""), "invalid");
+        assert_eq!(map_auth_reason("totally unrecognised"), "invalid");
+        assert_eq!(map_auth_reason("Unauthorized "), "invalid"); // exact match only
+    }
+}
