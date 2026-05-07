@@ -80,10 +80,10 @@ src/
     types.ts              EngineState, EngineProps, GameWorld, Deposit, etc.
     Hud.tsx               HUD component (fuel gauge, player list, deposit icons).
 
-  sync/
-    useSyncLoop.ts        Polls engine state, writes to Jazz every 200ms.
-    useDeposits.ts        Deposit subscription and reconciliation.
-    writes.ts             DB write helpers (playerStateChanged, reconcileDeposits).
+  jazz/
+    GameWithSync.tsx      Jazz-connected wrapper around Game; bridges subscriptions to engine state.
+    SyncManager.ts        All Jazz writes (player state, deposit reconcile, chat).
+    useSync.ts            All Jazz reads (live queries for players, deposits, messages).
 
 schema.ts                 Table definitions (players, fuel_deposits, chat_messages).
 permissions.ts            Access control policies.
