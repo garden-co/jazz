@@ -49,7 +49,7 @@ import {
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
-import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
+import type { WorkerLifecycleEvent } from "./worker-bridge.js";
 import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
@@ -1512,7 +1512,7 @@ export class Db {
 
     if (this.workerBridge) {
       try {
-        await this.workerBridge.shutdown(currentWorker);
+        await this.workerBridge.shutdown();
       } catch {
         // Best effort
       }
@@ -1547,7 +1547,7 @@ export class Db {
 
     if (this.workerBridge && currentWorker) {
       try {
-        await this.workerBridge.shutdown(currentWorker);
+        await this.workerBridge.shutdown();
       } catch {
         // Best effort: if the bridge shutdown times out, we still terminate below.
       }
@@ -2153,7 +2153,7 @@ export class Db {
 
     // Shutdown worker bridge — waits for OPFS handles to be released
     if (this.workerBridge && this.worker) {
-      await this.workerBridge.shutdown(this.worker);
+      await this.workerBridge.shutdown();
       this.workerBridge = null;
     }
 

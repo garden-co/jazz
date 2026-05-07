@@ -288,6 +288,14 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Fallback outbox sender used when no `TransportHandle` is set (e.g. on
     /// the server side, where the runtime fans out via `ConnectionEventHub`
     /// instead of a WebSocket connection).
+    ///
+    /// On wasm32 the bound is `dyn SyncSender` because WASM is single-threaded
+    /// and the JS/web-sys types it holds (`JsValue`, `Function`, `Rc`) are
+    /// `!Send`. On other targets the multi-threaded Tokio backend requires
+    /// the sender to be `Send`.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) sync_sender: Option<Box<dyn SyncSender>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) sync_sender: Option<Box<dyn SyncSender + Send>>,
 
     /// Parked sync messages (from network).
@@ -592,6 +600,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Install a fallback sync sender used when no `TransportHandle` is set.
     /// On the server side, this is the bridge from the runtime's outbox into
     /// the per-connection `ConnectionEventHub` channels.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender>) {
+        self.sync_sender = Some(sender);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_sync_sender(&mut self, sender: Box<dyn SyncSender + Send>) {
         self.sync_sender = Some(sender);
     }

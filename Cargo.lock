@@ -1838,6 +1838,7 @@ dependencies = [
  "jazz-tools",
  "jazz-wasm-tracing",
  "js-sys",
+ "postcard",
  "serde",
  "serde-wasm-bindgen 0.6.5",
  "serde_bytes",

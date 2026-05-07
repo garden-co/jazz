@@ -8,11 +8,7 @@
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import {
-  applyUserAuthHeaders,
-  type AuthFailureReason,
-  type RuntimeSyncOutboxCallback,
-} from "./sync-transport.js";
+import { applyUserAuthHeaders, type AuthFailureReason } from "./sync-transport.js";
 import {
   resolveClientSessionStateSync,
   LOCAL_FIRST_JWT_ISSUER,
@@ -107,8 +103,14 @@ export interface Runtime {
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
-  /** Route outbox messages to the transport layer. Required for WASM worker-bridge; no-op for NAPI/RN (Rust owns the transport). */
-  onSyncMessageToSend?(callback: RuntimeSyncOutboxCallback): void;
+  /**
+   * Construct a Rust-owned worker bridge attached to this runtime. Returns
+   * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
+   * Options are parsed at attach time; `bridge.init()` is parameter-less.
+   */
+  createWorkerBridge?(worker: Worker, options: object): unknown;
+  /** Drive a synchronous batched tick. Used by callers that need to flush
+   * pending state before a synchronous teardown. */
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
