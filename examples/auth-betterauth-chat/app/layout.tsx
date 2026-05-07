@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import "../../auth-simple-chat/src/styles.css";
+import "./globals.css";
 
 export const metadata: Metadata = {
   title: "auth-betterauth-chat",
