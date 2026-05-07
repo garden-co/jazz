@@ -57,6 +57,20 @@ function scope(label: string): Scope {
   };
 }
 
+/**
+ * Await a `db.insert()` result up to edge-tier durability and return the
+ * inserted value. Use this between dependent writes so the next op sees the
+ * prior one — both for policy checks (`isBandMember`) and for relation
+ * includes that need the related row to be visible at the server.
+ */
+async function inserted<T>(handle: {
+  readonly value: T;
+  wait(options: { tier: "local" | "edge" | "global" }): Promise<unknown>;
+}): Promise<T> {
+  await handle.wait({ tier: "edge" });
+  return handle.value;
+}
+
 async function waitFor(check: () => boolean, ms: number, label: string): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -179,29 +193,36 @@ describe("world-tour Jazz + Vue integration", () => {
     const userId = client.session?.user_id;
     if (!userId) throw new Error("test session is missing user_id");
 
-    const { value: band } = client.db.insert(app.bands, { name: `${s.marker}-band` });
-    client.db.insert(app.members, { bandId: band.id, userId });
-    const { value: venue } = client.db.insert(app.venues, {
-      name: `${s.marker}-venue`,
-      city: "London",
-      country: "UK",
-      lat: 51.5159,
-      lng: -0.1311,
-    });
-    const { value: stop } = client.db.insert(
-      app.stops,
-      s.tag({
-        bandId: band.id,
-        venueId: venue.id,
-        date: new Date("2026-08-01"),
-        status: "confirmed",
-        publicDescription: "",
+    // Each dependent insert awaits edge-tier confirmation. The stop's policy
+    // check (isBandMember) and the include-resolution of `venue` both require
+    // the prior writes to be visible at the server before the next op lands.
+    const band = await inserted(client.db.insert(app.bands, { name: `${s.marker}-band` }));
+    await inserted(client.db.insert(app.members, { bandId: band.id, userId }));
+    const venue = await inserted(
+      client.db.insert(app.venues, {
+        name: `${s.marker}-venue`,
+        city: "London",
+        country: "UK",
+        lat: 51.5159,
+        lng: -0.1311,
       }),
+    );
+    const stop = await inserted(
+      client.db.insert(
+        app.stops,
+        s.tag({
+          bandId: band.id,
+          venueId: venue.id,
+          date: new Date("2026-08-01"),
+          status: "confirmed",
+          publicDescription: "",
+        }),
+      ),
     );
 
     await waitFor(
       () => el.querySelectorAll("#stops li").length === 1,
-      15000,
+      5000,
       "stop with included venue should appear",
     );
     const li = el.querySelector("#stops li")!;
@@ -212,7 +233,7 @@ describe("world-tour Jazz + Vue integration", () => {
 
     await waitFor(
       () => el.querySelector("#stops li")!.getAttribute("data-status") === "tentative",
-      15000,
+      5000,
       "status update should propagate to the rendered DOM",
     );
   });
