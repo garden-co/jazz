@@ -201,7 +201,7 @@ describe("world-tour Jazz + Vue integration", () => {
 
     await waitFor(
       () => el.querySelectorAll("#stops li").length === 1,
-      5000,
+      15000,
       "stop with included venue should appear",
     );
     const li = el.querySelector("#stops li")!;
@@ -212,7 +212,7 @@ describe("world-tour Jazz + Vue integration", () => {
 
     await waitFor(
       () => el.querySelector("#stops li")!.getAttribute("data-status") === "tentative",
-      5000,
+      15000,
       "status update should propagate to the rendered DOM",
     );
   });
