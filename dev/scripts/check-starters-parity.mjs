@@ -14,7 +14,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..");
+const repoRoot = resolve(here, "..", "..");
 
 const STARTERS = {
   next: ["starters/next-betterauth", "starters/next-localfirst", "starters/next-hybrid"],
