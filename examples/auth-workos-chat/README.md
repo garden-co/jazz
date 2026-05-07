@@ -34,31 +34,29 @@ You need a [WorkOS account](https://workos.com/docs/authkit/client-only) with a 
 }
 ```
 
-### 2. Start the Jazz sync server
-
-```bash
-pnpm sync-server
-```
-
-Builds the `jazz-tools` binary if needed, starts a local sync server on port 1625 pointed at the
-WorkOS JWKS URL, and pushes the schema catalogue in one step.
-
-The JWKS URL is assembled from `WORKOS_CLIENT_ID` at runtime:
-
-```ts
-jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`;
-```
-
-The sync server fetches that URL to verify every incoming Jazz JWT signature.
-
-### 3. Start the Vite app
+### 2. Start the Vite app
 
 ```bash
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`. Click **Continue with WorkOS** to be redirected to the WorkOS
-hosted login page. After sign-in WorkOS redirects back to the app with an access token.
+The Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`) automatically spawns a local Jazz sync
+server pointed at the WorkOS JWKS URL, pushes the schema catalogue, and exposes
+`VITE_JAZZ_APP_ID` / `VITE_JAZZ_SERVER_URL` to the app. The JWKS URL is assembled from
+`WORKOS_CLIENT_ID` at config time:
+
+```ts
+jazzPlugin({
+  server: {
+    jwksUrl: `https://api.workos.com/sso/jwks/${WORKOS_CLIENT_ID}`,
+  },
+});
+```
+
+The sync server fetches that URL to verify every incoming Jazz JWT signature.
+
+Open the URL Vite prints (default `http://127.0.0.1:5173`). Click **Continue with WorkOS** to be
+redirected to the hosted login page; after sign-in WorkOS redirects back with an access token.
 
 ## How the WorkOS integration works
 
