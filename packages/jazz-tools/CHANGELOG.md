@@ -1,5 +1,54 @@
 # jazz-tools
 
+## 2.0.0-alpha.47
+
+### Minor Changes
+
+- 3d7e00f: Add edge upstream sync support for self-hosted Jazz servers.
+
+  `jazz-tools server` can now run as an edge when configured with an upstream core URL and peer secret, and the DevServer/testing APIs expose matching upstream and peer-secret options for integration coverage.
+
+### Patch Changes
+
+- 2156a27: Replace replayable batch settlements with whole-batch `BatchFate` sync semantics and remove visible-member manifests from the client-facing fate shape. Successful fate now applies by batch id to locally known rows, avoiding repeated per-row member decoding during subscription settlement.
+- 6352c68: Make sync batch settlements the durability source of truth, including batch-level rejection fate, settlement-based visibility, transport batching, and more reliable offline replay after reconnect.
+- 411d0a0: Updated BetterAuth adapter query-support rules: timestamp columns now support `ne`, `null` filters are only allowed for nullable columns, and `ne null` remains rejected for references and `id`.
+- 729effd: Add opt-in development telemetry export for Jazz runtimes and local dev servers. WASM runtimes now buffer spans and logs in Rust only when telemetry is enabled, notify JavaScript through a coalesced drain subscription, and lazy-load client-side OpenTelemetry exporters only after a collector URL is configured.
+- 9942d24: Drop the `fetch` polyfill from `jazz-tools/expo`.
+
+  Nothing in jazz-tools consumes a streaming `response.body`, sync runs over WebSocket, and every fetch call site uses buffered methods like `.json()`/`.text()`. The `expo/fetch` swap (and its accompanying `fetchSpecCompliant` URL/Request coercion) was working around `expo/fetch`'s string-only native bridge, but with `expo/fetch` gone, RN's default fetch — which is `whatwg-fetch` under the hood — already accepts URL and Request inputs natively. Better-auth's URL-input path therefore works without the wrapper.
+
+  The `ReadableStream` polyfill stays — it's still consumed by `runtime/file-storage.ts` for the chunked-file API, which Hermes can't service without it.
+
+- 22e5263: Drop no-op `Headers`/`Request`/`Response` polyfills from `jazz-tools/expo`.
+
+  These were imported from `react-native/Libraries/Network/fetch`, which just re-exports `global.*` — so each polyfill collapsed to `globalThis.X = globalThis.X` at best, and to `globalThis.X = undefined` if the polyfill module evaluated before RN installed its networking globals. The latter case broke any consumer that touched `Headers.prototype` (e.g. Clerk's `new Headers(...)` in `fapiClient`), which surfaced as `TypeError: Cannot read property 'prototype' of undefined`. The `fetch` and `ReadableStream` polyfills, which do real work, are kept.
+
+- 30b55f4: Fix OPFS-backed storage reads so coalesced disk reads stop at the current file length instead of reading past EOF after uncheckpointed growth.
+- 2ea35d5: Fix query subscription sync by preserving local-first auth mode through binary payloads.
+- 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
+  `withJazz` writes the live schema hash into a generated module that the
+  React provider depends on, so Turbopack and Webpack reload the page
+  whenever the schema is pushed — no consumer-side wiring required.
+- e5c83ea: Keep dev plugins running when the initial schema auto-push cannot reach a configured remote Jazz server. The plugins now warn and continue with the configured app and server URL, while still failing on schema, auth, or server rejections.
+- 5752bde: Add React Native anonymous auth support. `jazz-tools` now mints anonymous JWTs through the React Native runtime module when no auth credentials are provided, and `jazz-rn` exposes the matching native `mintAnonymousToken` binding.
+- 15b347d: `jazz-rn`: `query` is now `async` and no longer blocks the React Native JS thread on one-shot reads.
+
+  The native uniffi export used `block_on` on the JS thread, so any `db.all(...)` that needed a later `batched_tick` to settle (e.g. queries that wait on server-sourced data or parked sync messages) could deadlock — the JS thread was blocked, so the `batched_tick` callback could never fire to fulfil the query future. The export is now `async fn` and uniffi-bindgen-react-native generates a Promise-returning JSI call, polled off the JS thread. `JazzRnRuntimeAdapter.query` now `await`s the binding before parsing.
+
+- 181a66f: Modifies `createPolicyTestApp` to receive an app and permission objects instead of the schema's dir.
+- e336d8d: Modify the permission tests API to make `expectAllowed`/`expectDenied` side-effect free.
+- a523693: Add `rollback()` to transaction handles. Calling rollback closes the transaction without committing it, so later writes, reads, commits, or rollbacks on the same transaction fail.
+- Updated dependencies [2156a27]
+- Updated dependencies [6352c68]
+- Updated dependencies [729effd]
+- Updated dependencies [5752bde]
+- Updated dependencies [15b347d]
+  - jazz-wasm@2.0.0-alpha.47
+  - jazz-rn@2.0.0-alpha.47
+
 ## 2.0.0-alpha.46
 
 ### Patch Changes
