@@ -135,13 +135,57 @@ impl WasmWorkerBridge {
 
     /// Send the init message and resolve when the worker reports `init-ok`.
     /// Memoized — repeated calls return the same in-flight `Promise`.
+    ///
+    /// State setup + the init `postMessage` happen *synchronously* before
+    /// this returns. Only the `init-ok | error | timeout` race awaits inside
+    /// the returned `Promise`. Callers that emit a synthetic `init-ok`
+    /// straight after this call (tests) don't need a microtask yield to see
+    /// the resolver installed.
     #[wasm_bindgen]
     pub fn init(&self) -> js_sys::Promise {
         if let Some(p) = self.inner.init_promise.borrow().clone() {
             return p;
         }
+
+        if !self.inner.transition_init_called() {
+            return js_sys::Promise::reject(&JsValue::from_str("WorkerBridge has been disposed"));
+        }
+
+        let (tx, rx) = oneshot::channel::<Result<String, String>>();
+        *self.inner.init_resolver.borrow_mut() = Some(tx);
+
+        if let Err(e) = self.inner.worker.post_message(&self.inner.init_message) {
+            self.inner.init_resolver.borrow_mut().take();
+            self.inner.transition_init_failed();
+            return js_sys::Promise::reject(&JsValue::from_str(&format!(
+                "postMessage init: {e:?}"
+            )));
+        }
+
         let inner = Rc::clone(&self.inner);
-        let promise = wasm_bindgen_futures::future_to_promise(async move { run_init(inner).await });
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let timeout = make_timeout(INIT_RESPONSE_TIMEOUT_MS);
+            let response = match select(rx, timeout).await {
+                Either::Left((Ok(Ok(client_id)), _)) => Ok(client_id),
+                Either::Left((Ok(Err(msg)), _)) => Err(msg),
+                Either::Left((Err(_), _)) => Err("init resolver dropped".to_string()),
+                Either::Right(_) => Err("Worker init timeout".to_string()),
+            };
+            match response {
+                Ok(client_id) => {
+                    inner.transition_init_ok(client_id.clone());
+                    inner.sender.open_init_gate_and_flush();
+                    let result = Object::new();
+                    let _ =
+                        Reflect::set(&result, &"clientId".into(), &JsValue::from_str(&client_id));
+                    Ok(result.into())
+                }
+                Err(message) => {
+                    inner.transition_init_failed();
+                    Err(JsValue::from_str(&format!("Worker init failed: {message}")))
+                }
+            }
+        });
         *self.inner.init_promise.borrow_mut() = Some(promise.clone());
         promise
     }
@@ -351,10 +395,35 @@ impl WasmWorkerBridge {
         }
     }
 
+    /// Tear the bridge down. Synchronous side-effects (noop sender, edge
+    /// removal, `Shutdown` posted) happen before this returns. The returned
+    /// `Promise` resolves on `shutdown-ok` or after `SHUTDOWN_ACK_TIMEOUT_MS`.
     #[wasm_bindgen]
     pub fn shutdown(&self) -> js_sys::Promise {
+        if self.inner.is_disposed_like() {
+            return js_sys::Promise::resolve(&JsValue::UNDEFINED);
+        }
+        self.inner.transition_shutdown_called();
+        // Detach the outbox edge BEFORE posting shutdown.
+        self.inner.runtime.install_noop_sync_sender();
+        self.inner.sender.set_server_payload_forwarder(None);
+        self.inner.runtime.remove_server();
+
+        let (tx, rx) = oneshot::channel::<()>();
+        *self.inner.shutdown_resolver.borrow_mut() = Some(tx);
+        post_wire(&self.inner.worker, &MainToWorkerWire::Shutdown);
+
         let inner = Rc::clone(&self.inner);
-        wasm_bindgen_futures::future_to_promise(async move { run_shutdown(inner).await })
+        wasm_bindgen_futures::future_to_promise(async move {
+            let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
+            let _ = select(rx, timeout).await;
+            // Clear `worker.onmessage` so late inbound messages don't invoke
+            // a freed Rust trampoline. `Closure::drop` alone does NOT clear
+            // the JS slot.
+            inner.worker.set_onmessage(None);
+            inner.transition_shutdown_finished();
+            Ok(JsValue::UNDEFINED)
+        })
     }
 }
 
@@ -376,73 +445,9 @@ impl Drop for WasmWorkerBridge {
     }
 }
 
-async fn run_init(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
-    if !inner.transition_init_called() {
-        return Err(JsValue::from_str("WorkerBridge has been disposed"));
-    }
-
-    let (tx, rx) = oneshot::channel::<Result<String, String>>();
-    *inner.init_resolver.borrow_mut() = Some(tx);
-
-    if let Err(e) = inner.worker.post_message(&inner.init_message) {
-        // Drop the resolver we just installed so a subsequent `init-ok`
-        // (which can no longer arrive — the post failed) doesn't fire on a
-        // dead `Sender` or, worse, race the next init attempt.
-        inner.init_resolver.borrow_mut().take();
-        inner.transition_init_failed();
-        return Err(JsValue::from_str(&format!("postMessage init: {e:?}")));
-    }
-
-    let timeout = make_timeout(INIT_RESPONSE_TIMEOUT_MS);
-    let response = match select(rx, timeout).await {
-        Either::Left((Ok(Ok(client_id)), _)) => Ok(client_id),
-        Either::Left((Ok(Err(msg)), _)) => Err(msg),
-        Either::Left((Err(_), _)) => Err("init resolver dropped".to_string()),
-        Either::Right(_) => Err("Worker init timeout".to_string()),
-    };
-
-    match response {
-        Ok(client_id) => {
-            inner.transition_init_ok(client_id.clone());
-            // Open the outbox init-gate so accumulated outbox traffic flushes.
-            inner.sender.open_init_gate_and_flush();
-            let result = Object::new();
-            let _ = Reflect::set(&result, &"clientId".into(), &JsValue::from_str(&client_id));
-            Ok(result.into())
-        }
-        Err(message) => {
-            inner.transition_init_failed();
-            Err(JsValue::from_str(&format!("Worker init failed: {message}")))
-        }
-    }
-}
-
-async fn run_shutdown(inner: Rc<BridgeInner>) -> Result<JsValue, JsValue> {
-    if inner.is_disposed_like() {
-        return Ok(JsValue::UNDEFINED);
-    }
-    inner.transition_shutdown_called();
-
-    // Detach the outbox edge BEFORE posting shutdown. Spec line 528.
-    inner.runtime.install_noop_sync_sender();
-    inner.sender.set_server_payload_forwarder(None);
-    inner.runtime.remove_server();
-
-    let (tx, rx) = oneshot::channel::<()>();
-    *inner.shutdown_resolver.borrow_mut() = Some(tx);
-
-    post_wire(&inner.worker, &MainToWorkerWire::Shutdown);
-
-    let timeout = make_timeout(SHUTDOWN_ACK_TIMEOUT_MS);
-    let _ = select(rx, timeout).await;
-
-    // Spec-compliant teardown: explicitly clear `worker.onmessage` so that any
-    // late inbound messages don't invoke a freed Rust trampoline. `Closure::drop`
-    // alone does NOT clear the JS slot — it just invalidates the call.
-    inner.worker.set_onmessage(None);
-    inner.transition_shutdown_finished();
-    Ok(JsValue::UNDEFINED)
-}
+// `run_init` and `run_shutdown` are now inlined into the wasm-bindgen
+// `init` / `shutdown` methods so synchronous setup happens eagerly. See
+// the method bodies above.
 
 // =============================================================================
 // Internal state
