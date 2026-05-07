@@ -373,8 +373,8 @@ async fn named_object_trace() {
     alice    -> server    RowBatchCreated      created row:my-todo branch:main batch:B1
     alice    => server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
     alice    -> server    SealBatch            seal batch:B1 target:main members:[row:my-todo] frontier:0
-    server   => alice     BatchFate      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
-    server   -> alice     BatchFate      durable_direct batch:B1 tier:GlobalServer members:[row:my-todo branch:main batch:B1]
+    server   => alice     BatchFate            durable_direct batch:B1 tier:GlobalServer
+    server   -> alice     BatchFate            durable_direct batch:B1 tier:GlobalServer
     ");
 
     alice.shutdown().await.expect("shutdown alice");

@@ -19,6 +19,7 @@ use crate::sync_manager::{
     RowBatchKey, SchemaWarning, SyncManager,
 };
 
+use super::encoding::decode_row;
 use super::graph::{QueryCompileError, QueryGraph};
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::{Operation, PolicyExpr};
@@ -1740,7 +1741,113 @@ impl QueryManager {
         if local_update {
             self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
         } else {
+            let self_referential_table_update = old_row.is_some()
+                && table_schema.columns.columns.iter().any(|column| {
+                    column.references.as_ref().is_some_and(|referenced| {
+                        referenced.as_str() == logical_table.as_str()
+                            || referenced.as_str() == original_table.as_str()
+                            || referenced.as_str() == branch_table.as_str()
+                    })
+                });
+            if self_referential_table_update
+                || Self::select_policy_columns_changed(
+                    table_schema.policies.select_policy(),
+                    &table_name,
+                    &descriptor,
+                    old_row.map(|row| row.data.as_ref()),
+                    new_data,
+                )
+            {
+                self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
+            }
             self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
+        }
+    }
+
+    fn select_policy_columns_changed(
+        policy: Option<&PolicyExpr>,
+        table_name: &TableName,
+        descriptor: &RowDescriptor,
+        old_data: Option<&[u8]>,
+        new_data: &[u8],
+    ) -> bool {
+        let Some(policy) = policy else {
+            return false;
+        };
+        let Some(old_data) = old_data else {
+            return !matches!(policy, PolicyExpr::True);
+        };
+        let columns = Self::policy_local_columns(policy);
+        let Ok(old_values) = decode_row(descriptor, old_data) else {
+            return true;
+        };
+        let Ok(new_values) = decode_row(descriptor, new_data) else {
+            return true;
+        };
+        if descriptor
+            .columns
+            .iter()
+            .enumerate()
+            .any(|(index, column)| {
+                column
+                    .references
+                    .as_ref()
+                    .is_some_and(|referenced| referenced == table_name)
+                    && old_values.get(index) != new_values.get(index)
+            })
+        {
+            return true;
+        }
+        if columns.is_empty() {
+            return false;
+        }
+
+        columns.into_iter().any(|column| {
+            descriptor
+                .column_index(&column)
+                .is_some_and(|index| old_values.get(index) != new_values.get(index))
+        })
+    }
+
+    fn policy_local_columns(policy: &PolicyExpr) -> HashSet<String> {
+        let mut columns = HashSet::new();
+        Self::collect_policy_local_columns(policy, &mut columns);
+        columns
+    }
+
+    fn collect_policy_local_columns(policy: &PolicyExpr, columns: &mut HashSet<String>) {
+        match policy {
+            PolicyExpr::Cmp { column, .. }
+            | PolicyExpr::IsNull { column }
+            | PolicyExpr::IsNotNull { column }
+            | PolicyExpr::Contains { column, .. }
+            | PolicyExpr::In { column, .. }
+            | PolicyExpr::InList { column, .. }
+            | PolicyExpr::Inherits {
+                via_column: column, ..
+            } => {
+                columns.insert(column.clone());
+            }
+            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+                for expr in exprs {
+                    Self::collect_policy_local_columns(expr, columns);
+                }
+            }
+            PolicyExpr::Not(expr)
+            | PolicyExpr::Exists {
+                condition: expr, ..
+            } => {
+                Self::collect_policy_local_columns(expr, columns);
+            }
+            PolicyExpr::SessionCmp { .. }
+            | PolicyExpr::SessionIsNull { .. }
+            | PolicyExpr::SessionIsNotNull { .. }
+            | PolicyExpr::SessionContains { .. }
+            | PolicyExpr::SessionInList { .. }
+            | PolicyExpr::ExistsRel { .. }
+            | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::True
+            | PolicyExpr::False => {}
         }
     }
 

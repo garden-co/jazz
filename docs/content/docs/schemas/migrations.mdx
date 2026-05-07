@@ -1,7 +1,7 @@
 ---
 title: Migrations
 description: Structural schema evolution workflow and reviewed migration edges.
-reviewedAt: "22485728"
+reviewedAt: "c799b8dfd"
 ---
 
 <Callout type="info" title="You can skip this first">
@@ -10,7 +10,25 @@ reviewedAt: "22485728"
 
 ## Why Jazz migrations are different
 
-Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing. Jazz migrations are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema versions.
+Most migration systems are one-way: rewrite every row to the new shape, then cut over. That assumes you can stop the world long enough to upgrade&hairsp;—&hairsp;which doesn't hold when your clients are local-first, frequently offline, and updating their app on their own schedule.
+
+Jazz keeps every schema version addressable by hash and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
+
+## Schemas, lenses and branches
+
+Every unique version of your `schema.ts` has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
+
+<LensDiagram />
+
+Storage is partitioned by schema hash: rows written under a given schema live in
+that schema's own branch (`env-{hash}-userBranch`) and stay there unchanged.
+Non-adjacent reads compose lenses in sequence to bridge multiple schema versions.
+
+In practice, this lets you:
+
+- Ship a schema change without waiting for every user to update their app.
+- Roll out platform-by-platform (mobile, desktop, web) on independent cadences.
+- Accept writes from clients that have been offline since before the new schema landed.
 
 ## Workflow
 
@@ -23,8 +41,9 @@ Traditional migration systems run a linear sequence and require peers to converg
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to ensure policies
-   are valid before they are deployed. `deploy` does not run these checks.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
+   any policy diagnostics without publishing. `deploy` runs the same checks; `validate` is most
+   useful as a fast pre-publish sanity check or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
@@ -47,19 +66,21 @@ Traditional migration systems run a linear sequence and require peers to converg
    pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
-   `deploy` publishes the current schema if the server does not already know it, checks whether the
-   previous permissions schema is connected to the new one on the server, pushes the local migration
-   if needed, and then publishes the current permissions.
+   `deploy` walks through the publish pipeline in one go:
+   1. Publishes the current schema if the server does not already have it.
+   2. If your previous `permissions.ts` was tied to an older schema hash, asks the server whether
+      it already has a migration path between the two hashes. If not, pushes the local migration
+      file that closes the gap (and fails with a helpful message if you haven't created one yet).
+   3. Publishes the current permissions, attached to the current schema hash.
 
-Permission-only changes in `permissions.ts` do not need migrations, but they do still require
+Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
 
-## Generated stub
+## The migration file
 
-Under the hood, each migration produces a **lens**&hairsp;—&hairsp;a bidirectional transformation
-between two schema versions. The forward direction applies the migration; the backward direction is
-generated automatically so older clients can still read data written under the new schema. The
-generated stub contains the structural diff as declarative operations.
+The generated stub describes the diff as declarative operations which carry enough information to run in either direction. That
+is how older clients can still read data written under a newer schema: the same operations replay
+in reverse.
 
 <Callout type="warn">
   If the diff contains ambiguities (e.g. a column was removed and a same-typed column was added,
@@ -68,13 +89,15 @@ generated stub contains the structural diff as declarative operations.
   the ambiguity before publishing.
 </Callout>
 
+### Generated stub
+
 Here's a generated stub for adding a `description` column:
 
 <include cwd lang="ts" meta='title="migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"'>
   ../examples/docs/todo-server-ts/migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts
 </include>
 
-## Customising defaults
+### Customising defaults
 
 Review generated defaults before you publish. For example, you might replace a nullable default with a domain-specific value:
 
@@ -86,7 +109,7 @@ Review generated defaults before you publish. For example, you might replace a n
   ../examples/docs/todo-server-ts/migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts
 </include>
 
-## Backwards defaults
+### Backwards defaults
 
 When a newer schema drops a column that older clients still expect, define a backwards default so the lens can supply a value for those clients:
 
@@ -101,13 +124,13 @@ When a newer schema drops a column that older clients still expect, define a bac
 ## Migrating historical schemas
 
 Jazz does not require you to create a migration for every schema change. You can just use the app and create new data.
-Existing data will still be available, but you will not be able to read it until you create a migration.
+Existing data will still be stored in the database, but you will not be able to read it until you create a migration.
 
 This is particularly useful when you are iterating on a feature that is not yet ready to be released.
 
 The Jazz server will detect when there are rows that are not reachable from the current schema. It will log a warning and suggest you create a migration.
 
-In order to do so, you'll need to **create the migration using explicit to/from schema hashes**:
+To do so, you'll need to **create the migration using explicit to/from schema hashes**:
 
 ```bash
 pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>

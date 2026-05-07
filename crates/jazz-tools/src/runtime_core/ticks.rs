@@ -4,6 +4,21 @@ use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
+    fn local_batch_row_was_insert(
+        &self,
+        table: &str,
+        row: &crate::row_histories::StoredRowBatch,
+    ) -> bool {
+        let Ok(history_rows) = self.storage.scan_history_row_batches(table, row.row_id) else {
+            return row.parents.is_empty();
+        };
+        !history_rows.iter().any(|candidate| {
+            candidate.branch == row.branch
+                && candidate.batch_id != row.batch_id
+                && candidate.state.is_visible()
+        })
+    }
+
     fn local_batch_rows(
         &self,
         batch_id: crate::row_histories::BatchId,
@@ -169,7 +184,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 row.data.to_vec(),
                 matches!(row.state, RowState::VisibleDirect),
                 row.delete_kind.is_some(),
-                row.parents.is_empty(),
+                self.local_batch_row_was_insert(row_locator.table.as_str(), &row),
             ));
         }
 
