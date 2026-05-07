@@ -424,59 +424,6 @@ impl Conjunction {
         self.conditions.push(condition);
     }
 
-    /// Find the best condition for index scanning.
-    /// Prefers Eq over range conditions.
-    pub fn best_index_condition(&self) -> Option<&Condition> {
-        // First look for Eq conditions
-        if let Some(cond) = self
-            .conditions
-            .iter()
-            .find(|c| matches!(c, Condition::Eq { .. }) && c.is_index_scannable())
-        {
-            return Some(cond);
-        }
-        // Then any other index-scannable condition
-        self.conditions.iter().find(|c| c.is_index_scannable())
-    }
-
-    /// Get remaining conditions after removing the index condition.
-    pub fn remaining_conditions(&self, index_column: &str) -> Vec<&Condition> {
-        self.conditions
-            .iter()
-            .filter(|c| c.column() != index_column)
-            .collect()
-    }
-
-    /// Check if all conditions are fully covered by index scan on the given column.
-    /// Returns true if the only condition(s) are on the index column and are index-scannable.
-    pub fn is_fully_covered_by_index(&self, index_column: &str) -> bool {
-        if self.conditions.is_empty() {
-            return true;
-        }
-        // All conditions must be on the index column and index-scannable
-        self.conditions
-            .iter()
-            .all(|c| c.column() == index_column && c.is_index_scannable())
-    }
-
-    /// Convert remaining (non-indexed) conditions to a Predicate.
-    /// Returns Predicate::True if all conditions are covered by the index.
-    pub fn remaining_predicate(&self, index_column: &str, descriptor: &RowDescriptor) -> Predicate {
-        let remaining: Vec<_> = self
-            .remaining_conditions(index_column)
-            .into_iter()
-            .filter_map(|c| c.to_predicate(descriptor))
-            .collect();
-
-        if remaining.is_empty() {
-            Predicate::True
-        } else if remaining.len() == 1 {
-            remaining.into_iter().next().unwrap()
-        } else {
-            Predicate::And(remaining)
-        }
-    }
-
     /// Convert to a Predicate.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Predicate {
         if self.conditions.is_empty() {
@@ -512,27 +459,6 @@ impl Conjunction {
             predicates.into_iter().next().unwrap()
         } else {
             Predicate::And(predicates)
-        }
-    }
-
-    /// Convert remaining (non-indexed) conditions to a Predicate using a TupleDescriptor.
-    pub fn remaining_tuple_predicate(
-        &self,
-        index_column: &str,
-        tuple_descriptor: &TupleDescriptor,
-    ) -> Predicate {
-        let remaining: Vec<_> = self
-            .remaining_conditions(index_column)
-            .into_iter()
-            .filter_map(|c| c.to_tuple_predicate(tuple_descriptor))
-            .collect();
-
-        if remaining.is_empty() {
-            Predicate::True
-        } else if remaining.len() == 1 {
-            remaining.into_iter().next().unwrap()
-        } else {
-            Predicate::And(remaining)
         }
     }
 }
@@ -1534,23 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn conjunction_best_index_condition() {
-        let mut conj = Conjunction::new();
-        conj.add(Condition::Ge {
-            column: "score".into(),
-            value: Value::Integer(50),
-        });
-        conj.add(Condition::Eq {
-            column: "status".into(),
-            value: Value::Text("active".into()),
-        });
-
-        // Should prefer Eq over Ge
-        let best = conj.best_index_condition().unwrap();
-        assert!(matches!(best, Condition::Eq { column, .. } if column == "status"));
-    }
-
-    #[test]
     fn query_to_predicate() {
         let descriptor = test_descriptor();
         let query = QueryBuilder::new("users")
@@ -1623,7 +1532,7 @@ mod tests {
 
         let predicate = query.to_predicate(&descriptor);
         assert!(matches!(predicate, Predicate::IsNull { col_index: 1 }));
-        assert!(query.disjuncts[0].best_index_condition().is_none());
+        assert!(!query.disjuncts[0].conditions[0].is_index_scannable());
     }
 
     #[test]
