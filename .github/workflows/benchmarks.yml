@@ -235,6 +235,12 @@ jobs:
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - name: Install CMake
+        run: |
+          if ! command -v cmake >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y cmake
+          fi
       - run: pnpm --filter jazz-napi build
       - run: pnpm exec playwright install chromium
 
