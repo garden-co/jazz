@@ -223,6 +223,81 @@ describe("remote autonomy gateway", () => {
     });
   });
 
+  it("persists Designer indexer uploads in the Linux object cache and records replay refs", async () => {
+    const payload = {
+      schema_version: "designer.indexer_ingest_batch.v1",
+      objects: [
+        {
+          relative_key:
+            "spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
+          value: {
+            schema_version: "designer.indexer_snapshot_event.v1",
+            phase: "prompt_start",
+            workspace_id: "workspace-1",
+            prompt: "make the gear taller",
+          },
+        },
+      ],
+    };
+
+    const uploaded = await requestJson("POST", "/v1/indexer/uploads", payload);
+
+    expect(uploaded).toMatchObject({
+      ok: true,
+      receipts: [
+        {
+          backend: "object-cache",
+          key:
+            "nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
+          uri:
+            "oci://us-sanjose-1/x-sanjose/nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
+          bucket: "x-sanjose",
+          region: "us-sanjose-1",
+        },
+      ],
+    });
+
+    const receipt = uploaded.receipts[0];
+    const cached = JSON.parse(await readFile(receipt.localPath, "utf8"));
+    expect(cached).toEqual(payload.objects[0].value);
+
+    const listed = await requestJson("GET", "/v1/indexer/uploads?limit=10");
+    expect(listed.uploads).toEqual([
+      expect.objectContaining({
+        relativeKey: payload.objects[0].relative_key,
+        key: receipt.key,
+        uri: receipt.uri,
+        sourceSchemaVersion: "designer.indexer_snapshot_event.v1",
+        objectCachePath: receipt.localPath,
+      }),
+    ]);
+
+    const state = await requestJson("GET", "/v1/state");
+    expect(state.indexerUploads).toEqual([
+      expect.objectContaining({
+        key: receipt.key,
+        contentHash: receipt.contentHash,
+      }),
+    ]);
+  });
+
+  it("rejects unsafe Designer indexer object keys", async () => {
+    const rejected = await requestJsonWithStatus("POST", "/v1/indexer/uploads", 400, {
+      schema_version: "designer.indexer_ingest_batch.v1",
+      objects: [
+        {
+          relative_key: "../outside.json",
+          value: {},
+        },
+      ],
+    });
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: "invalid Designer indexer object key ../outside.json",
+    });
+  });
+
   it("creates idempotent sync jobs, claims them, and records completion receipts", async () => {
     const created = await requestJson("POST", "/v1/sync/jobs", {
       kind: "rsync-mirror",

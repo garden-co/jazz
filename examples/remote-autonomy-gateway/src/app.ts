@@ -85,6 +85,7 @@ const SPACE_SYNC_JOB_KIND = "space-rsync-mirror";
 const SPACE_FILE_UPLOAD_JOB_KIND = "space-file-object-upload";
 const SPACE_FILE_MATERIALIZE_JOB_KIND = "space-file-materialize";
 const SPACE_FILE_EVENT_TYPE = "designer_space_file";
+const INDEXER_UPLOAD_EVENT_TYPE = "designer_indexer_upload";
 
 type ObjectStorageDescriptor = {
   provider: "oci";
@@ -139,6 +140,20 @@ type InlineSpaceFileReceipt = {
   materializedPath: string;
   checksum: string;
   bytes: number;
+  recordedAt: string;
+};
+
+type DesignerIndexerUploadRecord = {
+  objectRefId: string;
+  relativeKey: string;
+  key: string;
+  uri: string;
+  bucket: string;
+  region: string;
+  contentHash: string;
+  sizeBytes: number;
+  sourceSchemaVersion?: string;
+  objectCachePath: string;
   recordedAt: string;
 };
 
@@ -247,6 +262,7 @@ export function createRemoteAutonomyGateway(
         syncJobs: "/v1/sync/jobs",
         syncReceipts: "/v1/sync/receipts",
         claims: "/v1/claims",
+        indexerUploads: "/v1/indexer/uploads",
         spaces: "/v1/spaces",
         spaceFiles: "/v1/spaces/:slug/files",
         spaceSync: "/v1/spaces/:slug/sync",
@@ -254,12 +270,13 @@ export function createRemoteAutonomyGateway(
     }))
     .get("/v1/state", async ({ query }) => {
       const limit = intQuery(query.limit, 20);
-      const [sessions, jobs, claims, spaces, spaceFiles] = await Promise.all([
+      const [sessions, jobs, claims, spaces, spaceFiles, indexerUploads] = await Promise.all([
         codexStore.listActiveSessionSummaries({ limit }),
         agentStore.listJobs({ includeFinished: false, limit }),
         agentStore.listAgentClaims({ limit }),
         listSpaceRecords(agentStore, limit),
         listSpaceFileRecords(agentStore, undefined, limit),
+        listIndexerUploadRecords(agentStore, limit),
       ]);
       return {
         ok: true,
@@ -273,6 +290,7 @@ export function createRemoteAutonomyGateway(
         claims: serialize(claims),
         spaces,
         spaceFiles,
+        indexerUploads,
       };
     })
     .post("/v1/codex/presence", async ({ body }) => {
@@ -347,6 +365,41 @@ export function createRemoteAutonomyGateway(
       return {
         ok: true,
         events: events.map(serializeStreamEvent),
+      };
+    })
+    .post("/v1/indexer/uploads", async ({ body }) => {
+      const payload = objectBody(body);
+      const schemaVersion = requiredString(payload, "schema_version");
+      if (schemaVersion !== "designer.indexer_ingest_batch.v1") {
+        throw new GatewayError(400, `unsupported indexer upload schema ${schemaVersion}`);
+      }
+      const objects = indexerUploadObjects(payload);
+      const records: DesignerIndexerUploadRecord[] = [];
+      for (const object of objects) {
+        const record = await writeIndexerUploadObject(resolved, object);
+        await recordGatewayEvent(
+          INDEXER_UPLOAD_EVENT_TYPE,
+          `Designer indexer object ${record.relativeKey} recorded`,
+          {
+            object: record,
+            source: {
+              schemaVersion,
+              objectSchemaVersion: record.sourceSchemaVersion,
+            },
+          },
+          indexerUploadEventId(record),
+        );
+        records.push(record);
+      }
+      return {
+        ok: true,
+        receipts: records.map(indexerUploadReceipt),
+      };
+    })
+    .get("/v1/indexer/uploads", async ({ query }) => {
+      return {
+        ok: true,
+        uploads: await listIndexerUploadRecords(agentStore, intQuery(query.limit, 50)),
       };
     })
     .post("/v1/executor/traces", async ({ body }) => {
@@ -938,6 +991,68 @@ async function listSpaceFileRecords(
   );
 }
 
+async function listIndexerUploadRecords(
+  agentStore: AgentDataStore,
+  limit: number,
+): Promise<DesignerIndexerUploadRecord[]> {
+  const resultLimit = Math.max(0, Math.floor(limit));
+  if (resultLimit === 0) {
+    return [];
+  }
+  const summary = await agentStore.getRunSummary(CONTROL_RUN_ID);
+  const records = new Map<string, DesignerIndexerUploadRecord>();
+  for (const event of [...(summary?.semanticEvents ?? [])].reverse()) {
+    if (event.event_type !== INDEXER_UPLOAD_EVENT_TYPE) {
+      continue;
+    }
+    const record = indexerUploadRecordFromEvent(event);
+    if (!record || records.has(record.key)) {
+      continue;
+    }
+    records.set(record.key, record);
+    if (records.size >= resultLimit) {
+      break;
+    }
+  }
+  return [...records.values()];
+}
+
+function indexerUploadRecordFromEvent(event: {
+  payload_json?: unknown;
+}): DesignerIndexerUploadRecord | null {
+  const payload = jsonObject(event.payload_json);
+  const object = jsonObject(payload?.object);
+  if (
+    !object ||
+    typeof object.objectRefId !== "string" ||
+    typeof object.relativeKey !== "string" ||
+    typeof object.key !== "string" ||
+    typeof object.uri !== "string" ||
+    typeof object.bucket !== "string" ||
+    typeof object.region !== "string" ||
+    typeof object.contentHash !== "string" ||
+    typeof object.sizeBytes !== "number" ||
+    typeof object.objectCachePath !== "string" ||
+    typeof object.recordedAt !== "string"
+  ) {
+    return null;
+  }
+  return {
+    objectRefId: object.objectRefId,
+    relativeKey: object.relativeKey,
+    key: object.key,
+    uri: object.uri,
+    bucket: object.bucket,
+    region: object.region,
+    contentHash: object.contentHash,
+    sizeBytes: object.sizeBytes,
+    sourceSchemaVersion:
+      typeof object.sourceSchemaVersion === "string" ? object.sourceSchemaVersion : undefined,
+    objectCachePath: object.objectCachePath,
+    recordedAt: object.recordedAt,
+  };
+}
+
 function spaceFileRecordFromEvent(event: {
   payload_json?: unknown;
 }): DesignerSpaceFileRecord | null {
@@ -1124,6 +1239,79 @@ async function writeInlineSpaceFile(
   };
 }
 
+type IndexerUploadObject = {
+  relativeKey: string;
+  value: unknown;
+};
+
+function indexerUploadObjects(payload: JsonObject): IndexerUploadObject[] {
+  const value = payload.objects;
+  if (!Array.isArray(value)) {
+    throw new GatewayError(400, "field objects must be an array");
+  }
+  return value.map((entry, index) => {
+    const object = jsonObject(entry);
+    if (!object) {
+      throw new GatewayError(400, `indexer upload object ${index} must be a JSON object`);
+    }
+    return {
+      relativeKey: indexerObjectKey(requiredString(object, "relative_key")),
+      value: object.value ?? null,
+    };
+  });
+}
+
+async function writeIndexerUploadObject(
+  options: ResolvedOptions,
+  object: IndexerUploadObject,
+): Promise<DesignerIndexerUploadRecord> {
+  const body = `${JSON.stringify(object.value, null, 2)}\n`;
+  const bytes = Buffer.from(body, "utf8");
+  const contentHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+  const key = storageKey(
+    options.designerSpacesPrefix,
+    "indexer",
+    "env",
+    options.env,
+    object.relativeKey,
+  );
+  const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...key.split("/"));
+  await writeFileWithParents(objectCachePath, bytes);
+  return {
+    objectRefId: `designer-indexer:${contentHash}:${object.relativeKey}`,
+    relativeKey: object.relativeKey,
+    key,
+    uri: objectStorageObjectUri(options.objectStorageRegion, options.objectStorageBucket, key),
+    bucket: options.objectStorageBucket,
+    region: options.objectStorageRegion,
+    contentHash,
+    sizeBytes: bytes.byteLength,
+    sourceSchemaVersion: sourceSchemaVersion(object.value),
+    objectCachePath,
+    recordedAt: new Date().toISOString(),
+  };
+}
+
+function indexerUploadReceipt(record: DesignerIndexerUploadRecord) {
+  return {
+    backend: "object-cache",
+    key: record.key,
+    uri: record.uri,
+    bucket: record.bucket,
+    region: record.region,
+    localPath: record.objectCachePath,
+    contentHash: record.contentHash,
+    sizeBytes: record.sizeBytes,
+    objectRefId: record.objectRefId,
+    recordedAt: record.recordedAt,
+  };
+}
+
+function sourceSchemaVersion(value: unknown): string | undefined {
+  const object = jsonObject(value);
+  return typeof object?.schema_version === "string" ? object.schema_version : undefined;
+}
+
 async function readCachedSpaceFileContent(
   options: ResolvedOptions,
   file: DesignerSpaceFileRecord,
@@ -1248,6 +1436,10 @@ function spaceFileEventId(file: DesignerSpaceFileRecord): string {
   return `${SPACE_FILE_EVENT_TYPE}:${file.spaceSlug}:${file.path}:${file.contentHash}`;
 }
 
+function indexerUploadEventId(record: DesignerIndexerUploadRecord): string {
+  return `${INDEXER_UPLOAD_EVENT_TYPE}:${record.key}:${record.contentHash}`;
+}
+
 function spaceFileUploadDedupeKey(file: DesignerSpaceFileRecord): string {
   return `${SPACE_FILE_UPLOAD_JOB_KIND}:${file.spaceSlug}:${file.path}:${file.contentHash}`;
 }
@@ -1277,6 +1469,23 @@ function spaceFilePath(value: string): string {
     normalized.endsWith("/")
   ) {
     throw new GatewayError(400, `invalid Designer space file path ${value}`);
+  }
+  return normalized;
+}
+
+function indexerObjectKey(value: string): string {
+  const rawKey = value.trim();
+  const normalized = posix.normalize(rawKey);
+  if (
+    rawKey === "" ||
+    rawKey.includes("\\") ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.startsWith("/") ||
+    normalized.endsWith("/")
+  ) {
+    throw new GatewayError(400, `invalid Designer indexer object key ${value}`);
   }
   return normalized;
 }
