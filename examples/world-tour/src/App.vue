@@ -219,31 +219,43 @@ function saveBandName(value: string) {
   if (bandId) db.update(app.bands, bandId, { name: trimmed });
 }
 
-const landingPosterStops = computed(() => {
+const stopsWithVenue = computed(() => {
   const stops = stopsData.value;
   if (!stops) return [];
   return stops
     .filter((s) => s.venue != null)
     .map((s) => ({
-      id: s.id,
+      ...s,
       date: s.date instanceof Date ? s.date : new Date(s.date),
-      venueName: s.venue!.name,
-      city: s.venue!.city,
-      country: s.venue!.country,
     }));
 });
 
-const calendarStops = computed(() => {
+const landingPosterStops = computed(() =>
+  stopsWithVenue.value.map((s) => ({
+    id: s.id,
+    date: s.date,
+    venueName: s.venue!.name,
+    city: s.venue!.city,
+    country: s.venue!.country,
+  })),
+);
+
+const calendarStops = computed(() =>
+  stopsWithVenue.value.map((s) => ({
+    id: s.id,
+    date: s.date,
+    venue: { name: s.venue!.name },
+  })),
+);
+
+function onStopButtonClick(stopId: string) {
+  dismissPopover();
+  // Marker clicks are also a "user interaction" that should end an active tour.
+  mapCtrl?.stopTour();
   const stops = stopsData.value;
-  if (!stops) return [];
-  return stops
-    .filter((s) => s.venue != null)
-    .map((s) => ({
-      id: s.id,
-      date: s.date instanceof Date ? s.date : new Date(s.date),
-      venue: { name: s.venue!.name },
-    }));
-});
+  const stop = stops?.find((s) => s.id === stopId);
+  if (stop) selectStop(stop);
+}
 
 function selectStop(stop: StopWithVenue) {
   if (!canEdit) {
@@ -255,10 +267,7 @@ function selectStop(stop: StopWithVenue) {
   }
 
   if (stop.venue && mapCtrl) {
-    mapCtrl.flyTo(
-      { lng: stop.venue.lng, lat: stop.venue.lat },
-      { zoom: 5, pitch: 40, duration: 1500 },
-    );
+    mapCtrl.flyTo({ lng: stop.venue.lng, lat: stop.venue.lat }, { duration: 1500 });
   }
 }
 
@@ -304,10 +313,7 @@ function onGeolocate(coords: { lat: number; lng: number }) {
   const nearestStop = stops.find((s) => s.id === nearest.id);
   if (!nearestStop?.venue) return;
 
-  mapCtrl?.flyTo(
-    { lng: nearestStop.venue.lng, lat: nearestStop.venue.lat },
-    { zoom: 6, pitch: 50, bearing: -20, duration: 3000 },
-  );
+  mapCtrl?.flyTo({ lng: nearestStop.venue.lng, lat: nearestStop.venue.lat }, { duration: 3000 });
 
   selectStop(nearestStop);
 }
@@ -353,10 +359,7 @@ onMounted(async () => {
   mapCtrl = new MapController({ container: "map" });
 
   mapCtrl.on("stopClick", (e) => {
-    dismissPopover();
-    const stops = stopsData.value;
-    const stop = stops?.find((s) => s.id === e.stopId);
-    if (stop) selectStop(stop);
+    onStopButtonClick(e.stopId);
   });
 
   mapCtrl.on("mapClick", (e) => {
@@ -385,10 +388,7 @@ onMounted(async () => {
       const nearestStop = stops.find((s) => s.id === nearestLoc.id);
       if (!nearestStop?.venue) return;
 
-      mapCtrl!.flyTo(
-        { lng: nearestStop.venue.lng, lat: nearestStop.venue.lat },
-        { zoom: 5, pitch: 45 },
-      );
+      mapCtrl!.flyTo({ lng: nearestStop.venue.lng, lat: nearestStop.venue.lat });
 
       selectStop(nearestStop);
     }
@@ -401,10 +401,7 @@ onMounted(async () => {
   const stops = stopsData.value;
   const firstStop = stops?.find((s) => s.venue != null);
   if (firstStop?.venue) {
-    mapCtrl.flyTo(
-      { lng: firstStop.venue.lng, lat: firstStop.venue.lat },
-      { zoom: 4, pitch: 40, duration: 2000 },
-    );
+    mapCtrl.flyTo({ lng: firstStop.venue.lng, lat: firstStop.venue.lat }, { duration: 2000 });
   }
 });
 

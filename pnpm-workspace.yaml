@@ -3,7 +3,6 @@ packages:
   - packages/*
   - starters/*
   - examples/*
-  - "!examples/world-tour"
   - examples/docs/*
   - dev/stress-tests/*
   - crates
