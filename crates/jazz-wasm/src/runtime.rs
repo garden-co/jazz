@@ -9,7 +9,10 @@
 //!
 //! - `MemoryStorage`/`OpfsBTreeStorage` provide synchronous storage (from jazz_tools::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
-//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback (worker-bridge only; server sync via `connect()`)
+//! - `RustOutboxSender` implements `SyncSender` and posts directly to a JS
+//!   `postMessage`-bearing target (a `Worker` on the main side, the
+//!   `DedicatedWorkerGlobalScope` on the worker side). Server sync uses the
+//!   Rust-owned WebSocket transport via `connect()`.
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
 
 use std::any::Any;
@@ -409,10 +412,10 @@ fn assemble_wasm_runtime(
     use_binary_encoding: bool,
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
-    let sync_sender = JsSyncSender::new(use_binary_encoding);
+    let outbox_sender = RustOutboxSender::new(use_binary_encoding);
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
-    core.set_sync_sender(Box::new(sync_sender.clone()));
+    core.set_sync_sender(Box::new(outbox_sender.clone()));
     let core_rc = Rc::new(RefCell::new(core));
     {
         let mut core_guard = core_rc.borrow_mut();
@@ -423,8 +426,8 @@ fn assemble_wasm_runtime(
     core_rc.borrow_mut().persist_schema();
     WasmRuntime {
         core: core_rc,
-        sync_sender,
-        upstream_server_id: RefCell::new(None),
+        outbox_sender,
+        upstream_server_id: Rc::new(std::cell::Cell::new(None)),
         tier_label,
     }
 }
@@ -506,119 +509,429 @@ impl Scheduler for WasmScheduler {
 }
 
 // ============================================================================
-// JsSyncSender
+// RustOutboxSender
 // ============================================================================
 
-/// Bridges outbound sync messages from the Rust runtime to a JS callback.
+/// Bridges outbound sync messages from the Rust runtime directly to a JS
+/// `postMessage`-bearing target.
 ///
-/// This sender is intentionally kept for the **worker-bridge path only**:
-/// the worker WASM runtime routes `"client"`-destination outbox messages
-/// back to the main thread via postMessage. Server-bound messages go through
-/// the Rust-owned WebSocket transport (`WasmRuntime::connect`) instead; any
-/// `"server"` destination that arrives here is silently dropped by the JS
-/// callback registered in `jazz-worker.ts`.
-struct JsSyncSenderInner {
-    callback: RefCell<Option<Function>>,
+/// On the **main thread**, the target is the `Worker` instance. On the
+/// **worker thread**, the target is `globalThis` / `DedicatedWorkerGlobalScope`.
+/// Server-bound messages on the worker side are delivered by the Rust-owned
+/// WebSocket transport (`WasmRuntime::connect`) and dropped here unless the
+/// bootstrap-catalogue forwarding flag is set. On the main side, server-bound
+/// messages are batched and posted to the worker as `{type:"sync", payload:[...]}`,
+/// or routed through a JS forwarder when the leader/follower coordinator has
+/// installed one.
+///
+/// Outbox entries enqueued during a single `batched_tick` accumulate into one
+/// `{type:"sync", payload:[...]}` post, mirroring the buffering the TS
+/// `WorkerBridge` used to do via `queueMicrotask`. Per-peer `peer-sync` posts
+/// fire immediately because peer routing already serialises one message per
+/// destination.
+enum SyncBatchEntry {
+    BareBytes(Vec<u8>),
+    BareString(String),
+    SequencedBytes { payload: Vec<u8>, sequence: u64 },
+    SequencedString { payload: String, sequence: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct PeerRouting {
+    /// `true` when the corresponding outbox entry was destined for the
+    /// main-thread peer client (used to gate the `on_main_sync_flushed`
+    /// notification after a batch flush).
+    is_main: bool,
+}
+
+struct RustOutboxSenderInner {
+    /// JS `postMessage`-bearing target. Holds `null` until `attach_outbox_target`
+    /// installs the real handle.
+    target: RefCell<JsValue>,
+    /// Worker-side: the runtime client id assigned to the main-thread peer.
+    /// `None` on the main side and during the brief window before init.
+    main_client_id: RefCell<Option<String>>,
+    /// Worker-side: `(clientId: string) => { peerId, term } | null` lookup
+    /// for routing client-bound payloads to the right follower-tab peer.
+    peer_routing_lookup: RefCell<Option<Function>>,
+    /// Worker-side: `() => void` invoked after each batch flush that
+    /// contained at least one main-bound client entry. The TS shim uses
+    /// it to schedule the rejected-batch replay walk.
+    on_main_sync_flushed: RefCell<Option<Function>>,
+    /// Main-side: optional `(payload, isCatalogue, sequence) => void`
+    /// installed by the leader/follower coordinator. When set, server-bound
+    /// payloads bypass `target.postMessage` and go through the forwarder.
+    server_payload_forwarder: RefCell<Option<Function>>,
+    /// Worker-side: while `true`, server-bound `isCatalogue=true` outbox
+    /// entries are queued into the main-bound sync batch. Set by the TS
+    /// shim around the `addServer/removeServer` bootstrap dance.
+    bootstrap_catalogue_forwarding: RefCell<bool>,
+    /// Encoding mode for **server-bound** payloads. Client-bound payloads
+    /// are always binary postcard. JSON when `false`, postcard when `true`.
     use_binary_encoding: bool,
+    /// Per-destination-client sequence counter (1-based). Used to assign
+    /// monotonically increasing sequence numbers to client-bound payloads
+    /// so the receiver can detect drops.
     next_client_sequences: RefCell<HashMap<String, u64>>,
+    /// Pending entries for the next `{type:"sync", payload:[...]}` post.
+    pending_sync_entries: RefCell<Vec<SyncBatchEntry>>,
+    /// Per-entry routing metadata, parallel to `pending_sync_entries`.
+    pending_sync_routing: RefCell<Vec<PeerRouting>>,
+    /// Debounce flag for the microtask flush.
+    flush_scheduled: RefCell<bool>,
+    /// Init-gate. While `false`, `send_sync_message` accumulates entries but
+    /// does not schedule a flush — the bridge holds outbound traffic until the
+    /// worker has acknowledged `init-ok`. Default: `true` (open) so the
+    /// worker-side runtime is unaffected.
+    init_gate_open: RefCell<bool>,
 }
 
 #[derive(Clone)]
-pub struct JsSyncSender {
-    inner: Rc<JsSyncSenderInner>,
+pub struct RustOutboxSender {
+    inner: Rc<RustOutboxSenderInner>,
 }
 
-// SAFETY: WASM is single-threaded; the JS callback never crosses threads.
-// `Send` is required only because `RuntimeCore::sync_sender` is typed
-// `Box<dyn SyncSender + Send>` for the multi-threaded Tokio backend.
-unsafe impl Send for JsSyncSender {}
-
-impl JsSyncSender {
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl RustOutboxSender {
     fn new(use_binary_encoding: bool) -> Self {
         Self {
-            inner: Rc::new(JsSyncSenderInner {
-                callback: RefCell::new(None),
+            inner: Rc::new(RustOutboxSenderInner {
+                target: RefCell::new(JsValue::NULL),
+                main_client_id: RefCell::new(None),
+                peer_routing_lookup: RefCell::new(None),
+                on_main_sync_flushed: RefCell::new(None),
+                server_payload_forwarder: RefCell::new(None),
+                bootstrap_catalogue_forwarding: RefCell::new(false),
                 use_binary_encoding,
                 next_client_sequences: RefCell::new(HashMap::new()),
+                pending_sync_entries: RefCell::new(Vec::new()),
+                pending_sync_routing: RefCell::new(Vec::new()),
+                flush_scheduled: RefCell::new(false),
+                init_gate_open: RefCell::new(true),
             }),
         }
     }
 
-    fn set_callback(&self, callback: Function) {
-        *self.inner.callback.borrow_mut() = Some(callback);
+    fn set_init_gate(&self, open: bool) {
+        *self.inner.init_gate_open.borrow_mut() = open;
+    }
+
+    fn open_init_gate_and_flush(&self) {
+        *self.inner.init_gate_open.borrow_mut() = true;
+        if !self.inner.pending_sync_entries.borrow().is_empty() {
+            self.schedule_flush();
+        }
+    }
+
+    fn attach_target(
+        &self,
+        target: JsValue,
+        main_client_id: Option<String>,
+        peer_routing_lookup: Option<Function>,
+        on_main_sync_flushed: Option<Function>,
+    ) {
+        *self.inner.target.borrow_mut() = target;
+        *self.inner.main_client_id.borrow_mut() = main_client_id;
+        *self.inner.peer_routing_lookup.borrow_mut() = peer_routing_lookup;
+        *self.inner.on_main_sync_flushed.borrow_mut() = on_main_sync_flushed;
+    }
+
+    fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
+        *self.inner.server_payload_forwarder.borrow_mut() = forwarder;
+    }
+
+    fn set_bootstrap_catalogue_forwarding(&self, enabled: bool) {
+        *self.inner.bootstrap_catalogue_forwarding.borrow_mut() = enabled;
     }
 }
 
-impl SyncSender for JsSyncSender {
+impl SyncSender for RustOutboxSender {
     fn send_sync_message(&self, message: OutboxEntry) {
-        if let Some(ref callback) = *self.inner.callback.borrow() {
-            let is_catalogue = message.payload.is_catalogue();
-            let (destination_kind, destination_id) = match message.destination {
-                Destination::Server(server_id) => ("server", server_id.0.to_string()),
-                Destination::Client(client_id) => ("client", client_id.0.to_string()),
-            };
-            let sequence = if destination_kind == "client" {
-                let mut next_sequences = self.inner.next_client_sequences.borrow_mut();
-                let sequence = next_sequences
-                    .entry(destination_id.clone())
-                    .and_modify(|next| *next += 1)
-                    .or_insert(1);
-                Some(*sequence)
-            } else {
-                None
-            };
-            let payload = match (&message.payload, sequence) {
-                (
-                    SyncPayload::QuerySettled {
-                        query_id,
-                        tier,
-                        scope,
-                        ..
-                    },
-                    Some(sequence),
-                ) => SyncPayload::QuerySettled {
-                    query_id: *query_id,
-                    tier: *tier,
-                    scope: scope.clone(),
-                    through_seq: sequence.saturating_sub(1),
+        let inner = &self.inner;
+        let is_catalogue = message.payload.is_catalogue();
+        let (destination_kind, destination_id) = match message.destination {
+            Destination::Server(server_id) => ("server", server_id.0.to_string()),
+            Destination::Client(client_id) => ("client", client_id.0.to_string()),
+        };
+
+        // Sequence numbering and QuerySettled.through_seq rewrite for client-bound.
+        let sequence = if destination_kind == "client" {
+            let mut next_sequences = inner.next_client_sequences.borrow_mut();
+            let next = next_sequences
+                .entry(destination_id.clone())
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            Some(*next)
+        } else {
+            None
+        };
+        let payload = match (&message.payload, sequence) {
+            (
+                SyncPayload::QuerySettled {
+                    query_id,
+                    tier,
+                    scope,
+                    ..
                 },
-                _ => message.payload,
+                Some(seq),
+            ) => SyncPayload::QuerySettled {
+                query_id: *query_id,
+                tier: *tier,
+                scope: scope.clone(),
+                through_seq: seq.saturating_sub(1),
+            },
+            _ => message.payload,
+        };
+
+        // Encode: client-bound is always binary; server-bound respects use_binary_encoding.
+        let use_binary = inner.use_binary_encoding || destination_kind == "client";
+        let encoded: SyncBatchEntry = if use_binary {
+            let Ok(bytes) = payload.to_bytes() else {
+                return;
             };
-            if self.inner.use_binary_encoding || destination_kind == "client" {
-                if let Ok(payload_bytes) = payload.to_bytes() {
-                    let payload_js = Uint8Array::from(payload_bytes.as_slice());
-                    let sequence_js = sequence
-                        .map(|sequence| JsValue::from_f64(sequence as f64))
-                        .unwrap_or(JsValue::NULL);
-                    let _ = callback.call5(
-                        &JsValue::NULL,
-                        &JsValue::from_str(destination_kind),
-                        &JsValue::from_str(&destination_id),
-                        &payload_js.into(),
-                        &JsValue::from_bool(is_catalogue),
-                        &sequence_js,
-                    );
-                }
-            } else {
-                let payload_json = payload.to_json().unwrap();
-                let sequence_js = sequence
-                    .map(|sequence| JsValue::from_f64(sequence as f64))
-                    .unwrap_or(JsValue::NULL);
-                let _ = callback.call5(
-                    &JsValue::NULL,
-                    &JsValue::from_str(destination_kind),
-                    &JsValue::from_str(&destination_id),
-                    &JsValue::from_str(&payload_json),
-                    &JsValue::from_bool(is_catalogue),
-                    &sequence_js,
-                );
+            match sequence {
+                Some(seq) => SyncBatchEntry::SequencedBytes {
+                    payload: bytes,
+                    sequence: seq,
+                },
+                None => SyncBatchEntry::BareBytes(bytes),
             }
+        } else {
+            let Ok(json) = payload.to_json() else { return };
+            match sequence {
+                Some(seq) => SyncBatchEntry::SequencedString {
+                    payload: json,
+                    sequence: seq,
+                },
+                None => SyncBatchEntry::BareString(json),
+            }
+        };
+
+        if destination_kind == "server" {
+            // Forwarder takes priority on the main side (leader/follower swap).
+            if let Some(forwarder) = inner.server_payload_forwarder.borrow().as_ref() {
+                let payload_js = sync_entry_payload_js(&encoded);
+                let seq_js = sequence
+                    .map(|s| JsValue::from_f64(s as f64))
+                    .unwrap_or(JsValue::NULL);
+                let _ = forwarder.call3(
+                    &JsValue::NULL,
+                    &payload_js,
+                    &JsValue::from_bool(is_catalogue),
+                    &seq_js,
+                );
+                return;
+            }
+
+            let main_side = inner.main_client_id.borrow().is_none();
+            if main_side {
+                // Main-side: server-bound goes to worker as part of the sync batch.
+                inner.pending_sync_entries.borrow_mut().push(encoded);
+                inner
+                    .pending_sync_routing
+                    .borrow_mut()
+                    .push(PeerRouting { is_main: false });
+                self.schedule_flush();
+            } else if *inner.bootstrap_catalogue_forwarding.borrow() && is_catalogue {
+                // Worker-side bootstrap: catalogue server entries forward to main.
+                inner.pending_sync_entries.borrow_mut().push(encoded);
+                inner
+                    .pending_sync_routing
+                    .borrow_mut()
+                    .push(PeerRouting { is_main: true });
+                self.schedule_flush();
+            }
+            // Otherwise: worker-side server-bound is delivered by the Rust transport,
+            // drop silently.
+            return;
         }
+
+        // Client-bound. Only worker-side has clients; main-side never enqueues client.
+        let main_client_id = inner.main_client_id.borrow().clone();
+        let Some(main_client_id) = main_client_id else {
+            return;
+        };
+
+        if destination_id == main_client_id {
+            inner.pending_sync_entries.borrow_mut().push(encoded);
+            inner
+                .pending_sync_routing
+                .borrow_mut()
+                .push(PeerRouting { is_main: true });
+            self.schedule_flush();
+            return;
+        }
+
+        // Peer client: look up (peerId, term) and post peer-sync immediately.
+        let routing = inner.peer_routing_lookup.borrow();
+        let Some(lookup) = routing.as_ref() else {
+            return;
+        };
+        let routing_value = match lookup.call1(&JsValue::NULL, &JsValue::from_str(&destination_id))
+        {
+            Ok(v) => v,
+            Err(_err) => {
+                #[cfg(target_arch = "wasm32")]
+                warn!(
+                    ?destination_id,
+                    ?_err,
+                    "peer_routing_lookup threw; dropping"
+                );
+                return;
+            }
+        };
+        if routing_value.is_null() || routing_value.is_undefined() {
+            return;
+        }
+        let peer_id = match js_sys::Reflect::get(&routing_value, &"peerId".into()) {
+            Ok(v) => v.as_string(),
+            Err(_) => None,
+        };
+        let term = match js_sys::Reflect::get(&routing_value, &"term".into()) {
+            Ok(v) => v.as_f64(),
+            Err(_) => None,
+        };
+        let (Some(peer_id), Some(term)) = (peer_id, term) else {
+            return;
+        };
+
+        // Post {type:"peer-sync", peerId, term, payload:[bytes]} immediately.
+        let (SyncBatchEntry::BareBytes(bytes)
+        | SyncBatchEntry::SequencedBytes { payload: bytes, .. }) = &encoded
+        else {
+            // Peer payloads are binary postcard only.
+            return;
+        };
+        let arr = Uint8Array::from(bytes.as_slice());
+        let payload_array = js_sys::Array::new();
+        payload_array.push(&arr);
+        let transferables = js_sys::Array::new();
+        transferables.push(&arr.buffer().into());
+
+        let message = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&message, &"type".into(), &"peer-sync".into());
+        let _ = js_sys::Reflect::set(&message, &"peerId".into(), &JsValue::from_str(&peer_id));
+        let _ = js_sys::Reflect::set(&message, &"term".into(), &JsValue::from_f64(term));
+        let _ = js_sys::Reflect::set(&message, &"payload".into(), &payload_array);
+
+        let target = inner.target.borrow();
+        let _ = post_message_with_transfer(&target, &message, &transferables);
     }
 
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl RustOutboxSender {
+    fn schedule_flush(&self) {
+        if !*self.inner.init_gate_open.borrow() {
+            return;
+        }
+        let mut scheduled = self.inner.flush_scheduled.borrow_mut();
+        if *scheduled {
+            return;
+        }
+        *scheduled = true;
+        drop(scheduled);
+
+        let inner = Rc::clone(&self.inner);
+        wasm_bindgen_futures::spawn_local(async move {
+            flush_pending(&inner);
+        });
+    }
+}
+
+fn flush_pending(inner: &Rc<RustOutboxSenderInner>) {
+    *inner.flush_scheduled.borrow_mut() = false;
+
+    let entries = std::mem::take(&mut *inner.pending_sync_entries.borrow_mut());
+    let routing = std::mem::take(&mut *inner.pending_sync_routing.borrow_mut());
+    if entries.is_empty() {
+        return;
+    }
+    let target = inner.target.borrow().clone();
+    if target.is_null() || target.is_undefined() {
+        return;
+    }
+
+    let payload_array = js_sys::Array::new();
+    let transferables = js_sys::Array::new();
+    let mut had_main_entry = false;
+    for (entry, route) in entries.iter().zip(routing.iter()) {
+        if route.is_main {
+            had_main_entry = true;
+        }
+        match entry {
+            SyncBatchEntry::BareBytes(bytes) => {
+                let arr = Uint8Array::from(bytes.as_slice());
+                transferables.push(&arr.buffer().into());
+                payload_array.push(&arr);
+            }
+            SyncBatchEntry::BareString(s) => {
+                payload_array.push(&JsValue::from_str(s));
+            }
+            SyncBatchEntry::SequencedBytes { payload, sequence } => {
+                let arr = Uint8Array::from(payload.as_slice());
+                transferables.push(&arr.buffer().into());
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"payload".into(), &arr);
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"sequence".into(),
+                    &JsValue::from_f64(*sequence as f64),
+                );
+                payload_array.push(&obj);
+            }
+            SyncBatchEntry::SequencedString { payload, sequence } => {
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(&obj, &"payload".into(), &JsValue::from_str(payload));
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"sequence".into(),
+                    &JsValue::from_f64(*sequence as f64),
+                );
+                payload_array.push(&obj);
+            }
+        }
+    }
+
+    let message = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&message, &"type".into(), &"sync".into());
+    let _ = js_sys::Reflect::set(&message, &"payload".into(), &payload_array);
+
+    let _ = post_message_with_transfer(&target, &message, &transferables);
+
+    if had_main_entry {
+        if let Some(cb) = inner.on_main_sync_flushed.borrow().as_ref() {
+            let _ = cb.call0(&JsValue::NULL);
+        }
+    }
+}
+
+fn sync_entry_payload_js(entry: &SyncBatchEntry) -> JsValue {
+    match entry {
+        SyncBatchEntry::BareBytes(bytes)
+        | SyncBatchEntry::SequencedBytes { payload: bytes, .. } => {
+            Uint8Array::from(bytes.as_slice()).into()
+        }
+        SyncBatchEntry::BareString(s) | SyncBatchEntry::SequencedString { payload: s, .. } => {
+            JsValue::from_str(s)
+        }
+    }
+}
+
+fn post_message_with_transfer(
+    target: &JsValue,
+    message: &JsValue,
+    transfer: &js_sys::Array,
+) -> Result<(), JsValue> {
+    let post_fn = js_sys::Reflect::get(target, &"postMessage".into())?;
+    let post_fn: Function = post_fn
+        .dyn_into()
+        .map_err(|v| JsValue::from_str(&format!("postMessage is not a function: {v:?}")))?;
+    post_fn.call2(target, message, transfer.as_ref())?;
+    Ok(())
 }
 
 // ============================================================================
@@ -632,16 +945,31 @@ impl SyncSender for JsSyncSender {
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
 pub struct WasmRuntime {
-    core: Rc<RefCell<WasmCoreType>>,
-    /// JS callback holder for outbound sync messages (worker-bridge path only).
-    ///
-    /// `on_sync_message_to_send` installs the JS-side callback here. The worker
-    /// WASM runtime uses it to forward `"client"`-destination outbox messages to
-    /// the main thread via postMessage. Server sync goes through `connect()`.
-    sync_sender: JsSyncSender,
-    upstream_server_id: RefCell<Option<ServerId>>,
+    pub(crate) core: Rc<RefCell<WasmCoreType>>,
+    /// Rust-owned outbox sender. Posts directly to a JS `postMessage`-bearing
+    /// target (Worker on the main side, `DedicatedWorkerGlobalScope` on the
+    /// worker side). Configured via `attach_outbox_target`,
+    /// `set_server_payload_forwarder`, and `set_bootstrap_catalogue_forwarding`.
+    /// Server sync goes through `connect()`.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) outbox_sender: RustOutboxSender,
+    /// `Rc<Cell<…>>` so `WasmRuntime` clones share state. The bridge keeps a
+    /// clone and mutates `upstream_server_id` via `add_server` / `remove_server`
+    /// — those updates must be visible through the original handle too.
+    pub(crate) upstream_server_id: Rc<std::cell::Cell<Option<ServerId>>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
-    tier_label: &'static str,
+    pub(crate) tier_label: &'static str,
+}
+
+impl Clone for WasmRuntime {
+    fn clone(&self) -> Self {
+        Self {
+            core: Rc::clone(&self.core),
+            outbox_sender: self.outbox_sender.clone(),
+            upstream_server_id: Rc::clone(&self.upstream_server_id),
+            tier_label: self.tier_label,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -716,14 +1044,17 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
-        let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
+        let outbox_sender = RustOutboxSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
         core.set_tier_label(tier_label);
-        // Install the JS-callback sender so `batched_tick` drains outbox
-        // entries to the worker bridge (no transport handle here).
-        core.set_sync_sender(Box::new(sync_sender.clone()));
+        // Install the Rust-owned outbox sender so `batched_tick` drains outbox
+        // entries through `postMessage` (no transport handle here). Only on
+        // wasm32: the sender holds `Rc<JsValue>` which isn't `Send`, and the
+        // multi-threaded native backend's `set_sync_sender` requires `+ Send`.
+        #[cfg(target_arch = "wasm32")]
+        core.set_sync_sender(Box::new(outbox_sender.clone()));
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -741,8 +1072,8 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
-            sync_sender,
-            upstream_server_id: RefCell::new(None),
+            outbox_sender,
+            upstream_server_id: Rc::new(std::cell::Cell::new(None)),
             tier_label,
         })
     }
@@ -769,7 +1100,7 @@ impl WasmRuntime {
             // unsequenced in-process hop.
             *through_seq = 0;
         }
-        let server_id = (*self.upstream_server_id.borrow()).ok_or_else(|| {
+        let server_id = self.upstream_server_id.get().ok_or_else(|| {
             JsError::new("No upstream server registered; call addServer() before sync delivery")
         })?;
 
@@ -851,10 +1182,109 @@ impl WasmRuntime {
         Ok(Some(sequence as u64))
     }
 
-    /// Register a callback for outgoing sync messages.
-    #[wasm_bindgen(js_name = onSyncMessageToSend)]
-    pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.sync_sender.set_callback(callback);
+    /// Attach the JS `postMessage`-bearing target the outbox sender will post
+    /// to. On the main side, `target` is the `Worker` instance. On the worker
+    /// side, `target` is `globalThis` / `DedicatedWorkerGlobalScope`.
+    ///
+    /// Worker-side parameters (ignored on the main side):
+    /// - `main_client_id`: the runtime client id assigned to the main-thread
+    ///   peer. Client-bound payloads with this destination id are batched and
+    ///   posted as `{type:"sync", payload:[...]}` to the main thread.
+    /// - `peer_routing_lookup`: `(clientId: string) => { peerId, term } | null`.
+    ///   Looks up the follower-tab peer mapping for a given runtime client id;
+    ///   client-bound payloads to other clients post as `peer-sync` immediately.
+    ///   Returning `null`/`undefined` drops the message; throwing logs and drops.
+    /// - `on_main_sync_flushed`: `() => void` invoked after each batch flush
+    ///   that contained at least one main-bound entry. Used by the TS shim
+    ///   to debounce the rejected-batch replay walk.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = attachOutboxTarget)]
+    pub fn attach_outbox_target(
+        &self,
+        target: JsValue,
+        main_client_id: Option<String>,
+        peer_routing_lookup: Option<Function>,
+        on_main_sync_flushed: Option<Function>,
+    ) {
+        self.outbox_sender.attach_target(
+            target,
+            main_client_id,
+            peer_routing_lookup,
+            on_main_sync_flushed,
+        );
+    }
+
+    /// Install a JS forwarder for **server-bound** payloads. When set, server-
+    /// bound outbox entries bypass `target.postMessage` and go through the
+    /// forwarder instead. Used by the leader/follower coordinator on the main
+    /// side to route upstream traffic through a BroadcastChannel.
+    ///
+    /// Forwarder signature:
+    /// `(payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void`.
+    ///
+    /// Pass `None` / `undefined` to clear.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = setServerPayloadForwarder)]
+    pub fn set_server_payload_forwarder(&self, forwarder: Option<Function>) {
+        self.outbox_sender.set_server_payload_forwarder(forwarder);
+    }
+
+    /// Worker-side bootstrap-catalogue forwarding flag. While `true`,
+    /// server-bound outbox entries with `isCatalogue=true` are queued into
+    /// the main-bound sync batch (instead of being delivered by the Rust
+    /// transport). Used by the worker shim around the
+    /// `addServer/removeServer` bootstrap dance.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = setBootstrapCatalogueForwarding)]
+    pub fn set_bootstrap_catalogue_forwarding(&self, enabled: bool) {
+        self.outbox_sender
+            .set_bootstrap_catalogue_forwarding(enabled);
+    }
+
+    /// Attach a `WasmWorkerBridge` to this runtime. Convenience helper so the
+    /// TS-side `WorkerBridge` adapter can construct the Rust bridge without
+    /// importing `WasmWorkerBridge` directly — it gets it back from the
+    /// runtime instance.
+    ///
+    /// `options` is the `WorkerBridgeOptions` JS object (parsed at attach
+    /// time per spec; `init` no longer takes options).
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = createWorkerBridge)]
+    pub fn create_worker_bridge(
+        &self,
+        worker: web_sys::Worker,
+        options: JsValue,
+    ) -> Result<crate::worker_bridge::WasmWorkerBridge, JsError> {
+        crate::worker_bridge::WasmWorkerBridge::attach(worker, self, options)
+    }
+
+    // -------------------------------------------------------------------------
+    // Outbox-init-gate plumbing for the bridge
+    // -------------------------------------------------------------------------
+
+    /// Bridge-only: while `false`, the outbox sender accumulates outbound
+    /// entries but does not schedule a flush. Used to hold main → worker sync
+    /// until `init-ok` arrives.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_outbox_init_gate(&self, open: bool) {
+        self.outbox_sender.set_init_gate(open);
+    }
+
+    /// Bridge-only: open the gate and flush any accumulated entries.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn open_outbox_init_gate(&self) {
+        self.outbox_sender.open_init_gate_and_flush();
+    }
+
+    /// Bridge/host shutdown: replace the active sync sender with a noop so
+    /// post-shutdown outbox drains do nothing — even if the runtime keeps
+    /// emitting (e.g. follower-tab promotion). Mirrors the spec's
+    /// "install `NoopSyncSender` on detach" requirement.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn install_noop_sync_sender(&self) {
+        self.core
+            .borrow_mut()
+            .set_sync_sender(Box::new(NoopSyncSender));
     }
 
     // =========================================================================
@@ -1458,14 +1888,12 @@ impl WasmRuntime {
         next_sync_seq: Option<f64>,
     ) -> Result<(), JsError> {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
-        let server_id = {
-            let mut slot = self.upstream_server_id.borrow_mut();
-            if let Some(server_id) = *slot {
-                server_id
-            } else {
-                let server_id = ServerId::new();
-                *slot = Some(server_id);
-                server_id
+        let server_id = match self.upstream_server_id.get() {
+            Some(id) => id,
+            None => {
+                let id = ServerId::new();
+                self.upstream_server_id.set(Some(id));
+                id
             }
         };
         let mut core = self.core.borrow_mut();
@@ -1487,7 +1915,7 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = removeServer)]
     pub fn remove_server(&self) {
         let mut core = self.core.borrow_mut();
-        if let Some(server_id) = *self.upstream_server_id.borrow() {
+        if let Some(server_id) = self.upstream_server_id.get() {
             core.remove_server(server_id);
         }
     }
@@ -1755,6 +2183,18 @@ impl WasmRuntime {
             tier_label,
             use_binary_encoding,
         ))
+    }
+}
+
+/// A `SyncSender` that drops every message. Installed on bridge shutdown so
+/// post-shutdown outbox drains are silent even if the runtime keeps emitting.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+struct NoopSyncSender;
+
+impl jazz_tools::runtime_core::SyncSender for NoopSyncSender {
+    fn send_sync_message(&self, _message: jazz_tools::sync_manager::OutboxEntry) {}
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
