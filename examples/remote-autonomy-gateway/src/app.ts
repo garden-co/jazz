@@ -143,6 +143,83 @@ type InlineSpaceFileReceipt = {
   recordedAt: string;
 };
 
+type DesignerIndexerObjectRole =
+  | "index_latest"
+  | "index_manifest"
+  | "index_delta"
+  | "index_snapshot_event"
+  | "editor_buffer_event"
+  | "editor_buffer_blob"
+  | "replay_operation"
+  | "telemetry_payload";
+
+type DesignerIndexerObjectRefRecord = {
+  objectRefId: string;
+  role: DesignerIndexerObjectRole;
+  provider: ObjectStorageDescriptor["provider"];
+  bucket: string;
+  region: string;
+  key: string;
+  uri: string;
+  contentHash: string;
+  contentType: "application/json";
+  sizeBytes: number;
+  metadata: {
+    relativeKey: string;
+    sourceSchemaVersion?: string;
+    env: string;
+  };
+};
+
+type DesignerIndexerUploadReceiptRecord = {
+  receiptId: string;
+  objectRefId: string;
+  backend: "object-cache";
+  storageBackend: "object-cache";
+  bucket: string;
+  region: string;
+  key: string;
+  uri: string;
+  contentHash: string;
+  sizeBytes: number;
+  localPath: string;
+  receivedAt: string;
+};
+
+type DesignerIndexerReplayRefRecord = {
+  eventId: string;
+  sourceKind: string;
+  schemaVersion?: string;
+  spaceId?: string;
+  workspaceId?: string;
+  phase?: string;
+  checkpointId?: string;
+  correlationId?: string;
+  promptHash?: string;
+  promptLength?: number;
+  objectRefId: string;
+  contentHash: string;
+  key: string;
+  uri: string;
+  recordedAt: string;
+};
+
+type DesignerCodebaseIndexSnapshotRefRecord = {
+  snapshotId: string;
+  workspaceId?: string;
+  checkpointId?: string;
+  phase: string;
+  objectRefId: string;
+  objectRole: DesignerIndexerObjectRole;
+  contentHash: string;
+  key: string;
+  uri: string;
+  fileCount?: number;
+  changedPathCount?: number;
+  projectHash?: string;
+  capturedAt: string;
+};
+
 type DesignerIndexerUploadRecord = {
   objectRefId: string;
   relativeKey: string;
@@ -155,7 +232,16 @@ type DesignerIndexerUploadRecord = {
   sourceSchemaVersion?: string;
   objectCachePath: string;
   recordedAt: string;
+  objectRef: DesignerIndexerObjectRefRecord;
+  uploadReceipt: DesignerIndexerUploadReceiptRecord;
+  replayRef: DesignerIndexerReplayRefRecord;
+  codebaseIndexSnapshot?: DesignerCodebaseIndexSnapshotRefRecord;
 };
+
+type DesignerIndexerUploadBaseRecord = Omit<
+  DesignerIndexerUploadRecord,
+  "replayRef" | "codebaseIndexSnapshot"
+>;
 
 export function createRemoteAutonomyGateway(
   options: RemoteAutonomyGatewayOptions = {},
@@ -1050,6 +1136,16 @@ function indexerUploadRecordFromEvent(event: {
       typeof object.sourceSchemaVersion === "string" ? object.sourceSchemaVersion : undefined,
     objectCachePath: object.objectCachePath,
     recordedAt: object.recordedAt,
+    objectRef:
+      indexerObjectRefFromJson(object.objectRef) ??
+      legacyIndexerObjectRefFromRecord(object as DesignerIndexerUploadRecord),
+    uploadReceipt:
+      indexerUploadReceiptFromJson(object.uploadReceipt) ??
+      legacyIndexerUploadReceiptFromRecord(object as DesignerIndexerUploadRecord),
+    replayRef:
+      indexerReplayRefFromJson(object.replayRef) ??
+      legacyIndexerReplayRefFromRecord(object as DesignerIndexerUploadRecord),
+    codebaseIndexSnapshot: indexerCodebaseSnapshotFromJson(object.codebaseIndexSnapshot),
   };
 }
 
@@ -1277,24 +1373,67 @@ async function writeIndexerUploadObject(
   );
   const objectCachePath = join(options.localSpacesRoot, OBJECT_CACHE_DIR, ...key.split("/"));
   await writeFileWithParents(objectCachePath, bytes);
-  return {
-    objectRefId: `designer-indexer:${contentHash}:${object.relativeKey}`,
+  const recordedAt = new Date().toISOString();
+  const sourceVersion = sourceSchemaVersion(object.value);
+  const objectRefId = `designer-indexer:${sha256Hex(`${key}\0${contentHash}`)}`;
+  const uri = objectStorageObjectUri(options.objectStorageRegion, options.objectStorageBucket, key);
+  const objectRef: DesignerIndexerObjectRefRecord = {
+    objectRefId,
+    role: indexerObjectRole(object.relativeKey, sourceVersion),
+    provider: "oci",
+    bucket: options.objectStorageBucket,
+    region: options.objectStorageRegion,
+    key,
+    uri,
+    contentHash,
+    contentType: "application/json",
+    sizeBytes: bytes.byteLength,
+    metadata: {
+      relativeKey: object.relativeKey,
+      sourceSchemaVersion: sourceVersion,
+      env: options.env,
+    },
+  };
+  const uploadReceipt: DesignerIndexerUploadReceiptRecord = {
+    receiptId: `designer-indexer-receipt:${sha256Hex(`${key}\0${contentHash}\0object-cache`)}`,
+    objectRefId,
+    backend: "object-cache",
+    storageBackend: "object-cache",
+    bucket: options.objectStorageBucket,
+    region: options.objectStorageRegion,
+    key,
+    uri,
+    contentHash,
+    sizeBytes: bytes.byteLength,
+    localPath: objectCachePath,
+    receivedAt: recordedAt,
+  };
+  const baseRecord: DesignerIndexerUploadBaseRecord = {
+    objectRefId,
     relativeKey: object.relativeKey,
     key,
-    uri: objectStorageObjectUri(options.objectStorageRegion, options.objectStorageBucket, key),
+    uri,
     bucket: options.objectStorageBucket,
     region: options.objectStorageRegion,
     contentHash,
     sizeBytes: bytes.byteLength,
-    sourceSchemaVersion: sourceSchemaVersion(object.value),
+    sourceSchemaVersion: sourceVersion,
     objectCachePath,
-    recordedAt: new Date().toISOString(),
+    recordedAt,
+    objectRef,
+    uploadReceipt,
+  };
+  return {
+    ...baseRecord,
+    replayRef: indexerReplayRefFromValue(baseRecord, object.value),
+    codebaseIndexSnapshot: indexerCodebaseSnapshotFromValue(baseRecord, object.value),
   };
 }
 
 function indexerUploadReceipt(record: DesignerIndexerUploadRecord) {
   return {
     backend: "object-cache",
+    storageBackend: record.uploadReceipt.storageBackend,
     key: record.key,
     uri: record.uri,
     bucket: record.bucket,
@@ -1304,12 +1443,392 @@ function indexerUploadReceipt(record: DesignerIndexerUploadRecord) {
     sizeBytes: record.sizeBytes,
     objectRefId: record.objectRefId,
     recordedAt: record.recordedAt,
+    objectRef: record.objectRef,
+    uploadReceipt: record.uploadReceipt,
+    replayRef: record.replayRef,
+    codebaseIndexSnapshot: record.codebaseIndexSnapshot,
   };
 }
 
 function sourceSchemaVersion(value: unknown): string | undefined {
   const object = jsonObject(value);
   return typeof object?.schema_version === "string" ? object.schema_version : undefined;
+}
+
+function indexerObjectRole(
+  relativeKey: string,
+  sourceVersion: string | undefined,
+): DesignerIndexerObjectRole {
+  if (relativeKey.includes("/latest.json")) {
+    return "index_latest";
+  }
+  if (relativeKey.includes("/deltas/")) {
+    return "index_delta";
+  }
+  if (relativeKey.includes("/checkpoints/")) {
+    return "index_manifest";
+  }
+  switch (sourceVersion) {
+    case "designer.indexer_snapshot_event.v1":
+      return "index_snapshot_event";
+    case "designer.indexer_checkpoint_manifest.v1":
+      return "index_manifest";
+    case "designer.indexer_checkpoint_delta.v1":
+      return "index_delta";
+    case "designer.indexer_editor_buffer_event.v1":
+      return "editor_buffer_event";
+    case "designer.indexer_text_blob.v1":
+      return "editor_buffer_blob";
+    case "designer.indexer_replay_operation_event.v1":
+      return "replay_operation";
+    default:
+      return "telemetry_payload";
+  }
+}
+
+function indexerReplayRefFromValue(
+  record: DesignerIndexerUploadBaseRecord,
+  value: unknown,
+): DesignerIndexerReplayRefRecord {
+  const object = jsonObject(value);
+  const context = jsonObject(object?.context);
+  const prompt = firstString(object, "prompt", "prompt_text", "promptText");
+  return {
+    eventId: indexerUploadEventId(record),
+    sourceKind: record.sourceSchemaVersion ?? "designer.indexer_object",
+    schemaVersion: record.sourceSchemaVersion,
+    spaceId: indexerSpaceId(record.relativeKey),
+    workspaceId:
+      firstString(object, "workspace_id", "workspaceId") ??
+      firstString(context, "workspace_id", "workspaceId"),
+    phase: firstString(object, "phase"),
+    checkpointId: firstString(object, "checkpoint_id", "checkpointId"),
+    correlationId:
+      firstString(object, "correlation_id", "correlationId") ??
+      firstString(context, "correlation_id", "correlationId"),
+    promptHash: prompt ? `sha256:${sha256Hex(prompt)}` : undefined,
+    promptLength: prompt?.length,
+    objectRefId: record.objectRefId,
+    contentHash: record.contentHash,
+    key: record.key,
+    uri: record.uri,
+    recordedAt: record.recordedAt,
+  };
+}
+
+function indexerCodebaseSnapshotFromValue(
+  record: DesignerIndexerUploadBaseRecord,
+  value: unknown,
+): DesignerCodebaseIndexSnapshotRefRecord | undefined {
+  if (
+    record.objectRef.role !== "index_latest" &&
+    record.objectRef.role !== "index_manifest" &&
+    record.objectRef.role !== "index_delta" &&
+    record.objectRef.role !== "index_snapshot_event"
+  ) {
+    return undefined;
+  }
+  const object = jsonObject(value);
+  return {
+    snapshotId: `designer-index-snapshot:${sha256Hex(`${record.key}\0${record.contentHash}`)}`,
+    workspaceId: firstString(object, "workspace_id", "workspaceId"),
+    checkpointId: firstString(object, "checkpoint_id", "checkpointId"),
+    phase: firstString(object, "phase") ?? record.objectRef.role,
+    objectRefId: record.objectRefId,
+    objectRole: record.objectRef.role,
+    contentHash: record.contentHash,
+    key: record.key,
+    uri: record.uri,
+    fileCount: firstNumber(object, "file_count", "fileCount"),
+    changedPathCount: indexerChangedPathCount(object),
+    projectHash: firstString(object, "project_hash", "projectHash"),
+    capturedAt:
+      firstString(object, "captured_at", "capturedAt", "recorded_at", "recordedAt") ??
+      record.recordedAt,
+  };
+}
+
+function indexerObjectRefFromJson(value: unknown): DesignerIndexerObjectRefRecord | null {
+  const object = jsonObject(value);
+  const metadata = jsonObject(object?.metadata);
+  const role = indexerObjectRoleFromString(object?.role);
+  if (
+    !object ||
+    !metadata ||
+    !role ||
+    object.provider !== "oci" ||
+    typeof object.objectRefId !== "string" ||
+    typeof object.bucket !== "string" ||
+    typeof object.region !== "string" ||
+    typeof object.key !== "string" ||
+    typeof object.uri !== "string" ||
+    typeof object.contentHash !== "string" ||
+    typeof object.sizeBytes !== "number" ||
+    typeof metadata.relativeKey !== "string" ||
+    typeof metadata.env !== "string"
+  ) {
+    return null;
+  }
+  return {
+    objectRefId: object.objectRefId,
+    role,
+    provider: "oci",
+    bucket: object.bucket,
+    region: object.region,
+    key: object.key,
+    uri: object.uri,
+    contentHash: object.contentHash,
+    contentType: "application/json",
+    sizeBytes: object.sizeBytes,
+    metadata: {
+      relativeKey: metadata.relativeKey,
+      sourceSchemaVersion:
+        typeof metadata.sourceSchemaVersion === "string" ? metadata.sourceSchemaVersion : undefined,
+      env: metadata.env,
+    },
+  };
+}
+
+function indexerUploadReceiptFromJson(value: unknown): DesignerIndexerUploadReceiptRecord | null {
+  const object = jsonObject(value);
+  if (
+    !object ||
+    typeof object.receiptId !== "string" ||
+    typeof object.objectRefId !== "string" ||
+    object.backend !== "object-cache" ||
+    object.storageBackend !== "object-cache" ||
+    typeof object.bucket !== "string" ||
+    typeof object.region !== "string" ||
+    typeof object.key !== "string" ||
+    typeof object.uri !== "string" ||
+    typeof object.contentHash !== "string" ||
+    typeof object.sizeBytes !== "number" ||
+    typeof object.localPath !== "string" ||
+    typeof object.receivedAt !== "string"
+  ) {
+    return null;
+  }
+  return object as DesignerIndexerUploadReceiptRecord;
+}
+
+function indexerReplayRefFromJson(value: unknown): DesignerIndexerReplayRefRecord | null {
+  const object = jsonObject(value);
+  if (
+    !object ||
+    typeof object.eventId !== "string" ||
+    typeof object.sourceKind !== "string" ||
+    typeof object.objectRefId !== "string" ||
+    typeof object.contentHash !== "string" ||
+    typeof object.key !== "string" ||
+    typeof object.uri !== "string" ||
+    typeof object.recordedAt !== "string"
+  ) {
+    return null;
+  }
+  return {
+    eventId: object.eventId,
+    sourceKind: object.sourceKind,
+    schemaVersion: typeof object.schemaVersion === "string" ? object.schemaVersion : undefined,
+    spaceId: typeof object.spaceId === "string" ? object.spaceId : undefined,
+    workspaceId: typeof object.workspaceId === "string" ? object.workspaceId : undefined,
+    phase: typeof object.phase === "string" ? object.phase : undefined,
+    checkpointId: typeof object.checkpointId === "string" ? object.checkpointId : undefined,
+    correlationId: typeof object.correlationId === "string" ? object.correlationId : undefined,
+    promptHash: typeof object.promptHash === "string" ? object.promptHash : undefined,
+    promptLength: typeof object.promptLength === "number" ? object.promptLength : undefined,
+    objectRefId: object.objectRefId,
+    contentHash: object.contentHash,
+    key: object.key,
+    uri: object.uri,
+    recordedAt: object.recordedAt,
+  };
+}
+
+function indexerCodebaseSnapshotFromJson(
+  value: unknown,
+): DesignerCodebaseIndexSnapshotRefRecord | undefined {
+  const object = jsonObject(value);
+  const objectRole = indexerObjectRoleFromString(object?.objectRole);
+  if (
+    !object ||
+    !objectRole ||
+    typeof object.snapshotId !== "string" ||
+    typeof object.phase !== "string" ||
+    typeof object.objectRefId !== "string" ||
+    typeof object.contentHash !== "string" ||
+    typeof object.key !== "string" ||
+    typeof object.uri !== "string" ||
+    typeof object.capturedAt !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    snapshotId: object.snapshotId,
+    workspaceId: typeof object.workspaceId === "string" ? object.workspaceId : undefined,
+    checkpointId: typeof object.checkpointId === "string" ? object.checkpointId : undefined,
+    phase: object.phase,
+    objectRefId: object.objectRefId,
+    objectRole,
+    contentHash: object.contentHash,
+    key: object.key,
+    uri: object.uri,
+    fileCount: typeof object.fileCount === "number" ? object.fileCount : undefined,
+    changedPathCount:
+      typeof object.changedPathCount === "number" ? object.changedPathCount : undefined,
+    projectHash: typeof object.projectHash === "string" ? object.projectHash : undefined,
+    capturedAt: object.capturedAt,
+  };
+}
+
+function legacyIndexerObjectRefFromRecord(
+  record: Pick<
+    DesignerIndexerUploadRecord,
+    | "objectRefId"
+    | "relativeKey"
+    | "key"
+    | "uri"
+    | "bucket"
+    | "region"
+    | "contentHash"
+    | "sizeBytes"
+    | "sourceSchemaVersion"
+  >,
+): DesignerIndexerObjectRefRecord {
+  return {
+    objectRefId: record.objectRefId,
+    role: indexerObjectRole(record.relativeKey, record.sourceSchemaVersion),
+    provider: "oci",
+    bucket: record.bucket,
+    region: record.region,
+    key: record.key,
+    uri: record.uri,
+    contentHash: record.contentHash,
+    contentType: "application/json",
+    sizeBytes: record.sizeBytes,
+    metadata: {
+      relativeKey: record.relativeKey,
+      sourceSchemaVersion: record.sourceSchemaVersion,
+      env: indexerEnvFromKey(record.key),
+    },
+  };
+}
+
+function legacyIndexerUploadReceiptFromRecord(
+  record: Pick<
+    DesignerIndexerUploadRecord,
+    | "objectRefId"
+    | "key"
+    | "uri"
+    | "bucket"
+    | "region"
+    | "contentHash"
+    | "sizeBytes"
+    | "objectCachePath"
+    | "recordedAt"
+  >,
+): DesignerIndexerUploadReceiptRecord {
+  return {
+    receiptId: `designer-indexer-receipt:${sha256Hex(`${record.key}\0${record.contentHash}\0object-cache`)}`,
+    objectRefId: record.objectRefId,
+    backend: "object-cache",
+    storageBackend: "object-cache",
+    bucket: record.bucket,
+    region: record.region,
+    key: record.key,
+    uri: record.uri,
+    contentHash: record.contentHash,
+    sizeBytes: record.sizeBytes,
+    localPath: record.objectCachePath,
+    receivedAt: record.recordedAt,
+  };
+}
+
+function legacyIndexerReplayRefFromRecord(
+  record: Pick<
+    DesignerIndexerUploadRecord,
+    | "objectRefId"
+    | "relativeKey"
+    | "key"
+    | "uri"
+    | "contentHash"
+    | "sourceSchemaVersion"
+    | "recordedAt"
+  >,
+): DesignerIndexerReplayRefRecord {
+  return {
+    eventId: indexerUploadEventId(record),
+    sourceKind: record.sourceSchemaVersion ?? "designer.indexer_object",
+    schemaVersion: record.sourceSchemaVersion,
+    spaceId: indexerSpaceId(record.relativeKey),
+    objectRefId: record.objectRefId,
+    contentHash: record.contentHash,
+    key: record.key,
+    uri: record.uri,
+    recordedAt: record.recordedAt,
+  };
+}
+
+function indexerObjectRoleFromString(value: unknown): DesignerIndexerObjectRole | null {
+  switch (value) {
+    case "index_latest":
+    case "index_manifest":
+    case "index_delta":
+    case "index_snapshot_event":
+    case "editor_buffer_event":
+    case "editor_buffer_blob":
+    case "replay_operation":
+    case "telemetry_payload":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function indexerSpaceId(relativeKey: string): string | undefined {
+  const segments = relativeKey.split("/");
+  return segments[0] === "spaces" && segments[1] ? segments[1] : undefined;
+}
+
+function indexerEnvFromKey(key: string): string {
+  const segments = key.split("/");
+  const envIndex = segments.indexOf("env");
+  return envIndex >= 0 && segments[envIndex + 1] ? segments[envIndex + 1]! : "unknown";
+}
+
+function indexerChangedPathCount(object: JsonObject | null): number | undefined {
+  const explicit = firstNumber(object, "changed_path_count", "changedPathCount");
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const changedPaths = object?.changed_paths ?? object?.changedPaths;
+  if (Array.isArray(changedPaths)) {
+    return changedPaths.filter((entry) => typeof entry === "string").length;
+  }
+  return undefined;
+}
+
+function firstString(object: JsonObject | null | undefined, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function firstNumber(object: JsonObject | null | undefined, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function readCachedSpaceFileContent(
@@ -1436,7 +1955,9 @@ function spaceFileEventId(file: DesignerSpaceFileRecord): string {
   return `${SPACE_FILE_EVENT_TYPE}:${file.spaceSlug}:${file.path}:${file.contentHash}`;
 }
 
-function indexerUploadEventId(record: DesignerIndexerUploadRecord): string {
+function indexerUploadEventId(
+  record: Pick<DesignerIndexerUploadRecord, "key" | "contentHash">,
+): string {
   return `${INDEXER_UPLOAD_EVENT_TYPE}:${record.key}:${record.contentHash}`;
 }
 

@@ -234,6 +234,11 @@ describe("remote autonomy gateway", () => {
             schema_version: "designer.indexer_snapshot_event.v1",
             phase: "prompt_start",
             workspace_id: "workspace-1",
+            checkpoint_id: "checkpoint-1",
+            project_hash: "sha256:project-1",
+            file_count: 3,
+            changed_paths: ["main.build123d.py"],
+            captured_at: "2026-05-06T00:00:00.000Z",
             prompt: "make the gear taller",
           },
         },
@@ -247,12 +252,42 @@ describe("remote autonomy gateway", () => {
       receipts: [
         {
           backend: "object-cache",
-          key:
-            "nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
-          uri:
-            "oci://us-sanjose-1/x-sanjose/nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
+          key: "nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
+          uri: "oci://us-sanjose-1/x-sanjose/nikiv/designer/indexer/env/remote-autonomy/spaces/shared-space/workspace-index/v1/events/2026/05/06/workspace-1/prompt-start.json",
           bucket: "x-sanjose",
           region: "us-sanjose-1",
+          storageBackend: "object-cache",
+          objectRef: {
+            role: "index_snapshot_event",
+            contentType: "application/json",
+            metadata: {
+              relativeKey: payload.objects[0].relative_key,
+              sourceSchemaVersion: "designer.indexer_snapshot_event.v1",
+              env: "remote-autonomy",
+            },
+          },
+          uploadReceipt: {
+            backend: "object-cache",
+            storageBackend: "object-cache",
+          },
+          replayRef: {
+            sourceKind: "designer.indexer_snapshot_event.v1",
+            schemaVersion: "designer.indexer_snapshot_event.v1",
+            spaceId: "shared-space",
+            workspaceId: "workspace-1",
+            phase: "prompt_start",
+            checkpointId: "checkpoint-1",
+          },
+          codebaseIndexSnapshot: {
+            workspaceId: "workspace-1",
+            checkpointId: "checkpoint-1",
+            phase: "prompt_start",
+            objectRole: "index_snapshot_event",
+            fileCount: 3,
+            changedPathCount: 1,
+            projectHash: "sha256:project-1",
+            capturedAt: "2026-05-06T00:00:00.000Z",
+          },
         },
       ],
     });
@@ -269,6 +304,29 @@ describe("remote autonomy gateway", () => {
         uri: receipt.uri,
         sourceSchemaVersion: "designer.indexer_snapshot_event.v1",
         objectCachePath: receipt.localPath,
+        objectRef: expect.objectContaining({
+          objectRefId: receipt.objectRefId,
+          role: "index_snapshot_event",
+          key: receipt.key,
+          uri: receipt.uri,
+          contentHash: receipt.contentHash,
+        }),
+        uploadReceipt: expect.objectContaining({
+          receiptId: receipt.uploadReceipt.receiptId,
+          objectRefId: receipt.objectRefId,
+          contentHash: receipt.contentHash,
+        }),
+        replayRef: expect.objectContaining({
+          eventId: receipt.replayRef.eventId,
+          spaceId: "shared-space",
+          workspaceId: "workspace-1",
+          promptLength: "make the gear taller".length,
+        }),
+        codebaseIndexSnapshot: expect.objectContaining({
+          snapshotId: receipt.codebaseIndexSnapshot.snapshotId,
+          objectRefId: receipt.objectRefId,
+          changedPathCount: 1,
+        }),
       }),
     ]);
 
@@ -277,8 +335,58 @@ describe("remote autonomy gateway", () => {
       expect.objectContaining({
         key: receipt.key,
         contentHash: receipt.contentHash,
+        objectRef: expect.objectContaining({
+          role: "index_snapshot_event",
+        }),
+        replayRef: expect.objectContaining({
+          spaceId: "shared-space",
+          workspaceId: "workspace-1",
+        }),
       }),
     ]);
+  });
+
+  it("deduplicates repeated Designer indexer uploads by object key and content hash", async () => {
+    const payload = {
+      schema_version: "designer.indexer_ingest_batch.v1",
+      objects: [
+        {
+          relative_key:
+            "spaces/shared-space/workspace-index/v1/indexes/workspaces/workspace-1/latest.json",
+          value: {
+            schema_version: "designer.indexer_checkpoint_manifest.v1",
+            workspace_id: "workspace-1",
+            checkpoint_id: "checkpoint-2",
+            phase: "checkpoint",
+          },
+        },
+      ],
+    };
+
+    const first = await requestJson("POST", "/v1/indexer/uploads", payload);
+    const second = await requestJson("POST", "/v1/indexer/uploads", payload);
+    const listed = await requestJson("GET", "/v1/indexer/uploads?limit=10");
+
+    expect(second.receipts[0]).toMatchObject({
+      objectRefId: first.receipts[0].objectRefId,
+      contentHash: first.receipts[0].contentHash,
+      objectRef: {
+        role: "index_latest",
+      },
+      replayRef: {
+        workspaceId: "workspace-1",
+        checkpointId: "checkpoint-2",
+      },
+    });
+    expect(listed.uploads).toHaveLength(1);
+    expect(listed.uploads[0]).toMatchObject({
+      objectRefId: first.receipts[0].objectRefId,
+      codebaseIndexSnapshot: {
+        objectRole: "index_latest",
+        workspaceId: "workspace-1",
+        checkpointId: "checkpoint-2",
+      },
+    });
   });
 
   it("rejects unsafe Designer indexer object keys", async () => {
