@@ -1129,7 +1129,6 @@ impl QueryManager {
                 .is_some_and(|required_tier| confirmed_tier >= required_tier)
             {
                 subscription.needs_visibility_recompute = true;
-                subscription.graph.mark_all_dirty();
             }
         }
     }
