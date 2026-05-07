@@ -80,6 +80,7 @@ pub struct TransportHandle {
     /// catalogue-state digest so the server can emit schema diagnostics
     /// against a real schema hash.
     pub(crate) declared_schema_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) can_publish_catalogue: bool,
 }
 
 impl TransportHandle {
@@ -89,6 +90,10 @@ impl TransportHandle {
     }
     pub fn send_outbox(&self, entry: OutboxEntry) {
         let _ = self.outbox_tx.unbounded_send(entry);
+    }
+
+    pub(crate) fn can_publish_catalogue(&self) -> bool {
+        self.can_publish_catalogue
     }
     pub fn has_ever_connected(&self) -> bool {
         self.ever_connected
@@ -147,6 +152,12 @@ pub struct AuthConfig {
     pub admin_secret: Option<String>,
     pub peer_secret: Option<String>,
     pub backend_session: Option<serde_json::Value>,
+}
+
+impl AuthConfig {
+    pub fn can_publish_catalogue(&self) -> bool {
+        self.admin_secret.is_some() || self.peer_secret.is_some()
+    }
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -366,6 +377,7 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
         control_tx,
         catalogue_state_hash: catalogue_state_hash.clone(),
         declared_schema_hash: declared_schema_hash.clone(),
+        can_publish_catalogue: auth.can_publish_catalogue(),
     };
     let manager = TransportManager {
         server_id,
