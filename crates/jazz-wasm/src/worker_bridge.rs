@@ -410,6 +410,16 @@ impl WasmWorkerBridge {
         // unmount sequence loses the writes: the queued microtask flush
         // would post AFTER `Shutdown`, and the worker drops the runtime on
         // `Shutdown` so the late sync never reaches OPFS.
+        //
+        // Two-step drain:
+        // 1. `runtime.batched_tick()` synchronously moves entries from the
+        //    main runtime's outbox into the `RustOutboxSender`'s
+        //    `pending_sync_entries`. The runtime's own `batched_tick` is
+        //    normally scheduled via `setTimeout(0)` and may not have fired
+        //    yet on a fast unmount-after-write.
+        // 2. `sender.flush_now()` synchronously postcard-encodes those
+        //    entries and posts them to the worker.
+        self.inner.runtime.batched_tick();
         self.inner.sender.flush_now();
         // Detach the outbox edge.
         self.inner.runtime.install_noop_sync_sender();
