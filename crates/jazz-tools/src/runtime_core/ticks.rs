@@ -797,6 +797,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         self.park_sync_message(*entry);
                     }
                 }
+                crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                    self.park_sync_message_batch(entries);
+                }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
                 }
@@ -955,6 +958,58 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    fn park_sync_message_batch(
+        &mut self,
+        entries: Vec<crate::transport_manager::SequencedInboxEntry>,
+    ) {
+        let mut parked_any = false;
+        for crate::transport_manager::SequencedInboxEntry { entry, sequence } in entries {
+            if let Some(sequence) = sequence {
+                match entry.source {
+                    crate::sync_manager::Source::Server(server_id) => {
+                        let next_expected = self
+                            .next_expected_server_seq
+                            .entry(server_id)
+                            .or_insert(sequence);
+                        if sequence < *next_expected {
+                            trace!(
+                                ?server_id,
+                                sequence,
+                                next_expected = *next_expected,
+                                "dropping already-applied sequenced sync message"
+                            );
+                            continue;
+                        }
+
+                        if let Some((ref tracer, ref name)) = self.sync_tracer {
+                            tracer.record_incoming(&entry.source, name, &entry.payload);
+                        }
+
+                        self.parked_sync_messages_by_server_seq
+                            .entry(server_id)
+                            .or_default()
+                            .insert(sequence, entry);
+                        parked_any = true;
+                    }
+                    _ => {
+                        self.parked_sync_messages.push(entry);
+                        parked_any = true;
+                    }
+                }
+            } else {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_incoming(&entry.source, name, &entry.payload);
+                }
+                self.parked_sync_messages.push(entry);
+                parked_any = true;
+            }
+        }
+
+        if parked_any {
+            self.scheduler.schedule_batched_tick();
+        }
+    }
+
     /// Set the next expected sequenced message for a server stream.
     pub fn set_next_expected_server_sequence(&mut self, server_id: ServerId, next_sequence: u64) {
         let next_sequence = next_sequence.max(1);
@@ -997,6 +1052,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 } else {
                     self.park_sync_message(*entry);
                 }
+            }
+            crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                self.park_sync_message_batch(entries);
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);

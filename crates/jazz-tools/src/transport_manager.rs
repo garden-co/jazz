@@ -33,6 +33,9 @@ pub enum TransportInbound {
         entry: Box<InboxEntry>,
         sequence: Option<u64>,
     },
+    SyncBatch {
+        entries: Vec<SequencedInboxEntry>,
+    },
     Disconnected,
     /// First connect/handshake attempt after `install_transport` failed before
     /// the handshake completed (DNS/TCP/TLS error, or handshake network error).
@@ -48,6 +51,12 @@ pub enum TransportInbound {
     AuthFailure {
         reason: String,
     },
+}
+
+#[derive(Debug)]
+pub struct SequencedInboxEntry {
+    pub entry: InboxEntry,
+    pub sequence: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -608,9 +617,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                 self.dispatch_sync_update(seq, *payload);
             }
             crate::transport_protocol::ServerEvent::SyncUpdateBatch { updates } => {
-                for update in updates {
-                    self.dispatch_sync_update(update.seq, update.payload);
-                }
+                self.dispatch_sync_update_batch(updates);
             }
             crate::transport_protocol::ServerEvent::Heartbeat => {}
             crate::transport_protocol::ServerEvent::Connected { .. } => {
@@ -628,12 +635,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         }
     }
 
-    fn dispatch_sync_update(
-        &mut self,
+    fn trace_sync_payload(
+        &self,
         sequence: Option<u64>,
-        payload: crate::sync_manager::types::SyncPayload,
+        payload: &crate::sync_manager::types::SyncPayload,
     ) {
-        match &payload {
+        match payload {
             crate::sync_manager::types::SyncPayload::QuerySettled {
                 query_id,
                 tier,
@@ -667,6 +674,14 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             }
             _ => {}
         }
+    }
+
+    fn dispatch_sync_update(
+        &mut self,
+        sequence: Option<u64>,
+        payload: crate::sync_manager::types::SyncPayload,
+    ) {
+        self.trace_sync_payload(sequence, &payload);
         let entry = InboxEntry {
             source: crate::sync_manager::types::Source::Server(self.server_id),
             payload,
@@ -675,6 +690,27 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             entry: Box::new(entry),
             sequence,
         });
+        self.tick.notify();
+    }
+
+    fn dispatch_sync_update_batch(
+        &mut self,
+        updates: Vec<crate::transport_protocol::SequencedSyncPayload>,
+    ) {
+        let mut entries = Vec::with_capacity(updates.len());
+        for update in updates {
+            self.trace_sync_payload(update.seq, &update.payload);
+            entries.push(SequencedInboxEntry {
+                entry: InboxEntry {
+                    source: crate::sync_manager::types::Source::Server(self.server_id),
+                    payload: update.payload,
+                },
+                sequence: update.seq,
+            });
+        }
+        let _ = self
+            .inbound_tx
+            .unbounded_send(TransportInbound::SyncBatch { entries });
         self.tick.notify();
     }
 }
