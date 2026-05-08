@@ -640,6 +640,10 @@ impl SyncManager {
         std::mem::take(&mut self.pending_query_subscriptions)
     }
 
+    pub fn has_pending_query_subscriptions(&self) -> bool {
+        !self.pending_query_subscriptions.is_empty()
+    }
+
     /// Re-queue pending query subscriptions that couldn't be processed yet.
     ///
     /// Called by QueryManager when schema isn't available for some subscriptions.

@@ -349,16 +349,17 @@ impl ServerState {
 
         match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
             Ok(batch) => {
-                for p in batch.payloads {
-                    let inbox = InboxEntry {
+                let entries = batch
+                    .payloads
+                    .into_iter()
+                    .map(|payload| InboxEntry {
                         source: Source::Client(client_id),
-                        payload: p,
-                    };
-                    self.runtime
-                        .push_sync_inbox(inbox)
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(())
+                        payload,
+                    })
+                    .collect();
+                self.runtime
+                    .push_sync_inbox_batch(entries)
+                    .map_err(|e| e.to_string())
             }
             Err(e) => Err(format!("invalid ws payload: {e}")),
         }

@@ -679,8 +679,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         self.handle_transport_messages();
 
+        if !self.has_outbound()
+            && self
+                .schema_manager
+                .query_manager()
+                .sync_manager()
+                .has_pending_query_subscriptions()
+        {
+            self.immediate_tick();
+        }
+
         // 1. Send all outgoing sync messages
         self.flush_runtime_outbox("flushing outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // 2. Process parked sync messages
         self.handle_sync_messages();
@@ -689,6 +708,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // The scheduler's debounce prevents immediate_tick() from scheduling
         // another batched_tick while we're inside one, so we must flush here.
         self.flush_runtime_outbox("flushing post-process outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {
@@ -814,6 +842,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .keys()
             .copied()
             .collect();
+        let mut applied_since_last_tick = applied_messages > 0;
         for server_id in server_ids {
             let mut next_expected = *self.next_expected_server_seq.get(&server_id).unwrap_or(&1);
             let mut ready_messages = Vec::new();
@@ -834,12 +863,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .copied()
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
+                let is_query_settled = matches!(
+                    &msg.payload,
+                    crate::sync_manager::SyncPayload::QuerySettled { .. }
+                );
                 if msg.payload.writes_storage() {
                     self.mark_storage_write_pending_flush();
                 }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
+                applied_since_last_tick = true;
                 last_applied = sequence;
+
+                // QuerySettled is an ordered stream barrier for first-callback
+                // delivery. If we queue many later rows before ticking, an
+                // early settled query waits behind unrelated replay work that
+                // merely arrived in the same transport drain.
+                if is_query_settled {
+                    self.next_expected_server_seq
+                        .insert(server_id, sequence.saturating_add(1));
+                    self.last_applied_server_seq.insert(server_id, last_applied);
+                    self.immediate_tick();
+                    applied_since_last_tick = false;
+                }
             }
             self.next_expected_server_seq
                 .insert(server_id, next_expected);
@@ -851,7 +897,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if applied_messages > 0 {
             debug!(count = applied_messages, "applied parked sync messages");
-            self.immediate_tick();
+            if applied_since_last_tick {
+                self.immediate_tick();
+            }
         }
     }
 
