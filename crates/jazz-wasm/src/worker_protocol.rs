@@ -212,8 +212,11 @@ pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, Stri
 // Read path (Worker → Main)
 // =============================================================================
 
-/// Decode a worker → main message. Returns `None` for the JS-object `ready`
-/// message (posted by the worker's JS shim before Rust takes over).
+/// Decode a worker → main message. The JS shim posts two JS-object envelopes
+/// before WASM takes over: `{type:"ready"}` once the module is loaded, and
+/// `{type:"error", message}` if the WASM load or bootstrap throws (no
+/// postcard wire is possible because the runtime isn't yet up). Everything
+/// else is a `Uint8Array` of postcard-encoded `WorkerToMainWire`.
 pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
     if let Some(type_str) = Reflect::get(value, &JsValue::from_str("type"))
         .ok()
@@ -221,6 +224,13 @@ pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
     {
         return match type_str.as_str() {
             "ready" => ParsedWorkerToMain::Ready,
+            "error" => {
+                let message = Reflect::get(value, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "worker shim error (no message)".to_string());
+                ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message })
+            }
             other => ParsedWorkerToMain::UnknownJsObject(other.to_string()),
         };
     }
