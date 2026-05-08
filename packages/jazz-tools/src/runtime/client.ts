@@ -2687,6 +2687,16 @@ export class JazzClient {
   }
 
   /**
+   * Returns `true` if at least one waiter is registered for the given batch.
+   * Used by external dispatchers (e.g. the worker-bridge mutation-error
+   * replay path) to avoid double-firing onMutationError when a wait()
+   * promise is already on the hook for the same batch.
+   */
+  hasPendingBatchWaiter(batchId: string): boolean {
+    return (this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0;
+  }
+
+  /**
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
