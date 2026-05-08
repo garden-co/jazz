@@ -779,7 +779,7 @@ fn update_auth(jwt: Option<String>, runtime: Option<&Rc<WasmRuntime>>) {
     }
 }
 
-fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
+fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, _simulate_crash: bool) {
     HOST.with(|cell| {
         if let Some(h) = cell.borrow_mut().as_mut() {
             h.state = HostState::ShuttingDown;
@@ -787,18 +787,20 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     });
 
     if let Some(rt) = runtime {
-        if simulate_crash {
-            rt.flush_wal();
-        } else {
-            // Normal shutdown: drain any parked main/peer sync messages so
-            // their writes reach storage, then flush WAL so they survive a
-            // remount. Without this, pending entries delivered just before
-            // `Shutdown` (e.g. an in-flight write right before unmount) get
-            // dropped because the scheduled `batched_tick` (setTimeout(0))
-            // sits behind the `Shutdown` macrotask in the worker queue.
-            rt.batched_tick();
-            rt.flush_wal();
-        }
+        // Drain any parked main/peer sync messages so their writes reach
+        // storage, then flush WAL so they survive a remount/replay. Without
+        // this, pending entries delivered just before `Shutdown` /
+        // `SimulateCrash` (e.g. a wait-then-crash sequence) get dropped
+        // because the scheduled `batched_tick` (setTimeout(0)) sits behind
+        // the control macrotask in the worker queue.
+        //
+        // `simulate_crash` keeps the same drain step. On opfs-btree
+        // `flush_wal` is the only durability primitive (snapshot == WAL
+        // checkpoint), so the crash flavour and the clean shutdown have
+        // the same effect on storage; the distinction is preserved in case
+        // a future storage backend introduces a separate snapshot path.
+        rt.batched_tick();
+        rt.flush_wal();
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
         // replaces the active sender wholesale, so any future outbox emission
