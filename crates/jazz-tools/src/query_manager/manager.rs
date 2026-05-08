@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -1110,7 +1111,7 @@ impl QueryManager {
         for subscription in self.subscriptions.values_mut() {
             if subscription
                 .graph
-                .current_output_tuples()
+                .current_output_tuples_ref()
                 .iter()
                 .any(|tuple| tuple.batch_provenance().contains(&batch_id))
             {
@@ -1464,15 +1465,15 @@ impl QueryManager {
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                self.authorized_tuples_from_graph(
+                Cow::Owned(self.authorized_tuples_from_graph(
                     storage_ref,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,
                     subscription.session.as_ref(),
-                )
+                ))
             } else {
-                subscription.graph.current_output_tuples()
+                Cow::Borrowed(subscription.graph.current_output_tuples_ref())
             };
 
             if subscription.sync_backed
@@ -1483,11 +1484,11 @@ impl QueryManager {
                 && (subscription.propagation == QueryPropagation::Full
                     || !self.sync_manager.has_durability_identity())
             {
-                visible_tuples = self.filter_synced_query_scope_tuples(
+                visible_tuples = Cow::Owned(self.filter_synced_query_scope_tuples(
                     QueryId(sub_id.0),
                     &subscription.pending_local_row_ids,
-                    visible_tuples,
-                );
+                    visible_tuples.into_owned(),
+                ));
             }
 
             visible_tuples = self.filter_transaction_visible_tuples(
@@ -1496,7 +1497,7 @@ impl QueryManager {
                 visible_tuples,
             );
 
-            let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
+            let visible_rows = Self::rows_from_tuples(&subscription.graph, visible_tuples.as_ref());
             let visible_rows_by_id: HashMap<_, _> = visible_rows
                 .iter()
                 .cloned()
@@ -2663,36 +2664,59 @@ impl QueryManager {
             || query_scope.is_subset(local_scope)
     }
 
-    fn filter_transaction_visible_tuples(
+    fn filter_transaction_visible_tuples<'a>(
         &self,
         storage: &dyn Storage,
         query_id: QueryId,
-        tuples: Vec<Tuple>,
-    ) -> Vec<Tuple> {
+        tuples: Cow<'a, [Tuple]>,
+    ) -> Cow<'a, [Tuple]> {
         if tuples.is_empty() {
             return tuples;
         }
 
-        let local_scope = Self::scope_from_tuples(&tuples);
+        let local_scope = Self::scope_from_tuples(tuples.as_ref());
         let mut query_scope = local_scope.clone();
         query_scope.extend(self.sync_manager.remote_query_scope(query_id));
 
         let mut settlement_cache: HashMap<BatchId, Option<BatchFate>> = HashMap::new();
+        let mut first_hidden = None;
 
-        tuples
-            .into_iter()
-            .filter(|tuple| {
-                tuple.batch_provenance().iter().copied().all(|batch_id| {
-                    Self::transactional_batch_complete_for_query_scope(
-                        storage,
-                        &mut settlement_cache,
-                        batch_id,
-                        &local_scope,
-                        &query_scope,
-                    )
-                })
-            })
-            .collect()
+        for (index, tuple) in tuples.as_ref().iter().enumerate() {
+            let is_visible = tuple.batch_provenance().iter().copied().all(|batch_id| {
+                Self::transactional_batch_complete_for_query_scope(
+                    storage,
+                    &mut settlement_cache,
+                    batch_id,
+                    &local_scope,
+                    &query_scope,
+                )
+            });
+            if !is_visible {
+                first_hidden = Some(index);
+                break;
+            }
+        }
+
+        let Some(first_hidden) = first_hidden else {
+            return tuples;
+        };
+
+        let mut filtered = Vec::with_capacity(tuples.len().saturating_sub(1));
+        filtered.extend_from_slice(&tuples.as_ref()[..first_hidden]);
+        for tuple in &tuples.as_ref()[first_hidden + 1..] {
+            if tuple.batch_provenance().iter().copied().all(|batch_id| {
+                Self::transactional_batch_complete_for_query_scope(
+                    storage,
+                    &mut settlement_cache,
+                    batch_id,
+                    &local_scope,
+                    &query_scope,
+                )
+            }) {
+                filtered.push(tuple.clone());
+            }
+        }
+        Cow::Owned(filtered)
     }
     // ========================================================================
     // No-op storage driver (for tests)

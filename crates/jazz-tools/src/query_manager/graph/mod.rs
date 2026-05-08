@@ -292,9 +292,14 @@ impl QueryGraph {
 
     /// Get the current output tuples in output order.
     pub fn current_output_tuples(&self) -> Vec<Tuple> {
+        self.current_output_tuples_ref().to_vec()
+    }
+
+    /// Borrow the current output tuples in output order.
+    pub fn current_output_tuples_ref(&self) -> &[Tuple] {
         match self.get_node(self.output_node) {
-            Some(GraphNode::Output(node)) => node.ordered_tuples().to_vec(),
-            _ => vec![],
+            Some(GraphNode::Output(node)) => node.ordered_tuples(),
+            _ => &[],
         }
     }
 
