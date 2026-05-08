@@ -38,17 +38,9 @@ The server:
 
 Variants: forge `DurableDirect` for a `batch_id` the server already `Rejected` (stomping the legitimate decision); pre-empt a transactional batch in flight with a forged `AcceptedTransaction`; launder writes by claiming durability for batches the user does not own.
 
-### Pre-existing vs branch-introduced
+### Provenance
 
-The fan-out leak is pre-existing on `main`. The authoritative-storage write is **introduced by `feat/rust-owned-worker-bridge-spec` commit `2156a27f` ("Replace batch settlements with batch fate")**, which added the `retain_client_batch_fate(storage, fate)` call inside the `process_from_client` arm. On `main` the same arm is one line:
-
-```rust
-SyncPayload::BatchSettlement { settlement } => {
-    self.pending_batch_settlements.push(settlement.clone());
-}
-```
-
-That version queues for fan-out only; it does not touch storage or create phantom records.
+The settlements→fate refactor merged to `main` via PR #820 (`c739040a`, "Merge pull request #820 from garden-co/feat/batch-rollback"). That refactor added the `retain_client_batch_fate(storage, fate)` call inside the `process_from_client` arm; before it, the equivalent arm just pushed onto `pending_batch_settlements` and did not touch storage. The fan-out leak therefore pre-dates the refactor; the authoritative-storage forge and phantom-record synthesis are post-refactor regressions and are now live on `main`.
 
 ### Failing test (drop into `crates/jazz-tools/src/sync_manager/tests/permissions.rs`)
 
@@ -94,7 +86,7 @@ fn batch_fate_from_user_client_must_not_forge_authoritative_fate() {
 }
 ```
 
-Currently fails at the first assertion on this branch; would fail at the third assertion on `main`.
+Lives on branch `fix/client-batch-fate-forgery` (off `main`). Fails at the first assertion today; the others would surface in turn once the storage write is gated.
 
 ### Same hole, sibling arms
 
@@ -108,4 +100,4 @@ While role-gating `BatchFate`, audit the other unguarded `process_from_client` a
 
 - Role-gate the `BatchFate` arm in `process_from_client`. My read of the protocol is that fate is server-authority output and should only flow inbound via `process_from_server`; check `Peer`-role routing before locking that in (peer-as-client may exist in some topologies).
 - While in the file, sweep `SealBatch`, `BatchFateNeeded`, `QuerySettled` for the same gap.
-- If the worker-bridge PR ships before this is fixed, at minimum revert the regression by dropping the `retain_client_batch_fate(storage, fate)` call from the client arm so the branch matches `main`'s pre-existing (still buggy but less dangerous) behaviour.
+- Stretch: also revisit whether the storage write should ever happen from the client edge regardless of role — the legitimate "client tells us a fate it learned downstream" flow is already covered by `process_from_server` at line 1190.
