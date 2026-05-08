@@ -27,9 +27,16 @@ pub struct MaterializeNode {
     rows: AHashMap<ObjectId, Row>,
     /// Current tuples (fully or partially materialized).
     current_tuples: AHashSet<Tuple>,
+    /// Reverse index for materialized tuples, keyed by any object ID contained
+    /// in the tuple.
+    current_tuples_by_id: AHashMap<ObjectId, AHashSet<Tuple>>,
     /// Current upstream tuples, including rows that are in scope but not yet
     /// materializable at the requested durability.
     known_tuples: AHashSet<Tuple>,
+    /// Reverse index for known tuples, keyed by any object ID contained in the
+    /// tuple. This keeps row update handling proportional to the affected
+    /// tuples instead of scanning every tuple in the materializer.
+    known_tuples_by_id: AHashMap<ObjectId, AHashSet<Tuple>>,
     /// IDs to check for content updates (row data may have changed).
     updated_ids: AHashSet<ObjectId>,
     /// IDs that were deleted (emit removal delta during settle).
@@ -57,11 +64,50 @@ impl MaterializeNode {
             elements_to_materialize,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
+            current_tuples_by_id: AHashMap::new(),
             known_tuples: AHashSet::new(),
+            known_tuples_by_id: AHashMap::new(),
             updated_ids: AHashSet::new(),
             deleted_ids: AHashSet::new(),
             dirty: true,
         }
+    }
+
+    fn insert_current_tuple(&mut self, tuple: Tuple) {
+        if self.current_tuples.insert(tuple.clone()) {
+            for id in tuple.id_iter() {
+                self.current_tuples_by_id
+                    .entry(id)
+                    .or_default()
+                    .insert(tuple.clone());
+            }
+        }
+    }
+
+    fn remove_current_tuple_from_index(&mut self, tuple: &Tuple) {
+        for id in tuple.id_iter() {
+            if let Some(tuples) = self.current_tuples_by_id.get_mut(&id) {
+                tuples.remove(tuple);
+                if tuples.is_empty() {
+                    self.current_tuples_by_id.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn remove_current_tuple(&mut self, tuple: &Tuple) -> bool {
+        if let Some(existing) = self.current_tuples.take(tuple) {
+            self.remove_current_tuple_from_index(&existing);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn take_current_tuple(&mut self, tuple: &Tuple) -> Option<Tuple> {
+        let existing = self.current_tuples.take(tuple)?;
+        self.remove_current_tuple_from_index(&existing);
+        Some(existing)
     }
 
     /// Create a new materialize node that materializes ALL elements.
@@ -108,6 +154,30 @@ impl MaterializeNode {
         self.dirty
     }
 
+    fn insert_known_tuple(&mut self, tuple: Tuple) {
+        if self.known_tuples.insert(tuple.clone()) {
+            for id in tuple.id_iter() {
+                self.known_tuples_by_id
+                    .entry(id)
+                    .or_default()
+                    .insert(tuple.clone());
+            }
+        }
+    }
+
+    fn remove_known_tuple(&mut self, tuple: &Tuple) {
+        if self.known_tuples.remove(tuple) {
+            for id in tuple.id_iter() {
+                if let Some(tuples) = self.known_tuples_by_id.get_mut(&id) {
+                    tuples.remove(tuple);
+                    if tuples.is_empty() {
+                        self.known_tuples_by_id.remove(&id);
+                    }
+                }
+            }
+        }
+    }
+
     // ========================================================================
     // Tuple-based methods for unified tuple model
     // ========================================================================
@@ -123,7 +193,7 @@ impl MaterializeNode {
 
         // Handle removed tuples - find the materialized version from current_tuples
         for tuple in delta.removed {
-            self.known_tuples.remove(&tuple);
+            self.remove_known_tuple(&tuple);
             // Find the materialized tuple in current_tuples (uses ID-based equality)
             let materialized_tuple = self.current_tuples.get(&tuple).cloned();
 
@@ -139,7 +209,7 @@ impl MaterializeNode {
                 self.updated_ids.remove(&id);
                 self.rows.remove(&id);
             }
-            self.current_tuples.remove(&tuple);
+            self.remove_current_tuple(&tuple);
 
             // Emit the materialized version
             result.removed.push(materialized_tuple.unwrap());
@@ -147,9 +217,9 @@ impl MaterializeNode {
 
         // Handle added tuples - materialize each element
         for tuple in delta.added {
-            self.known_tuples.insert(tuple.clone());
+            self.insert_known_tuple(tuple.clone());
             if let Some(materialized) = self.materialize_tuple(&tuple, &mut loader) {
-                self.current_tuples.insert(materialized.clone());
+                self.insert_current_tuple(materialized.clone());
                 result.added.push(materialized);
             }
             // If materialize_tuple returns None, the tuple is dropped (unavailable row)
@@ -157,11 +227,11 @@ impl MaterializeNode {
 
         // Handle updated tuples
         for (old_tuple, new_tuple) in delta.updated {
-            self.known_tuples.remove(&old_tuple);
-            self.known_tuples.insert(new_tuple.clone());
-            self.current_tuples.remove(&old_tuple);
+            self.remove_known_tuple(&old_tuple);
+            self.insert_known_tuple(new_tuple.clone());
+            self.remove_current_tuple(&old_tuple);
             if let Some(materialized) = self.materialize_tuple(&new_tuple, &mut loader) {
-                self.current_tuples.insert(materialized.clone());
+                self.insert_current_tuple(materialized.clone());
                 result.updated.push((old_tuple, materialized));
             } else {
                 // New version unavailable - emit as removal
@@ -269,14 +339,13 @@ impl MaterializeNode {
 
             // Find and remove tuples containing this ID
             let tuples_to_remove: Vec<Tuple> = self
-                .current_tuples
-                .iter()
-                .filter(|t| t.ids().contains(&id))
-                .cloned()
-                .collect();
+                .current_tuples_by_id
+                .get(&id)
+                .map(|tuples| tuples.iter().cloned().collect())
+                .unwrap_or_default();
 
             for tuple in tuples_to_remove {
-                self.current_tuples.remove(&tuple);
+                self.remove_current_tuple(&tuple);
                 result.removed.push(tuple);
             }
         }
@@ -291,33 +360,31 @@ impl MaterializeNode {
     {
         let mut result = TupleDelta::new();
         let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
+        let mut affected_tuples = AHashSet::new();
 
         for id in ids_to_check {
             // Find tuples containing this ID, including rows that were previously
             // in scope but not materializable at the requested durability.
-            let affected_tuples: Vec<Tuple> = self
-                .known_tuples
-                .iter()
-                .filter(|t| t.ids().contains(&id))
-                .cloned()
-                .collect();
+            if let Some(tuples) = self.known_tuples_by_id.get(&id) {
+                affected_tuples.extend(tuples.iter().cloned());
+            }
+        }
 
-            for tuple in affected_tuples {
-                let previous_materialized = self.current_tuples.take(&tuple);
+        for tuple in affected_tuples {
+            let previous_materialized = self.take_current_tuple(&tuple);
 
-                if let Some(new_tuple) = self.materialize_tuple(&tuple, &mut loader) {
-                    self.current_tuples.insert(new_tuple.clone());
-                    match previous_materialized {
-                        Some(old_tuple) => {
-                            if has_content_changed(&old_tuple, &new_tuple) {
-                                result.updated.push((old_tuple, new_tuple));
-                            }
+            if let Some(new_tuple) = self.materialize_tuple(&tuple, &mut loader) {
+                self.insert_current_tuple(new_tuple.clone());
+                match previous_materialized {
+                    Some(old_tuple) => {
+                        if has_content_changed(&old_tuple, &new_tuple) {
+                            result.updated.push((old_tuple, new_tuple));
                         }
-                        None => result.added.push(new_tuple),
                     }
-                } else if let Some(old_tuple) = previous_materialized {
-                    result.removed.push(old_tuple);
+                    None => result.added.push(new_tuple),
                 }
+            } else if let Some(old_tuple) = previous_materialized {
+                result.removed.push(old_tuple);
             }
         }
 
