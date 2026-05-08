@@ -333,3 +333,77 @@ fn row_batch_created_from_user_with_older_exact_history_match_skips_permission_c
         "idempotent replay of an older history row should re-emit its cached settlement, got {outbox:?}",
     );
 }
+
+/// `BatchFate` is a server-authority output: it tells the world whether a
+/// batch was durably committed, accepted as a transaction, or rejected. The
+/// only legitimate inbound source is `process_from_server` (a trusted
+/// upstream). A `User`-role client must not be able to forge fate by sending
+/// `SyncPayload::BatchFate` over the client edge — doing so would let any
+/// authenticated user write authoritative durability into storage and
+/// fan-out the lie to every other subscribed client.
+#[test]
+fn batch_fate_from_user_client_must_not_forge_authoritative_fate() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let forged_batch_id = BatchId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.set_client_role(client_id, ClientRole::User);
+    sm.set_client_session(
+        client_id,
+        crate::query_manager::session::Session::new("mallory"),
+    );
+    sm.take_outbox();
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::BatchFate {
+            fate: BatchFate::DurableDirect {
+                batch_id: forged_batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
+        },
+    });
+    sm.process_inbox(&mut io);
+
+    let stored_fate = io
+        .load_authoritative_batch_fate(forged_batch_id)
+        .expect("authoritative fate read should succeed");
+    assert!(
+        stored_fate.is_none(),
+        "User client forged a DurableDirect for an unknown batch and the \
+         server accepted it as authoritative: {stored_fate:?}",
+    );
+
+    let stored_record = io
+        .load_local_batch_record(forged_batch_id)
+        .expect("local batch record read should succeed");
+    assert!(
+        stored_record.is_none(),
+        "User client forging a DurableDirect must not synthesize a phantom \
+         LocalBatchRecord on the server: {stored_record:?}",
+    );
+
+    let pending_fates = sm.take_pending_batch_fates();
+    assert!(
+        pending_fates.is_empty(),
+        "Forged fate from a User client must not be queued for fan-out, \
+         got {pending_fates:?}",
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        !outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                payload: SyncPayload::BatchFate {
+                    fate: BatchFate::DurableDirect { batch_id, .. },
+                },
+                ..
+            } if *batch_id == forged_batch_id
+        )),
+        "Forged fate from a User client must not be relayed to other peers, \
+         got {outbox:?}",
+    );
+}
