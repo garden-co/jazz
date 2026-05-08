@@ -1298,12 +1298,20 @@ fn mid_tier_forwards_query_subscription_upstream() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
     });
 
     // Process the subscription
+    mid_tier
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
     mid_tier.process(&mut storage);
 
     // Check that QuerySubscription was forwarded to upstream server
@@ -1319,6 +1327,137 @@ fn mid_tier_forwards_query_subscription_upstream() {
         forwarded.len(),
         1,
         "Mid-tier should forward QuerySubscription to upstream server"
+    );
+}
+
+#[test]
+fn mid_tier_suppresses_repeated_local_query_settled_for_global_downstream_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
+        SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut mid_tier, &storage, upstream_id);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut mid_tier, &storage, client_id);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier.query("users").build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query: Box::new(query),
+            session: None,
+            required_tier: Some(DurabilityTier::GlobalServer),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    mid_tier.process(&mut storage);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::QuerySubscription { query_id, required_tier: None, .. },
+            } if *id == upstream_id
+                && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "mid-tier should forward the subscription upstream without imposing the downstream-local tier gate on the upstream server"
+    );
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "the first lower-tier settled signal is preserved as the initial remote scope snapshot"
+    );
+
+    mid_tier.process(&mut storage);
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "after the initial scope snapshot, below-required settled signals should be suppressed"
+    );
+}
+
+#[test]
+fn mid_tier_keeps_local_query_settled_for_legacy_downstream_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, OutboxEntry, ServerId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut mid_tier, &storage, upstream_id);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut mid_tier, &storage, client_id);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier.query("users").build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    mid_tier.process(&mut storage);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: crate::sync_manager::DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "subscriptions without an explicit required tier should retain the legacy local settled signal"
     );
 }
 
@@ -1349,6 +1488,7 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
             policy_context_tables: vec![],
         },
@@ -1392,6 +1532,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
             query_id: crate::sync_manager::QueryId(77),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
             policy_context_tables: vec![],
         },
@@ -1446,6 +1587,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             query_id,
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -1522,6 +1664,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

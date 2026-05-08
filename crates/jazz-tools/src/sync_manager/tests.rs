@@ -330,6 +330,7 @@ fn push_query_subscription(
             query_id: QueryId(1),
             query: Box::new(query),
             session: payload_session,
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         },

@@ -124,6 +124,7 @@ export class WorkerBridge {
           const sequence = isSequencedSyncPayload(entry) ? entry.sequence : undefined;
           this.runtime.onSyncMessageReceived(payload, sequence);
         }
+        this.runtime.batchedTick?.();
       } else if (msg.type === "upstream-connected") {
         this.markUpstreamServerConnected();
       } else if (msg.type === "upstream-disconnected") {
@@ -313,6 +314,7 @@ export class WorkerBridge {
   applyIncomingServerPayload(payload: Uint8Array): void {
     if (this.isDisposedLike()) return;
     this.runtime.onSyncMessageReceived(payload);
+    this.runtime.batchedTick?.();
   }
 
   replayServerConnection(): void {
