@@ -312,13 +312,14 @@ pub(super) fn build_computed_visible_preview(
     let mut merged_values = Vec::with_capacity(user_descriptor.columns.len());
     let mut contributing_rows: Vec<&StoredRowBatch> = Vec::new();
     let mut winner_batch_ids = Vec::with_capacity(user_descriptor.columns.len());
+    let null_ancestor = Value::Null;
 
     for column_index in 0..user_descriptor.columns.len() {
         let column = &user_descriptor.columns[column_index];
         let ancestor_value = ancestor_values
             .as_ref()
-            .map(|values| values[column_index].clone())
-            .unwrap_or(Value::Null);
+            .map(|values| &values[column_index])
+            .unwrap_or(&null_ancestor);
         let changed_contenders = frontier
             .iter()
             .zip(frontier_values.iter())
@@ -343,7 +344,7 @@ pub(super) fn build_computed_visible_preview(
             })
             .collect::<Vec<_>>();
         let (best_value, best_changed) =
-            merge_column_with_strategy(column, &ancestor_value, &changed_contenders)?;
+            merge_column_with_strategy(column, ancestor_value, &changed_contenders)?;
 
         merged_values.push(best_value);
         let winner_row = best_changed.or(ancestor).unwrap_or(latest_tip);
