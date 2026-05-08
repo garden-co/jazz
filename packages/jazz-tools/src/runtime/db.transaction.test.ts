@@ -157,10 +157,14 @@ describe("Db transactions", () => {
       title: "Transactional",
       done: false,
     });
-    expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Transactional" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(runtimeTransaction.create).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Transactional" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+    );
     expect(runtimeTransaction.update).toHaveBeenCalledWith("todo-1", {
       done: { type: "Boolean", value: true },
     });
@@ -220,10 +224,14 @@ describe("Db transactions", () => {
 
     expect(getSchema).not.toHaveBeenCalled();
     expect(getSchemaHash).not.toHaveBeenCalled();
-    expect(runtimeTransaction.create).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Fast transaction" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(runtimeTransaction.create).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Fast transaction" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+    );
     expect(runtimeTransaction.upsert).toHaveBeenCalledWith(
       "todos",
       { title: { type: "Text", value: "Fast transaction upsert" } },
@@ -1000,10 +1008,14 @@ describe("Db transactions", () => {
       title: "Direct batch",
       done: false,
     });
-    expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Direct batch" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(runtimeBatch.create).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Direct batch" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+    );
     expect(runtimeBatch.update).toHaveBeenCalledWith("todo-direct-1", {
       done: { type: "Boolean", value: true },
     });
@@ -1068,10 +1080,14 @@ describe("Db transactions", () => {
 
     expect(getSchema).not.toHaveBeenCalled();
     expect(getSchemaHash).not.toHaveBeenCalled();
-    expect(runtimeBatch.create).toHaveBeenCalledWith("todos", {
-      title: { type: "Text", value: "Fast batch" },
-      done: { type: "Boolean", value: false },
-    });
+    expect(runtimeBatch.create).toHaveBeenCalledWith(
+      "todos",
+      {
+        title: { type: "Text", value: "Fast batch" },
+        done: { type: "Boolean", value: false },
+      },
+      undefined,
+    );
     expect(runtimeBatch.upsert).toHaveBeenCalledWith(
       "todos",
       { title: { type: "Text", value: "Fast batch upsert" } },
