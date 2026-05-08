@@ -178,42 +178,23 @@ pub enum MainToWorkerMessage {
 
 /// Parse an inbound `MessageEvent.data`. Init is JS-object; everything else is
 /// a `Uint8Array` of postcard-encoded `MainToWorkerWire` bytes.
-///
-/// Cold-path debug messages (`debug-schema-state`, `debug-seed-live-schema`)
-/// also accept a JS-object form so external test harnesses can post them
-/// without a postcard encoder.
 pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, String> {
+    // Init special case (JS object with `type === "init"`).
     if let Some(type_str) = Reflect::get(value, &JsValue::from_str("type"))
         .ok()
         .and_then(|v| v.as_string())
     {
-        match type_str.as_str() {
-            "init" => {
-                let runtime_sources = Reflect::get(value, &JsValue::from_str("runtimeSources"))
-                    .unwrap_or(JsValue::UNDEFINED);
-                let fields: InitPayloadFields = serde_wasm_bindgen::from_value(value.clone())
-                    .map_err(|e| format!("init payload: {e}"))?;
-                return Ok(MainToWorkerMessage::Init(Box::new(InitPayload {
-                    fields,
-                    runtime_sources,
-                })));
-            }
-            "debug-schema-state" => {
-                return Ok(MainToWorkerMessage::Wire(
-                    MainToWorkerWire::DebugSchemaState,
-                ));
-            }
-            "debug-seed-live-schema" => {
-                let schema_json = Reflect::get(value, &JsValue::from_str("schemaJson"))
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
-                return Ok(MainToWorkerMessage::Wire(
-                    MainToWorkerWire::DebugSeedLiveSchema { schema_json },
-                ));
-            }
-            other => return Ok(MainToWorkerMessage::Unknown(other.to_string())),
+        if type_str == "init" {
+            let runtime_sources = Reflect::get(value, &JsValue::from_str("runtimeSources"))
+                .unwrap_or(JsValue::UNDEFINED);
+            let fields: InitPayloadFields = serde_wasm_bindgen::from_value(value.clone())
+                .map_err(|e| format!("init payload: {e}"))?;
+            return Ok(MainToWorkerMessage::Init(Box::new(InitPayload {
+                fields,
+                runtime_sources,
+            })));
         }
+        return Ok(MainToWorkerMessage::Unknown(type_str));
     }
 
     // Binary path.
@@ -231,12 +212,8 @@ pub fn parse_main_to_worker(value: &JsValue) -> Result<MainToWorkerMessage, Stri
 // Read path (Worker → Main)
 // =============================================================================
 
-/// Decode a worker → main message. Returns `Ready` for the JS-object `ready`
+/// Decode a worker → main message. Returns `None` for the JS-object `ready`
 /// message (posted by the worker's JS shim before Rust takes over).
-///
-/// Cold-path responses (`error`, `debug-schema-state-ok`,
-/// `debug-seed-live-schema-ok`) also accept a JS-object form so external
-/// test harnesses can dispatch them without a postcard encoder.
 pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
     if let Some(type_str) = Reflect::get(value, &JsValue::from_str("type"))
         .ok()
@@ -244,29 +221,6 @@ pub fn parse_worker_to_main(value: &JsValue) -> ParsedWorkerToMain {
     {
         return match type_str.as_str() {
             "ready" => ParsedWorkerToMain::Ready,
-            "error" => {
-                let message = Reflect::get(value, &JsValue::from_str("message"))
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
-                ParsedWorkerToMain::Wire(WorkerToMainWire::Error { message })
-            }
-            "debug-schema-state-ok" => {
-                let state_value =
-                    Reflect::get(value, &JsValue::from_str("state")).unwrap_or(JsValue::UNDEFINED);
-                let state_json = if state_value.is_undefined() || state_value.is_null() {
-                    "null".to_string()
-                } else {
-                    js_sys::JSON::stringify(&state_value)
-                        .ok()
-                        .and_then(|s| s.as_string())
-                        .unwrap_or_else(|| "null".to_string())
-                };
-                ParsedWorkerToMain::Wire(WorkerToMainWire::DebugSchemaStateOk { state_json })
-            }
-            "debug-seed-live-schema-ok" => {
-                ParsedWorkerToMain::Wire(WorkerToMainWire::DebugSeedLiveSchemaOk)
-            }
             other => ParsedWorkerToMain::UnknownJsObject(other.to_string()),
         };
     }
