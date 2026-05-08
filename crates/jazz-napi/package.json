@@ -8,10 +8,11 @@
     "url": "https://github.com/garden-co/jazz2"
   },
   "files": [
+    "index.cjs",
     "index.js",
     "index.d.ts"
   ],
-  "main": "index.js",
+  "main": "index.cjs",
   "types": "index.d.ts",
   "publishConfig": {
     "access": "public",
