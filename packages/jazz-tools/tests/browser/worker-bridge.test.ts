@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { encodeMainToWorkerJs, encodeWorkerToMainJs, decodeWorkerToMainJs } from "jazz-wasm";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
@@ -528,7 +529,10 @@ describe("Worker Bridge with OPFS", () => {
         queueMicrotask(() => {
           worker.dispatchEvent(
             new MessageEvent("message", {
-              data: { type: "error", message: "forced bridge init failure for test" },
+              data: encodeWorkerToMainJs({
+                type: "error",
+                message: "forced bridge init failure for test",
+              }),
             }),
           );
         });
@@ -578,7 +582,10 @@ describe("Worker Bridge with OPFS", () => {
         queueMicrotask(() => {
           worker.dispatchEvent(
             new MessageEvent("message", {
-              data: { type: "error", message: "forced bridge init failure for query test" },
+              data: encodeWorkerToMainJs({
+                type: "error",
+                message: "forced bridge init failure for query test",
+              }),
             }),
           );
         });
@@ -2101,6 +2108,24 @@ function getMainDebugSchemaState(db: Db, schemaForClient: WasmSchema): DebugSche
   return runtime.__debugSchemaState();
 }
 
+/**
+ * Decode a worker → main `MessageEvent.data`. Returns `null` for messages
+ * the helpers don't recognise (init JS-objects, ready, etc.).
+ */
+function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unknown } | null {
+  if (data instanceof Uint8Array) {
+    try {
+      return decodeWorkerToMainJs(data);
+    } catch {
+      return null;
+    }
+  }
+  if (data && typeof data === "object" && typeof (data as any).type === "string") {
+    return data as { type: string; [key: string]: unknown };
+  }
+  return null;
+}
+
 async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
   await (db as any).ensureBridgeReady();
   const worker = (db as any).worker as Worker | null;
@@ -2115,14 +2140,12 @@ async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<Debu
     }, timeoutMs);
 
     const handler = (event: MessageEvent) => {
-      const data = event.data as
-        | { type?: string; state?: DebugSchemaState; message?: string }
-        | undefined;
-      if (!data?.type) return;
+      const data = decodeWorkerMessage(event.data);
+      if (!data) return;
 
       if (data.type === "debug-schema-state-ok" && data.state) {
         cleanup();
-        resolve(data.state);
+        resolve(data.state as DebugSchemaState);
         return;
       }
 
@@ -2142,7 +2165,7 @@ async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<Debu
     };
 
     worker.addEventListener("message", handler);
-    worker.postMessage({ type: "debug-schema-state" });
+    worker.postMessage(encodeMainToWorkerJs({ type: "debug-schema-state" }));
   });
 }
 
@@ -2162,8 +2185,8 @@ async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000
     }, timeoutMs);
 
     const handler = (event: MessageEvent) => {
-      const data = event.data as { type?: string; message?: string } | undefined;
-      if (!data?.type) return;
+      const data = decodeWorkerMessage(event.data);
+      if (!data) return;
 
       if (data.type === "debug-seed-live-schema-ok") {
         cleanup();
@@ -2187,6 +2210,6 @@ async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000
     };
 
     worker.addEventListener("message", handler);
-    worker.postMessage({ type: "debug-seed-live-schema", schemaJson });
+    worker.postMessage(encodeMainToWorkerJs({ type: "debug-seed-live-schema", schemaJson }));
   });
 }

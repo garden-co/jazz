@@ -36,6 +36,32 @@ declare module "jazz-wasm" {
    * the runtime and posts `init-ok` asynchronously.
    */
   export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
+  /**
+   * Encode a JS-shaped main→worker control message (`{type: "<kebab-case>", ...}`)
+   * to a postcard-binary `Uint8Array`. Test-harness convenience.
+   */
+  export function encodeMainToWorkerJs(value: unknown): Uint8Array;
+  /**
+   * Encode a JS-shaped worker→main control message (`{type: "<kebab-case>", ...}`)
+   * to a postcard-binary `Uint8Array`. Test-harness convenience.
+   */
+  export function encodeWorkerToMainJs(value: unknown): Uint8Array;
+  /**
+   * Decode a postcard-binary main→worker message back into a JS object
+   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
+   */
+  export function decodeMainToWorkerJs(bytes: Uint8Array): {
+    type: string;
+    [key: string]: unknown;
+  };
+  /**
+   * Decode a postcard-binary worker→main message back into a JS object
+   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
+   */
+  export function decodeWorkerToMainJs(bytes: Uint8Array): {
+    type: string;
+    [key: string]: unknown;
+  };
 
   export class WasmWorkerBridge {
     static attach(worker: Worker, runtime: WasmRuntime, options: unknown): WasmWorkerBridge;
