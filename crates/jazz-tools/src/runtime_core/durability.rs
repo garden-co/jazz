@@ -19,7 +19,7 @@ use super::{PersistedWriteAck, PersistedWriteRejection};
 pub(crate) struct DurabilityTracker {
     /// Watchers waiting for a row+batch to be confirmed at a requested tier.
     ack_watchers: HashMap<RowBatchKey, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
-    /// Watchers waiting for a whole batch to settle at a requested tier.
+    /// Watchers waiting for a batch to settle at a requested tier.
     batch_watchers: HashMap<BatchId, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
     /// Rejected replayable batch ids surfaced once to bindings on next drain.
     rejected_batch_ids: BTreeSet<BatchId>,

@@ -755,7 +755,6 @@ function rejectionFromRuntimeWaitError(
   const candidate = error as {
     kind?: unknown;
     batchId?: unknown;
-    batch_id?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -765,12 +764,7 @@ function rejectionFromRuntimeWaitError(
   if (typeof candidate.code !== "string" || typeof candidate.reason !== "string") {
     return null;
   }
-  const batchId =
-    typeof candidate.batchId === "string"
-      ? candidate.batchId
-      : typeof candidate.batch_id === "string"
-        ? candidate.batch_id
-        : fallbackBatchId;
+  const batchId = typeof candidate.batchId === "string" ? candidate.batchId : fallbackBatchId;
   return new PersistedWriteRejectedError(batchId, candidate.code, candidate.reason);
 }
 

@@ -315,6 +315,10 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     /// Recently mutated local batch records. Large direct batches append one
     /// member per write, so reloading the record from storage on every insert
     /// means repeatedly decoding the full accumulated member array.
+    /// Note: local_batch_record_cache is not authoritative after a batch has been sealed.
+    /// seal_batch writes the record to storage and also leaves a copy in the cache;
+    /// later incoming batch fate is applied to storage in apply_received_batch_fate,
+    /// but the cached copy is not updated.
     local_batch_record_cache: HashMap<BatchId, crate::batch_fate::LocalBatchRecord>,
 
     /// Label for tracing (e.g. "local", "edge", "client").
