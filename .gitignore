@@ -34,6 +34,7 @@ test-results/
 
 # Generated
 examples/wequencer/walkthrough/*.html
+**/.jazz-schema-*.mjs
 
 # Local data
 data/

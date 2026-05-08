@@ -637,6 +637,15 @@ impl RustOutboxSender {
         }
     }
 
+    /// Synchronously drain any pending outbox entries to the target. Used by
+    /// the bridge on shutdown so a final post lands *before* the `Shutdown`
+    /// envelope — otherwise the worker would receive `Shutdown` first, drop
+    /// the runtime, then receive (and ignore) the queued sync, losing those
+    /// writes from OPFS.
+    pub(crate) fn flush_now(&self) {
+        flush_pending(&self.inner);
+    }
+
     pub(crate) fn attach_target(
         &self,
         target: JsValue,
