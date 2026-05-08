@@ -1166,6 +1166,13 @@ export class Db {
       if (!settlement || settlement.kind !== "rejected") {
         return;
       }
+      // If a `wait()` promise is registered for this batch, let the client
+      // settlement path deliver the rejection to the waiter — firing the
+      // onMutationError listeners here would double-deliver and break the
+      // "wait() consumes the error" contract.
+      if (client.hasPendingBatchWaiter(batch.batchId)) {
+        return;
+      }
       const event: MutationErrorEvent = {
         code: settlement.code,
         reason: settlement.reason,
