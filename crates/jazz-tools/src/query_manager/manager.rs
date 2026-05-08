@@ -1372,6 +1372,9 @@ impl QueryManager {
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
+            let local_durability_satisfies_subscription = subscription
+                .durability_tier
+                .is_some_and(|tier| self.sync_manager.has_local_durability_at_least(tier));
 
             let delta = {
                 let schema_context = &self.schema_context;
@@ -1380,6 +1383,7 @@ impl QueryManager {
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
                         let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
+                            && !local_durability_satisfies_subscription
                             && !self
                                 .sync_manager
                                 .has_remote_query_scope_snapshot(QueryId(sub_id.0));
@@ -1478,6 +1482,7 @@ impl QueryManager {
 
             if subscription.sync_backed
                 && Self::subscription_query_frontier_satisfied(&subscription)
+                && !local_durability_satisfies_subscription
                 && self
                     .sync_manager
                     .has_remote_query_scope_snapshot(QueryId(sub_id.0))

@@ -1140,6 +1140,61 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
 }
 
 #[test]
+fn local_durability_tier_subscription_ignores_stale_upstream_scope() {
+    use crate::sync_manager::{DurabilityTier, InboxEntry, QueryId, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let schema = test_schema();
+    let (mut edge_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let row_id = edge_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap()
+        .row_id;
+    edge_qm.process(&mut storage);
+    let _ = edge_qm.take_updates();
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut edge_qm, &storage, upstream_id);
+    let _ = edge_qm.sync_manager_mut().take_outbox();
+
+    let query = edge_qm.query("users").build();
+    let sub_id = edge_qm
+        .subscribe_with_sync(query, None, Some(DurabilityTier::EdgeServer))
+        .unwrap();
+
+    edge_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(upstream_id),
+        payload: SyncPayload::QuerySettled {
+            query_id: QueryId(sub_id.0),
+            tier: DurabilityTier::Local,
+            scope: vec![],
+            through_seq: 0,
+        },
+    });
+    edge_qm.process(&mut storage);
+
+    let updates = edge_qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0]
+            .delta
+            .added
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![row_id],
+        "edge-tier reads on an edge runtime are satisfied locally and must not be clipped by a stale upstream scope snapshot"
+    );
+}
+
+#[test]
 fn add_server_replays_existing_local_query_subscriptions() {
     use crate::sync_manager::{Destination, QueryId, ServerId, SyncPayload};
     use uuid::Uuid;
