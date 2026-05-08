@@ -668,35 +668,40 @@ fn process_main_message(msg: MainToWorkerMessage) {
         }
         MainToWorkerWire::DebugSchemaState => match runtime.as_ref() {
             Some(rt) => match rt.debug_schema_state() {
-                Ok(state_value) => {
-                    post_js_object_to_main(&build_debug_schema_state_ok_object(&state_value))
-                }
-                Err(err) => post_js_object_to_main(&build_error_object(&format!(
-                    "debug-schema-state failed: {}",
-                    js_error_message(&err.into())
-                ))),
+                Ok(state_value) => post_to_main(&WorkerToMainWire::DebugSchemaStateOk {
+                    state_json: js_value_to_json(&state_value),
+                }),
+                Err(err) => post_to_main(&WorkerToMainWire::Error {
+                    message: format!(
+                        "debug-schema-state failed: {}",
+                        js_error_message(&err.into())
+                    ),
+                }),
             },
             None => {
-                post_js_object_to_main(&build_error_object(
-                    "debug-schema-state requested before worker init complete",
-                ));
+                post_to_main(&WorkerToMainWire::Error {
+                    message: "debug-schema-state requested before worker init complete".to_string(),
+                });
             }
         },
         MainToWorkerWire::DebugSeedLiveSchema { schema_json } => match runtime.as_ref() {
             Some(rt) => match rt.debug_seed_live_schema(&schema_json) {
                 Ok(()) => {
                     rt.flush_wal();
-                    post_js_object_to_main(&build_debug_seed_live_schema_ok_object());
+                    post_to_main(&WorkerToMainWire::DebugSeedLiveSchemaOk);
                 }
-                Err(err) => post_js_object_to_main(&build_error_object(&format!(
-                    "debug-seed-live-schema failed: {}",
-                    js_error_message(&err.into())
-                ))),
+                Err(err) => post_to_main(&WorkerToMainWire::Error {
+                    message: format!(
+                        "debug-seed-live-schema failed: {}",
+                        js_error_message(&err.into())
+                    ),
+                }),
             },
             None => {
-                post_js_object_to_main(&build_error_object(
-                    "debug-seed-live-schema requested before worker init complete",
-                ));
+                post_to_main(&WorkerToMainWire::Error {
+                    message: "debug-seed-live-schema requested before worker init complete"
+                        .to_string(),
+                });
             }
         },
     }
@@ -840,50 +845,6 @@ fn post_to_main(msg: &WorkerToMainWire) {
     };
     let global = global_worker_scope();
     let _ = global.post_message_with_transfer(&value, transfer.as_ref());
-}
-
-/// Post a JS-object message to main. Used for cold-path debug responses and
-/// errors so external test harnesses can observe them without a postcard
-/// decoder.
-fn post_js_object_to_main(value: &JsValue) {
-    let global = global_worker_scope();
-    let _ = global.post_message(value);
-}
-
-fn build_debug_schema_state_ok_object(state_value: &JsValue) -> JsValue {
-    let obj = js_sys::Object::new();
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("type"),
-        &JsValue::from_str("debug-schema-state-ok"),
-    );
-    let _ = Reflect::set(&obj, &JsValue::from_str("state"), state_value);
-    obj.into()
-}
-
-fn build_debug_seed_live_schema_ok_object() -> JsValue {
-    let obj = js_sys::Object::new();
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("type"),
-        &JsValue::from_str("debug-seed-live-schema-ok"),
-    );
-    obj.into()
-}
-
-fn build_error_object(message: &str) -> JsValue {
-    let obj = js_sys::Object::new();
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("type"),
-        &JsValue::from_str("error"),
-    );
-    let _ = Reflect::set(
-        &obj,
-        &JsValue::from_str("message"),
-        &JsValue::from_str(message),
-    );
-    obj.into()
 }
 
 /// Serialise a JS-shaped `JsValue` to JSON. Returns `"null"` on failure.
