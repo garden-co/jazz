@@ -1083,9 +1083,15 @@ impl SyncManager {
                     .remote_query_scopes
                     .get(&(server_id, query_id))
                     .is_none_or(|previous_scope| previous_scope != &scope_set);
+                let tier_changed = self
+                    .remote_query_scope_tiers
+                    .get(&(server_id, query_id))
+                    .is_none_or(|previous_tier| *previous_tier != tier);
                 self.remote_query_scopes
                     .insert((server_id, query_id), scope_set);
-                if scope_changed {
+                self.remote_query_scope_tiers
+                    .insert((server_id, query_id), tier);
+                if scope_changed || tier_changed {
                     self.remote_query_scope_dirty.insert(query_id);
                 }
 

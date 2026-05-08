@@ -86,6 +86,8 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Latest remote scope snapshots keyed by upstream server and query id.
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
+    /// Durability tier associated with each latest remote scope snapshot.
+    pub(super) remote_query_scope_tiers: HashMap<(ServerId, QueryId), DurabilityTier>,
     /// Query ids whose remote scope changed since the last QueryManager process.
     pub(super) remote_query_scope_dirty: HashSet<QueryId>,
     /// Pending QuerySettled notifications for QueryManager to process.
@@ -132,6 +134,7 @@ impl std::fmt::Debug for SyncManager {
             .field("row_batch_interest", &self.row_batch_interest)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
+            .field("remote_query_scope_tiers", &self.remote_query_scope_tiers)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("pending_query_rejections", &self.pending_query_rejections)
             .field("pending_batch_fates", &self.pending_batch_fates)
@@ -234,6 +237,7 @@ impl SyncManager {
             row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
+            remote_query_scope_tiers: HashMap::new(),
             remote_query_scope_dirty: HashSet::new(),
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
@@ -492,6 +496,8 @@ impl SyncManager {
                 }
                 keep
             });
+        self.remote_query_scope_tiers
+            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
         self.remote_query_scope_dirty.extend(removed_query_ids);
     }
 
@@ -901,11 +907,45 @@ impl SyncManager {
             .collect()
     }
 
+    /// Return the union of latest upstream scope snapshots at or above the
+    /// requested tier for this query.
+    pub fn remote_query_scope_at_least(
+        &self,
+        query_id: QueryId,
+        requested_tier: DurabilityTier,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        self.remote_query_scopes
+            .iter()
+            .filter(|((server_id, remote_query_id), _)| {
+                *remote_query_id == query_id
+                    && self
+                        .remote_query_scope_tiers
+                        .get(&(*server_id, *remote_query_id))
+                        .is_some_and(|tier| *tier >= requested_tier)
+            })
+            .flat_map(|(_, scope)| scope.iter().copied())
+            .collect()
+    }
+
     /// Whether we have received at least one upstream scope snapshot for this query.
     pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
         self.remote_query_scopes
             .keys()
             .any(|(_, remote_query_id)| *remote_query_id == query_id)
+    }
+
+    /// Whether we have received at least one upstream scope snapshot for this
+    /// query at a tier that can authoritatively satisfy the requested tier.
+    pub fn has_remote_query_scope_snapshot_at_least(
+        &self,
+        query_id: QueryId,
+        requested_tier: DurabilityTier,
+    ) -> bool {
+        self.remote_query_scope_tiers
+            .iter()
+            .any(|((_, remote_query_id), tier)| {
+                *remote_query_id == query_id && *tier >= requested_tier
+            })
     }
 
     /// Take query ids whose upstream scope changed since the last process pass.

@@ -108,6 +108,123 @@ fn recursive_query_with_hop_expands_transitive_closure() {
 }
 
 #[test]
+fn recursive_query_with_self_referential_hop_expands_ancestors() {
+    use crate::query_manager::query::Query;
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+        ProjectExpr, RelExpr, RowIdRef, ValueRef,
+    };
+
+    let sync_manager = SyncManager::new();
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("teams"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("org_id", ColumnType::Uuid).nullable(),
+            ColumnDescriptor::new("parent_id", ColumnType::Uuid).nullable(),
+        ])
+        .into(),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let root = qm
+        .insert(
+            &mut storage,
+            "teams",
+            &[Value::Text("root".into()), Value::Null, Value::Null],
+        )
+        .unwrap();
+    let mid = qm
+        .insert(
+            &mut storage,
+            "teams",
+            &[
+                Value::Text("mid".into()),
+                Value::Null,
+                Value::Uuid(root.row_id),
+            ],
+        )
+        .unwrap();
+    let leaf = qm
+        .insert(
+            &mut storage,
+            "teams",
+            &[
+                Value::Text("leaf".into()),
+                Value::Null,
+                Value::Uuid(mid.row_id),
+            ],
+        )
+        .unwrap();
+
+    let mut query = Query::new("teams");
+    query.relation_ir = RelExpr::Gather {
+        seed: Box::new(RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("teams"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::scoped("teams", "id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::Literal(Value::Uuid(leaf.row_id)),
+            },
+        }),
+        step: Box::new(RelExpr::Project {
+            input: Box::new(RelExpr::Join {
+                left: Box::new(RelExpr::Filter {
+                    input: Box::new(RelExpr::TableScan {
+                        table: TableName::new("teams"),
+                    }),
+                    predicate: PredicateExpr::Cmp {
+                        left: ColumnRef::scoped("teams", "id"),
+                        op: PredicateCmpOp::Eq,
+                        right: ValueRef::RowId(RowIdRef::Frontier),
+                    },
+                }),
+                right: Box::new(RelExpr::TableScan {
+                    table: TableName::new("teams"),
+                }),
+                on: vec![JoinCondition {
+                    left: ColumnRef::scoped("teams", "parent_id"),
+                    right: ColumnRef::scoped("__recursive_hop_0", "id"),
+                }],
+                join_kind: JoinKind::Inner,
+            }),
+            columns: vec![
+                ProjectColumn {
+                    alias: "id".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "id")),
+                },
+                ProjectColumn {
+                    alias: "name".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "name")),
+                },
+                ProjectColumn {
+                    alias: "parent_id".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "parent_id")),
+                },
+                ProjectColumn {
+                    alias: "org_id".into(),
+                    expr: ProjectExpr::Column(ColumnRef::scoped("__recursive_hop_0", "org_id")),
+                },
+            ],
+        }),
+        frontier_key: KeyRef::RowId(RowIdRef::Current),
+        max_depth: 10,
+        dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+    };
+
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    let mut ids: Vec<ObjectId> = results.into_iter().map(|(id, _)| id).collect();
+    ids.sort();
+
+    let mut expected = vec![root.row_id, mid.row_id, leaf.row_id];
+    expected.sort();
+    assert_eq!(ids, expected);
+}
+
+#[test]
 fn recursive_query_with_join_project_step_is_rejected() {
     let sync_manager = SyncManager::new();
     let schema = recursive_hop_team_schema();

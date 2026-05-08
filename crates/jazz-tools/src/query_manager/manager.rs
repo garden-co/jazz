@@ -1375,6 +1375,11 @@ impl QueryManager {
             let local_durability_satisfies_subscription = subscription
                 .durability_tier
                 .is_some_and(|tier| self.sync_manager.has_local_durability_at_least(tier));
+            let remote_scope_satisfies_subscription =
+                subscription.durability_tier.is_none_or(|tier| {
+                    self.sync_manager
+                        .has_remote_query_scope_snapshot_at_least(QueryId(sub_id.0), tier)
+                });
 
             let delta = {
                 let schema_context = &self.schema_context;
@@ -1383,10 +1388,7 @@ impl QueryManager {
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
                         let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
-                            && !local_durability_satisfies_subscription
-                            && !self
-                                .sync_manager
-                                .has_remote_query_scope_snapshot(QueryId(sub_id.0));
+                            && !remote_scope_satisfies_subscription;
                         let durability_tier = if lacks_authoritative_remote_scope
                             || (subscription.local_updates == LocalUpdates::Immediate
                                 && subscription.pending_local_row_ids.contains(&id))
@@ -1482,7 +1484,7 @@ impl QueryManager {
 
             if subscription.sync_backed
                 && Self::subscription_query_frontier_satisfied(&subscription)
-                && !local_durability_satisfies_subscription
+                && (!local_durability_satisfies_subscription || remote_scope_satisfies_subscription)
                 && self
                     .sync_manager
                     .has_remote_query_scope_snapshot(QueryId(sub_id.0))
@@ -1491,6 +1493,7 @@ impl QueryManager {
             {
                 visible_tuples = Cow::Owned(self.filter_synced_query_scope_tuples(
                     QueryId(sub_id.0),
+                    subscription.durability_tier,
                     &subscription.pending_local_row_ids,
                     visible_tuples.into_owned(),
                 ));
@@ -2623,10 +2626,16 @@ impl QueryManager {
     fn filter_synced_query_scope_tuples(
         &self,
         query_id: QueryId,
+        durability_tier: Option<DurabilityTier>,
         pending_local_row_ids: &HashSet<ObjectId>,
         tuples: Vec<Tuple>,
     ) -> Vec<Tuple> {
-        let remote_scope = self.sync_manager.remote_query_scope(query_id);
+        let remote_scope = match durability_tier {
+            Some(tier) => self
+                .sync_manager
+                .remote_query_scope_at_least(query_id, tier),
+            None => self.sync_manager.remote_query_scope(query_id),
+        };
         tuples
             .into_iter()
             .filter(|tuple| {
