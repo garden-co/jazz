@@ -283,6 +283,156 @@ pub fn main_to_worker_post(msg: &MainToWorkerWire) -> Result<(JsValue, Array), p
     Ok(encode_to_uint8array_with_transfer(&bytes))
 }
 
+// =============================================================================
+// JS-callable encode/decode helpers (test-only convenience)
+// =============================================================================
+//
+// Bindings exposed to JS so test harnesses can construct postcard-encoded
+// envelopes (and decode responses) without re-implementing postcard in TS.
+// The JS shape is `{ type: "<kebab-case>", ...fields }`, mirroring the legacy
+// JS-object protocol so test bodies stay readable.
+
+#[wasm_bindgen(js_name = encodeMainToWorkerJs)]
+pub fn encode_main_to_worker_js(value: JsValue) -> Result<Uint8Array, JsError> {
+    let type_str = Reflect::get(&value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| JsError::new("missing `type` field"))?;
+    let wire = match type_str.as_str() {
+        "debug-schema-state" => MainToWorkerWire::DebugSchemaState,
+        "debug-seed-live-schema" => {
+            let schema_json = Reflect::get(&value, &JsValue::from_str("schemaJson"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            MainToWorkerWire::DebugSeedLiveSchema { schema_json }
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "encodeMainToWorkerJs: unsupported type `{other}`"
+            )));
+        }
+    };
+    let bytes =
+        encode_main_to_worker(&wire).map_err(|e| JsError::new(&format!("postcard encode: {e}")))?;
+    Ok(Uint8Array::from(bytes.as_slice()))
+}
+
+#[wasm_bindgen(js_name = encodeWorkerToMainJs)]
+pub fn encode_worker_to_main_js(value: JsValue) -> Result<Uint8Array, JsError> {
+    let type_str = Reflect::get(&value, &JsValue::from_str("type"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| JsError::new("missing `type` field"))?;
+    let wire = match type_str.as_str() {
+        "error" => {
+            let message = Reflect::get(&value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            WorkerToMainWire::Error { message }
+        }
+        "debug-schema-state-ok" => {
+            let state_value =
+                Reflect::get(&value, &JsValue::from_str("state")).unwrap_or(JsValue::UNDEFINED);
+            let state_json = if state_value.is_undefined() || state_value.is_null() {
+                "null".to_string()
+            } else {
+                js_sys::JSON::stringify(&state_value)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .unwrap_or_else(|| "null".to_string())
+            };
+            WorkerToMainWire::DebugSchemaStateOk { state_json }
+        }
+        "debug-seed-live-schema-ok" => WorkerToMainWire::DebugSeedLiveSchemaOk,
+        other => {
+            return Err(JsError::new(&format!(
+                "encodeWorkerToMainJs: unsupported type `{other}`"
+            )));
+        }
+    };
+    let bytes =
+        encode_worker_to_main(&wire).map_err(|e| JsError::new(&format!("postcard encode: {e}")))?;
+    Ok(Uint8Array::from(bytes.as_slice()))
+}
+
+#[wasm_bindgen(js_name = decodeMainToWorkerJs)]
+pub fn decode_main_to_worker_js(bytes: &Uint8Array) -> Result<JsValue, JsError> {
+    let bytes = bytes.to_vec();
+    let wire: MainToWorkerWire =
+        postcard::from_bytes(&bytes).map_err(|e| JsError::new(&format!("postcard decode: {e}")))?;
+    let obj = js_sys::Object::new();
+    let set = |k: &str, v: &JsValue| -> Result<(), JsError> {
+        Reflect::set(&obj, &JsValue::from_str(k), v)
+            .map(|_| ())
+            .map_err(|_| JsError::new("Reflect::set failed"))
+    };
+    match wire {
+        MainToWorkerWire::UpdateAuth { jwt_token } => {
+            set("type", &JsValue::from_str("update-auth"))?;
+            let token_val = match jwt_token {
+                Some(s) => JsValue::from_str(&s),
+                None => JsValue::NULL,
+            };
+            set("jwtToken", &token_val)?;
+        }
+        MainToWorkerWire::Shutdown => {
+            set("type", &JsValue::from_str("shutdown"))?;
+        }
+        MainToWorkerWire::DebugSchemaState => {
+            set("type", &JsValue::from_str("debug-schema-state"))?;
+        }
+        MainToWorkerWire::DebugSeedLiveSchema { schema_json } => {
+            set("type", &JsValue::from_str("debug-seed-live-schema"))?;
+            set("schemaJson", &JsValue::from_str(&schema_json))?;
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "decodeMainToWorkerJs: unsupported variant {other:?}"
+            )));
+        }
+    }
+    Ok(obj.into())
+}
+
+#[wasm_bindgen(js_name = decodeWorkerToMainJs)]
+pub fn decode_worker_to_main_js(bytes: &Uint8Array) -> Result<JsValue, JsError> {
+    let bytes = bytes.to_vec();
+    let wire: WorkerToMainWire =
+        postcard::from_bytes(&bytes).map_err(|e| JsError::new(&format!("postcard decode: {e}")))?;
+    let obj = js_sys::Object::new();
+    let set = |k: &str, v: &JsValue| -> Result<(), JsError> {
+        Reflect::set(&obj, &JsValue::from_str(k), v)
+            .map(|_| ())
+            .map_err(|_| JsError::new("Reflect::set failed"))
+    };
+    match wire {
+        WorkerToMainWire::Error { message } => {
+            set("type", &JsValue::from_str("error"))?;
+            set("message", &JsValue::from_str(&message))?;
+        }
+        WorkerToMainWire::DebugSchemaStateOk { state_json } => {
+            set("type", &JsValue::from_str("debug-schema-state-ok"))?;
+            let state = js_sys::JSON::parse(&state_json).unwrap_or(JsValue::NULL);
+            set("state", &state)?;
+        }
+        WorkerToMainWire::DebugSeedLiveSchemaOk => {
+            set("type", &JsValue::from_str("debug-seed-live-schema-ok"))?;
+        }
+        WorkerToMainWire::InitOk { client_id } => {
+            set("type", &JsValue::from_str("init-ok"))?;
+            set("clientId", &JsValue::from_str(&client_id))?;
+        }
+        other => {
+            return Err(JsError::new(&format!(
+                "decodeWorkerToMainJs: unsupported variant {other:?}"
+            )));
+        }
+    }
+    Ok(obj.into())
+}
+
 #[cfg(test)]
 mod tests {
     //! Postcard round-trip tests for the wire enums. These guard the protocol
