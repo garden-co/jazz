@@ -199,13 +199,27 @@ impl QueryGraph {
     /// After calling `settle()`, this method returns the (ObjectId, BranchName) pairs
     /// for all rows currently in the query result.
     pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
-        self.scope_from_tuples(&self.current_output_tuples())
+        self.current_output_scope().cloned().unwrap_or_default()
     }
 
     /// Returns ObjectIds that must be synced for the client to reproduce the
     /// current query result locally.
     pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        if self.pagination_node.is_none() {
+            return self.current_output_scope().cloned().unwrap_or_default();
+        }
+
         self.scope_from_tuples(&self.sync_scope_tuples())
+    }
+
+    /// Returns a borrowed sync scope when it is maintained directly by the
+    /// output node. Paginated queries need the prefix before windowing, so they
+    /// still compute scope from the pagination node's sync input.
+    pub fn sync_scope_object_ids_ref(&self) -> Option<&HashSet<(ObjectId, BranchName)>> {
+        if self.pagination_node.is_some() {
+            return None;
+        }
+        self.current_output_scope()
     }
 
     /// Returns tuples that must be synced for the client to reproduce the current
@@ -259,6 +273,13 @@ impl QueryGraph {
             .iter()
             .flat_map(|tuple| tuple.provenance().iter().copied())
             .collect()
+    }
+
+    fn current_output_scope(&self) -> Option<&HashSet<(ObjectId, BranchName)>> {
+        match self.get_node(self.output_node) {
+            Some(GraphNode::Output(node)) => Some(node.sync_scope()),
+            _ => None,
+        }
     }
 
     /// Get current result from output node.
