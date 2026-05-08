@@ -20,6 +20,9 @@ declare module "jazz-wasm" {
   type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
   type InsertValues = Record<string, unknown>;
 
+  /** OpenTelemetry-style `HrTime` — `[seconds, nanos]` since the Unix epoch. */
+  type HrTime = [number, number];
+
   export type WasmTraceEntry =
     | {
         kind: "span";
@@ -27,8 +30,8 @@ declare module "jazz-wasm" {
         name: string;
         target: string;
         level: string;
-        startUnixNano: string;
-        endUnixNano: string;
+        startUnixNano: HrTime;
+        endUnixNano: HrTime;
         fields: Record<string, string>;
       }
     | {
@@ -36,7 +39,7 @@ declare module "jazz-wasm" {
         sequence: number;
         target: string;
         level: string;
-        timestampUnixNano: string;
+        timestampUnixNano: HrTime;
         message: string;
         fields: Record<string, string>;
       }

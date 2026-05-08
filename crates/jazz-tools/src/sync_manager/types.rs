@@ -512,11 +512,43 @@ pub enum Destination {
     Client(ClientId),
 }
 
+impl Destination {
+    pub fn peer_kind(&self) -> &'static str {
+        match self {
+            Destination::Server(_) => "server",
+            Destination::Client(_) => "client",
+        }
+    }
+
+    pub fn peer_uuid(&self) -> Uuid {
+        match self {
+            Destination::Server(server_id) => server_id.0,
+            Destination::Client(client_id) => client_id.0,
+        }
+    }
+}
+
 /// Source of an inbox entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Source {
     Server(ServerId),
     Client(ClientId),
+}
+
+impl Source {
+    pub fn peer_kind(&self) -> &'static str {
+        match self {
+            Source::Server(_) => "server",
+            Source::Client(_) => "client",
+        }
+    }
+
+    pub fn peer_uuid(&self) -> Uuid {
+        match self {
+            Source::Server(server_id) => server_id.0,
+            Source::Client(client_id) => client_id.0,
+        }
+    }
 }
 
 /// Outgoing message to be sent.
@@ -576,6 +608,34 @@ pub struct PendingPermissionCheck {
 mod tests {
     use super::*;
     use crate::query_manager::session::AuthMode;
+
+    #[test]
+    fn destination_exposes_peer_identity_for_telemetry() {
+        let server_id = ServerId::new();
+        let client_id = ClientId::new();
+
+        let server = Destination::Server(server_id);
+        let client = Destination::Client(client_id);
+
+        assert_eq!(server.peer_kind(), "server");
+        assert_eq!(server.peer_uuid(), server_id.0);
+        assert_eq!(client.peer_kind(), "client");
+        assert_eq!(client.peer_uuid(), client_id.0);
+    }
+
+    #[test]
+    fn source_exposes_peer_identity_for_telemetry() {
+        let server_id = ServerId::new();
+        let client_id = ClientId::new();
+
+        let server = Source::Server(server_id);
+        let client = Source::Client(client_id);
+
+        assert_eq!(server.peer_kind(), "server");
+        assert_eq!(server.peer_uuid(), server_id.0);
+        assert_eq!(client.peer_kind(), "client");
+        assert_eq!(client.peer_uuid(), client_id.0);
+    }
 
     #[test]
     fn query_subscription_postcard_roundtrip_preserves_session_auth_mode() {
