@@ -505,6 +505,14 @@ impl SyncPayload {
     }
 }
 
+/// Either end of a peer relationship — `Source` and `Destination` are mirror
+/// images, and both expose the same `peer_kind`/`peer_uuid` accessors. The
+/// trait exists purely to dedupe; the inherent methods on each enum are
+/// preserved as the public API so callers don't need to import the trait.
+trait PeerEnd {
+    fn descriptor(&self) -> (&'static str, Uuid);
+}
+
 /// Destination for an outbox entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Destination {
@@ -512,19 +520,22 @@ pub enum Destination {
     Client(ClientId),
 }
 
+impl PeerEnd for Destination {
+    fn descriptor(&self) -> (&'static str, Uuid) {
+        match self {
+            Destination::Server(id) => ("server", id.0),
+            Destination::Client(id) => ("client", id.0),
+        }
+    }
+}
+
 impl Destination {
     pub fn peer_kind(&self) -> &'static str {
-        match self {
-            Destination::Server(_) => "server",
-            Destination::Client(_) => "client",
-        }
+        PeerEnd::descriptor(self).0
     }
 
     pub fn peer_uuid(&self) -> Uuid {
-        match self {
-            Destination::Server(server_id) => server_id.0,
-            Destination::Client(client_id) => client_id.0,
-        }
+        PeerEnd::descriptor(self).1
     }
 }
 
@@ -535,19 +546,22 @@ pub enum Source {
     Client(ClientId),
 }
 
+impl PeerEnd for Source {
+    fn descriptor(&self) -> (&'static str, Uuid) {
+        match self {
+            Source::Server(id) => ("server", id.0),
+            Source::Client(id) => ("client", id.0),
+        }
+    }
+}
+
 impl Source {
     pub fn peer_kind(&self) -> &'static str {
-        match self {
-            Source::Server(_) => "server",
-            Source::Client(_) => "client",
-        }
+        PeerEnd::descriptor(self).0
     }
 
     pub fn peer_uuid(&self) -> Uuid {
-        match self {
-            Source::Server(server_id) => server_id.0,
-            Source::Client(client_id) => client_id.0,
-        }
+        PeerEnd::descriptor(self).1
     }
 }
 

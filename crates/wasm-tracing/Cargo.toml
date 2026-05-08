@@ -34,4 +34,3 @@ wasm-bindgen-test = "0.3.0"
 console_error_panic_hook = "0.1.7"
 serde_json = "1"
 tracing = { version = "0.1", features = ["std"], default-features = false }
-uuid = { version = "1", features = ["v4"] }

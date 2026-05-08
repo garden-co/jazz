@@ -2,19 +2,7 @@ import { useMemo, useState } from "react";
 import type React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { runQuery } from "./api.js";
-
-type Row = {
-  Timestamp: string;
-  ServiceName: string;
-  SpanName: "sync.send" | "sync.recv";
-  thread?: string;
-  payload?: string;
-  payload_json?: string;
-  peer_kind?: string;
-  peer_id?: string;
-  tier?: string;
-  fields?: string;
-};
+import { flowPayloadDetails, resolveFlowAttrs, type FlowRow as Row } from "./flowRows.js";
 
 export function FlowList(props: { minutes: number }) {
   const { minutes } = props;
@@ -174,7 +162,7 @@ type Group = {
 function groupAdjacent(rows: Row[]): Group[] {
   const groups: Group[] = [];
   rows.forEach((row, i) => {
-    const attrs = resolveAttrs(row);
+    const attrs = resolveFlowAttrs(row);
     const layer = layerLabel(row);
     const fingerprint = [
       layer,
@@ -214,7 +202,7 @@ function GroupRows(props: {
   const { group, expanded, onToggle, expandedRows, onToggleRow } = props;
   const first = group.rows[0].row;
   const layer = layerLabel(first);
-  const attrs = resolveAttrs(first);
+  const attrs = resolveFlowAttrs(first);
 
   if (group.rows.length === 1) {
     return (
@@ -284,8 +272,9 @@ function RowDetail(props: {
 }) {
   const { row, indented, expanded, onToggle } = props;
   const layer = layerLabel(row);
-  const attrs = resolveAttrs(row);
-  const canExpandPayload = !!attrs.payload_json;
+  const attrs = resolveFlowAttrs(row);
+  const payloadDetails = flowPayloadDetails(attrs);
+  const canExpandPayload = payloadDetails.length > 0;
   return (
     <Frag>
       <tr
@@ -310,7 +299,18 @@ function RowDetail(props: {
       {expanded && canExpandPayload && (
         <tr>
           <td colSpan={6} style={styles.expanded}>
-            <pre style={styles.pre}>{prettyJson(attrs.payload_json!)}</pre>
+            <div style={styles.payloadDetails}>
+              {payloadDetails.map((detail) => (
+                <div key={detail.label} style={styles.payloadDetail}>
+                  <div style={styles.payloadLabel}>{detail.label}</div>
+                  {detail.kind === "json" ? (
+                    <pre style={styles.pre}>{prettyJson(detail.value)}</pre>
+                  ) : (
+                    <code style={styles.payloadText}>{detail.value}</code>
+                  )}
+                </div>
+              ))}
+            </div>
           </td>
         </tr>
       )}
@@ -357,30 +357,9 @@ function directionStyle(span: Row["SpanName"]): React.CSSProperties {
     : { color: "#06a", fontWeight: 600 };
 }
 
-function shortPeer(attrs: ReturnType<typeof resolveAttrs>): string {
+function shortPeer(attrs: ReturnType<typeof resolveFlowAttrs>): string {
   if (!attrs.peer_id) return attrs.peer_kind ?? "";
   return `${attrs.peer_kind ?? "?"}:${attrs.peer_id.slice(0, 8)}`;
-}
-
-function resolveAttrs(row: Row) {
-  let payload = row.payload || "";
-  let peer_kind = row.peer_kind || "";
-  let peer_id = row.peer_id || "";
-  let tier = row.tier || "";
-  let payload_json = row.payload_json || "";
-  if ((!payload || !peer_kind || !payload_json) && row.fields) {
-    try {
-      const f = JSON.parse(row.fields) as Record<string, string>;
-      payload = payload || f.payload || "";
-      peer_kind = peer_kind || f.peer_kind || "";
-      peer_id = peer_id || f.peer_id || "";
-      tier = tier || f.tier || "";
-      payload_json = payload_json || f.payload_json || "";
-    } catch {
-      // ignore
-    }
-  }
-  return { payload, peer_kind, peer_id, tier, payload_json };
 }
 
 function formatTime(s: string): string {
@@ -477,9 +456,31 @@ const styles: Record<string, React.CSSProperties> = {
   },
   td: { padding: "4px 8px", verticalAlign: "top", whiteSpace: "nowrap" },
   expanded: { padding: 0, background: "#fafafa" },
+  payloadDetails: {
+    padding: "8px 16px",
+    display: "grid",
+    gap: 8,
+  },
+  payloadDetail: {
+    display: "grid",
+    gridTemplateColumns: "120px minmax(0, 1fr)",
+    gap: 12,
+    alignItems: "start",
+  },
+  payloadLabel: {
+    color: "#666",
+    fontSize: 11,
+    textTransform: "uppercase",
+    paddingTop: 2,
+  },
+  payloadText: {
+    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    fontSize: 11,
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+  },
   pre: {
     margin: 0,
-    padding: "8px 16px",
     fontSize: 11,
     overflowX: "auto",
     whiteSpace: "pre",

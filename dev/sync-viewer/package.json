@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 5478",
+    "test": "tsx --test src/*.test.mjs",
     "build": "vite build",
     "preview": "vite preview --port 5478"
   },

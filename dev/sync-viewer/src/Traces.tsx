@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import type React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { runQuery } from "./api.js";
+import { buildTraceListSql } from "./traceQueries.js";
+import { traceRowPayloadLabel } from "./traceRows.js";
 
 type TraceSummary = {
   TraceId: string;
@@ -59,10 +61,11 @@ export function TraceList(props: { minutes: number; onSelect: (id: string) => vo
   const { minutes, onSelect } = props;
   const [serviceFilter, setServiceFilter] = useState<string>("");
   const [opFilter, setOpFilter] = useState<string>("");
+  const [traceIdFilter, setTraceIdFilter] = useState<string>("");
 
   const { data, error } = useQuery({
-    queryKey: ["traces", minutes, serviceFilter, opFilter],
-    queryFn: () => fetchTraces(minutes, serviceFilter, opFilter),
+    queryKey: ["traces", minutes, serviceFilter, opFilter, traceIdFilter],
+    queryFn: () => fetchTraces(minutes, serviceFilter, opFilter, traceIdFilter),
   });
   const traces = data ?? [];
 
@@ -90,6 +93,15 @@ export function TraceList(props: { minutes: number; onSelect: (id: string) => vo
             style={{ ...styles.input, width: 200 }}
           />
         </Field>
+        <Field label="Trace ID contains">
+          <input
+            type="text"
+            value={traceIdFilter}
+            placeholder="full or partial id"
+            onChange={(e) => setTraceIdFilter(e.target.value)}
+            style={{ ...styles.input, width: 220 }}
+          />
+        </Field>
         <span style={styles.summaryNote}>
           {traces.length} trace{traces.length === 1 ? "" : "s"}
         </span>
@@ -102,6 +114,7 @@ export function TraceList(props: { minutes: number; onSelect: (id: string) => vo
           <tr>
             <th style={styles.th}>started</th>
             <th style={styles.th}>service · operation</th>
+            <th style={styles.th}>trace id</th>
             <th style={{ ...styles.th, textAlign: "right" }}>duration</th>
             <th style={{ ...styles.th, textAlign: "right" }}>spans</th>
             <th style={styles.th}>services</th>
@@ -126,6 +139,11 @@ export function TraceList(props: { minutes: number; onSelect: (id: string) => vo
                 </span>{" "}
                 <strong>{t.root_span}</strong>
               </td>
+              <td style={styles.td}>
+                <code style={styles.code} title={t.TraceId}>
+                  {t.TraceId.slice(0, 16)}…
+                </code>
+              </td>
               <td style={{ ...styles.td, textAlign: "right" }}>{formatDuration(t.duration_ms)}</td>
               <td style={{ ...styles.td, textAlign: "right" }}>{t.span_count}</td>
               <td style={styles.td}>
@@ -144,7 +162,7 @@ export function TraceList(props: { minutes: number; onSelect: (id: string) => vo
           ))}
           {traces.length === 0 && !error && (
             <tr>
-              <td colSpan={5} style={styles.empty}>
+              <td colSpan={6} style={styles.empty}>
                 No traces in the last {minutes} minute(s).
               </td>
             </tr>
@@ -159,45 +177,9 @@ async function fetchTraces(
   minutes: number,
   serviceFilter: string,
   opFilter: string,
+  traceIdFilter: string,
 ): Promise<TraceSummary[]> {
-  const where: string[] = [`Timestamp > now() - INTERVAL ${minutes} MINUTE`];
-  if (serviceFilter) where.push(`ServiceName = '${serviceFilter.replace(/'/g, "''")}'`);
-  if (opFilter) where.push(`SpanName ILIKE '%${opFilter.replace(/'/g, "''").replace(/%/g, "")}%'`);
-
-  // Per-trace summary. For root span info, prefer the span with empty
-  // ParentSpanId; otherwise fall back to the earliest span.
-  const sql = `
-    WITH base AS (
-      SELECT
-        TraceId,
-        Timestamp,
-        Duration,
-        SpanName,
-        ServiceName,
-        ParentSpanId,
-        StatusCode
-      FROM otel_traces
-      WHERE ${where.join(" AND ")}
-    )
-    SELECT
-      TraceId,
-      toString(min(Timestamp)) AS start,
-      (
-        toFloat64(max(toUnixTimestamp64Nano(Timestamp) + Duration))
-        - toFloat64(min(toUnixTimestamp64Nano(Timestamp)))
-      ) / 1e6 AS duration_ms,
-      count(*) AS span_count,
-      argMinIf(SpanName,    Timestamp, ParentSpanId = '') AS root_span_explicit,
-      argMin(SpanName, Timestamp) AS root_span_fallback,
-      argMinIf(ServiceName, Timestamp, ParentSpanId = '') AS root_service_explicit,
-      argMin(ServiceName, Timestamp) AS root_service_fallback,
-      arraySort(groupUniqArray(ServiceName)) AS services,
-      countIf(StatusCode = 'STATUS_CODE_ERROR') AS has_error
-    FROM base
-    GROUP BY TraceId
-    ORDER BY min(Timestamp) DESC
-    LIMIT 200
-  `;
+  const sql = buildTraceListSql({ minutes, serviceFilter, opFilter, traceIdFilter });
   const rows = await runQuery<any>(sql);
   return rows.map((r) => ({
     TraceId: r.TraceId,
@@ -376,6 +358,7 @@ function SpanRow(props: {
   const color = colorForKey(span.ServiceName);
   const labelService = span.ServiceName.replace(/^jazz-/, "");
   const errored = span.StatusCode === "STATUS_CODE_ERROR";
+  const payloadLabel = traceRowPayloadLabel(span.attrs);
   return (
     <div
       onClick={onClick}
@@ -393,6 +376,11 @@ function SpanRow(props: {
         <span style={{ ...styles.serviceDot, background: color }} />
         <span style={styles.serviceName}>{labelService}</span>
         <span style={styles.spanName}>{span.SpanName}</span>
+        {payloadLabel && (
+          <span style={styles.payloadTag} title={`payload: ${payloadLabel}`}>
+            {payloadLabel}
+          </span>
+        )}
         {span.thread && <span style={styles.threadTag}>{span.thread}</span>}
         {errored && <span style={styles.errorChip}>err</span>}
       </div>
@@ -706,6 +694,18 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 10,
     color: "#446",
     background: "#eef",
+    padding: "1px 5px",
+    borderRadius: 8,
+  },
+  payloadTag: {
+    minWidth: 0,
+    maxWidth: 160,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    fontSize: 10,
+    color: "#075",
+    background: "#e9f8f2",
+    border: "1px solid #cceade",
     padding: "1px 5px",
     borderRadius: 8,
   },

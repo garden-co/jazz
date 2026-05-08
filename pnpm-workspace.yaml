@@ -6,7 +6,7 @@ packages:
   - "!examples/world-tour"
   - examples/docs/*
   - dev/stress-tests/*
-  - dev/scripts/sync-viewer
+  - dev/sync-viewer
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi

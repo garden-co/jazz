@@ -33,6 +33,12 @@ type UnixNano = (u32, u32);
 
 struct SpanTiming {
     start_unix_nano: UnixNano,
+    /// `true` iff `on_enter` emitted a `performance.mark`. We track it so
+    /// `on_exit` only calls `measure()` when the matching mark exists,
+    /// regardless of whether collection-enabled flipped between enter and
+    /// exit (which would otherwise produce orphan marks or unmatched
+    /// measures).
+    marked: bool,
 }
 
 const MAX_TRACE_ENTRIES: usize = 5_000;
@@ -285,6 +291,14 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         id: &tracing::Id,
         ctx: Context<'_, S>,
     ) {
+        // Field recording only feeds console output (`config.enabled`) or
+        // buffered TraceEntry collection. When neither is on, building a
+        // `StringRecorder` and copying every field into a `HashMap<String,
+        // String>` is wasted work — skip it.
+        let needs_recorder = self.config.enabled || trace_entry_collection_enabled();
+        if !needs_recorder {
+            return;
+        }
         let mut new_debug_record = StringRecorder::new(self.config.show_fields);
         attrs.record(&mut new_debug_record);
 
@@ -420,14 +434,21 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         // Skip Performance Timeline marks while OTel telemetry is collecting:
         // OTel already carries the same span boundaries, and emitting both
         // doubles the per-span work on hot paths.
-        if self.config.report_logs_in_timings && !should_collect_entry {
+        let emit_mark = self.config.report_logs_in_timings && !should_collect_entry;
+        if emit_mark {
             mark(&mark_name(id));
         }
 
-        if should_collect_entry {
-            if let Some(span_ref) = ctx.span(id) {
+        // Capture timing unconditionally so toggling collection between enter
+        // and exit can't yield a span with start_unix_nano falling back to
+        // end_unix_nano (zero duration). The cost is two `u32`s + a bool in
+        // span extensions whether or not the span is later recorded.
+        if let Some(span_ref) = ctx.span(id) {
+            let already_timed = span_ref.extensions().get::<SpanTiming>().is_some();
+            if !already_timed {
                 span_ref.extensions_mut().insert(SpanTiming {
                     start_unix_nano: unix_nano_now(),
+                    marked: emit_mark,
                 });
             }
         }
@@ -467,45 +488,41 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
 
     fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         let should_collect_entry = trace_entry_collection_enabled();
-        // Mirror on_enter: skip Performance Timeline measures when OTel is the
-        // consumer.
-        let report_timings = self.config.report_logs_in_timings && !should_collect_entry;
-        if !report_timings && !should_collect_entry {
-            return;
-        }
 
         if let Some(span_ref) = ctx.span(id) {
             let meta = span_ref.metadata();
             let extensions = span_ref.extensions();
             let debug_record = extensions.get::<StringRecorder>();
             let timing = extensions.get::<SpanTiming>();
-            if let Some(debug_record) = debug_record {
-                if report_timings {
-                    let _ = measure(
-                        format!(
+
+            // Pair with the on_enter mark by replaying the recorded `marked`
+            // flag, not by re-checking `should_collect_entry` — that flag can
+            // flip between enter and exit and orphan a `mark()` without a
+            // matching `measure()`.
+            let emit_measure = timing.map(|t| t.marked).unwrap_or(false);
+            if emit_measure {
+                let _ = measure(
+                    match debug_record {
+                        Some(record) => format!(
                             "\"{}\"{} {} {}",
                             meta.name(),
                             thread_display_suffix(),
                             meta.module_path().unwrap_or("..."),
-                            debug_record,
+                            record,
                         ),
-                        mark_name(id),
-                    );
-                }
-                record_span_trace_entry(meta, Some(debug_record), timing);
-            } else {
-                if report_timings {
-                    let _ = measure(
-                        format!(
+                        None => format!(
                             "\"{}\"{} {}",
                             meta.name(),
                             thread_display_suffix(),
                             meta.module_path().unwrap_or("..."),
                         ),
-                        mark_name(id),
-                    );
-                }
-                record_span_trace_entry(meta, None, timing);
+                    },
+                    mark_name(id),
+                );
+            }
+
+            if should_collect_entry {
+                record_span_trace_entry(meta, debug_record, timing);
             }
         }
     }
@@ -564,8 +581,17 @@ fn unix_nano_now() -> UnixNano {
     {
         let ms = js_sys::Date::now();
         let seconds = (ms / 1000.0).floor();
-        let nanos = ((ms - seconds * 1000.0) * 1_000_000.0).round();
-        (seconds as u32, nanos as u32)
+        let nanos_f = ((ms - seconds * 1000.0) * 1_000_000.0).round();
+        // `round()` can land on exactly 1_000_000_000 when the milliseconds
+        // component is 999.999…; OTel `HrTime` requires nanos < 1e9, so spill
+        // the carry into the seconds component.
+        let mut seconds = seconds as u32;
+        let mut nanos = nanos_f as u32;
+        if nanos >= 1_000_000_000 {
+            nanos -= 1_000_000_000;
+            seconds = seconds.saturating_add(1);
+        }
+        (seconds, nanos)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -741,13 +767,16 @@ mod trace_entry_tests {
         let subscriber = tracing_subscriber::registry().with(runtime_layer);
         tracing::subscriber::with_default(subscriber, || {
             let peer_kind = "server";
-            let peer_id = uuid::Uuid::nil();
+            // String literal stand-in for `Uuid::nil().to_string()` — the
+            // assertion below compares against the displayed value, no need
+            // to pull `uuid` into dev-dependencies for it.
+            let peer_id = "00000000-0000-0000-0000-000000000000";
             let payload = "RowBatchCreated";
             let tier_label: &'static str = "edge";
             let _entered = tracing::debug_span!(
                 "sync.send",
                 peer_kind = peer_kind,
-                peer_id = %peer_id,
+                peer_id = peer_id,
                 payload = payload,
                 tier = tier_label,
             )
@@ -777,6 +806,62 @@ mod trace_entry_tests {
         assert_eq!(
             fields.get("peer_id").map(String::as_str),
             Some("00000000-0000-0000-0000-000000000000"),
+        );
+    }
+
+    #[test]
+    fn enabling_collection_after_enter_still_records_span_with_real_duration() {
+        // Regression: previously, on_enter only stored SpanTiming when
+        // collection was enabled; if it flipped on between enter and exit,
+        // record_span_trace_entry's `timing` lookup returned None and
+        // start_unix_nano fell back to end_unix_nano, yielding a
+        // zero-duration span.
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(false);
+
+        let layer = WasmLayer::new(
+            WasmLayerConfig::new()
+                .with_max_level(Level::DEBUG)
+                .remove_timings(),
+        );
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::debug_span!("toggled");
+            let entered = span.enter();
+            // Flip collection on between enter and exit.
+            set_trace_entry_collection_enabled(true);
+            for i in 0..100 {
+                std::hint::black_box(i);
+            }
+            drop(entered);
+        });
+
+        let drained = drain_trace_entries_for_test();
+        let span = drained
+            .iter()
+            .find_map(|e| match e {
+                TraceEntry::Span {
+                    name,
+                    start_unix_nano,
+                    end_unix_nano,
+                    ..
+                } if name == "toggled" => Some((*start_unix_nano, *end_unix_nano)),
+                _ => None,
+            })
+            .expect("toggled span recorded");
+        // What we want to prove is that start was actually captured at enter
+        // (not silently filled with end at recording time). On a coarse
+        // native clock the only guarantee is start <= end, but the SpanTiming
+        // must exist in extensions or this assertion would compare end to end.
+        let (start_s, start_ns) = span.0;
+        let (end_s, end_ns) = span.1;
+        assert!(start_s > 0 && end_s > 0, "non-zero unix times");
+        assert!(
+            (start_s, start_ns) <= (end_s, end_ns),
+            "start {:?} must precede end {:?}",
+            span.0,
+            span.1,
         );
     }
 
