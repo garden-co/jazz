@@ -205,6 +205,39 @@ async fn init_propagates_error() {
 }
 
 #[wasm_bindgen_test]
+async fn init_propagates_js_object_error_from_shim() {
+    // Pre-handoff worker errors (WASM load failures, bootstrap failures inside
+    // the JS shim) arrive as JS objects shaped `{type:"error", message}`
+    // because the WASM module isn't yet loaded to encode a postcard wire.
+    // The bridge must surface that message on the init Promise instead of
+    // dropping it and timing out.
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    let init_promise = bridge.init();
+
+    let err_obj = Object::new();
+    Reflect::set(&err_obj, &"type".into(), &"error".into()).unwrap();
+    Reflect::set(
+        &err_obj,
+        &"message".into(),
+        &"WASM load failed: HTTP 404".into(),
+    )
+    .unwrap();
+    fw.emit_data(err_obj.into());
+
+    let result = JsFuture::from(init_promise).await;
+    assert!(result.is_err(), "init should reject on JS-object error");
+    let err_str = result.err().and_then(|e| e.as_string()).unwrap_or_default();
+    assert!(
+        err_str.contains("WASM load failed: HTTP 404"),
+        "shim error message should propagate: {err_str}"
+    );
+}
+
+#[wasm_bindgen_test]
 async fn init_is_memoized() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
