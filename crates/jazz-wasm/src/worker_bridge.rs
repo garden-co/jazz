@@ -395,16 +395,23 @@ impl WasmWorkerBridge {
         }
     }
 
-    /// Tear the bridge down. Synchronous side-effects (noop sender, edge
-    /// removal, `Shutdown` posted) happen before this returns. The returned
-    /// `Promise` resolves on `shutdown-ok` or after `SHUTDOWN_ACK_TIMEOUT_MS`.
+    /// Tear the bridge down. Synchronous side-effects (final outbox flush,
+    /// noop sender install, edge removal, `Shutdown` posted) happen before
+    /// this returns. The returned `Promise` resolves on `shutdown-ok` or
+    /// after `SHUTDOWN_ACK_TIMEOUT_MS`.
     #[wasm_bindgen]
     pub fn shutdown(&self) -> js_sys::Promise {
         if self.inner.is_disposed_like() {
             return js_sys::Promise::resolve(&JsValue::UNDEFINED);
         }
         self.inner.transition_shutdown_called();
-        // Detach the outbox edge BEFORE posting shutdown.
+        // Drain any pending outbox entries to the worker BEFORE swapping in
+        // the noop sender and posting `Shutdown`. Otherwise a writes-then-
+        // unmount sequence loses the writes: the queued microtask flush
+        // would post AFTER `Shutdown`, and the worker drops the runtime on
+        // `Shutdown` so the late sync never reaches OPFS.
+        self.inner.sender.flush_now();
+        // Detach the outbox edge.
         self.inner.runtime.install_noop_sync_sender();
         self.inner.sender.set_server_payload_forwarder(None);
         self.inner.runtime.remove_server();
