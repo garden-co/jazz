@@ -508,6 +508,9 @@ pub(crate) struct PreparedRowWriteContext {
 
 type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
 type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
+type BranchSchemaHashCache = HashMap<(usize, String), Vec<SchemaHash>>;
+type TableCatalogueDescriptorCache =
+    HashMap<(usize, String), Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>>;
 
 fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
     static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
@@ -621,6 +624,32 @@ fn cache_row_descriptor(raw_table: &str, descriptor: Arc<RowDescriptor>) {
 fn catalogue_user_descriptor_cache() -> &'static Mutex<CatalogueUserDescriptorCache> {
     static CACHE: OnceLock<Mutex<CatalogueUserDescriptorCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn branch_schema_hash_cache() -> &'static Mutex<BranchSchemaHashCache> {
+    static CACHE: OnceLock<Mutex<BranchSchemaHashCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn table_catalogue_descriptor_cache() -> &'static Mutex<TableCatalogueDescriptorCache> {
+    static CACHE: OnceLock<Mutex<TableCatalogueDescriptorCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn invalidate_catalogue_lookup_caches_with_storage<H: Storage + ?Sized>(storage: &H) {
+    let namespace = storage.storage_cache_namespace();
+    catalogue_user_descriptor_cache()
+        .lock()
+        .expect("catalogue user descriptor cache poisoned")
+        .retain(|(cached_namespace, _, _), _| *cached_namespace != namespace);
+    branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .retain(|(cached_namespace, _), _| *cached_namespace != namespace);
+    table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .retain(|(cached_namespace, _), _| *cached_namespace != namespace);
 }
 
 fn cached_catalogue_user_descriptor_with_storage<H: Storage + ?Sized>(
@@ -1648,14 +1677,15 @@ fn load_history_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
     let Some(entry) = storage.load_catalogue_entry(schema_hash.to_object_id())? else {
         return Ok(None);
     };
-    let schema = crate::schema_manager::encoding::decode_schema(&entry.content)
-        .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?;
-
-    let hinted_table_name = crate::query_manager::types::TableName::new(table_hint);
-    let Some(table_schema) = schema.get(&hinted_table_name) else {
+    let Some(descriptor) = crate::schema_manager::encoding::decode_table_descriptor_from_schema(
+        &entry.content,
+        table_hint,
+    )
+    .map_err(|err| StorageError::IoError(format!("decode schema for row history: {err}")))?
+    else {
         return Ok(None);
     };
-    let descriptor = Arc::new(table_schema.columns.clone());
+    let descriptor = Arc::new(descriptor);
     cache_catalogue_user_descriptor_with_storage(
         storage,
         table_hint,
@@ -1683,8 +1713,23 @@ fn schema_hashes_matching_branch<H: Storage + ?Sized>(
     storage: &H,
     branch: &str,
 ) -> Result<Vec<SchemaHash>, StorageError> {
+    let cache_key = (storage.storage_cache_namespace(), branch.to_string());
+    if let Some(cached) = branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
     let Some(composed) = ComposedBranchName::parse(&BranchName::new(branch)) else {
-        return Ok(Vec::new());
+        let hashes = Vec::new();
+        branch_schema_hash_cache()
+            .lock()
+            .expect("branch schema hash cache poisoned")
+            .insert(cache_key, hashes.clone());
+        return Ok(hashes);
     };
 
     let mut hashes = storage
@@ -1695,6 +1740,10 @@ fn schema_hashes_matching_branch<H: Storage + ?Sized>(
         .collect::<Vec<_>>();
     hashes.sort_by_key(|schema_hash| schema_hash.to_string());
     hashes.dedup();
+    branch_schema_hash_cache()
+        .lock()
+        .expect("branch schema hash cache poisoned")
+        .insert(cache_key, hashes.clone());
     Ok(hashes)
 }
 
@@ -1702,6 +1751,16 @@ fn catalogue_row_descriptors_for_table<H: Storage + ?Sized>(
     storage: &H,
     table_hint: &str,
 ) -> Result<Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>, StorageError> {
+    let cache_key = (storage.storage_cache_namespace(), table_hint.to_string());
+    if let Some(cached) = table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
     let table_name = crate::query_manager::types::TableName::new(table_hint);
     let mut candidates = Vec::new();
 
@@ -1718,6 +1777,10 @@ fn catalogue_row_descriptors_for_table<H: Storage + ?Sized>(
 
     candidates.sort_by_key(|(schema_hash, _)| schema_hash.to_string());
     candidates.dedup_by(|(left_hash, _), (right_hash, _)| left_hash == right_hash);
+    table_catalogue_descriptor_cache()
+        .lock()
+        .expect("table catalogue descriptor cache poisoned")
+        .insert(cache_key, candidates.clone());
     Ok(candidates)
 }
 

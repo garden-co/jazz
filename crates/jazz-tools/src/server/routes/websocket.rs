@@ -471,7 +471,7 @@ async fn handle_ws_connection(
                 } else {
                     crate::jazz_transport::ServerEvent::SyncUpdateBatch { updates }
                 };
-                let bytes = match serde_json::to_vec(&event) {
+                let bytes = match event.encode_payload() {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
@@ -487,7 +487,7 @@ async fn handle_ws_connection(
             }
             _ = heartbeat.tick() => {
                 let event = crate::jazz_transport::ServerEvent::Heartbeat;
-                let Ok(bytes) = serde_json::to_vec(&event) else { continue };
+                let Ok(bytes) = event.encode_payload() else { continue };
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),

@@ -156,6 +156,46 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     decode_schema_with_version(data, version)
 }
 
+/// Decode only one table descriptor from an encoded schema.
+///
+/// Structural schemas in large apps can be much larger than the row descriptor
+/// needed for a single incoming history row. This keeps row replay from
+/// materializing the entire schema map just to find one table.
+pub fn decode_table_descriptor_from_schema(
+    data: &[u8],
+    table_name: &str,
+) -> Result<Option<RowDescriptor>, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let Some(version) = SchemaEncodingVersion::from_byte(data[0]) else {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: data[0],
+            expected: SCHEMA_VERSION,
+        });
+    };
+
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+    for _ in 0..table_count {
+        let name = read_string(data, &mut offset, "table_name")?;
+        if name == table_name {
+            return decode_row_descriptor_with_version(data, &mut offset, version).map(Some);
+        }
+
+        skip_row_descriptor_with_version(data, &mut offset, version)?;
+        if version.has_table_policies() {
+            decode_table_policies(data, &mut offset)?;
+        }
+    }
+
+    Ok(None)
+}
+
 fn encode_table_entry_with_version(
     buf: &mut Vec<u8>,
     name: &TableName,
@@ -234,6 +274,18 @@ fn decode_row_descriptor_with_version(
     }
 
     Ok(RowDescriptor::new(columns))
+}
+
+fn skip_row_descriptor_with_version(
+    data: &[u8],
+    offset: &mut usize,
+    version: SchemaEncodingVersion,
+) -> Result<(), CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    for _ in 0..count {
+        skip_column_descriptor_with_version(data, offset, version)?;
+    }
+    Ok(())
 }
 
 fn encode_column_descriptor_with_version(
@@ -333,6 +385,42 @@ fn decode_column_descriptor_with_version(
         default,
         merge_strategy,
     })
+}
+
+fn skip_column_descriptor_with_version(
+    data: &[u8],
+    offset: &mut usize,
+    version: SchemaEncodingVersion,
+) -> Result<(), CatalogueEncodingError> {
+    skip_string(data, offset)?;
+    skip_column_type_with_version(data, offset, version)?;
+    let _nullable = read_u8(data, offset)?;
+    let has_ref = read_u8(data, offset)? != 0;
+    if has_ref {
+        skip_string(data, offset)?;
+    }
+    if version.has_legacy_inherit_policy_byte() {
+        let _legacy_inherit_policy = read_u8(data, offset)?;
+    }
+    if version.has_column_defaults() {
+        let has_default = read_u8(data, offset)? != 0;
+        if has_default {
+            skip_value(data, offset)?;
+        }
+    }
+    if version.has_column_merge_strategies() {
+        let has_merge_strategy = read_u8(data, offset)? != 0;
+        if has_merge_strategy {
+            let tag = read_u8(data, offset)?;
+            if tag != 1 {
+                return Err(CatalogueEncodingError::InvalidTypeTag {
+                    tag,
+                    context: "column_merge_strategy",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Column type tags.
@@ -451,6 +539,39 @@ fn decode_column_type_with_version(
                 columns: Box::new(desc),
             })
         }
+        _ => Err(CatalogueEncodingError::InvalidTypeTag {
+            tag,
+            context: "column_type",
+        }),
+    }
+}
+
+fn skip_column_type_with_version(
+    data: &[u8],
+    offset: &mut usize,
+    version: SchemaEncodingVersion,
+) -> Result<(), CatalogueEncodingError> {
+    let tag = read_u8(data, offset)?;
+    match tag {
+        TYPE_INTEGER | TYPE_BIGINT | TYPE_DOUBLE | TYPE_BOOLEAN | TYPE_TEXT | TYPE_TIMESTAMP
+        | TYPE_UUID | TYPE_BATCH_ID | TYPE_BYTEA => Ok(()),
+        TYPE_JSON => {
+            let has_schema = read_u8(data, offset)? != 0;
+            if has_schema {
+                let len = read_u32(data, offset)? as usize;
+                read_bytes(data, offset, len)?;
+            }
+            Ok(())
+        }
+        TYPE_ENUM => {
+            let variant_count = read_u32(data, offset)? as usize;
+            for _ in 0..variant_count {
+                skip_string(data, offset)?;
+            }
+            Ok(())
+        }
+        TYPE_ARRAY => skip_column_type_with_version(data, offset, version),
+        TYPE_ROW => skip_row_descriptor_with_version(data, offset, version),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "column_type",
@@ -1687,6 +1808,33 @@ fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncod
     }
 }
 
+fn skip_value(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
+    let tag = read_u8(data, offset)?;
+    match tag {
+        VALUE_NULL => Ok(()),
+        VALUE_INTEGER => read_bytes(data, offset, 4).map(|_| ()),
+        VALUE_BIGINT | VALUE_DOUBLE | VALUE_TIMESTAMP => read_bytes(data, offset, 8).map(|_| ()),
+        VALUE_BOOLEAN => read_u8(data, offset).map(|_| ()),
+        VALUE_TEXT => skip_string(data, offset),
+        VALUE_UUID | VALUE_BATCH_ID => read_bytes(data, offset, 16).map(|_| ()),
+        VALUE_BYTEA => {
+            let len = read_u32(data, offset)? as usize;
+            read_bytes(data, offset, len).map(|_| ())
+        }
+        VALUE_ARRAY | VALUE_ROW => {
+            let count = read_u32(data, offset)?;
+            for _ in 0..count {
+                skip_value(data, offset)?;
+            }
+            Ok(())
+        }
+        _ => Err(CatalogueEncodingError::InvalidTypeTag {
+            tag,
+            context: "value",
+        }),
+    }
+}
+
 // ============================================================================
 // Primitive Helpers
 // ============================================================================
@@ -1751,6 +1899,11 @@ fn read_string(
     let len = read_u32(data, offset)? as usize;
     let bytes = read_bytes(data, offset, len)?;
     String::from_utf8(bytes.to_vec()).map_err(|_| CatalogueEncodingError::InvalidUtf8 { context })
+}
+
+fn skip_string(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
+    let len = read_u32(data, offset)? as usize;
+    read_bytes(data, offset, len).map(|_| ())
 }
 
 #[cfg(test)]

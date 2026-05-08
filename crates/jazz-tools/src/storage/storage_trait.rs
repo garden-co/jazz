@@ -357,6 +357,7 @@ pub trait Storage {
         let bytes = entry
             .encode_storage_row()
             .map_err(|err| StorageError::IoError(format!("encode catalogue entry: {err}")))?;
+        invalidate_catalogue_lookup_caches_with_storage(self);
         self.raw_table_put(
             "catalogue",
             &key_codec::catalogue_entry_key(entry.object_id),

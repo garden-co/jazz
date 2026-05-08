@@ -1,4 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::object::BranchName;
 
@@ -42,6 +44,26 @@ impl SchemaHash {
         hex::encode(&self.0[..6])
     }
 
+    pub fn to_hex(&self) -> String {
+        static CACHE: OnceLock<Mutex<HashMap<SchemaHash, String>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(cached) = cache
+            .lock()
+            .expect("schema hash hex cache poisoned")
+            .get(self)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let encoded = hex::encode(&self.0);
+        cache
+            .lock()
+            .expect("schema hash hex cache poisoned")
+            .insert(*self, encoded.clone());
+        encoded
+    }
+
     /// Convert to an ObjectId for storage in the catalogue.
     ///
     /// Uses UUIDv5 with DNS namespace over the hash bytes.
@@ -75,13 +97,13 @@ impl SchemaHash {
 
 impl std::fmt::Display for SchemaHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(&self.0))
+        f.write_str(&self.to_hex())
     }
 }
 
 impl Serialize for SchemaHash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&hex::encode(&self.0))
+        serializer.serialize_str(&self.to_hex())
     }
 }
 

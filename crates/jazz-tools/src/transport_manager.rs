@@ -7,7 +7,7 @@ use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, SyncPayload};
 use futures::channel::mpsc;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 2;
+pub const SYNC_PROTOCOL_VERSION: u32 = 3;
 const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
 
 pub trait TickNotifier: 'static {
@@ -512,16 +512,17 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
     fn encode_outbound_payload_batch(&self, payloads: Vec<SyncPayload>) -> Option<Vec<u8>> {
         if payloads.len() == 1 {
             let payload = payloads.into_iter().next()?;
-            serde_json::to_vec(&OutboxEntry {
+            crate::transport_protocol::encode_outbox_entry_payload(&OutboxEntry {
                 destination: crate::sync_manager::types::Destination::Server(self.server_id),
                 payload,
             })
             .ok()
         } else {
-            serde_json::to_vec(&crate::transport_protocol::SyncBatchRequest {
+            crate::transport_protocol::SyncBatchRequest {
                 payloads,
                 client_id: self.client_id,
-            })
+            }
+            .encode_payload()
             .ok()
         }
     }
@@ -586,9 +587,12 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         }
 
         // Fall back: check whether the server sent an explicit Error event.
-        if let Ok(crate::transport_protocol::ServerEvent::Error { message, code }) =
-            serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload)
-        {
+        let error_event = crate::transport_protocol::ServerEvent::decode_payload(resp_payload)
+            .ok()
+            .or_else(|| {
+                serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload).ok()
+            });
+        if let Some(crate::transport_protocol::ServerEvent::Error { message, code }) = error_event {
             if code == crate::transport_protocol::ErrorCode::Unauthorized {
                 return HandshakeResult::AuthFailure(message);
             }
@@ -857,7 +861,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
@@ -1045,7 +1049,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Ok(event) = crate::transport_protocol::ServerEvent::decode_payload(payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
