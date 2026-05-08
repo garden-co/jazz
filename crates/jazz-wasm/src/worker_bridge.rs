@@ -549,13 +549,18 @@ impl BridgeInner {
 
     fn transition_init_called(&self) -> bool {
         match self.state.get() {
-            BridgeState::Idle | BridgeState::Failed => {
+            BridgeState::Idle => {
                 self.state.set(BridgeState::Initializing);
                 true
             }
             // Memoized: repeated init() calls re-await the same Promise.
             BridgeState::Initializing | BridgeState::Ready => true,
-            _ => false,
+            // Failed is terminal. The JS shim's `initMessage` guard and the
+            // worker host's `HOST.is_some()` short-circuit both forbid a
+            // second bootstrap on the same worker, so reusing this bridge
+            // for a retry would just hang to timeout. Callers must drop and
+            // re-attach with a fresh worker to recover.
+            BridgeState::Failed | BridgeState::ShuttingDown | BridgeState::Disposed => false,
         }
     }
 
