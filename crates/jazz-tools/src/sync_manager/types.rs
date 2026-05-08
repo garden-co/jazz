@@ -291,6 +291,8 @@ pub enum SyncPayload {
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
+        required_tier: Option<DurabilityTier>,
+        #[serde(default)]
         propagation: QueryPropagation,
         #[serde(default)]
         policy_context_tables: Vec<String>,
@@ -540,6 +542,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub required_tier: Option<DurabilityTier>,
     pub propagation: QueryPropagation,
     pub policy_context_tables: Vec<String>,
 }

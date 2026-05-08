@@ -300,6 +300,20 @@ pub(super) struct ServerQuerySubscription {
     /// Extra tables whose rows must be synced so downstream clients can
     /// reproduce bundled policy context locally.
     pub(super) policy_context_tables: Vec<String>,
+    /// Durability tier requested by the downstream subscriber. `None` means the
+    /// subscriber did not request frontier gating.
+    pub(super) required_tier: Option<DurabilityTier>,
+    /// Lower-tier settlements are useful as an initial remote scope snapshot,
+    /// but repeated below-required settlements should not churn downstream
+    /// subscribers that are still waiting for their requested tier.
+    pub(super) sent_below_required_settled: bool,
+    /// Highest query settlement tier that has actually been emitted downstream.
+    ///
+    /// Dirty graph passes can leave a server subscription's scope unchanged. In
+    /// that case a repeated QuerySettled at the same tier carries no new
+    /// information, but large scopes are expensive for clients to decode and
+    /// apply.
+    pub(super) last_emitted_settled_tier: Option<DurabilityTier>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -439,6 +453,15 @@ pub struct QueryManager {
     /// without rescanning and decoding every subscribed visible region.
     pub(super) visible_rows_by_batch: HashMap<BatchId, Vec<(String, ObjectId)>>,
 
+    /// Currently queued SyncManager batch fates whose query effects have
+    /// already been applied by this manager.
+    ///
+    /// RuntimeCore owns draining the pending fate queue so write waiters and
+    /// persisted fate state still see the same events. QueryManager may process
+    /// multiple times before that drain happens, so it must only apply the
+    /// subscription dirtiness effects for the newly appended suffix.
+    pub(super) applied_pending_batch_fates: Vec<BatchFate>,
+
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
@@ -542,6 +565,7 @@ impl QueryManager {
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
             visible_rows_by_batch: HashMap::new(),
+            applied_pending_batch_fates: Vec::new(),
             known_schemas: Arc::new(HashMap::new()),
             pending_catalogue_schema_hashes: HashSet::new(),
             catalogued_storage_namespaces: HashSet::new(),
@@ -1050,11 +1074,24 @@ impl QueryManager {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
             let was_unsatisfied = !Self::subscription_query_frontier_satisfied(sub);
+            let before = sub.query_frontier_settled_tier;
+            let required_tier = sub.durability_tier;
             sub.query_frontier_settled_tier = Some(
                 sub.query_frontier_settled_tier
                     .map_or(tier, |current| current.max(tier)),
             );
-            if was_unsatisfied && Self::subscription_query_frontier_satisfied(sub) {
+            let now_satisfied = Self::subscription_query_frontier_satisfied(sub);
+            tracing::trace!(
+                query_id = query_id.0,
+                tier = ?tier,
+                required_tier = ?required_tier,
+                before = ?before,
+                after = ?sub.query_frontier_settled_tier,
+                was_unsatisfied,
+                now_satisfied,
+                "jazz trace query settled applied"
+            );
+            if was_unsatisfied && now_satisfied {
                 sub.needs_visibility_recompute = true;
             }
         }
@@ -1083,7 +1120,25 @@ impl QueryManager {
     }
 
     fn apply_pending_batch_fate_effects<H: Storage>(&mut self, storage: &H) {
-        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
+        let pending_batch_fates = self.sync_manager.pending_batch_fates();
+        let already_applied_count =
+            if pending_batch_fates.starts_with(&self.applied_pending_batch_fates) {
+                self.applied_pending_batch_fates.len()
+            } else {
+                // RuntimeCore may have drained the queue and SyncManager may have
+                // appended new fates before QueryManager gets another process pass.
+                // In that case, the current queue is a new sequence, not a suffix
+                // of the old one.
+                0
+            };
+
+        let batch_fates = pending_batch_fates[already_applied_count..].to_vec();
+        self.applied_pending_batch_fates = pending_batch_fates.to_vec();
+        let fate_count = batch_fates.len();
+        if fate_count == 0 {
+            return;
+        }
+
         let max_confirmed_tier = batch_fates
             .iter()
             .filter_map(BatchFate::confirmed_tier)
@@ -1099,6 +1154,8 @@ impl QueryManager {
         batch_ids.sort();
         batch_ids.dedup();
 
+        let unique_batch_count = batch_ids.len();
+        let mut marked_row_count = 0usize;
         for batch_id in batch_ids {
             self.mark_subscriptions_visibility_recompute_for_batch(batch_id);
             let mut rows = self
@@ -1113,10 +1170,18 @@ impl QueryManager {
             }
             rows.sort();
             rows.dedup();
+            marked_row_count += rows.len();
             for (table_name, object_id) in rows {
                 self.mark_local_row_updated_in_subscriptions(table_name.as_str(), object_id);
             }
         }
+        tracing::trace!(
+            fate_count,
+            unique_batch_count,
+            marked_row_count,
+            max_confirmed_tier = ?max_confirmed_tier,
+            "jazz trace batch fate effects applied"
+        );
     }
 
     pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
@@ -1242,6 +1307,13 @@ impl QueryManager {
             let mut blocked = Vec::new();
             for pending_settled in pending_query_settled {
                 if pending_settled.through_seq == 0 {
+                    if let Some(server_id) = pending_settled.server_id {
+                        self.sync_manager.relay_query_settled_to_origins(
+                            server_id,
+                            pending_settled.query_id,
+                            pending_settled.tier,
+                        );
+                    }
                     self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 } else {
                     blocked.push(pending_settled);
@@ -1373,6 +1445,18 @@ impl QueryManager {
                 // initial upstream frontier has been replayed — or until every
                 // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
                 // which means nothing upstream is going to replay.
+                tracing::trace!(
+                    sub_id = sub_id.0,
+                    table = %table,
+                    required_tier = ?subscription.durability_tier,
+                    settled_tier = ?subscription.query_frontier_settled_tier,
+                    dirty = subscription.graph.has_dirty_nodes(),
+                    needs_recompile = subscription.needs_recompile,
+                    needs_visibility_recompute = subscription.needs_visibility_recompute,
+                    pending_local_updates = subscription.has_pending_local_updates,
+                    has_servers_or_pending_servers = self.sync_manager.has_servers_or_pending_servers(),
+                    "jazz trace subscription waiting for initial frontier"
+                );
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1426,6 +1510,18 @@ impl QueryManager {
             let ordered_ids_after: Vec<ObjectId> = visible_rows.iter().map(|row| row.id).collect();
 
             if !subscription.settled_once {
+                tracing::trace!(
+                    sub_id = sub_id.0,
+                    table = %table,
+                    rows = visible_rows.len(),
+                    added = visible_delta.added.len(),
+                    removed = visible_delta.removed.len(),
+                    updated = visible_delta.updated.len(),
+                    moved = visible_delta.moved.len(),
+                    settled_tier = ?subscription.query_frontier_settled_tier,
+                    required_tier = ?subscription.durability_tier,
+                    "jazz trace subscription first delivery"
+                );
                 subscription.settled_once = true;
                 let ordered = build_ordered_delta_with_post_ids(
                     &subscription.current_ordered_ids,

@@ -32,6 +32,16 @@ pub use types::*;
 /// treat it as offline.
 pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
+pub(crate) struct OutgoingQuerySubscription {
+    pub(crate) query_id: QueryId,
+    pub(crate) query: Query,
+    pub(crate) session: Option<Session>,
+    pub(crate) required_tier: Option<DurabilityTier>,
+    pub(crate) propagation: QueryPropagation,
+    pub(crate) policy_context_tables: Vec<String>,
+}
+
 // ============================================================================
 // SyncManager
 // ============================================================================
@@ -49,6 +59,7 @@ pub struct SyncManager {
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) pending_servers: HashMap<ServerId, Instant>,
+    pub(super) pending_server_query_subscriptions: HashSet<(ServerId, QueryId)>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -189,7 +200,7 @@ pub(crate) fn log_connection_schema_diagnostics(
             .iter()
             .map(short_hash)
             .collect();
-        tracing::warn!(
+        tracing::trace!(
             origin = origin,
             client_schema_hash = %client_hash,
             unreachable_schema_hashes = ?unreachable_hashes,
@@ -209,6 +220,7 @@ impl SyncManager {
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             pending_servers: HashMap::new(),
+            pending_server_query_subscriptions: HashSet::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -407,6 +419,8 @@ impl SyncManager {
 
     pub fn remove_pending_server(&mut self, server_id: ServerId) {
         self.pending_servers.remove(&server_id);
+        self.pending_server_query_subscriptions
+            .retain(|(id, _)| *id != server_id);
     }
 
     pub fn server_ids(&self) -> impl Iterator<Item = ServerId> + '_ {
@@ -441,15 +455,7 @@ impl SyncManager {
     }
 
     pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
-        let now = Instant::now();
-        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
-        server_ids.extend(
-            self.pending_servers
-                .iter()
-                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
-                .map(|(server_id, _)| *server_id),
-        );
-        for server_id in server_ids {
+        for server_id in self.outbound_server_ids() {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::SealBatch {
@@ -459,10 +465,24 @@ impl SyncManager {
         }
     }
 
+    fn outbound_server_ids(&self) -> Vec<ServerId> {
+        let now = Instant::now();
+        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
+        server_ids.extend(
+            self.pending_servers
+                .iter()
+                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
+                .map(|(server_id, _)| *server_id),
+        );
+        server_ids
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
         self.pending_servers.remove(&server_id);
+        self.pending_server_query_subscriptions
+            .retain(|(id, _)| *id != server_id);
         let mut removed_query_ids = HashSet::new();
         self.remote_query_scopes
             .retain(|(remote_server_id, query_id), _| {
@@ -762,18 +782,29 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        required_tier: Option<DurabilityTier>,
         propagation: QueryPropagation,
         policy_context_tables: Vec<String>,
     ) {
-        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        let server_ids = self.outbound_server_ids();
+        tracing::trace!(
+            server_count = server_ids.len(),
+            query_id = query_id.0,
+            table = %query.table,
+            ?propagation,
+            "jazz trace send query subscription to servers"
+        );
         for server_id in server_ids {
             self.send_query_subscription_to_server(
                 server_id,
-                query_id,
-                query.clone(),
-                session.clone(),
-                propagation,
-                policy_context_tables.clone(),
+                OutgoingQuerySubscription {
+                    query_id,
+                    query: query.clone(),
+                    session: session.clone(),
+                    required_tier,
+                    propagation,
+                    policy_context_tables: policy_context_tables.clone(),
+                },
             );
         }
     }
@@ -781,36 +812,64 @@ impl SyncManager {
     /// Send a QuerySubscription to one specific server.
     ///
     /// Used when replaying existing subscriptions after a late server connect.
-    pub fn send_query_subscription_to_server(
+    pub(crate) fn send_query_subscription_to_server(
         &mut self,
         server_id: ServerId,
-        query_id: QueryId,
-        query: Query,
-        session: Option<Session>,
-        propagation: QueryPropagation,
-        policy_context_tables: Vec<String>,
+        subscription: OutgoingQuerySubscription,
     ) {
-        if !self.servers.contains_key(&server_id) {
+        let OutgoingQuerySubscription {
+            query_id,
+            query,
+            session,
+            required_tier,
+            propagation,
+            policy_context_tables,
+        } = subscription;
+        let is_connected = self.servers.contains_key(&server_id);
+        let is_pending = self.pending_servers.contains_key(&server_id);
+        if !is_connected && !is_pending {
             return;
         }
 
+        tracing::trace!(
+            %server_id,
+            query_id = query_id.0,
+            table = %query.table,
+            ?propagation,
+            "jazz trace sending query subscription upstream"
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
                 session,
+                required_tier,
                 propagation,
                 policy_context_tables,
             },
         });
+
+        if !is_connected && is_pending {
+            self.pending_server_query_subscriptions
+                .insert((server_id, query_id));
+        }
+    }
+
+    pub(crate) fn consume_pending_query_subscription_marker(
+        &mut self,
+        server_id: ServerId,
+        query_id: QueryId,
+    ) -> bool {
+        self.pending_server_query_subscriptions
+            .remove(&(server_id, query_id))
     }
 
     /// Send a QueryUnsubscription to all connected servers.
     ///
     /// Called by QueryManager when a client unsubscribes from a synced query.
     pub fn send_query_unsubscription_to_servers(&mut self, query_id: QueryId) {
-        for &server_id in self.servers.keys() {
+        for server_id in self.outbound_server_ids() {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::QueryUnsubscription { query_id },
@@ -894,6 +953,13 @@ impl SyncManager {
         tier: DurabilityTier,
         scope: &HashSet<(ObjectId, BranchName)>,
     ) {
+        tracing::trace!(
+            %client_id,
+            query_id = query_id.0,
+            ?tier,
+            scope_len = scope.len(),
+            "jazz trace emitting query settled to client"
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::QuerySettled {
@@ -903,6 +969,28 @@ impl SyncManager {
                 through_seq: 0,
             },
         });
+    }
+
+    pub(crate) fn relay_query_settled_to_origins(
+        &mut self,
+        server_id: ServerId,
+        query_id: QueryId,
+        tier: DurabilityTier,
+    ) {
+        let Some(scope) = self
+            .remote_query_scopes
+            .get(&(server_id, query_id))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(clients) = self.query_origin.get(&query_id).cloned() else {
+            return;
+        };
+
+        for client_id in clients {
+            self.emit_query_settled(client_id, query_id, tier, &scope);
+        }
     }
 
     /// Emit a schema warning to a client.

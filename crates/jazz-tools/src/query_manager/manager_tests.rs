@@ -1284,6 +1284,7 @@ fn push_query_subscription(
             query_id: QueryId(query_id),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

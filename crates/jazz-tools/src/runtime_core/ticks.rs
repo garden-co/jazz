@@ -494,8 +494,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         >= pending_settled.through_seq
                 });
                 if is_ready {
+                    tracing::trace!(
+                        server_id = ?pending_settled.server_id,
+                        query_id = pending_settled.query_id.0,
+                        tier = ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        "jazz trace query settled ready for query manager"
+                    );
                     ready.push(pending_settled);
                 } else {
+                    tracing::trace!(
+                        server_id = ?pending_settled.server_id,
+                        query_id = pending_settled.query_id.0,
+                        tier = ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        last_applied = pending_settled.server_id.and_then(|server_id| {
+                            self.last_applied_server_seq.get(&server_id).copied()
+                        }),
+                        "jazz trace query settled blocked on stream sequence"
+                    );
                     blocked.push(pending_settled);
                 }
             }
@@ -514,6 +531,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             {
                 let query_manager = self.schema_manager.query_manager_mut();
                 for pending_settled in ready_query_settled {
+                    if let Some(server_id) = pending_settled.server_id {
+                        query_manager
+                            .sync_manager_mut()
+                            .relay_query_settled_to_origins(
+                                server_id,
+                                pending_settled.query_id,
+                                pending_settled.tier,
+                            );
+                    }
                     query_manager
                         .apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 }
