@@ -187,9 +187,19 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
         });
     }
 
-    let mut fixed_data = Vec::new();
-    let mut var_data = Vec::new();
-    let mut var_offsets: Vec<u32> = Vec::new();
+    let layout = compiled_row_layout(descriptor);
+    let offset_table_size = layout.variable_column_count.saturating_sub(1) * size_of::<u32>();
+    let estimated_var_data_len = descriptor
+        .columns
+        .iter()
+        .zip(values.iter())
+        .filter(|(col, _)| col.column_type.is_variable())
+        .map(|(col, val)| estimated_variable_value_len(col, val))
+        .sum::<usize>();
+
+    let mut fixed_data = Vec::with_capacity(layout.fixed_section_size);
+    let mut var_data = Vec::with_capacity(estimated_var_data_len);
+    let mut var_offsets: Vec<u32> = Vec::with_capacity(layout.variable_column_count);
 
     // Separate fixed and variable columns while maintaining order
     let mut var_columns: Vec<(usize, &ColumnDescriptor, &Value)> = Vec::new();
@@ -231,7 +241,9 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
     }
 
     // Build final binary: fixed_data + offset_table (skip first) + var_data
-    let mut result = fixed_data;
+    let mut result =
+        Vec::with_capacity(layout.fixed_section_size + offset_table_size + var_data.len());
+    result.extend(fixed_data);
 
     // Write offsets (skip first, as it's implicitly 0)
     for offset in var_offsets.iter().skip(1) {
@@ -241,6 +253,73 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
     result.extend(var_data);
 
     Ok(result)
+}
+
+fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
+    let nullable_prefix = usize::from(col.nullable);
+    if val.is_null() {
+        return nullable_prefix;
+    }
+
+    nullable_prefix
+        + match val {
+            Value::Text(s) => s.len(),
+            Value::Bytea(bytes) => bytes.len(),
+            Value::Array(elements) => estimated_array_len(elements, &col.column_type),
+            Value::Row { id, values } => {
+                let id_len = 1 + id.map(|_| 16).unwrap_or(0);
+                if let ColumnType::Row { columns } = &col.column_type {
+                    id_len + estimated_row_len(columns, values)
+                } else {
+                    id_len
+                }
+            }
+            _ => 0,
+        }
+}
+
+fn estimated_row_len(descriptor: &RowDescriptor, values: &[Value]) -> usize {
+    let layout = compiled_row_layout(descriptor);
+    layout.fixed_section_size
+        + layout.variable_column_count.saturating_sub(1) * size_of::<u32>()
+        + descriptor
+            .columns
+            .iter()
+            .zip(values.iter())
+            .filter(|(col, _)| col.column_type.is_variable())
+            .map(|(col, val)| estimated_variable_value_len(col, val))
+            .sum::<usize>()
+}
+
+fn estimated_array_len(elements: &[Value], column_type: &ColumnType) -> usize {
+    let element_type = match column_type {
+        ColumnType::Array { element } => element.as_ref(),
+        _ => return 0,
+    };
+
+    let offsets_len = elements.len().saturating_sub(1) * size_of::<u32>();
+    let data_len = elements
+        .iter()
+        .map(|element| match (element, element_type) {
+            (Value::Text(value), ColumnType::Text)
+            | (Value::Text(value), ColumnType::Json { .. })
+            | (Value::Text(value), ColumnType::Enum { .. }) => value.len(),
+            (Value::Bytea(bytes), ColumnType::Bytea) => bytes.len(),
+            (Value::Array(_), ColumnType::Array { .. }) => {
+                let nested_col = ColumnDescriptor::new("", column_type.clone());
+                estimated_variable_value_len(&nested_col, element)
+            }
+            (
+                Value::Row { id, values },
+                ColumnType::Row {
+                    columns: descriptor,
+                },
+            ) => 1 + id.map(|_| 16).unwrap_or(0) + estimated_row_len(descriptor, values),
+            _ => element_type.fixed_size().unwrap_or(0),
+        })
+        .sum::<usize>();
+
+    size_of::<u32>() + offsets_len + data_len
 }
 
 fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
