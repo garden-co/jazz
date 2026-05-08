@@ -25,14 +25,14 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         Box::new(RowRegionReadFailingStorage::with_row_locator_scan_failure()),
     );
 
-    let ((row_id, _row_values), mut receiver) = core
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut core,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let branch_name = core.schema_manager().branch_name();
     let batch_id = core
@@ -206,14 +206,14 @@ fn rc_direct_delete_rejection_restores_previous_visible_row() {
 fn rc_worker_peer_relays_rejected_batch_fate_to_downstream_peer() {
     let mut s = create_3tier_rc();
 
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let batch_id =
         s.a.storage()
@@ -259,14 +259,14 @@ fn rc_worker_peer_relays_rejected_batch_fate_to_downstream_peer() {
 fn rc_worker_peer_retains_replayable_batch_record_for_downstream_direct_write() {
     let mut s = create_3tier_rc();
 
-    let ((row_id, _row_values), _receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let batch_id =
         s.a.storage()
@@ -301,14 +301,14 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
 
     s.a.remove_server(s.b_server_for_a);
 
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows =
         s.a.storage()
@@ -386,14 +386,14 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
     worker.sync_sender().take();
 
     let write_context = WriteContext::from_session(alice_session);
-    let ((row_id, _row_values), mut receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let batch_id = alice
         .storage()
@@ -514,14 +514,14 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
     worker.sync_sender().take();
 
     let write_context = WriteContext::from_session(alice_session);
-    let ((row_id, _row_values), mut receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let batch_id = alice
         .storage()
@@ -635,14 +635,14 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
 
     let write_context = WriteContext::from_session(alice_session)
         .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
-    let ((row_id, _row_values), _receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows = alice
         .storage()
@@ -728,22 +728,21 @@ fn rc_worker_path_overlapping_insert_and_delete_rejects_delete() {
         .sync_manager_mut()
         .set_client_role(s.b_client_of_c, ClientRole::User);
 
-    let ((row_id, _row_values), mut insert_receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut insert_receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
     let insert_batch_id =
         s.a.storage()
             .scan_history_row_batches("users", row_id)
             .unwrap()[0]
             .batch_id;
     let mut delete_receiver =
-        s.a.delete_persisted(row_id, None, DurabilityTier::EdgeServer)
-            .unwrap();
+        delete_and_wait_for_batch(&mut s.a, row_id, None, DurabilityTier::EdgeServer).unwrap();
     let delete_batch_id =
         s.a.storage()
             .scan_history_row_batches("users", row_id)
@@ -865,14 +864,14 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
 
     let write_context = WriteContext::from_session(alice_session)
         .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
-    let ((row_id, _row_values), _receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows = alice
         .storage()
@@ -964,14 +963,14 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 
     let write_context = WriteContext::from_session(alice_session)
         .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
-    let ((row_id, _row_values), _receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows = alice
         .storage()
@@ -1052,14 +1051,14 @@ fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
     let mut alice =
         create_runtime_with_schema(schema.clone(), "rc-restart-apply-stored-rejected-test");
 
-    let ((row_id, _row_values), _receiver) = alice
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut alice,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let branch_name = alice.schema_manager().branch_name();
     let visible_row_before = alice

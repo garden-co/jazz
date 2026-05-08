@@ -60,26 +60,6 @@ export interface Runtime {
   ): DirectMutationResult;
   delete(object_id: string): DirectMutationResult;
   deleteWithSession?(object_id: string, write_context_json?: string | null): DirectMutationResult;
-  insertPersisted?(table: string, values: InsertValues, tier: string): PersistedInsertResult;
-  insertPersistedWithSession?(
-    table: string,
-    values: InsertValues,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedInsertResult;
-  updatePersisted?(object_id: string, values: any, tier: string): PersistedMutationResult;
-  updatePersistedWithSession?(
-    object_id: string,
-    values: any,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
-  deletePersisted?(object_id: string, tier: string): PersistedMutationResult;
-  deletePersistedWithSession?(
-    object_id: string,
-    write_context_json: string | null | undefined,
-    tier: string,
-  ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
   loadLocalBatchRecords?(): LocalBatchRecord[];
   drainRejectedBatchIds?(): string[];
@@ -290,15 +270,6 @@ interface WriteContextPayload {
   batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
-}
-
-interface PersistedInsertResult {
-  batchId: string;
-  row: Row;
-}
-
-interface PersistedMutationResult {
-  batchId: string;
 }
 
 /**

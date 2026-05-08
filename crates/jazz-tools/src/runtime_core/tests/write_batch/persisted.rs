@@ -115,35 +115,22 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
 }
 
 #[test]
-fn rc_insert_persisted_resolves_on_worker_ack() {
+fn rc_wait_for_batch_local_resolves_after_direct_seal() {
     let mut s = create_3tier_rc();
     let user_id = ObjectId::new();
     let expected_values = user_row_values(user_id, "Alice");
-    let ((id, row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(user_id, "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((id, row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(user_id, "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
     assert!(!id.0.is_nil());
     assert_eq!(row_values, expected_values);
 
-    assert!(
-        receiver.try_recv().is_err() || receiver.try_recv() == Ok(None),
-        "Receiver should not be resolved before ack"
-    );
-
-    pump_a_to_b(&mut s);
-    pump_b_to_a(&mut s);
-
-    match receiver.try_recv() {
-        Ok(Some(Ok(()))) => {}
-        Ok(Some(Err(rejection))) => panic!("Receiver should not reject: {rejection:?}"),
-        Ok(None) => panic!("Receiver should be resolved after Local ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 }
 
 #[test]
@@ -155,14 +142,14 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
         Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
     );
 
-    let ((row_id, _row_values), mut receiver) = core
-        .insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut core,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let branch_name = core.schema_manager().branch_name();
     let batch_id = core
@@ -198,14 +185,14 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 #[test]
 fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let row_batch_id =
@@ -220,7 +207,7 @@ fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
         payload: SyncPayload::BatchFate {
             fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id: row_batch_id,
-                confirmed_tier: DurabilityTier::Local,
+                confirmed_tier: DurabilityTier::EdgeServer,
             },
         },
     });
@@ -345,14 +332,14 @@ fn rc_wait_for_batch_missing_fate_remains_pending() {
 #[test]
 fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
-    let (_id, mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let (_id, mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
@@ -377,14 +364,14 @@ fn rc_insert_persisted_holds_until_correct_tier() {
 #[test]
 fn rc_insert_persisted_higher_tier_satisfies_lower() {
     let mut s = create_3tier_rc();
-    let (_id, mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let (_id, mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     pump_3tier(&mut s);
 
@@ -399,14 +386,14 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 #[test]
 fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -462,14 +449,14 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
 #[test]
 fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -505,14 +492,14 @@ fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
 #[test]
 fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -569,14 +556,14 @@ fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
 #[test]
 fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::EdgeServer,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -634,14 +621,14 @@ fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
 #[test]
 fn rc_insert_persisted_resolves_from_batch_fate_without_row_state_changed() {
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -697,14 +684,14 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
     //   write reaches worker, but the live settlement never comes back
     //   then alice reconnects and asks for the batch fate explicitly
     let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), mut receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::EdgeServer,
+    )
+    .unwrap();
 
     let branch_name = s.a.schema_manager().branch_name();
     let visible_row =
@@ -719,19 +706,18 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
     assert_eq!(
         receiver.try_recv(),
         Ok(None),
-        "without the return settlement, the persisted receiver should still be pending"
+        "without the return settlement, the batch wait should still be pending"
     );
 
     s.a.remove_server(s.b_server_for_a);
     s.a.add_server(s.b_server_for_a);
 
-    pump_a_to_b(&mut s);
-    pump_b_to_a(&mut s);
+    pump_3tier(&mut s);
 
     assert_eq!(
         receiver.try_recv(),
         Ok(Some(Ok(()))),
-        "reconnect should reconcile the still-pending batch from the server's current durable truth"
+        "reconnect should reconcile the still-pending batch from durable server truth"
     );
 
     let settled_record =
@@ -743,7 +729,7 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
         settled_record.latest_fate,
         Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Local,
+            confirmed_tier: DurabilityTier::EdgeServer,
         })
     );
 }
@@ -762,14 +748,14 @@ fn rc_add_server_requests_pending_batch_fate_reconciliation() {
 
     s.a.remove_server(s.b_server_for_a);
 
-    let ((row_id, _row_values), _receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows =
         s.a.storage()
@@ -817,14 +803,14 @@ fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
         crate::object::BranchName::new(existing_history_rows[0].branch.as_str());
     let existing_batch_id = existing_history_rows[0].batch_id();
 
-    let ((row_id, _row_values), _receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            Some(&write_context),
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let ((row_id, _row_values), _receiver) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        Some(&write_context),
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     let history_rows =
         s.a.storage()
@@ -907,14 +893,14 @@ fn rc_update_persisted_resolves_on_ack() {
             .unwrap();
     pump_a_to_b(&mut s);
 
-    let mut receiver =
-        s.a.update_persisted(
-            id,
-            vec![("name".into(), Value::Text("Bob".into()))],
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let mut receiver = update_and_wait_for_batch(
+        &mut s.a,
+        id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
@@ -940,8 +926,7 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
 
     let mut receiver =
-        s.a.delete_persisted(id, None, DurabilityTier::Local)
-            .unwrap();
+        delete_and_wait_for_batch(&mut s.a, id, None, DurabilityTier::Local).unwrap();
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
@@ -962,23 +947,23 @@ fn rc_delete_persisted_resolves_on_ack() {
 fn rc_multiple_persisted_inserts_independent() {
     let mut s = create_3tier_rc();
 
-    let (_id1, mut receiver1) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let (_id1, mut receiver1) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Alice"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
-    let (_id2, mut receiver2) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Bob"),
-            None,
-            DurabilityTier::Local,
-        )
-        .unwrap();
+    let (_id2, mut receiver2) = insert_and_wait_for_batch(
+        &mut s.a,
+        "users",
+        user_insert_values(ObjectId::new(), "Bob"),
+        None,
+        DurabilityTier::Local,
+    )
+    .unwrap();
 
     pump_3tier(&mut s);
 

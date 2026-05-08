@@ -131,7 +131,6 @@ fn rc_late_insert_settlement_does_not_hide_newer_update() {
     let ((id, _row_values), insert_batch_id) =
         s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
             .unwrap();
-    let branch_name = s.a.schema_manager().branch_name();
 
     s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
         .unwrap();
