@@ -1974,6 +1974,7 @@ mod tests {
                         query: Box::new(query),
                         session: None,
                         propagation,
+                        required_tier: None,
                         policy_context_tables: vec![],
                     },
                 })
