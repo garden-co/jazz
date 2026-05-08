@@ -45,7 +45,7 @@ use jazz_tools::binding_support::{
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
     query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
-    subscription_delta_to_json,
+    serialize_mutation_error_event, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -420,11 +420,13 @@ fn init_dev_server_telemetry(collector_url: Option<&str>) {
 /// The TSFN type produced by `build_threadsafe_function().weak().build()`:
 /// CalleeHandled = false, Weak = true (won't keep event loop alive).
 type SchedulerTsfn = ThreadsafeFunction<(), (), (), napi::Status, false, true, 0>;
+type MutationErrorTsfn = ThreadsafeFunction<serde_json::Value>;
 
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
     core_ref: Weak<Mutex<NapiCoreType>>,
     tsfn: Option<SchedulerTsfn>,
+    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 impl NapiScheduler {
@@ -433,6 +435,7 @@ impl NapiScheduler {
             scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
             tsfn: None,
+            mutation_error_callback: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -450,18 +453,46 @@ impl Scheduler for NapiScheduler {
         if !self.scheduled.swap(true, Ordering::SeqCst) {
             let scheduled = Arc::clone(&self.scheduled);
             let core_ref = self.core_ref.clone();
+            let mutation_error_callback = Arc::clone(&self.mutation_error_callback);
             std::thread::spawn(move || {
                 // Give bursts of inbound websocket frames a chance to coalesce
                 // before the runtime drains the queue.
                 std::thread::sleep(Duration::from_millis(1));
                 scheduled.store(false, Ordering::SeqCst);
-                if let Some(core_arc) = core_ref.upgrade()
-                    && let Ok(mut core) = core_arc.lock()
-                {
-                    core.batched_tick();
+                if let Some(core_arc) = core_ref.upgrade() {
+                    if let Ok(mut core) = core_arc.lock() {
+                        core.batched_tick();
+                    }
+                    emit_pending_mutation_errors(&core_arc, &mutation_error_callback);
                 }
             });
         }
+    }
+}
+
+fn emit_pending_mutation_errors(
+    core_arc: &Arc<Mutex<NapiCoreType>>,
+    mutation_error_callback: &Arc<Mutex<Option<MutationErrorTsfn>>>,
+) {
+    let Ok(callback_guard) = mutation_error_callback.lock() else {
+        return;
+    };
+    let Some(callback) = callback_guard.as_ref() else {
+        return;
+    };
+
+    let events = {
+        let Ok(mut core) = core_arc.lock() else {
+            return;
+        };
+        core.drain_mutation_error_events()
+    };
+
+    for event in events {
+        callback.call(
+            Ok(serialize_mutation_error_event(&event)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
     }
 }
 
@@ -506,6 +537,7 @@ fn build_napi_runtime(
 
     // Create components
     let scheduler = NapiScheduler::new();
+    let mutation_error_callback = Arc::clone(&scheduler.mutation_error_callback);
 
     // Create RuntimeCore and wrap
     let core = RuntimeCore::new(schema_manager, storage, scheduler);
@@ -523,14 +555,16 @@ fn build_napi_runtime(
 
         let core_ref_for_tsfn = core_weak.clone();
         let flag_for_tsfn = scheduled_flag;
+        let mutation_error_callback_for_tsfn = Arc::clone(&mutation_error_callback);
 
         let tick_fn = env.create_function_from_closure("__groove_tick", move |_ctx| {
             // Reset flag first so new ticks can be scheduled
             flag_for_tsfn.store(false, Ordering::SeqCst);
-            if let Some(core_arc) = core_ref_for_tsfn.upgrade()
-                && let Ok(mut core) = core_arc.lock()
-            {
-                core.batched_tick();
+            if let Some(core_arc) = core_ref_for_tsfn.upgrade() {
+                if let Ok(mut core) = core_arc.lock() {
+                    core.batched_tick();
+                }
+                emit_pending_mutation_errors(&core_arc, &mutation_error_callback_for_tsfn);
             }
             Ok(())
         })?;
@@ -553,6 +587,7 @@ fn build_napi_runtime(
         upstream_server_id: Mutex::new(None),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
+        mutation_error_callback,
     })
 }
 
@@ -566,6 +601,7 @@ pub struct NapiRuntime {
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
+    mutation_error_callback: Arc<Mutex<Option<MutationErrorTsfn>>>,
 }
 
 #[napi]
@@ -807,19 +843,6 @@ impl NapiRuntime {
         Ok(serialize_local_batch_records(&records))
     }
 
-    #[napi(js_name = "drainRejectedBatchIds", ts_return_type = "string[]")]
-    pub fn drain_rejected_batch_ids(&self) -> napi::Result<Vec<String>> {
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        Ok(core
-            .drain_rejected_batch_ids()
-            .into_iter()
-            .map(|batch_id| batch_id.to_string())
-            .collect())
-    }
-
     #[napi(js_name = "acknowledgeRejectedBatch")]
     pub fn acknowledge_rejected_batch(&self, batch_id: String) -> napi::Result<bool> {
         let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
@@ -830,6 +853,22 @@ impl NapiRuntime {
         core.acknowledge_rejected_batch(batch_id).map_err(|e| {
             napi::Error::from_reason(format!("Acknowledge rejected batch failed: {e}"))
         })
+    }
+
+    #[napi(
+        js_name = "onMutationError",
+        ts_args_type = "callback: (event: any) => void"
+    )]
+    pub fn on_mutation_error(&self, callback: MutationErrorTsfn) -> napi::Result<()> {
+        {
+            let mut slot = self
+                .mutation_error_callback
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            *slot = Some(callback);
+        }
+        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
+        Ok(())
     }
 
     #[napi(js_name = "sealBatch")]

@@ -69,9 +69,6 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_disconnect(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -97,6 +94,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_on_mutation_error(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_method_rnruntime_on_sync_message_received(
@@ -140,6 +140,9 @@ protected:
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_fn_init_callback_vtable_mutationerrorcallback(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_fn_init_callback_vtable_subscriptioncallback(
@@ -388,10 +391,6 @@ protected:
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_disconnect(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
-  jsi::Value
-  cpp_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids(
-      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
-      size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
@@ -420,6 +419,9 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value
@@ -468,6 +470,9 @@ protected:
       size_t count);
   jsi::Value
   cpp_uniffi_jazz_rn_checksum_method_batchedtickcallback_request_batched_tick(
+      jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
+      size_t count);
+  jsi::Value cpp_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error(
       jsi::Runtime &rt, const jsi::Value &thisVal, const jsi::Value *args,
       size_t count);
   jsi::Value cpp_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update(

@@ -83,6 +83,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use jazz_tools::binding_support::{
     parse_batch_id_input, serialize_local_batch_record, serialize_local_batch_records,
+    serialize_mutation_error_event,
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
@@ -410,6 +411,7 @@ fn assemble_wasm_runtime(
     use_binary_encoding: bool,
 ) -> WasmRuntime {
     let scheduler = WasmScheduler::new();
+    let mutation_error_callback = scheduler.mutation_error_callback.clone();
     let sync_sender = JsSyncSender::new(use_binary_encoding);
     let mut core = RuntimeCore::new(schema_manager, storage, scheduler);
     core.set_tier_label(tier_label);
@@ -425,6 +427,7 @@ fn assemble_wasm_runtime(
     WasmRuntime {
         core: core_rc,
         sync_sender,
+        mutation_error_callback,
         upstream_server_id: RefCell::new(None),
         tier_label,
     }
@@ -451,6 +454,8 @@ pub struct WasmScheduler {
     scheduled: Rc<RefCell<bool>>,
     /// Weak reference back to RuntimeCore for spawned tasks.
     core_ref: Weak<RefCell<WasmCoreType>>,
+    /// JS callback receiving pushed mutation error events.
+    mutation_error_callback: Rc<RefCell<Option<Function>>>,
 }
 
 impl WasmScheduler {
@@ -458,6 +463,7 @@ impl WasmScheduler {
         Self {
             scheduled: Rc::new(RefCell::new(false)),
             core_ref: Weak::new(),
+            mutation_error_callback: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -466,7 +472,33 @@ impl WasmScheduler {
     }
 }
 
-fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<RefCell<bool>>) {
+fn emit_pending_mutation_errors(
+    core_rc: &Rc<RefCell<WasmCoreType>>,
+    mutation_error_callback: &Rc<RefCell<Option<Function>>>,
+) {
+    let Some(callback) = mutation_error_callback.borrow().clone() else {
+        return;
+    };
+
+    let events = core_rc.borrow_mut().drain_mutation_error_events();
+    if events.is_empty() {
+        return;
+    }
+
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    for event in events {
+        let Ok(value) = serialize_mutation_error_event(&event).serialize(&serializer) else {
+            continue;
+        };
+        let _ = callback.call1(&JsValue::UNDEFINED, &value);
+    }
+}
+
+fn schedule_batched_tick_task(
+    core_ref: Weak<RefCell<WasmCoreType>>,
+    flag: Rc<RefCell<bool>>,
+    mutation_error_callback: Rc<RefCell<Option<Function>>>,
+) {
     let task = Closure::once_into_js(move || {
         *flag.borrow_mut() = false;
 
@@ -481,6 +513,10 @@ fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<Re
             true
         };
 
+        if !needs_retry {
+            emit_pending_mutation_errors(&core_rc, &mutation_error_callback);
+        }
+
         if needs_retry {
             // Runtime is currently borrowed (e.g. during query/subscription setup).
             // Keep one retry queued rather than panicking on RefCell reborrow.
@@ -490,7 +526,11 @@ fn schedule_batched_tick_task(core_ref: Weak<RefCell<WasmCoreType>>, flag: Rc<Re
             }
             *scheduled = true;
             drop(scheduled);
-            schedule_batched_tick_task(core_ref.clone(), flag.clone());
+            schedule_batched_tick_task(
+                core_ref.clone(),
+                flag.clone(),
+                mutation_error_callback.clone(),
+            );
         }
     });
 
@@ -509,7 +549,11 @@ impl Scheduler for WasmScheduler {
         if !*scheduled {
             *scheduled = true;
             drop(scheduled);
-            schedule_batched_tick_task(self.core_ref.clone(), self.scheduled.clone());
+            schedule_batched_tick_task(
+                self.core_ref.clone(),
+                self.scheduled.clone(),
+                self.mutation_error_callback.clone(),
+            );
         }
     }
 }
@@ -648,6 +692,7 @@ pub struct WasmRuntime {
     /// WASM runtime uses it to forward `"client"`-destination outbox messages to
     /// the main thread via postMessage. Server sync goes through `connect()`.
     sync_sender: JsSyncSender,
+    mutation_error_callback: Rc<RefCell<Option<Function>>>,
     upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "local", "edge", or "client").
     tier_label: &'static str,
@@ -725,6 +770,7 @@ impl WasmRuntime {
         // Create components
         let storage: Box<dyn Storage> = Box::new(MemoryStorage::new());
         let scheduler = WasmScheduler::new();
+        let mutation_error_callback = scheduler.mutation_error_callback.clone();
         let sync_sender = JsSyncSender::new(use_binary_encoding.unwrap_or(false));
 
         // Create RuntimeCore
@@ -751,6 +797,7 @@ impl WasmRuntime {
         Ok(WasmRuntime {
             core: core_rc,
             sync_sender,
+            mutation_error_callback,
             upstream_server_id: RefCell::new(None),
             tier_label,
         })
@@ -832,7 +879,12 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = batchedTick)]
     pub fn batched_tick(&self) {
         let _span = debug_span!("wasm::batchedTick", tier = self.tier_label).entered();
+        self.batched_tick_and_emit_mutation_errors();
+    }
+
+    fn batched_tick_and_emit_mutation_errors(&self) {
         self.core.borrow_mut().batched_tick();
+        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
     }
 
     fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
@@ -871,6 +923,13 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
         self.sync_sender.set_callback(callback);
+    }
+
+    /// Register a callback for unhandled mutation errors.
+    #[wasm_bindgen(js_name = onMutationError)]
+    pub fn on_mutation_error(&self, callback: Function) {
+        *self.mutation_error_callback.borrow_mut() = Some(callback);
+        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
     }
 
     // =========================================================================
@@ -1162,18 +1221,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
-    #[wasm_bindgen(js_name = drainRejectedBatchIds)]
-    pub fn drain_rejected_batch_ids(&self) -> Result<JsValue, JsError> {
-        let mut core = self.core.borrow_mut();
-        let batch_ids = core
-            .drain_rejected_batch_ids()
-            .into_iter()
-            .map(|batch_id| batch_id.to_string())
-            .collect::<Vec<_>>();
-        serde_wasm_bindgen::to_value(&batch_ids)
-            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
-    }
-
     #[wasm_bindgen(js_name = acknowledgeRejectedBatch)]
     pub fn acknowledge_rejected_batch(&self, batch_id: &str) -> Result<bool, JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
@@ -1333,6 +1380,8 @@ impl WasmRuntime {
             core.set_next_expected_server_sequence(server_id, next_sync_seq);
         }
         core.batched_tick();
+        drop(core);
+        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
         Ok(())
     }
 
@@ -1479,6 +1528,8 @@ impl WasmRuntime {
         // Process pending updates and flush outbox so peer/main runtime can receive catalogue sync.
         core.immediate_tick();
         core.batched_tick();
+        drop(core);
+        emit_pending_mutation_errors(&self.core, &self.mutation_error_callback);
 
         Ok(())
     }

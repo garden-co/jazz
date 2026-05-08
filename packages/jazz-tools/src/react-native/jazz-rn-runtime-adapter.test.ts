@@ -13,6 +13,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     disconnect: vi.fn(),
     updateAuth: vi.fn(),
     onAuthFailure: vi.fn(),
+    onMutationError: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(() => JSON.stringify({ batchId: "batch-delete-1" })),
     deleteWithSession: vi.fn(() => JSON.stringify({ batchId: "batch-delete-2" })),
@@ -485,8 +486,12 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(listener).toHaveBeenCalledWith("token expired");
   });
 
-  it("bridges rejected batch helpers", () => {
+  it("bridges rejected batch helpers and mutation error callback", () => {
+    let capturedMutationError: { onError: (eventJson: string) => void } | null = null;
     const binding = createBinding({
+      onMutationError: vi.fn((callback: { onError: (eventJson: string) => void }) => {
+        capturedMutationError = callback;
+      }),
       loadLocalBatchRecord: vi.fn(() =>
         JSON.stringify({
           batchId: "batch-1",
@@ -509,7 +514,6 @@ describe("JazzRnRuntimeAdapter", () => {
           },
         ]),
       ),
-      drainRejectedBatchIds: vi.fn(() => ["batch-1"]),
       acknowledgeRejectedBatch: vi.fn(() => true),
       sealBatch: vi.fn(),
     });
@@ -533,14 +537,41 @@ describe("JazzRnRuntimeAdapter", () => {
         },
       },
     ]);
-    expect(adapter.drainRejectedBatchIds()).toEqual(["batch-1"]);
     expect(adapter.acknowledgeRejectedBatch("batch-1")).toBe(true);
+    const mutationErrorListener = vi.fn();
+    adapter.onMutationError(mutationErrorListener);
+    capturedMutationError!.onError(
+      JSON.stringify({
+        code: "WriteRejected",
+        reason: "nope",
+        batch: {
+          batchId: "batch-1",
+          latestSettlement: {
+            kind: "rejected",
+            code: "WriteRejected",
+            reason: "nope",
+          },
+        },
+      }),
+    );
     adapter.sealBatch("batch-1");
 
     expect(binding.loadLocalBatchRecord).toHaveBeenCalledWith("batch-1");
     expect(binding.loadLocalBatchRecords).toHaveBeenCalledTimes(1);
-    expect(binding.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
     expect(binding.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-1");
+    expect(binding.onMutationError).toHaveBeenCalledTimes(1);
+    expect(mutationErrorListener).toHaveBeenCalledWith({
+      code: "WriteRejected",
+      reason: "nope",
+      batch: {
+        batchId: "batch-1",
+        latestSettlement: {
+          kind: "rejected",
+          code: "WriteRejected",
+          reason: "nope",
+        },
+      },
+    });
     expect(binding.sealBatch).toHaveBeenCalledWith("batch-1");
   });
 });

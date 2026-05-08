@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -49,6 +49,13 @@ use crate::row_histories::BatchId;
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationErrorEvent {
+    pub code: String,
+    pub reason: String,
+    pub batch: crate::batch_fate::LocalBatchRecord,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLocalOverlay {
@@ -337,21 +344,36 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        let rejected_batch_ids: BTreeSet<BatchId> = storage
+        let pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent> = storage
             .scan_local_batch_records()
             .map(|records| {
                 records
                     .into_iter()
                     .filter_map(|record| {
-                        matches!(
-                            record.latest_fate,
-                            Some(crate::batch_fate::BatchFate::Rejected { .. })
-                        )
-                        .then_some(record.batch_id)
+                        let Some(crate::batch_fate::BatchFate::Rejected { code, reason, .. }) =
+                            record.latest_fate.as_ref()
+                        else {
+                            return None;
+                        };
+                        let code = code.clone();
+                        let reason = reason.clone();
+
+                        Some((
+                            record.batch_id,
+                            MutationErrorEvent {
+                                code,
+                                reason,
+                                batch: record,
+                            },
+                        ))
                     })
                     .collect()
             })
             .unwrap_or_default();
+        let rejected_batch_ids = pending_mutation_error_events
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
 
         let mut core = Self {
             schema_manager,
@@ -369,7 +391,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             next_subscription_handle: 0,
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
-            durability: DurabilityTracker::with_initial_rejections(rejected_batch_ids.clone()),
+            durability: DurabilityTracker::with_initial_mutation_error_events(
+                pending_mutation_error_events,
+            ),
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,

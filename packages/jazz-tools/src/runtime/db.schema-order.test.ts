@@ -164,6 +164,7 @@ describe("Db runtime schema order", () => {
       ]),
       getSchema: vi.fn(() => new Map()),
       getSchemaHash: vi.fn(() => "runtime-schema-hash"),
+      onMutationError: vi.fn(),
       onSyncMessageReceived: vi.fn(),
       createSubscription: vi.fn(),
       executeSubscription: vi.fn(),

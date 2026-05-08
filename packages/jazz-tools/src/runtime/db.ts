@@ -1057,31 +1057,10 @@ export class Db {
     bridge.onLocalBatchRecordsSync((batches) => {
       client.hydrateLocalBatchRecords(batches);
     });
-    bridge.onMutationErrorReplay((batch) => {
-      const existingRecord = client.localBatchRecord(batch.batchId);
-      const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
-      client.replayRejectedBatchRecord(batch);
-      if (existingRecord && !replayableFromWorker) {
-        return;
-      }
-      client.markReplayedRejectedBatchDelivered(batch.batchId);
-      const settlement = batch.latestSettlement;
-      if (!settlement || settlement.kind !== "rejected") {
-        return;
-      }
-      const event: MutationErrorEvent = {
-        code: settlement.code,
-        reason: settlement.reason,
-        batch,
-      };
-      if (this.mutationErrorListeners.size === 0) {
-        this.pendingWorkerMutationErrorEvents.push(event);
-        return;
-      }
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+    bridge.onMutationErrorReplay((event) => {
+      setTimeout(() => {
+        this.handleWorkerMutationErrorReplay(client, event);
+      }, 0);
     });
     this.workerBridge = bridge;
     const bridgeReady = bridge
@@ -1089,6 +1068,40 @@ export class Db {
       .then(() => undefined);
     bridgeReady.catch(() => undefined);
     this.bridgeReady = bridgeReady;
+  }
+
+  private handleWorkerMutationErrorReplay(client: JazzClient, event: MutationErrorEvent): void {
+    const batch = event.batch;
+    if (client.hasAcknowledgedRejectedBatch(batch.batchId)) {
+      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      return;
+    }
+    if (client.hasWaitHandlerForBatch(batch.batchId)) {
+      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      return;
+    }
+    const runtimeRecord = client.runtimeLocalBatchRecord(batch.batchId);
+    if (runtimeRecord?.latestSettlement?.kind === "rejected") {
+      this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
+      return;
+    }
+    const existingRecord = client.localBatchRecord(batch.batchId);
+    const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
+    client.replayRejectedBatchRecord(batch);
+    if (existingRecord && !replayableFromWorker) {
+      return;
+    }
+    if (batch.latestSettlement?.kind !== "rejected") {
+      return;
+    }
+    if (this.mutationErrorListeners.size === 0) {
+      this.pendingWorkerMutationErrorEvents.push(event);
+      return;
+    }
+    for (const listener of this.mutationErrorListeners) {
+      listener(event);
+    }
+    this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
   }
 
   private installMainThreadWasmTelemetry(): void {
@@ -1592,9 +1605,6 @@ export class Db {
     while (this.pendingWorkerMutationErrorEvents.length > 0) {
       const event = this.pendingWorkerMutationErrorEvents.shift()!;
       listener(event);
-      for (const client of this.clients.values()) {
-        client.markReplayedRejectedBatchDelivered(event.batch.batchId);
-      }
       this.workerBridge?.acknowledgeRejectedBatch(event.batch.batchId);
     }
     return () => {

@@ -78,6 +78,7 @@ function createRuntimeMock(): {
     query: async () => [],
     sealBatch: () => undefined,
     waitForBatch: async () => undefined,
+    onMutationError: () => undefined,
     subscribe: () => 1,
     unsubscribe: () => undefined,
     createSubscription: () => 1,

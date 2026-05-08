@@ -3,6 +3,7 @@ import type {
   DirectInsertResult,
   DirectMutationResult,
   LocalBatchRecord,
+  MutationErrorEvent,
   Runtime,
 } from "../runtime/client.js";
 import { encodeFFIRecordToJson } from "../runtime/ffi-value.js";
@@ -42,8 +43,8 @@ export interface JazzRnRuntimeBinding {
   ): string;
   loadLocalBatchRecord?(batchId: string): string | null;
   loadLocalBatchRecords?(): string;
-  drainRejectedBatchIds?(): string[];
   waitForBatch(batchId: string, tier: string): Promise<void>;
+  onMutationError(callback: { onError(eventJson: string): void }): void;
   onBatchedTickNeeded(
     callback:
       | {
@@ -184,11 +185,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   private requireBatchRecordMethod<
-    T extends
-      | "loadLocalBatchRecord"
-      | "loadLocalBatchRecords"
-      | "drainRejectedBatchIds"
-      | "acknowledgeRejectedBatch",
+    T extends "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch",
   >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
     const runtimeMethod = this.binding[method];
     if (!runtimeMethod) {
@@ -289,14 +286,6 @@ export class JazzRnRuntimeAdapter implements Runtime {
     try {
       const recordsJson = this.requireBatchRecordMethod("loadLocalBatchRecords")();
       return JSON.parse(recordsJson) as LocalBatchRecord[];
-    } catch (error) {
-      throw normalizeJazzRnError(error);
-    }
-  }
-
-  drainRejectedBatchIds(): string[] {
-    try {
-      return this.requireBatchRecordMethod("drainRejectedBatchIds")();
     } catch (error) {
       throw normalizeJazzRnError(error);
     }
@@ -421,6 +410,19 @@ export class JazzRnRuntimeAdapter implements Runtime {
           callback(reason);
         } catch (error) {
           swallowCallbackError("onAuthFailure", error);
+        }
+      },
+    });
+  }
+
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    if (this.closed) return;
+    this.binding.onMutationError({
+      onError: (eventJson: string) => {
+        try {
+          callback(JSON.parse(eventJson) as MutationErrorEvent);
+        } catch (error) {
+          swallowCallbackError("onMutationError", error);
         }
       },
     });

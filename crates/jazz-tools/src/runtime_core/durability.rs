@@ -1,35 +1,37 @@
-//! [`DurabilityTracker`] — owns durability waiters and the set of rejected
-//! replayable batch ids that bindings still need to surface.
+//! [`DurabilityTracker`] — owns durability waiters and pending mutation error
+//! events that bindings still need to surface.
 //!
 //! Extracted from `RuntimeCore` so the orchestrator no longer carries the
 //! bookkeeping for who-is-waiting-on-which-tier; it only delegates the
 //! primitive operations (`register_batch_watcher`, `record_batch_ack`,
-//! `record_rejection`, `drain_rejected`, `forget_batch`) defined here.
+//! `record_rejection`, `drain_mutation_error_events`, `forget_batch`) defined here.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use futures::channel::oneshot;
 
 use crate::row_histories::BatchId;
 use crate::sync_manager::DurabilityTier;
 
-use super::{PersistedWriteAck, PersistedWriteRejection};
+use super::{MutationErrorEvent, PersistedWriteAck, PersistedWriteRejection};
 
 #[derive(Default)]
 pub(crate) struct DurabilityTracker {
     /// Watchers waiting for a batch to settle at a requested tier.
     batch_watchers: HashMap<BatchId, Vec<(DurabilityTier, oneshot::Sender<PersistedWriteAck>)>>,
-    /// Rejected replayable batch ids surfaced once to bindings on next drain.
-    rejected_batch_ids: BTreeSet<BatchId>,
+    /// Rejected replayable batch events surfaced once to bindings on next drain.
+    pending_mutation_error_events: BTreeMap<BatchId, MutationErrorEvent>,
 }
 
 impl DurabilityTracker {
-    /// Construct a tracker preloaded with rejection ids recovered from
+    /// Construct a tracker preloaded with mutation errors recovered from
     /// persisted local batch records on startup.
-    pub(crate) fn with_initial_rejections(rejected: BTreeSet<BatchId>) -> Self {
+    pub(crate) fn with_initial_mutation_error_events(
+        events: BTreeMap<BatchId, MutationErrorEvent>,
+    ) -> Self {
         Self {
             batch_watchers: HashMap::new(),
-            rejected_batch_ids: rejected,
+            pending_mutation_error_events: events,
         }
     }
 
@@ -72,28 +74,48 @@ impl DurabilityTracker {
     }
 
     /// Mark `batch_id` rejected and notify every watcher waiting on that batch
-    /// with the rejection details.
-    pub(crate) fn record_rejection(&mut self, batch_id: BatchId, code: &str, reason: &str) {
-        self.rejected_batch_ids.insert(batch_id);
-
+    /// with the rejection details. Returns true when at least one live watcher
+    /// accepted the rejection.
+    pub(crate) fn record_rejection(&mut self, batch_id: BatchId, code: &str, reason: &str) -> bool {
         let rejection = PersistedWriteRejection {
             batch_id,
             code: code.to_string(),
             reason: reason.to_string(),
         };
 
+        let mut handled_by_waiter = false;
         if let Some(watchers) = self.batch_watchers.remove(&batch_id) {
             for (_requested_tier, sender) in watchers {
-                let _ = sender.send(Err(rejection.clone()));
+                if sender.send(Err(rejection.clone())).is_ok() {
+                    handled_by_waiter = true;
+                }
             }
         }
+
+        handled_by_waiter
     }
 
-    /// Drain every rejection id pending surface; subsequent calls return an
-    /// empty vec until a new rejection is recorded.
-    pub(crate) fn drain_rejected(&mut self) -> Vec<BatchId> {
-        std::mem::take(&mut self.rejected_batch_ids)
-            .into_iter()
+    /// Queue a mutation error event for bindings to deliver. Repeated
+    /// rejection fates for the same batch coalesce to one pending event.
+    pub(crate) fn queue_mutation_error_event(&mut self, event: MutationErrorEvent) {
+        self.pending_mutation_error_events
+            .entry(event.batch.batch_id)
+            .or_insert(event);
+    }
+
+    /// Drop a queued-but-undelivered mutation error event for `batch_id`.
+    pub(crate) fn take_mutation_error_event(
+        &mut self,
+        batch_id: BatchId,
+    ) -> Option<MutationErrorEvent> {
+        self.pending_mutation_error_events.remove(&batch_id)
+    }
+
+    /// Drain every mutation error event pending surface; subsequent calls
+    /// return an empty vec until a new rejection is recorded.
+    pub(crate) fn drain_mutation_error_events(&mut self) -> Vec<MutationErrorEvent> {
+        std::mem::take(&mut self.pending_mutation_error_events)
+            .into_values()
             .collect()
     }
 
@@ -102,6 +124,6 @@ impl DurabilityTracker {
     /// the local batch record.
     pub(crate) fn forget_batch(&mut self, batch_id: BatchId) {
         self.batch_watchers.remove(&batch_id);
-        self.rejected_batch_ids.remove(&batch_id);
+        self.pending_mutation_error_events.remove(&batch_id);
     }
 }

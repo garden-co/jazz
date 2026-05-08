@@ -82,6 +82,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
     fn apply_received_batch_fate(&mut self, fate: crate::batch_fate::BatchFate) {
         let batch_id = fate.batch_id();
+        let mut updated_record = None;
         if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
             record.apply_fate(fate.clone());
             if let Err(error) = self.storage.upsert_local_batch_record(&record) {
@@ -91,11 +92,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     "failed to persist local batch fate"
                 );
             }
+            updated_record = Some(record);
         }
 
         if let crate::batch_fate::BatchFate::Rejected { code, reason, .. } = &fate {
             self.mark_local_batch_rows_rejected(batch_id);
-            self.durability.record_rejection(batch_id, code, reason);
+            let handled_by_waiter = self.durability.record_rejection(batch_id, code, reason);
+            if !handled_by_waiter && let Some(record) = updated_record {
+                self.durability.queue_mutation_error_event(
+                    crate::runtime_core::MutationErrorEvent {
+                        code: code.clone(),
+                        reason: reason.clone(),
+                        batch: record,
+                    },
+                );
+            }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
             self.retransmit_local_batch_to_servers(batch_id);
         } else if matches!(

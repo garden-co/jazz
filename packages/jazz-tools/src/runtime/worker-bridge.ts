@@ -66,7 +66,7 @@ interface WorkerBridgeState {
   localBatchRecordsSyncListener:
     | ((batches: LocalBatchRecordsSyncMessage["batches"]) => void)
     | null;
-  mutationErrorReplayListener: ((batch: MutationErrorReplayMessage["batch"]) => void) | null;
+  mutationErrorReplayListener: ((event: MutationErrorReplayMessage["event"]) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
 }
 
@@ -124,6 +124,7 @@ export class WorkerBridge {
           const sequence = isSequencedSyncPayload(entry) ? entry.sequence : undefined;
           this.runtime.onSyncMessageReceived(payload, sequence);
         }
+        this.runtime.batchedTick?.();
       } else if (msg.type === "upstream-connected") {
         this.markUpstreamServerConnected();
       } else if (msg.type === "upstream-disconnected") {
@@ -133,7 +134,7 @@ export class WorkerBridge {
       } else if (msg.type === "local-batch-records-sync") {
         this.state.localBatchRecordsSyncListener?.(msg.batches);
       } else if (msg.type === "mutation-error-replay") {
-        this.state.mutationErrorReplayListener?.(msg.batch);
+        this.state.mutationErrorReplayListener?.(msg.event);
       } else if (msg.type === "peer-sync") {
         this.state.peerSyncListener?.({
           peerId: msg.peerId,
@@ -350,7 +351,7 @@ export class WorkerBridge {
     this.state.localBatchRecordsSyncListener = listener;
   }
 
-  onMutationErrorReplay(listener: (batch: MutationErrorReplayMessage["batch"]) => void): void {
+  onMutationErrorReplay(listener: (event: MutationErrorReplayMessage["event"]) => void): void {
     this.state.mutationErrorReplayListener = listener;
   }
 

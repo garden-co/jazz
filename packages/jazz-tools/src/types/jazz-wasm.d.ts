@@ -1,4 +1,4 @@
-import type { LocalBatchRecord } from "../runtime/client.js";
+import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
 
 declare module "jazz-wasm" {
   type SyncOutboxCallbackArgs =
@@ -80,8 +80,8 @@ declare module "jazz-wasm" {
     deleteWithSession(objectId: string, sessionJson?: string | null): { batchId: string };
     loadLocalBatchRecord(batchId: string): LocalBatchRecord | null;
     loadLocalBatchRecords(): LocalBatchRecord[];
-    drainRejectedBatchIds(): string[];
     acknowledgeRejectedBatch(batchId: string): boolean;
+    onMutationError(callback: (event: MutationErrorEvent) => void): void;
     sealBatch(batchId: string): void;
     waitForBatch(batchId: string, tier: string): Promise<void>;
     query(

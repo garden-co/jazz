@@ -63,6 +63,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     },
     query: async () => [],
     waitForBatch: async () => {},
+    onMutationError: () => {},
     subscribe: () => 0,
     createSubscription: () => 0,
     executeSubscription: () => {},

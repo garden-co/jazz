@@ -493,15 +493,18 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let record = self.local_batch_record_for_wait(batch_id)?;
 
         if let Some(outcome) = Self::batch_wait_outcome(record.latest_fate.as_ref(), tier) {
+            if outcome.is_err() {
+                self.durability.take_mutation_error_event(batch_id);
+            }
             return Ok(Self::completed_batch_wait_receiver(outcome));
         }
 
         Ok(self.register_batch_waiter(batch_id, tier))
     }
 
-    /// Drain replayable rejected batch ids that should be surfaced by bindings.
-    pub fn drain_rejected_batch_ids(&mut self) -> Vec<BatchId> {
-        self.durability.drain_rejected()
+    /// Drain replayable mutation error events that should be surfaced by bindings.
+    pub fn drain_mutation_error_events(&mut self) -> Vec<MutationErrorEvent> {
+        self.durability.drain_mutation_error_events()
     }
 
     /// Acknowledge a replayable rejected batch outcome and prune the local

@@ -66,7 +66,6 @@ let pendingSyncMessages: Uint8Array[] = []; // Buffer sync messages until init c
 let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint8Array[] }> = [];
 let pendingSyncPayloadsForMain: (Uint8Array | string | SequencedSyncPayload)[] = [];
 let syncBatchFlushQueued = false;
-let rejectedBatchReplayQueued = false;
 let bootstrapCatalogueForwarding = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let peerRuntimeClientByPeerId = new Map<string, string>();
@@ -87,35 +86,6 @@ function syncRetainedLocalBatchRecordsToMain(): void {
   } catch (error) {
     console.warn("[worker] loadLocalBatchRecords failed:", error);
   }
-}
-
-function replayNewlyRejectedBatchesToMain(): void {
-  if (!runtime) {
-    return;
-  }
-  try {
-    const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
-    for (const batchId of batchIds) {
-      const batch = runtime.loadLocalBatchRecord?.(batchId);
-      if (batch?.latestSettlement?.kind !== "rejected") {
-        continue;
-      }
-      post({ type: "mutation-error-replay", batch });
-    }
-  } catch (error) {
-    console.warn("[worker] drainRejectedBatchIds failed:", error);
-  }
-}
-
-function queueRejectedBatchReplayToMain(): void {
-  if (rejectedBatchReplayQueued) {
-    return;
-  }
-  rejectedBatchReplayQueued = true;
-  queueMicrotask(() => {
-    rejectedBatchReplayQueued = false;
-    replayNewlyRejectedBatchesToMain();
-  });
 }
 
 function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
@@ -403,6 +373,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
       post({ type: "auth-failed", reason: mapAuthReason(reason) });
     });
 
+    runtime.onMutationError?.((event: any) => {
+      queueMicrotask(() => {
+        post({ type: "mutation-error-replay", event });
+      });
+    });
+
     // Set up outbox routing — only the worker-bridge (client-bound) path.
     // Server sync is handled by the Rust-owned WebSocket transport below.
     runtime.onSyncMessageToSend(
@@ -418,7 +394,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
           if (destinationClientId === mainClientId) {
             // Local main-thread client-bound payload.
             enqueueSyncMessageForMain(payload, sequence);
-            queueRejectedBatchReplayToMain();
             return;
           }
 
@@ -481,7 +456,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
     }
 
     syncRetainedLocalBatchRecordsToMain();
-    queueRejectedBatchReplayToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 

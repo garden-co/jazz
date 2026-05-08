@@ -5,7 +5,7 @@
  */
 
 import type { RuntimeSourcesConfig } from "../runtime/context.js";
-import type { LocalBatchRecord } from "../runtime/client.js";
+import type { LocalBatchRecord, MutationErrorEvent } from "../runtime/client.js";
 import type { AuthFailureReason } from "../runtime/sync-transport.js";
 
 // ============================================================================
@@ -188,7 +188,7 @@ export interface PeerSyncToMainMessage {
 /** Replay a persisted rejected batch that was not acknowledged before restart. */
 export interface MutationErrorReplayMessage {
   type: "mutation-error-replay";
-  batch: LocalBatchRecord;
+  event: MutationErrorEvent;
 }
 
 /** Sync retained local batch records from the worker into the main runtime overlay. */

@@ -63,14 +63,9 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
         }))),
         "replayed direct-batch rejections should resolve persisted waits"
     );
-    assert_eq!(
-        core.drain_rejected_batch_ids(),
-        vec![batch_id],
-        "rejected batch ids should be surfaced once for bindings"
-    );
     assert!(
-        core.drain_rejected_batch_ids().is_empty(),
-        "draining rejected batch ids should clear the queue"
+        core.drain_mutation_error_events().is_empty(),
+        "handled direct-batch rejections should not surface onMutationError events"
     );
     assert_eq!(
         core.storage()
@@ -1005,14 +1000,12 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
         Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. })
             if settled_batch_id == batch_id
     ));
-    assert_eq!(
-        restarted.drain_rejected_batch_ids(),
-        vec![batch_id],
-        "restart should seed rejected batch ids from persisted rejected batch records"
-    );
+    let events = restarted.drain_mutation_error_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].batch.batch_id, batch_id);
     assert!(
-        restarted.drain_rejected_batch_ids().is_empty(),
-        "draining rejected batch ids after restart should clear the seeded queue"
+        restarted.drain_mutation_error_events().is_empty(),
+        "draining mutation error events after restart should clear the seeded queue"
     );
 
     assert!(
@@ -1035,6 +1028,35 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     assert_eq!(
         restarted_history_rows[0].state,
         crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
+fn rc_acknowledge_rejected_batch_prunes_pending_mutation_error_event() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "Alice cannot publish this row".to_string(),
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    assert!(
+        s.a.acknowledge_rejected_batch(batch_id).unwrap(),
+        "acknowledgement should prune the stored rejected record"
+    );
+    assert!(
+        s.a.drain_mutation_error_events().is_empty(),
+        "acknowledgement should also remove a queued mutation error event"
     );
 }
 

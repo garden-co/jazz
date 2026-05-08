@@ -295,6 +295,77 @@ fn rc_wait_for_batch_rejects_when_batch_is_rejected() {
         }
         other => panic!("expected rejected batch wait, got {other:?}"),
     }
+
+    assert!(
+        s.a.drain_mutation_error_events().is_empty(),
+        "a live batch waiter should handle the rejection without queuing onMutationError"
+    );
+}
+
+#[test]
+fn rc_rejected_batch_without_waiter_queues_mutation_error_event_once() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "Alice cannot publish this row".to_string(),
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let events = s.a.drain_mutation_error_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].code, "permission_denied");
+    assert_eq!(events[0].reason, "Alice cannot publish this row");
+    assert_eq!(events[0].batch.batch_id, batch_id);
+    assert!(
+        s.a.drain_mutation_error_events().is_empty(),
+        "draining mutation errors should consume the pending event"
+    );
+}
+
+#[test]
+fn rc_wait_for_batch_after_pending_rejection_consumes_mutation_error_event() {
+    let mut s = create_3tier_rc();
+    let ((_row_id, _row_values), batch_id) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Rejected {
+                batch_id,
+                code: "permission_denied".to_string(),
+                reason: "Alice cannot publish this row".to_string(),
+            },
+        },
+    });
+    s.a.immediate_tick();
+
+    let mut receiver =
+        s.a.wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+            .unwrap();
+    match receiver.try_recv() {
+        Ok(Some(Err(rejection))) => {
+            assert_eq!(rejection.batch_id, batch_id);
+            assert_eq!(rejection.code, "permission_denied");
+            assert_eq!(rejection.reason, "Alice cannot publish this row");
+        }
+        other => panic!("expected rejected batch wait, got {other:?}"),
+    }
+    assert!(
+        s.a.drain_mutation_error_events().is_empty(),
+        "wait_for_batch should suppress a queued but undelivered mutation error"
+    );
 }
 
 #[test]

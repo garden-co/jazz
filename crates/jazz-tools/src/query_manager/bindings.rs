@@ -18,7 +18,7 @@ use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::row_format::decode_row;
 use crate::row_histories::BatchId;
-use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
+use crate::runtime_core::{MutationErrorEvent, ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{DurabilityTier, QueryPropagation};
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -319,6 +319,14 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
 
 pub fn serialize_local_batch_records(records: &[LocalBatchRecord]) -> JsonValue {
     JsonValue::Array(records.iter().map(serialize_local_batch_record).collect())
+}
+
+pub fn serialize_mutation_error_event(event: &MutationErrorEvent) -> JsonValue {
+    json!({
+        "code": event.code.as_str(),
+        "reason": event.reason.as_str(),
+        "batch": serialize_local_batch_record(&event.batch),
+    })
 }
 
 pub fn default_read_durability_options(tier: Option<DurabilityTier>) -> ReadDurabilityOptions {
