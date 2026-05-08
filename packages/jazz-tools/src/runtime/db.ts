@@ -30,6 +30,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   runInBatch,
+  Scoped,
 } from "./client.js";
 import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
 import { WasmRuntimeModule } from "./wasm-runtime-module.js";
@@ -397,34 +398,22 @@ export interface ColumnTransform {
 
 export type ColumnTransformMap = Record<string, ColumnTransform>;
 
-type DbTransactionBinding = {
+type DbBatchHandleBinding = {
   client: JazzClient;
-  runtimeTransaction: RuntimeTransaction;
+  runtimeHandle: RuntimeTransaction;
 };
+type AnyDbBatchHandle = DbBatchHandleBase<RuntimeTransaction | RuntimeDirectBatch>;
 
-type DbDirectBatchBinding = {
-  client: JazzClient;
-  runtimeBatch: RuntimeDirectBatch;
-};
+const dbBatchHandleBindings = new WeakMap<AnyDbBatchHandle, DbBatchHandleBinding>();
 
-const dbTransactionBindings = new WeakMap<DbTransaction, DbTransactionBinding>();
-const dbDirectBatchBindings = new WeakMap<DbDirectBatch, DbDirectBatchBinding>();
-
-function getDbTransactionBinding(
-  transaction: DbTransaction,
+function getDbBatchHandleBinding(
+  handle: AnyDbBatchHandle,
   operation: string,
-): DbTransactionBinding {
-  const binding = dbTransactionBindings.get(transaction);
+  bindingName: "DbTransaction" | "DbDirectBatch",
+): DbBatchHandleBinding {
+  const binding = dbBatchHandleBindings.get(handle);
   if (!binding) {
-    throw new Error(`DbTransaction.${operation}() requires at least one table operation first`);
-  }
-  return binding;
-}
-
-function getDbDirectBatchBinding(batch: DbDirectBatch, operation: string): DbDirectBatchBinding {
-  const binding = dbDirectBatchBindings.get(batch);
-  if (!binding) {
-    throw new Error(`DbDirectBatch.${operation}() requires at least one table operation first`);
+    throw new Error(`${bindingName}.${operation}() requires at least one table operation first`);
   }
   return binding;
 }
@@ -472,135 +461,127 @@ function transformInputColumns(
 }
 
 /**
- * Transactions group a set of writes that should settle together after an authority validates them.
- *
- * Data read and written through this transaction is scoped to it, and will only be
- * globally visible once it's committed using {@link DbTransaction.commit} and
- * accepted by the authority.
+ * Shared implementation for batches and transactions.
  */
-export class DbTransaction {
+abstract class DbBatchHandleBase<TRuntimeHandle extends RuntimeTransaction | RuntimeDirectBatch> {
   constructor(
+    private readonly bindingName: "DbTransaction" | "DbDirectBatch",
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
+    private readonly beginRuntimeHandle: (client: JazzClient) => TRuntimeHandle,
   ) {}
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbTransactionBinding {
-    const existingBinding = dbTransactionBindings.get(this);
+  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
+    const existingBinding = dbBatchHandleBindings.get(this);
     if (existingBinding) {
       assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
       return existingBinding;
     }
 
     const client = this.resolveClient(table._schema);
-    const runtimeTransaction = this.beginRuntimeTransaction(client);
-    const binding = { client, runtimeTransaction };
-    dbTransactionBindings.set(this, binding);
+    const runtimeHandle = this.beginRuntimeHandle(client);
+    const binding = { client, runtimeHandle };
+    dbBatchHandleBindings.set(this, binding);
     return binding;
   }
 
-  private bindQuery<T>(query: QueryBuilder<T>): DbTransactionBinding {
-    return this.bindTable(query as unknown as TableProxy<T, never>, "DbTransaction");
+  private bindQuery<T>(query: QueryBuilder<T>): DbBatchHandleBinding {
+    return this.bindTable(query as unknown as TableProxy<T, never>, this.bindingName);
   }
 
-  private requireRuntimeTransaction(operation: string): RuntimeTransaction {
-    return getDbTransactionBinding(this, operation).runtimeTransaction;
+  private requireRuntimeHandle(operation: string): TRuntimeHandle {
+    return getDbBatchHandleBinding(this, operation, this.bindingName)
+      .runtimeHandle as TRuntimeHandle;
   }
 
   batchId(): string {
-    return this.requireRuntimeTransaction("batchId").batchId();
+    return this.requireRuntimeHandle("batchId").batchId();
   }
 
   /**
-   * Commit the transaction. Data will be globally visible once it's accepted by the authority.
+   * Commit this batch.
    */
   commit(): WriteHandle {
-    return this.requireRuntimeTransaction("commit").commit();
+    return this.requireRuntimeHandle("commit").commit();
   }
 
   /**
-   * Roll back this transaction locally.
+   * Roll back this batch locally.
    *
-   * Pending rows remain pending, but this transaction handle can no longer be committed.
+   * Pending rows remain pending, but this batch can no longer be committed.
    *
-   * Only available on transactions created with {@link Db.beginTransaction}.
-   * When using {@link Db.transaction}, throw an error inside the callback
-   * to roll back the transaction.
+   * Only available on batches/transactions created with {@link Db.beginBatch}/{@link Db.beginTransaction}.
+   * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
    */
   rollback(): void {
-    this.requireRuntimeTransaction("rollback").rollback();
+    this.requireRuntimeHandle("rollback").rollback();
   }
 
   /**
    * Insert a new row into a table.
    *
-   * The insert is scoped to this transaction, and will only be globally visible
-   * once it's committed with {@link DbTransaction.commit}.
+   * The insert is scoped to this batch, and will only be globally visible
+   * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    this.bindTable(table, "DbTransaction");
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toInsertRecord(transformedData, table._schema, table._table);
-    const runtimeTransaction = this.requireRuntimeTransaction("insert");
-    const row = options
-      ? runtimeTransaction.create(table._table, values, options)
-      : runtimeTransaction.create(table._table, values);
+    const runtimeHandle = this.requireRuntimeHandle("insert");
+    const row = runtimeHandle.create(table._table, values, options);
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
   /**
    * Create or update a row with a caller-supplied id.
    *
-   * The upsert is scoped to this transaction, and will only be globally visible
-   * once it's committed with {@link DbTransaction.commit}.
+   * The upsert is scoped to this batch, and will only be globally visible
+   * once it's committed.
    */
   upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    this.bindTable(table, "DbTransaction");
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const values = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeTransaction("upsert").upsert(table._table, values, options);
+    this.requireRuntimeHandle("upsert").upsert(table._table, values, options);
   }
 
   /**
    * Update an existing row in a table.
    *
-   * The update is scoped to this transaction, and will only be globally visible
-   * once it's committed with {@link DbTransaction.commit}.
+   * The update is scoped to this batch, and will only be globally visible
+   * once it's committed.
    */
   update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.bindTable(table, "DbTransaction");
+    this.bindTable(table, this.bindingName);
     const transformedData = transformInputColumns(table, data);
     const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeTransaction("update").update(id, updates);
+    this.requireRuntimeHandle("update").update(id, updates);
   }
 
   /**
    * Delete an existing row from a table.
    *
-   * The delete is scoped to this transaction, and will only be globally visible
-   * once it's committed with {@link DbTransaction.commit}.
+   * The delete is scoped to this batch, and will only be globally visible
+   * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { runtimeTransaction } = this.bindTable(table, "DbTransaction");
-    runtimeTransaction.delete(id);
+    const { runtimeHandle } = this.bindTable(table, this.bindingName);
+    runtimeHandle.delete(id);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * Read data is scoped to this transaction.
+   * Read data is scoped to this batch.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, runtimeTransaction } = this.bindQuery(query);
+    const { client, runtimeHandle } = this.bindQuery(query);
     const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
     const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
-    const rows = await runtimeTransaction.query(
-      translateQuery(builderJson, planningSchema),
-      options,
-    );
+    const rows = await runtimeHandle.query(translateQuery(builderJson, planningSchema), options);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
       rows,
@@ -617,7 +598,7 @@ export class DbTransaction {
   /**
    * Execute a query and return the first matching row, or null.
    *
-   * Read data is scoped to this transaction.
+   * Read data is scoped to this batch.
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(query, options);
@@ -625,134 +606,56 @@ export class DbTransaction {
   }
 
   localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.requireRuntimeTransaction("localBatchRecord").localBatchRecord(batchId);
+    return this.requireRuntimeHandle("localBatchRecord").localBatchRecord(batchId);
   }
 
   localBatchRecords(): LocalBatchRecord[] {
-    return this.requireRuntimeTransaction("localBatchRecords").localBatchRecords();
+    return this.requireRuntimeHandle("localBatchRecords").localBatchRecords();
   }
 
   acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.requireRuntimeTransaction("acknowledgeRejectedBatch").acknowledgeRejectedBatch(
-      batchId,
-    );
+    return this.requireRuntimeHandle("acknowledgeRejectedBatch").acknowledgeRejectedBatch(batchId);
+  }
+}
+
+/**
+ * Transactions group a set of writes that should settle together after an authority validates them.
+ *
+ * Data read and written through this transaction is scoped to it, and will only be
+ * globally visible once it's committed using {@link DbTransaction.commit} and
+ * accepted by the authority.
+ */
+export class DbTransaction extends DbBatchHandleBase<RuntimeTransaction> {
+  constructor(
+    resolveClient: (schema: WasmSchema) => JazzClient,
+    beginRuntimeTransaction: (client: JazzClient) => RuntimeTransaction,
+  ) {
+    super("DbTransaction", resolveClient, beginRuntimeTransaction);
   }
 }
 
 /**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type DbTransactionScope = Omit<DbTransaction, "commit" | "rollback">;
+export type DbTransactionScope = Scoped<DbTransaction>;
 
 /**
- * Direct batches group a set of writes that should settle immediately, without an authority,
- * while still being part of the same batch.
+ * Direct batches group a set of writes that should become visible together on batch commit,
+ * without waiting for an authority approval.
  */
-export class DbDirectBatch {
-  private committedHandle: WriteHandle | null = null;
-
+export class DbDirectBatch extends DbBatchHandleBase<RuntimeDirectBatch> {
   constructor(
-    private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
-  ) {}
-
-  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbDirectBatchBinding {
-    const existingBinding = dbDirectBatchBindings.get(this);
-    if (existingBinding) {
-      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
-      return existingBinding;
-    }
-
-    const client = this.resolveClient(table._schema);
-    const runtimeBatch = this.beginRuntimeBatch(client);
-    const binding = { client, runtimeBatch };
-    dbDirectBatchBindings.set(this, binding);
-    return binding;
-  }
-
-  private requireRuntimeBatch(operation: string): RuntimeDirectBatch {
-    return getDbDirectBatchBinding(this, operation).runtimeBatch;
-  }
-
-  batchId(): string {
-    return this.requireRuntimeBatch("batchId").batchId();
-  }
-
-  private ensureActive(): void {
-    if (this.committedHandle) {
-      const batchId = dbDirectBatchBindings.get(this)?.runtimeBatch.batchId() ?? "unbound";
-      throw new Error(`Direct batch ${batchId} is already committed`);
-    }
-  }
-
-  /**
-   * Commit the direct batch. Data is visible optimistically once committed and
-   * can be waited on through the returned handle.
-   *
-   * Only available on transactions created with {@link Db.beginTransaction}.
-   * When using {@link Db.transaction}, the transaction is committed automatically
-   * once the callback finishes running.
-   */
-  commit(): WriteHandle {
-    if (this.committedHandle) {
-      return this.committedHandle;
-    }
-    const handle = this.requireRuntimeBatch("commit").commit();
-    this.committedHandle = handle;
-    return handle;
-  }
-
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    this.ensureActive();
-    this.bindTable(table, "DbDirectBatch");
-    const transformedData = transformInputColumns(table, data);
-    const values = toInsertRecord(transformedData, table._schema, table._table);
-    const runtimeBatch = this.requireRuntimeBatch("insert");
-    const row = options
-      ? runtimeBatch.create(table._table, values, options)
-      : runtimeBatch.create(table._table, values);
-    return transformOutputRow(table, transformRow(row, table._schema, table._table));
-  }
-
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    this.ensureActive();
-    this.bindTable(table, "DbDirectBatch");
-    const transformedData = transformInputColumns(table, data);
-    const values = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeBatch("upsert").upsert(table._table, values, options);
-  }
-
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.ensureActive();
-    this.bindTable(table, "DbDirectBatch");
-    const transformedData = transformInputColumns(table, data);
-    const updates = toUpdateRecord(transformedData, table._schema, table._table);
-    this.requireRuntimeBatch("update").update(id, updates);
-  }
-
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    this.ensureActive();
-    const { runtimeBatch } = this.bindTable(table, "DbDirectBatch");
-    runtimeBatch.delete(id);
-  }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.requireRuntimeBatch("localBatchRecord").localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.requireRuntimeBatch("localBatchRecords").localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.requireRuntimeBatch("acknowledgeRejectedBatch").acknowledgeRejectedBatch(batchId);
+    resolveClient: (schema: WasmSchema) => JazzClient,
+    beginRuntimeBatch: (client: JazzClient) => RuntimeDirectBatch,
+  ) {
+    super("DbDirectBatch", resolveClient, beginRuntimeBatch);
   }
 }
 
 /**
  * Batch object available inside {@link Db.batch}'s callback.
  */
-export type DbBatchScope = Omit<DbDirectBatch, "commit">;
+export type DbBatchScope = Scoped<DbDirectBatch>;
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -1833,7 +1736,7 @@ export class Db {
     return runInBatch(
       transaction,
       callback,
-      () => getDbTransactionBinding(transaction, "result").client,
+      () => getDbBatchHandleBinding(transaction, "result", "DbTransaction").client,
     );
   }
 
@@ -1868,7 +1771,11 @@ export class Db {
     callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginBatch();
-    return runInBatch(batch, callback, () => getDbDirectBatchBinding(batch, "result").client);
+    return runInBatch(
+      batch,
+      callback,
+      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
+    );
   }
 
   /**
@@ -2383,7 +2290,7 @@ class ClientBackedDb extends Db {
     return runInBatch(
       transaction,
       callback,
-      () => getDbTransactionBinding(transaction, "result").client,
+      () => getDbBatchHandleBinding(transaction, "result", "DbTransaction").client,
     );
   }
 
@@ -2403,7 +2310,11 @@ class ClientBackedDb extends Db {
     callback: (batch: DbBatchScope) => TResult | Promise<TResult>,
   ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
     const batch = this.beginBatch();
-    return runInBatch(batch, callback, () => getDbDirectBatchBinding(batch, "result").client);
+    return runInBatch(
+      batch,
+      callback,
+      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
+    );
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
