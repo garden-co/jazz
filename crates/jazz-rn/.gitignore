@@ -86,5 +86,7 @@ android/generated
 JazzRnFramework.xcframework/**
 
 cpp/generated/
+cpp/jazz_rn.cpp
+cpp/jazz_rn.hpp
 
 android/src/main/jniLibs/**

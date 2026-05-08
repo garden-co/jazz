@@ -850,16 +850,16 @@ function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Sco
   }) as Scoped<TBatchOrTx>;
 }
 
-function rollbackIfAvailable(batchOrTx: { rollback?: () => void }): void {
+function rollback(batchOrTx: { rollback: () => void }): void {
   try {
-    batchOrTx.rollback?.();
+    batchOrTx.rollback();
   } catch {
     // Preserve the original callback error.
   }
 }
 
 export function runInBatch<
-  TBatchOrTx extends { commit(): WriteHandle; rollback?: () => void },
+  TBatchOrTx extends { commit(): WriteHandle; rollback: () => void },
   TResult,
 >(
   batchOrTx: TBatchOrTx,
@@ -871,7 +871,7 @@ export function runInBatch<
     const scope = createBatchScope(batchOrTx);
     value = callback(scope);
   } catch (error) {
-    rollbackIfAvailable(batchOrTx);
+    rollback(batchOrTx);
     throw error;
   }
   const resultClient = typeof client === "function" ? client : () => client;
@@ -886,7 +886,7 @@ export function runInBatch<
         );
       },
       (error) => {
-        rollbackIfAvailable(batchOrTx);
+        rollback(batchOrTx);
         throw error;
       },
     ) as RunInBatchResult<TResult>;
@@ -941,7 +941,10 @@ abstract class BatchHandleBase {
 
   commit(): WriteHandle {
     this.ensureActive();
-    const handle = this.client.sealBatch(this.batchId());
+    const handle =
+      this.touchedRowIds.size === 0
+        ? this.client.completeEmptyBatch(this.batchId())
+        : this.client.sealBatch(this.batchId());
     this.status = "committed";
     return handle;
   }
@@ -1254,6 +1257,7 @@ export class JazzClient {
   private readonly waitHandledBatchIds = new Set<string>();
   private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
+  private readonly completedEmptyBatchIds = new Set<string>();
   private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
   private shutdownPromise: Promise<void> | null = null;
   private cachedRuntimeSchemaHash: string | null = null;
@@ -1627,6 +1631,11 @@ export class JazzClient {
 
   sealBatch(batchId: string): WriteHandle {
     this.runtime.sealBatch(batchId);
+    return new WriteHandle(batchId, this);
+  }
+
+  completeEmptyBatch(batchId: string): WriteHandle {
+    this.completedEmptyBatchIds.add(batchId);
     return new WriteHandle(batchId, this);
   }
 
@@ -2432,6 +2441,10 @@ export class JazzClient {
     const acknowledgedRejection = this.acknowledgedRejectedBatchErrors.get(batchId);
     if (acknowledgedRejection) {
       return { settled: true, error: acknowledgedRejection };
+    }
+
+    if (this.completedEmptyBatchIds.has(batchId)) {
+      return { settled: true, error: null };
     }
 
     const settlement = this.localBatchRecord(batchId)?.latestSettlement;

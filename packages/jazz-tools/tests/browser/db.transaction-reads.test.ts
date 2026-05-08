@@ -175,6 +175,39 @@ describe("db transaction reads browser integration", () => {
   });
 
   describe("db.transaction(cb)", () => {
+    it("returns the callback value when an async transaction only reads", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice checked the roadmap",
+        done: false,
+      });
+
+      await expect(
+        db.transaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).resolves.toMatchObject({ value: "no writes needed" });
+    });
+
+    it("rolls back cleanly when an async transaction reads then throws before writing", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice checked rollback",
+        done: false,
+      });
+      const error = new Error("no write transaction failed");
+
+      await expect(
+        db.transaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          throw error;
+        }),
+      ).rejects.toBe(error);
+
+      await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([existingTodo]);
+    });
+
     it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
       const txResult = db.transaction((tx) => {
         return tx.insert(todos, { title: "Batch", done: false });
@@ -266,6 +299,39 @@ describe("db batch reads browser integration", () => {
   });
 
   describe("db.batch(cb)", () => {
+    it("returns the callback value when an async batch only reads", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice reviewed the plan",
+        done: false,
+      });
+
+      await expect(
+        db.batch(async (batch) => {
+          const rows = await batch.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).resolves.toMatchObject({ value: "no writes needed" });
+    });
+
+    it("rolls back cleanly when an async batch reads then throws before writing", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice reviewed rollback",
+        done: false,
+      });
+      const error = new Error("no write batch failed");
+
+      await expect(
+        db.batch(async (batch) => {
+          const rows = await batch.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          throw error;
+        }),
+      ).rejects.toBe(error);
+
+      await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([existingTodo]);
+    });
+
     it("commits changes once the callback resolves", async () => {
       const batchResult = db.batch((batch) => {
         return batch.insert(todos, { title: "Batch", done: false });
