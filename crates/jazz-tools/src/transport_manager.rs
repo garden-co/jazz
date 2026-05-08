@@ -8,6 +8,7 @@ use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId, Sy
 use futures::channel::mpsc;
 
 pub const SYNC_PROTOCOL_VERSION: u32 = 2;
+const MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME: usize = 256;
 
 pub trait TickNotifier: 'static {
     fn notify(&self);
@@ -455,6 +456,76 @@ pub(crate) enum HandshakeResult {
 
 /// Handshake helpers shared between the Tokio and WASM run loops.
 impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, T> {
+    fn trace_outbound_payload(&self, payload: &SyncPayload) {
+        match payload {
+            crate::sync_manager::types::SyncPayload::QuerySubscription {
+                query_id,
+                query,
+                propagation,
+                ..
+            } => {
+                tracing::trace!(
+                    %self.server_id,
+                    query_id = query_id.0,
+                    table = %query.table,
+                    ?propagation,
+                    "jazz trace transport socket send query subscription"
+                );
+            }
+            crate::sync_manager::types::SyncPayload::QuerySettled {
+                query_id,
+                tier,
+                scope,
+                through_seq,
+            } => {
+                tracing::trace!(
+                    %self.server_id,
+                    query_id = query_id.0,
+                    ?tier,
+                    scope_len = scope.len(),
+                    through_seq,
+                    "jazz trace transport socket send query settled"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn drain_outbound_payload_batch(&mut self, first: OutboxEntry) -> Vec<SyncPayload> {
+        self.trace_outbound_payload(&first.payload);
+        let mut payloads = Vec::with_capacity(MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME);
+        payloads.push(first.payload);
+
+        while payloads.len() < MAX_OUTBOUND_SYNC_PAYLOADS_PER_FRAME {
+            match self.outbox_rx.try_recv() {
+                Ok(entry) => {
+                    self.trace_outbound_payload(&entry.payload);
+                    payloads.push(entry.payload);
+                }
+                Err(_) => break,
+            }
+        }
+
+        payloads
+    }
+
+    fn encode_outbound_payload_batch(&self, payloads: Vec<SyncPayload>) -> Option<Vec<u8>> {
+        if payloads.len() == 1 {
+            let payload = payloads.into_iter().next()?;
+            serde_json::to_vec(&OutboxEntry {
+                destination: crate::sync_manager::types::Destination::Server(self.server_id),
+                payload,
+            })
+            .ok()
+        } else {
+            serde_json::to_vec(&crate::transport_protocol::SyncBatchRequest {
+                payloads,
+                client_id: self.client_id,
+            })
+            .ok()
+        }
+    }
+
     /// Build the length-prefixed handshake frame from the current client identity, auth,
     /// and the latest catalogue + declared schema hashes known to the caller.
     fn build_handshake_frame(&self) -> Vec<u8> {
@@ -777,39 +848,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return ConnectedExit::Shutdown; };
-                    match &entry.payload {
-                        crate::sync_manager::types::SyncPayload::QuerySubscription {
-                            query_id,
-                            query,
-                            propagation,
-                            ..
-                        } => {
-                            tracing::trace!(
-                                %self.server_id,
-                                query_id = query_id.0,
-                                table = %query.table,
-                                ?propagation,
-                                "jazz trace transport socket send query subscription"
-                            );
-                        }
-                        crate::sync_manager::types::SyncPayload::QuerySettled {
-                            query_id,
-                            tier,
-                            scope,
-                            through_seq,
-                        } => {
-                            tracing::trace!(
-                                %self.server_id,
-                                query_id = query_id.0,
-                                ?tier,
-                                scope_len = scope.len(),
-                                through_seq,
-                                "jazz trace transport socket send query settled"
-                            );
-                        }
-                        _ => {}
-                    }
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
+                    let payloads = self.drain_outbound_payload_batch(entry);
+                    let Some(bytes) = self.encode_outbound_payload_batch(payloads) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return ConnectedExit::NetworkError; }
                 }
@@ -996,39 +1036,8 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return WasmConnectedExit::Shutdown; };
-                    match &entry.payload {
-                        crate::sync_manager::types::SyncPayload::QuerySubscription {
-                            query_id,
-                            query,
-                            propagation,
-                            ..
-                        } => {
-                            tracing::trace!(
-                                %self.server_id,
-                                query_id = query_id.0,
-                                table = %query.table,
-                                ?propagation,
-                                "jazz trace transport socket send query subscription"
-                            );
-                        }
-                        crate::sync_manager::types::SyncPayload::QuerySettled {
-                            query_id,
-                            tier,
-                            scope,
-                            through_seq,
-                        } => {
-                            tracing::trace!(
-                                %self.server_id,
-                                query_id = query_id.0,
-                                ?tier,
-                                scope_len = scope.len(),
-                                through_seq,
-                                "jazz trace transport socket send query settled"
-                            );
-                        }
-                        _ => {}
-                    }
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
+                    let payloads = self.drain_outbound_payload_batch(entry);
+                    let Some(bytes) = self.encode_outbound_payload_batch(payloads) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return WasmConnectedExit::NetworkError; }
                 }

@@ -99,6 +99,10 @@ pub struct SyncManager {
 
     /// Batch fates to send to clients after a full inbox batch has been processed.
     pub(super) pending_client_batch_fates: HashMap<ClientId, HashSet<BatchId>>,
+    /// Durability acknowledgements already sent to an upstream server during
+    /// this connection. A large replay can deliver many rows from the same
+    /// sealed batch across several ticks, so outbox-local dedupe is not enough.
+    pub(super) sent_server_batch_fate_acks: HashSet<(ServerId, BatchId, DurabilityTier, bool)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -243,6 +247,7 @@ impl SyncManager {
             pending_query_rejections: Vec::new(),
             pending_batch_fates: Vec::new(),
             pending_client_batch_fates: HashMap::new(),
+            sent_server_batch_fate_acks: HashSet::new(),
         }
     }
 
@@ -487,6 +492,8 @@ impl SyncManager {
         self.pending_servers.remove(&server_id);
         self.pending_server_query_subscriptions
             .retain(|(id, _)| *id != server_id);
+        self.sent_server_batch_fate_acks
+            .retain(|(id, ..)| *id != server_id);
         let mut removed_query_ids = HashSet::new();
         self.remote_query_scopes
             .retain(|(remote_server_id, query_id), _| {

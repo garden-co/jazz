@@ -22,7 +22,7 @@ enum SealedBatchMode {
 }
 
 impl SyncManager {
-    fn queue_batch_durability_ack_to_server(
+    pub(super) fn queue_batch_durability_ack_to_server(
         &mut self,
         server_id: ServerId,
         tier: DurabilityTier,
@@ -34,6 +34,14 @@ impl SyncManager {
         }
 
         let is_transactional = matches!(row.state, RowState::VisibleTransactional);
+        if !self.sent_server_batch_fate_acks.insert((
+            server_id,
+            row.batch_id,
+            tier,
+            is_transactional,
+        )) {
+            return;
+        }
 
         for entry in self.outbox.iter_mut().rev() {
             if entry.destination != Destination::Server(server_id) {
