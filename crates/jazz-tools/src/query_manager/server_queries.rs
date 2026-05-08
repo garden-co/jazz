@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -700,14 +701,6 @@ impl QueryManager {
         })
     }
 
-    fn should_sync_policy_context_rows(
-        &self,
-        client_id: ClientId,
-        session: Option<&Session>,
-    ) -> bool {
-        self.client_bypasses_authorization_filtering(client_id, session)
-    }
-
     fn client_bypasses_authorization_filtering(
         &self,
         client_id: ClientId,
@@ -919,8 +912,6 @@ impl QueryManager {
                 continue;
             };
 
-            let sync_policy_context_rows =
-                self.should_sync_policy_context_rows(sub.client_id, session_for_policy.as_ref());
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
@@ -973,18 +964,16 @@ impl QueryManager {
                 .client_bypasses_authorization_filtering(sub.client_id, session_for_policy.as_ref())
             {
                 let result_scope = graph.sync_scope_object_ids();
-                Some(
-                    if sync_policy_context_rows || !policy_context_tables.is_empty() {
-                        Self::scope_with_policy_context_rows_for_tables(
-                            &result_scope,
-                            &policy_context_tables,
-                            &branches,
-                            storage_ref,
-                        )
-                    } else {
-                        result_scope
-                    },
-                )
+                Some(if !policy_context_tables.is_empty() {
+                    Self::scope_with_policy_context_rows_for_tables(
+                        &result_scope,
+                        &policy_context_tables,
+                        &branches,
+                        storage_ref,
+                    )
+                } else {
+                    result_scope
+                })
             } else {
                 self.authorized_scope_from_graph_if_available(
                     storage_ref,
@@ -1144,7 +1133,7 @@ impl QueryManager {
             let had_dirty_graph = sub.graph.has_dirty_nodes();
 
             // Row loader for this subscription
-            let new_scope = {
+            let new_scope: Option<Cow<'_, HashSet<(ObjectId, BranchName)>>> = {
                 {
                     let row_loader =
                         |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
@@ -1182,21 +1171,19 @@ impl QueryManager {
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
                 if self.client_bypasses_authorization_filtering(client_id, sub.session.as_ref()) {
-                    let result_scope = sub.graph.sync_scope_object_ids();
-                    Some(
-                        if self.should_sync_policy_context_rows(client_id, sub.session.as_ref())
-                            || !policy_context_tables.is_empty()
-                        {
-                            Self::scope_with_policy_context_rows_for_tables(
-                                &result_scope,
-                                &policy_context_tables,
-                                branches,
-                                storage,
-                            )
-                        } else {
-                            result_scope
-                        },
-                    )
+                    if !policy_context_tables.is_empty() {
+                        let result_scope = sub.graph.sync_scope_object_ids();
+                        Some(Cow::Owned(Self::scope_with_policy_context_rows_for_tables(
+                            &result_scope,
+                            &policy_context_tables,
+                            branches,
+                            storage,
+                        )))
+                    } else if let Some(scope) = sub.graph.sync_scope_object_ids_ref() {
+                        Some(Cow::Borrowed(scope))
+                    } else {
+                        Some(Cow::Owned(sub.graph.sync_scope_object_ids()))
+                    }
                 } else {
                     self.authorized_scope_from_graph_if_available(
                         storage,
@@ -1205,19 +1192,21 @@ impl QueryManager {
                         &branch_schema_map,
                         sub.session.as_ref(),
                     )
+                    .map(Cow::Owned)
                 }
             };
             if let Some(new_scope) = new_scope {
-                let scope_changed = new_scope != sub.last_scope;
+                let scope_changed = new_scope.as_ref() != &sub.last_scope;
                 if scope_changed {
+                    let owned_scope = new_scope.into_owned();
                     self.sync_manager.set_client_query_scope_with_storage(
                         storage,
                         client_id,
                         query_id,
-                        new_scope.clone(),
+                        owned_scope.clone(),
                         sub.session.clone(),
                     );
-                    sub.last_scope = new_scope.clone();
+                    sub.last_scope = owned_scope;
                 }
 
                 // Emit an authoritative QuerySettled once the scope for this
@@ -1241,14 +1230,14 @@ impl QueryManager {
                             %client_id,
                             query_id = query_id.0,
                             tier = ?settled_tier,
-                            scope_len = new_scope.len(),
+                            scope_len = sub.last_scope.len(),
                             "jazz trace server subscription settled"
                         );
                         self.sync_manager.emit_query_settled(
                             client_id,
                             query_id,
                             settled_tier,
-                            &new_scope,
+                            &sub.last_scope,
                         );
                     }
                 } else if scope_changed || had_dirty_graph {
