@@ -789,6 +789,15 @@ fn handle_shutdown(runtime: Option<&Rc<WasmRuntime>>, simulate_crash: bool) {
     if let Some(rt) = runtime {
         if simulate_crash {
             rt.flush_wal();
+        } else {
+            // Normal shutdown: drain any parked main/peer sync messages so
+            // their writes reach storage, then flush WAL so they survive a
+            // remount. Without this, pending entries delivered just before
+            // `Shutdown` (e.g. an in-flight write right before unmount) get
+            // dropped because the scheduled `batched_tick` (setTimeout(0))
+            // sits behind the `Shutdown` macrotask in the worker queue.
+            rt.batched_tick();
+            rt.flush_wal();
         }
         rt.install_noop_sync_sender();
         // (No forwarder on worker side — `install_noop_sync_sender` below
