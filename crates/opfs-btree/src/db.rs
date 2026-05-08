@@ -1049,29 +1049,25 @@ impl<F: SyncFile> OpfsBTree<F> {
             )));
         }
 
-        let file_len = self.file.len()?;
-        let page_offset = page_id
-            .checked_mul(self.options.page_size as u64)
-            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
-        let available_pages = file_len
-            .saturating_sub(page_offset)
-            .checked_div(self.options.page_size as u64)
-            .unwrap_or(0);
-        if available_pages == 0 {
-            return Err(BTreeError::Io(format!(
-                "unexpected eof: page {} at offset {} beyond file length {}",
-                page_id, page_offset, file_len
+        let file_pages = self.file.len()? / self.options.page_size as u64;
+        let readable_pages = self.total_pages.min(file_pages);
+        if page_id >= readable_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "page id {} out of bounds for persisted pages {}",
+                page_id, readable_pages
             )));
         }
 
-        let run_pages = (self.total_pages - page_id)
-            .min(available_pages)
-            .min(self.options.read_coalesce_pages as u64) as usize;
+        let run_pages =
+            (readable_pages - page_id).min(self.options.read_coalesce_pages as u64) as usize;
         let run_bytes = run_pages
             .checked_mul(self.options.page_size)
             .ok_or_else(|| BTreeError::Io("read run size overflow".to_string()))?;
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
         let mut raw = vec![0u8; run_bytes];
-        self.file.read_exact_at(page_offset, &mut raw)?;
+        self.file.read_exact_at(offset, &mut raw)?;
         let allowance = self.max_cached_pages() / 4;
 
         for i in 0..run_pages {
@@ -2211,6 +2207,33 @@ mod tests {
             reopened.get(b"k00000").expect("get"),
             Some(b"value".to_vec())
         );
+    }
+
+    #[test]
+    fn coalesced_read_stops_at_file_len_after_uncheckpointed_growth() {
+        let file = MemoryFile::new();
+        let mut options = small_options();
+        options.read_coalesce_pages = 4;
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"alice", b"first").expect("put");
+        tree.checkpoint().expect("checkpoint");
+
+        let root_page_id = tree.root_page_id.expect("root page");
+        assert_eq!(
+            file.len().expect("file len") / options.page_size as u64,
+            tree.total_pages,
+            "checkpoint should extend the file through total_pages"
+        );
+
+        for _ in 0..3 {
+            let _ = tree.alloc_page();
+        }
+        tree.remove_page(root_page_id);
+
+        tree.ensure_page_loaded(root_page_id)
+            .expect("coalesced read should not cross the persisted file length");
+        assert!(tree.pages.contains_key(&root_page_id));
     }
 
     #[test]
