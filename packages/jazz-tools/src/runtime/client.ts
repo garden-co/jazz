@@ -1300,7 +1300,7 @@ export class JazzClient {
     defaultDurabilityTier: DurabilityTier,
     runtimeOptions?: ConnectSyncRuntimeOptions,
   ) {
-    this.runtime = this.wrapRuntime(runtime);
+    this.runtime = runtime;
     this.scheduler = getScheduler();
     this.context = context;
     this.defaultDurabilityTier = defaultDurabilityTier;
@@ -1316,18 +1316,6 @@ export class JazzClient {
 
     this.runtime.onMutationError((event) => {
       this.queueMutationError(event);
-    });
-  }
-
-  private wrapRuntime(runtime: Runtime): Runtime {
-    return new Proxy(runtime, {
-      get: (target, property, receiver) => {
-        const value = Reflect.get(target, property, receiver);
-        if (typeof value === "function") {
-          return value.bind(target);
-        }
-        return value;
-      },
     });
   }
 
@@ -2490,28 +2478,29 @@ export class JazzClient {
     this.acknowledgeRejectedBatchInternal(batchId);
   }
 
-  waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+  async waitForBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     const outcome = this.batchWaitOutcome(batchId, tier);
     if (outcome.settled) {
-      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
+      if (outcome.error) {
+        throw outcome.error;
+      }
+      return;
     }
 
     this.waitHandledBatchIds.add(batchId);
 
-    return Promise.resolve()
-      .then(() => this.runtime.waitForBatch(batchId, tier))
-      .then(() => {
+    try {
+      await this.runtime.waitForBatch(batchId, tier);
+      this.waitHandledBatchIds.delete(batchId);
+    } catch (error) {
+      const normalizedError = this.normalizeBatchWaitError(batchId, error);
+      if (normalizedError instanceof PersistedWriteRejectedError) {
+        this.acknowledgeRejectedBatchInternal(batchId);
+      } else {
         this.waitHandledBatchIds.delete(batchId);
-      })
-      .catch((error) => {
-        const normalizedError = this.normalizeBatchWaitError(batchId, error);
-        if (normalizedError instanceof PersistedWriteRejectedError) {
-          this.acknowledgeRejectedBatchInternal(batchId);
-        } else {
-          this.waitHandledBatchIds.delete(batchId);
-        }
-        throw normalizedError;
-      });
+      }
+      throw normalizedError;
+    }
   }
 
   /**
