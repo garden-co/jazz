@@ -94,6 +94,16 @@ impl Storage for MemoryStorage {
         self.cache_namespace
     }
 
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        let mut rows = self
+            .row_locators
+            .iter()
+            .map(|(object_id, locator)| (*object_id, locator.clone()))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
+    }
+
     fn apply_prepared_row_mutation(
         &mut self,
         table: &str,
@@ -298,20 +308,8 @@ impl Storage for MemoryStorage {
         locator: Option<&RowLocator>,
     ) -> Result<(), StorageError> {
         if let Some(locator) = locator {
-            self.ensure_cached_raw_table_header(
-                ROW_LOCATOR_TABLE,
-                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, ROW_LOCATOR_STORAGE_FORMAT_V1),
-            )?;
-            let locator_bytes = encode_row_locator(locator)?;
-            self.raw_tables
-                .entry(ROW_LOCATOR_TABLE.to_string())
-                .or_default()
-                .insert(metadata_raw_key(id), locator_bytes);
             self.row_locators.insert(id, locator.clone());
         } else {
-            if let Some(rows) = self.raw_tables.get_mut(ROW_LOCATOR_TABLE) {
-                rows.remove(&metadata_raw_key(id));
-            }
             self.row_locators.remove(&id);
         }
 
