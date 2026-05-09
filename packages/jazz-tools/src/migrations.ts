@@ -18,13 +18,12 @@ import type {
 } from "./schema.js";
 import type {
   CompactSchema,
-  DefinedTable,
   Schema as AppSchema,
   SchemaDefinition,
   Simplify,
   TableDefinition,
 } from "./typed-app.js";
-import { unwrapTableDefinition } from "./typed-app.js";
+import { DefinedTable, unwrapTableDefinition } from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -527,22 +526,27 @@ function tableDefinitionToAst(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): SchemaAstTable {
   const columnsDefinition = unwrapTableDefinition(definition);
+  const indexedColumns =
+    definition instanceof DefinedTable && definition.indexedColumns
+      ? [...definition.indexedColumns]
+      : undefined;
   return {
     name: tableName,
     columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
       assertUserColumnNameAllowed(columnName);
       return builder._build(columnName);
     }),
+    ...(indexedColumns ? { indexedColumns } : {}),
   };
 }
 
 function normalizeSchemaDefinition(
   definition: SchemaDefinition | AppSchema<any>,
-): Record<string, TableDefinition> {
+): Record<string, TableDefinition | DefinedTable<TableDefinition>> {
   return Object.fromEntries(
     Object.entries(definition as SchemaDefinition).map(([tableName, tableDefinition]) => [
       tableName,
-      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
+      tableDefinition as TableDefinition | DefinedTable<TableDefinition>,
     ]),
   );
 }

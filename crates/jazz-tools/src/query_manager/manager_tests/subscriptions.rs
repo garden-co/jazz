@@ -34,6 +34,66 @@ fn subscription_updates_after_insert_and_process() {
 }
 
 #[test]
+fn unindexed_where_predicate_falls_back_to_id_scan() {
+    let sync_manager = SyncManager::new();
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["score"])
+            .build(),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+    qm.take_updates();
+
+    assert!(
+        storage
+            .index_lookup(
+                "users",
+                "name",
+                qm.current_branch().as_str(),
+                &Value::Text("Alice".into())
+            )
+            .is_empty(),
+        "indexOnly should avoid maintaining an index for omitted columns"
+    );
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    let values = decode_row(
+        &qm.schema[&TableName::new("users")].columns,
+        &updates[0].delta.added[0].data,
+    )
+    .unwrap();
+    assert_eq!(values[0], Value::Text("Alice".into()));
+}
+
+#[test]
 fn settled_clean_subscription_does_not_request_visibility_recompute_on_idle_process() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();

@@ -17,7 +17,7 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V5 as u8;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V6 as u8;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -36,6 +36,8 @@ enum SchemaEncodingVersion {
     V4 = 4,
     // v5 schemas include column merge strategies.
     V5 = 5,
+    // v6 schemas include per-table indexed-column overrides.
+    V6 = 6,
 }
 
 impl SchemaEncodingVersion {
@@ -46,6 +48,7 @@ impl SchemaEncodingVersion {
             3 => Some(Self::V3),
             4 => Some(Self::V4),
             5 => Some(Self::V5),
+            6 => Some(Self::V6),
             _ => None,
         }
     }
@@ -59,11 +62,15 @@ impl SchemaEncodingVersion {
     }
 
     fn has_column_defaults(self) -> bool {
-        matches!(self, Self::V4 | Self::V5)
+        matches!(self, Self::V4 | Self::V5 | Self::V6)
     }
 
     fn has_column_merge_strategies(self) -> bool {
-        matches!(self, Self::V5)
+        matches!(self, Self::V5 | Self::V6)
+    }
+
+    fn has_indexed_columns(self) -> bool {
+        matches!(self, Self::V6)
     }
 }
 
@@ -121,7 +128,7 @@ impl std::error::Error for CatalogueEncodingError {}
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    let version = SchemaEncodingVersion::V5;
+    let version = SchemaEncodingVersion::V6;
     buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
@@ -188,6 +195,9 @@ pub fn decode_table_descriptor_from_schema(
         }
 
         skip_row_descriptor_with_version(data, &mut offset, version)?;
+        if version.has_indexed_columns() {
+            skip_indexed_columns(data, &mut offset)?;
+        }
         if version.has_table_policies() {
             decode_table_policies(data, &mut offset)?;
         }
@@ -204,6 +214,9 @@ fn encode_table_entry_with_version(
 ) {
     write_string(buf, name.as_str());
     encode_row_descriptor_with_version(buf, &schema.columns, version);
+    if version.has_indexed_columns() {
+        encode_indexed_columns(buf, schema.indexed_columns.as_deref());
+    }
     if version.has_table_policies() {
         encode_table_policies(buf, &schema.policies);
     }
@@ -216,6 +229,11 @@ fn decode_table_entry_with_version(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor_with_version(data, offset, version)?;
+    let indexed_columns = if version.has_indexed_columns() {
+        decode_indexed_columns(data, offset)?
+    } else {
+        None
+    };
     if version.has_table_policies() {
         // Legacy schema versions encoded policies inline, but structural schema
         // decode intentionally drops them now that permissions are catalogued
@@ -227,9 +245,57 @@ fn decode_table_entry_with_version(
         TableName::new(name),
         TableSchema {
             columns: descriptor,
+            indexed_columns,
             policies: TablePolicies::default(),
         },
     ))
+}
+
+fn encode_indexed_columns(buf: &mut Vec<u8>, indexed_columns: Option<&[ColumnName]>) {
+    match indexed_columns {
+        None => write_u32(buf, u32::MAX),
+        Some(columns) => {
+            write_u32(buf, columns.len() as u32);
+            let mut columns: Vec<_> = columns.iter().map(|column| column.as_str()).collect();
+            columns.sort_unstable();
+            for column in columns {
+                write_string(buf, column);
+            }
+        }
+    }
+}
+
+fn decode_indexed_columns(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<Option<Vec<ColumnName>>, CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    if count == u32::MAX {
+        return Ok(None);
+    }
+
+    let mut columns = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        columns.push(ColumnName::new(read_string(
+            data,
+            offset,
+            "indexed_column",
+        )?));
+    }
+    Ok(Some(columns))
+}
+
+fn skip_indexed_columns(data: &[u8], offset: &mut usize) -> Result<(), CatalogueEncodingError> {
+    let count = read_u32(data, offset)?;
+    if count == u32::MAX {
+        return Ok(());
+    }
+
+    for _ in 0..count {
+        let len = read_u32(data, offset)? as usize;
+        read_bytes(data, offset, len)?;
+    }
+    Ok(())
 }
 
 fn decode_schema_with_version(
@@ -892,6 +958,7 @@ fn decode_table_schema(
     let descriptor = decode_row_descriptor(data, offset)?;
     Ok(TableSchema {
         columns: descriptor,
+        indexed_columns: None,
         policies: TablePolicies::default(),
     })
 }
@@ -904,6 +971,7 @@ fn decode_table_schema_v1(
     decode_table_policies(data, offset)?;
     Ok(TableSchema {
         columns: descriptor,
+        indexed_columns: None,
         policies: TablePolicies::default(),
     })
 }
@@ -2090,6 +2158,57 @@ mod tests {
         let column = table.columns.column("value").expect("counter column");
 
         assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
+    }
+
+    #[test]
+    fn schema_roundtrip_preserves_indexed_columns() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .index_only(["done"]),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
+
+        let decoded = decode_schema(&encoded).unwrap();
+        let todos = decoded
+            .get(&TableName::new("todos"))
+            .expect("decoded todos table");
+        assert_eq!(todos.indexed_columns, Some(vec![ColumnName::new("done")]));
+    }
+
+    #[test]
+    fn table_descriptor_lookup_skips_indexed_column_metadata() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("a")
+                    .column("name", ColumnType::Text)
+                    .index_only(["name"]),
+            )
+            .table(
+                TableSchema::builder("b")
+                    .column("done", ColumnType::Boolean)
+                    .column("count", ColumnType::Integer),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let descriptor = decode_table_descriptor_from_schema(&encoded, "b")
+            .unwrap()
+            .expect("descriptor for b");
+
+        assert_eq!(
+            descriptor
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["done", "count"]
+        );
     }
 
     #[test]

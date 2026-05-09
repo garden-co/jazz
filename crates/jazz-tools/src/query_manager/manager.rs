@@ -28,8 +28,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, RowPolicyMode,
-    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
+    ColumnName, ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor,
+    RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
     build_ordered_delta_with_post_ids,
 };
 
@@ -273,6 +273,7 @@ pub(super) struct PolicyCheckState {
 #[derive(Debug)]
 pub(super) struct WriteTableCacheEntry {
     pub(super) descriptor: Arc<RowDescriptor>,
+    pub(super) indexed_columns: Option<Arc<Vec<ColumnName>>>,
     pub(super) row_layout: Arc<crate::row_format::CompiledRowLayout>,
     pub(super) row_locator: RowLocator,
     pub(super) insert_policy: Option<Arc<PolicyExpr>>,
@@ -1736,6 +1737,7 @@ impl QueryManager {
                     update.object_id,
                     old_data,
                     &descriptor,
+                    table_schema.indexed_columns.as_deref(),
                 );
             }
             if local_update {
@@ -1761,6 +1763,7 @@ impl QueryManager {
                         update.object_id,
                         &old_row.data,
                         &descriptor,
+                        table_schema.indexed_columns.as_deref(),
                     );
                 } else {
                     let _ = storage.index_remove(
@@ -1808,6 +1811,7 @@ impl QueryManager {
                     update.object_id,
                     new_data,
                     &descriptor,
+                    table_schema.indexed_columns.as_deref(),
                 )
             {
                 tracing::error!(
@@ -1840,6 +1844,7 @@ impl QueryManager {
                     update.object_id,
                     new_data,
                     &descriptor,
+                    table_schema.indexed_columns.as_deref(),
                 )
             {
                 tracing::error!(
@@ -1855,12 +1860,15 @@ impl QueryManager {
             && apply_index_mutations
             && let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
-                &branch_table,
-                branch,
+                super::indices::BranchIndexTarget {
+                    table: &branch_table,
+                    branch,
+                    descriptor: &descriptor,
+                    indexed_columns: table_schema.indexed_columns.as_deref(),
+                },
                 update.object_id,
                 &old_row.data,
                 new_data,
-                &descriptor,
             )
         {
             tracing::error!(

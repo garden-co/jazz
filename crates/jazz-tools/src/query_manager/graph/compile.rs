@@ -150,6 +150,25 @@ fn collect_magic_refs_from_disjuncts(
     refs
 }
 
+fn best_available_index_condition<'a>(
+    disjunct: &'a Conjunction,
+    table_schema: &crate::query_manager::types::TableSchema,
+) -> Option<&'a Condition> {
+    disjunct
+        .conditions
+        .iter()
+        .find(|condition| {
+            matches!(condition, Condition::Eq { .. })
+                && condition.is_index_scannable()
+                && table_schema.is_indexed_column(condition.column())
+        })
+        .or_else(|| {
+            disjunct.conditions.iter().find(|condition| {
+                condition.is_index_scannable() && table_schema.is_indexed_column(condition.column())
+            })
+        })
+}
+
 fn collect_magic_refs_from_project_columns(
     columns: Option<&[ProjectColumn]>,
 ) -> Vec<(Option<String>, MagicColumnKind)> {
@@ -576,7 +595,7 @@ impl QueryGraph {
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
                 let (scan_column, scan_condition) =
-                    if let Some(cond) = disjunct.best_index_condition() {
+                    if let Some(cond) = best_available_index_condition(disjunct, table_schema) {
                         let column = cond.column().to_string();
                         let scan_cond = condition_to_scan(cond);
                         (column, scan_cond)

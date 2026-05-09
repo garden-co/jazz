@@ -6,7 +6,7 @@ use crate::row_format::CompiledRowLayout;
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
+use super::types::{ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, TableName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IndexUpdateError {
@@ -28,6 +28,13 @@ impl std::error::Error for IndexUpdateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
     }
+}
+
+pub(super) struct BranchIndexTarget<'a> {
+    pub table: &'a str,
+    pub branch: &'a str,
+    pub descriptor: &'a RowDescriptor,
+    pub indexed_columns: Option<&'a [ColumnName]>,
 }
 
 impl QueryManager {
@@ -87,13 +94,24 @@ impl QueryManager {
         branch: &str,
         values: &[Value],
         descriptor: &RowDescriptor,
+        indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), QueryError> {
         for (column, value) in descriptor.columns.iter().zip(values.iter()) {
+            if !Self::should_index_column(indexed_columns, column) {
+                continue;
+            }
             if *value != Value::Null {
                 Self::validate_column_index_values(table, column, branch, value)?;
             }
         }
         Ok(())
+    }
+
+    fn should_index_column(
+        indexed_columns: Option<&[ColumnName]>,
+        column: &ColumnDescriptor,
+    ) -> bool {
+        indexed_columns.is_none_or(|columns| columns.contains(&column.name))
     }
 
     fn push_insert_column_index_values<'a>(
@@ -140,10 +158,17 @@ impl QueryManager {
         object_id: ObjectId,
         data: &[u8],
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
     ) -> Vec<IndexMutation<'a>> {
         let layout = crate::row_format::compiled_row_layout(descriptor);
         Self::index_mutations_for_insert_on_branch_with_layout(
-            table, branch, object_id, data, descriptor, &layout,
+            table,
+            branch,
+            object_id,
+            data,
+            descriptor,
+            indexed_columns,
+            &layout,
         )
     }
 
@@ -153,6 +178,7 @@ impl QueryManager {
         object_id: ObjectId,
         data: &[u8],
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
         layout: &CompiledRowLayout,
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Insert {
@@ -164,6 +190,9 @@ impl QueryManager {
         }];
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            if !Self::should_index_column(indexed_columns, col) {
+                continue;
+            }
             if let Ok(value) =
                 crate::row_format::decode_column_with_layout(descriptor, layout, data, col_idx)
                 && value != Value::Null
@@ -189,10 +218,14 @@ impl QueryManager {
         old_data: &[u8],
         new_data: &[u8],
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = Vec::new();
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            if !Self::should_index_column(indexed_columns, col) {
+                continue;
+            }
             let Ok(old_value) = decode_column(descriptor, old_data, col_idx) else {
                 continue;
             };
@@ -235,6 +268,7 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: &[u8],
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
@@ -245,6 +279,9 @@ impl QueryManager {
         }];
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            if !Self::should_index_column(indexed_columns, col) {
+                continue;
+            }
             if let Ok(value) = decode_column(descriptor, old_data, col_idx)
                 && value != Value::Null
             {
@@ -276,6 +313,7 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: Option<&[u8]>,
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![IndexMutation::Remove {
             table,
@@ -287,6 +325,9 @@ impl QueryManager {
 
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
+                if !Self::should_index_column(indexed_columns, col) {
+                    continue;
+                }
                 if let Ok(value) = decode_column(descriptor, data, col_idx)
                     && value != Value::Null
                 {
@@ -319,6 +360,7 @@ impl QueryManager {
         object_id: ObjectId,
         new_data: &[u8],
         descriptor: &'a RowDescriptor,
+        indexed_columns: Option<&'a [ColumnName]>,
     ) -> Vec<IndexMutation<'a>> {
         let mut mutations = vec![
             IndexMutation::Remove {
@@ -338,6 +380,9 @@ impl QueryManager {
         ];
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            if !Self::should_index_column(indexed_columns, col) {
+                continue;
+            }
             if let Ok(value) = decode_column(descriptor, new_data, col_idx)
                 && value != Value::Null
             {
@@ -363,9 +408,16 @@ impl QueryManager {
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
+        indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), IndexUpdateError> {
-        let mutations =
-            Self::index_mutations_for_insert_on_branch(table, branch, object_id, data, descriptor);
+        let mutations = Self::index_mutations_for_insert_on_branch(
+            table,
+            branch,
+            object_id,
+            data,
+            descriptor,
+            indexed_columns,
+        );
         for mutation in &mutations {
             if let Err(error) = storage.apply_index_mutations(std::slice::from_ref(mutation)) {
                 let column = match mutation {
@@ -385,15 +437,19 @@ impl QueryManager {
     /// Update indices when a row is updated on a specific branch.
     pub(super) fn update_indices_for_update_on_branch(
         storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
+        target: BranchIndexTarget<'_>,
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
-        descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_update_on_branch(
-            table, branch, object_id, old_data, new_data, descriptor,
+            target.table,
+            target.branch,
+            object_id,
+            old_data,
+            new_data,
+            target.descriptor,
+            target.indexed_columns,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -408,9 +464,15 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: &[u8],
         descriptor: &RowDescriptor,
+        indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_soft_delete_on_branch(
-            table, branch, object_id, old_data, descriptor,
+            table,
+            branch,
+            object_id,
+            old_data,
+            descriptor,
+            indexed_columns,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -425,9 +487,15 @@ impl QueryManager {
         object_id: ObjectId,
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
+        indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_hard_delete_on_branch(
-            table, branch, object_id, old_data, descriptor,
+            table,
+            branch,
+            object_id,
+            old_data,
+            descriptor,
+            indexed_columns,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -442,9 +510,15 @@ impl QueryManager {
         object_id: ObjectId,
         new_data: &[u8],
         descriptor: &RowDescriptor,
+        indexed_columns: Option<&[ColumnName]>,
     ) -> Result<(), QueryError> {
         let mutations = Self::index_mutations_for_undelete_on_branch(
-            table, branch, object_id, new_data, descriptor,
+            table,
+            branch,
+            object_id,
+            new_data,
+            descriptor,
+            indexed_columns,
         );
         storage
             .apply_index_mutations(&mutations)
@@ -490,6 +564,7 @@ impl QueryManager {
             row_id,
             Some(row_data),
             &table_schema.columns,
+            table_schema.indexed_columns.as_deref(),
         ) {
             tracing::warn!(
                 table,
@@ -551,6 +626,7 @@ impl QueryManager {
                 row_id,
                 restored_data,
                 &table_schema.columns,
+                table_schema.indexed_columns.as_deref(),
             )
         {
             tracing::warn!(
