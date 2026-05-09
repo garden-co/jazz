@@ -1018,8 +1018,8 @@ export class Db {
       return;
     }
     if (!options?.tier || options.tier === "local") {
-      await this.workerBridge.waitForUpstreamServerConnection();
-      if (client) {
+      if (client?.hasPendingHydratedBatchReconciliation("edge")) {
+        await this.workerBridge.waitForUpstreamServerConnection();
         await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
       }
       return;
