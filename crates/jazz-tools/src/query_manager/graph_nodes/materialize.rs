@@ -21,8 +21,8 @@ pub struct MaterializeNode {
     output_descriptor: TupleDescriptor,
     /// Descriptor for the row format (for backward compatibility).
     descriptor: RowDescriptor,
-    /// Which elements to materialize (indices).
-    elements_to_materialize: HashSet<usize>,
+    /// Which elements to materialize, indexed by tuple element position.
+    elements_to_materialize: Vec<bool>,
     /// Current materialized rows, keyed by ObjectId.
     rows: AHashMap<ObjectId, Row>,
     /// Current tuples (fully or partially materialized).
@@ -58,10 +58,16 @@ impl MaterializeNode {
             .clone()
             .with_materialized(&elements_to_materialize);
         let descriptor = input_desc.combined_descriptor();
+        let mut materialize_flags = vec![false; input_desc.element_count()];
+        for index in elements_to_materialize {
+            if let Some(flag) = materialize_flags.get_mut(index) {
+                *flag = true;
+            }
+        }
         Self {
             output_descriptor,
             descriptor,
-            elements_to_materialize,
+            elements_to_materialize: materialize_flags,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
             current_tuples_by_id: AHashMap::new(),
@@ -124,7 +130,10 @@ impl MaterializeNode {
 
     /// Check if an element should be materialized.
     fn should_materialize(&self, element_index: usize) -> bool {
-        self.elements_to_materialize.contains(&element_index)
+        self.elements_to_materialize
+            .get(element_index)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Mark an ID for content update checking (only if we're tracking it).
