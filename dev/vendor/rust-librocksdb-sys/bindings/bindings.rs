@@ -413,6 +413,21 @@ pub struct rocksdb_compactionfilterfactory_t {
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
+pub struct rocksdb_file_checksum_gen_factory_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_sst_partitioner_factory_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_table_properties_collector_factory_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct rocksdb_comparator_t {
     _unused: [u8; 0],
 }
@@ -668,6 +683,21 @@ pub struct rocksdb_wait_for_compact_options_t {
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
+pub struct rocksdb_slice_t {
+    pub data: *const libc::c_char,
+    pub size: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of rocksdb_slice_t"][::std::mem::size_of::<rocksdb_slice_t>() - 16usize];
+    ["Alignment of rocksdb_slice_t"][::std::mem::align_of::<rocksdb_slice_t>() - 8usize];
+    ["Offset of field: rocksdb_slice_t::data"]
+        [::std::mem::offset_of!(rocksdb_slice_t, data) - 0usize];
+    ["Offset of field: rocksdb_slice_t::size"]
+        [::std::mem::offset_of!(rocksdb_slice_t, size) - 8usize];
+};
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct rocksdb_flushjobinfo_t {
     _unused: [u8; 0],
 }
@@ -706,6 +736,56 @@ pub struct rocksdb_writestallcondition_t {
 pub struct rocksdb_memtableinfo_t {
     _unused: [u8; 0],
 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_compactionservice_scheduleresponse_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_compactionservice_jobinfo_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_compactionservice_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_compaction_service_options_override_t {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_open_and_compact_options_t {
+    _unused: [u8; 0],
+}
+pub type rocksdb_compaction_service_schedule_cb = ::std::option::Option<
+    unsafe extern "C" fn(
+        state: *mut libc::c_void,
+        info: *const rocksdb_compactionservice_jobinfo_t,
+        compaction_service_input: *const libc::c_char,
+        input_len: usize,
+    ) -> *mut rocksdb_compactionservice_scheduleresponse_t,
+>;
+pub type rocksdb_compaction_service_wait_cb = ::std::option::Option<
+    unsafe extern "C" fn(
+        state: *mut libc::c_void,
+        scheduled_job_id: *const libc::c_char,
+        result: *mut *mut libc::c_char,
+        result_len: *mut usize,
+    ) -> libc::c_int,
+>;
+pub type rocksdb_compaction_service_cancel_awaiting_jobs_cb =
+    ::std::option::Option<unsafe extern "C" fn(state: *mut libc::c_void)>;
+pub type rocksdb_compaction_service_on_installation_cb = ::std::option::Option<
+    unsafe extern "C" fn(
+        state: *mut libc::c_void,
+        scheduled_job_id: *const libc::c_char,
+        status: libc::c_int,
+    ),
+>;
 unsafe extern "C" {
     pub fn rocksdb_open(
         options: *const rocksdb_options_t,
@@ -1456,6 +1536,18 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn rocksdb_batched_multi_get_cf_slice(
+        db: *mut rocksdb_t,
+        options: *const rocksdb_readoptions_t,
+        column_family: *mut rocksdb_column_family_handle_t,
+        num_keys: usize,
+        keys_list: *const rocksdb_slice_t,
+        values: *mut *mut rocksdb_pinnableslice_t,
+        errs: *mut *mut libc::c_char,
+        sorted_input: bool,
+    );
+}
+unsafe extern "C" {
     pub fn rocksdb_key_may_exist(
         db: *mut rocksdb_t,
         options: *const rocksdb_readoptions_t,
@@ -1758,6 +1850,15 @@ unsafe extern "C" {
     pub fn rocksdb_iter_get_error(arg1: *const rocksdb_iterator_t, errptr: *mut *mut libc::c_char);
 }
 unsafe extern "C" {
+    pub fn rocksdb_iter_key_slice(iter: *const rocksdb_iterator_t) -> rocksdb_slice_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_iter_value_slice(iter: *const rocksdb_iterator_t) -> rocksdb_slice_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_iter_timestamp_slice(iter: *const rocksdb_iterator_t) -> rocksdb_slice_t;
+}
+unsafe extern "C" {
     pub fn rocksdb_iter_refresh(iter: *const rocksdb_iterator_t, errptr: *mut *mut libc::c_char);
 }
 unsafe extern "C" {
@@ -2039,6 +2140,31 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn rocksdb_writebatch_iterate_ld(
+        arg1: *mut rocksdb_writebatch_t,
+        state: *mut libc::c_void,
+        put: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                k: *const libc::c_char,
+                klen: usize,
+                v: *const libc::c_char,
+                vlen: usize,
+            ),
+        >,
+        deleted: ::std::option::Option<
+            unsafe extern "C" fn(arg1: *mut libc::c_void, k: *const libc::c_char, klen: usize),
+        >,
+        log_data: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                blob: *const libc::c_char,
+                blob_len: usize,
+            ),
+        >,
+    );
+}
+unsafe extern "C" {
     pub fn rocksdb_writebatch_iterate_cf(
         arg1: *mut rocksdb_writebatch_t,
         state: *mut libc::c_void,
@@ -2068,6 +2194,47 @@ unsafe extern "C" {
                 klen: usize,
                 v: *const libc::c_char,
                 vlen: usize,
+            ),
+        >,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_writebatch_iterate_cf_ld(
+        arg1: *mut rocksdb_writebatch_t,
+        state: *mut libc::c_void,
+        put_cf: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                cfid: u32,
+                k: *const libc::c_char,
+                klen: usize,
+                v: *const libc::c_char,
+                vlen: usize,
+            ),
+        >,
+        deleted_cf: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                cfid: u32,
+                k: *const libc::c_char,
+                klen: usize,
+            ),
+        >,
+        merge_cf: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                cfid: u32,
+                k: *const libc::c_char,
+                klen: usize,
+                v: *const libc::c_char,
+                vlen: usize,
+            ),
+        >,
+        log_data: ::std::option::Option<
+            unsafe extern "C" fn(
+                arg1: *mut libc::c_void,
+                blob: *const libc::c_char,
+                blob_len: usize,
             ),
         >,
     );
@@ -2570,6 +2737,12 @@ unsafe extern "C" {
         arg2: libc::c_int,
     );
 }
+unsafe extern "C" {
+    pub fn rocksdb_block_based_options_set_separate_key_value_in_data_block(
+        arg1: *mut rocksdb_block_based_table_options_t,
+        arg2: libc::c_uchar,
+    );
+}
 pub const rocksdb_block_based_table_index_type_binary_search: _bindgen_ty_2 = 0;
 pub const rocksdb_block_based_table_index_type_hash_search: _bindgen_ty_2 = 1;
 pub const rocksdb_block_based_table_index_type_two_level_index_search: _bindgen_ty_2 = 2;
@@ -2585,6 +2758,15 @@ pub const rocksdb_block_based_table_data_block_index_type_binary_search_and_hash
 pub type _bindgen_ty_3 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_block_based_options_set_data_block_index_type(
+        arg1: *mut rocksdb_block_based_table_options_t,
+        arg2: libc::c_int,
+    );
+}
+pub const rocksdb_block_based_table_index_block_search_type_binary: _bindgen_ty_4 = 0;
+pub const rocksdb_block_based_table_index_block_search_type_interpolation: _bindgen_ty_4 = 1;
+pub type _bindgen_ty_4 = libc::c_uint;
+unsafe extern "C" {
+    pub fn rocksdb_block_based_options_set_index_block_search_type(
         arg1: *mut rocksdb_block_based_table_options_t,
         arg2: libc::c_int,
     );
@@ -2625,11 +2807,11 @@ unsafe extern "C" {
         table_options: *mut rocksdb_block_based_table_options_t,
     );
 }
-pub const rocksdb_block_based_k_fallback_pinning_tier: _bindgen_ty_4 = 0;
-pub const rocksdb_block_based_k_none_pinning_tier: _bindgen_ty_4 = 1;
-pub const rocksdb_block_based_k_flush_and_similar_pinning_tier: _bindgen_ty_4 = 2;
-pub const rocksdb_block_based_k_all_pinning_tier: _bindgen_ty_4 = 3;
-pub type _bindgen_ty_4 = libc::c_uint;
+pub const rocksdb_block_based_k_fallback_pinning_tier: _bindgen_ty_5 = 0;
+pub const rocksdb_block_based_k_none_pinning_tier: _bindgen_ty_5 = 1;
+pub const rocksdb_block_based_k_flush_and_similar_pinning_tier: _bindgen_ty_5 = 2;
+pub const rocksdb_block_based_k_all_pinning_tier: _bindgen_ty_5 = 3;
+pub type _bindgen_ty_5 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_block_based_options_set_top_level_index_pinning_tier(
         arg1: *mut rocksdb_block_based_table_options_t,
@@ -2646,6 +2828,12 @@ unsafe extern "C" {
     pub fn rocksdb_block_based_options_set_unpartitioned_pinning_tier(
         arg1: *mut rocksdb_block_based_table_options_t,
         arg2: libc::c_int,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_block_based_options_set_block_align(
+        arg1: *mut rocksdb_block_based_table_options_t,
+        arg2: libc::c_uchar,
     );
 }
 unsafe extern "C" {
@@ -3119,6 +3307,12 @@ unsafe extern "C" {
     pub fn rocksdb_options_get_paranoid_checks(arg1: *mut rocksdb_options_t) -> libc::c_uchar;
 }
 unsafe extern "C" {
+    pub fn rocksdb_options_set_open_files_async(arg1: *mut rocksdb_options_t, arg2: libc::c_uchar);
+}
+unsafe extern "C" {
+    pub fn rocksdb_options_get_open_files_async(arg1: *mut rocksdb_options_t) -> libc::c_uchar;
+}
+unsafe extern "C" {
     pub fn rocksdb_options_set_db_paths(
         arg1: *mut rocksdb_options_t,
         path_values: *mut *const rocksdb_dbpath_t,
@@ -3169,6 +3363,46 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn rocksdb_logger_destroy(logger: *mut rocksdb_logger_t);
+}
+unsafe extern "C" {
+    pub fn rocksdb_file_checksum_gen_crc32c_factory_create()
+    -> *mut rocksdb_file_checksum_gen_factory_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_file_checksum_gen_factory_destroy(
+        factory: *mut rocksdb_file_checksum_gen_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_options_set_file_checksum_gen_factory(
+        arg1: *mut rocksdb_options_t,
+        arg2: *mut rocksdb_file_checksum_gen_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_sst_partitioner_fixed_prefix_factory_create(
+        prefix_len: usize,
+    ) -> *mut rocksdb_sst_partitioner_factory_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_sst_partitioner_factory_destroy(factory: *mut rocksdb_sst_partitioner_factory_t);
+}
+unsafe extern "C" {
+    pub fn rocksdb_options_set_sst_partitioner_factory(
+        arg1: *mut rocksdb_options_t,
+        arg2: *mut rocksdb_sst_partitioner_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_table_properties_collector_factory_destroy(
+        factory: *mut rocksdb_table_properties_collector_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_options_add_table_properties_collector_factory(
+        arg1: *mut rocksdb_options_t,
+        arg2: *mut rocksdb_table_properties_collector_factory_t,
+    );
 }
 unsafe extern "C" {
     pub fn rocksdb_options_set_write_buffer_size(arg1: *mut rocksdb_options_t, arg2: usize);
@@ -3424,14 +3658,14 @@ unsafe extern "C" {
         arg1: *mut rocksdb_options_t,
     ) -> u32;
 }
-pub const rocksdb_statistics_level_disable_all: _bindgen_ty_5 = 0;
-pub const rocksdb_statistics_level_except_tickers: _bindgen_ty_5 = 0;
-pub const rocksdb_statistics_level_except_histogram_or_timers: _bindgen_ty_5 = 1;
-pub const rocksdb_statistics_level_except_timers: _bindgen_ty_5 = 2;
-pub const rocksdb_statistics_level_except_detailed_timers: _bindgen_ty_5 = 3;
-pub const rocksdb_statistics_level_except_time_for_mutex: _bindgen_ty_5 = 4;
-pub const rocksdb_statistics_level_all: _bindgen_ty_5 = 5;
-pub type _bindgen_ty_5 = libc::c_uint;
+pub const rocksdb_statistics_level_disable_all: _bindgen_ty_6 = 0;
+pub const rocksdb_statistics_level_except_tickers: _bindgen_ty_6 = 0;
+pub const rocksdb_statistics_level_except_histogram_or_timers: _bindgen_ty_6 = 1;
+pub const rocksdb_statistics_level_except_timers: _bindgen_ty_6 = 2;
+pub const rocksdb_statistics_level_except_detailed_timers: _bindgen_ty_6 = 3;
+pub const rocksdb_statistics_level_except_time_for_mutex: _bindgen_ty_6 = 4;
+pub const rocksdb_statistics_level_all: _bindgen_ty_6 = 5;
+pub type _bindgen_ty_6 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_statistics_level(arg1: *mut rocksdb_options_t, level: libc::c_int);
 }
@@ -3446,17 +3680,6 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn rocksdb_options_get_skip_stats_update_on_db_open(
-        opt: *mut rocksdb_options_t,
-    ) -> libc::c_uchar;
-}
-unsafe extern "C" {
-    pub fn rocksdb_options_set_skip_checking_sst_file_sizes_on_db_open(
-        opt: *mut rocksdb_options_t,
-        val: libc::c_uchar,
-    );
-}
-unsafe extern "C" {
-    pub fn rocksdb_options_get_skip_checking_sst_file_sizes_on_db_open(
         opt: *mut rocksdb_options_t,
     ) -> libc::c_uchar;
 }
@@ -3527,9 +3750,9 @@ unsafe extern "C" {
         blob_cache: *mut rocksdb_cache_t,
     );
 }
-pub const rocksdb_prepopulate_blob_disable: _bindgen_ty_6 = 0;
-pub const rocksdb_prepopulate_blob_flush_only: _bindgen_ty_6 = 1;
-pub type _bindgen_ty_6 = libc::c_uint;
+pub const rocksdb_prepopulate_blob_disable: _bindgen_ty_7 = 0;
+pub const rocksdb_prepopulate_blob_flush_only: _bindgen_ty_7 = 1;
+pub type _bindgen_ty_7 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_prepopulate_blob_cache(
         opt: *mut rocksdb_options_t,
@@ -4048,26 +4271,26 @@ unsafe extern "C" {
     pub fn rocksdb_options_get_experimental_mempurge_threshold(arg1: *mut rocksdb_options_t)
     -> f64;
 }
-pub const rocksdb_tolerate_corrupted_tail_records_recovery: _bindgen_ty_7 = 0;
-pub const rocksdb_absolute_consistency_recovery: _bindgen_ty_7 = 1;
-pub const rocksdb_point_in_time_recovery: _bindgen_ty_7 = 2;
-pub const rocksdb_skip_any_corrupted_records_recovery: _bindgen_ty_7 = 3;
-pub type _bindgen_ty_7 = libc::c_uint;
+pub const rocksdb_tolerate_corrupted_tail_records_recovery: _bindgen_ty_8 = 0;
+pub const rocksdb_absolute_consistency_recovery: _bindgen_ty_8 = 1;
+pub const rocksdb_point_in_time_recovery: _bindgen_ty_8 = 2;
+pub const rocksdb_skip_any_corrupted_records_recovery: _bindgen_ty_8 = 3;
+pub type _bindgen_ty_8 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_wal_recovery_mode(arg1: *mut rocksdb_options_t, arg2: libc::c_int);
 }
 unsafe extern "C" {
     pub fn rocksdb_options_get_wal_recovery_mode(arg1: *mut rocksdb_options_t) -> libc::c_int;
 }
-pub const rocksdb_no_compression: _bindgen_ty_8 = 0;
-pub const rocksdb_snappy_compression: _bindgen_ty_8 = 1;
-pub const rocksdb_zlib_compression: _bindgen_ty_8 = 2;
-pub const rocksdb_bz2_compression: _bindgen_ty_8 = 3;
-pub const rocksdb_lz4_compression: _bindgen_ty_8 = 4;
-pub const rocksdb_lz4hc_compression: _bindgen_ty_8 = 5;
-pub const rocksdb_xpress_compression: _bindgen_ty_8 = 6;
-pub const rocksdb_zstd_compression: _bindgen_ty_8 = 7;
-pub type _bindgen_ty_8 = libc::c_uint;
+pub const rocksdb_no_compression: _bindgen_ty_9 = 0;
+pub const rocksdb_snappy_compression: _bindgen_ty_9 = 1;
+pub const rocksdb_zlib_compression: _bindgen_ty_9 = 2;
+pub const rocksdb_bz2_compression: _bindgen_ty_9 = 3;
+pub const rocksdb_lz4_compression: _bindgen_ty_9 = 4;
+pub const rocksdb_lz4hc_compression: _bindgen_ty_9 = 5;
+pub const rocksdb_xpress_compression: _bindgen_ty_9 = 6;
+pub const rocksdb_zstd_compression: _bindgen_ty_9 = 7;
+pub type _bindgen_ty_9 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_compression(arg1: *mut rocksdb_options_t, arg2: libc::c_int);
 }
@@ -4083,10 +4306,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn rocksdb_options_get_bottommost_compression(arg1: *mut rocksdb_options_t) -> libc::c_int;
 }
-pub const rocksdb_level_compaction: _bindgen_ty_9 = 0;
-pub const rocksdb_universal_compaction: _bindgen_ty_9 = 1;
-pub const rocksdb_fifo_compaction: _bindgen_ty_9 = 2;
-pub type _bindgen_ty_9 = libc::c_uint;
+pub const rocksdb_level_compaction: _bindgen_ty_10 = 0;
+pub const rocksdb_universal_compaction: _bindgen_ty_10 = 1;
+pub const rocksdb_fifo_compaction: _bindgen_ty_10 = 2;
+pub type _bindgen_ty_10 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_compaction_style(arg1: *mut rocksdb_options_t, arg2: libc::c_int);
 }
@@ -4156,12 +4379,12 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn rocksdb_options_get_wal_compression(opt: *mut rocksdb_options_t) -> libc::c_int;
 }
-pub const rocksdb_k_by_compensated_size_compaction_pri: _bindgen_ty_10 = 0;
-pub const rocksdb_k_oldest_largest_seq_first_compaction_pri: _bindgen_ty_10 = 1;
-pub const rocksdb_k_oldest_smallest_seq_first_compaction_pri: _bindgen_ty_10 = 2;
-pub const rocksdb_k_min_overlapping_ratio_compaction_pri: _bindgen_ty_10 = 3;
-pub const rocksdb_k_round_robin_compaction_pri: _bindgen_ty_10 = 4;
-pub type _bindgen_ty_10 = libc::c_uint;
+pub const rocksdb_k_by_compensated_size_compaction_pri: _bindgen_ty_11 = 0;
+pub const rocksdb_k_oldest_largest_seq_first_compaction_pri: _bindgen_ty_11 = 1;
+pub const rocksdb_k_oldest_smallest_seq_first_compaction_pri: _bindgen_ty_11 = 2;
+pub const rocksdb_k_min_overlapping_ratio_compaction_pri: _bindgen_ty_11 = 3;
+pub const rocksdb_k_round_robin_compaction_pri: _bindgen_ty_11 = 4;
+pub type _bindgen_ty_11 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_options_set_compaction_pri(arg1: *mut rocksdb_options_t, arg2: libc::c_int);
 }
@@ -4194,93 +4417,98 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn rocksdb_ratelimiter_destroy(arg1: *mut rocksdb_ratelimiter_t);
 }
-pub const rocksdb_uninitialized: _bindgen_ty_11 = 0;
-pub const rocksdb_disable: _bindgen_ty_11 = 1;
-pub const rocksdb_enable_count: _bindgen_ty_11 = 2;
-pub const rocksdb_enable_time_except_for_mutex: _bindgen_ty_11 = 3;
-pub const rocksdb_enable_time: _bindgen_ty_11 = 4;
-pub const rocksdb_out_of_bounds: _bindgen_ty_11 = 5;
-pub type _bindgen_ty_11 = libc::c_uint;
-pub const rocksdb_user_key_comparison_count: _bindgen_ty_12 = 0;
-pub const rocksdb_block_cache_hit_count: _bindgen_ty_12 = 1;
-pub const rocksdb_block_read_count: _bindgen_ty_12 = 2;
-pub const rocksdb_block_read_byte: _bindgen_ty_12 = 3;
-pub const rocksdb_block_read_time: _bindgen_ty_12 = 4;
-pub const rocksdb_block_checksum_time: _bindgen_ty_12 = 5;
-pub const rocksdb_block_decompress_time: _bindgen_ty_12 = 6;
-pub const rocksdb_get_read_bytes: _bindgen_ty_12 = 7;
-pub const rocksdb_multiget_read_bytes: _bindgen_ty_12 = 8;
-pub const rocksdb_iter_read_bytes: _bindgen_ty_12 = 9;
-pub const rocksdb_internal_key_skipped_count: _bindgen_ty_12 = 10;
-pub const rocksdb_internal_delete_skipped_count: _bindgen_ty_12 = 11;
-pub const rocksdb_internal_recent_skipped_count: _bindgen_ty_12 = 12;
-pub const rocksdb_internal_merge_count: _bindgen_ty_12 = 13;
-pub const rocksdb_get_snapshot_time: _bindgen_ty_12 = 14;
-pub const rocksdb_get_from_memtable_time: _bindgen_ty_12 = 15;
-pub const rocksdb_get_from_memtable_count: _bindgen_ty_12 = 16;
-pub const rocksdb_get_post_process_time: _bindgen_ty_12 = 17;
-pub const rocksdb_get_from_output_files_time: _bindgen_ty_12 = 18;
-pub const rocksdb_seek_on_memtable_time: _bindgen_ty_12 = 19;
-pub const rocksdb_seek_on_memtable_count: _bindgen_ty_12 = 20;
-pub const rocksdb_next_on_memtable_count: _bindgen_ty_12 = 21;
-pub const rocksdb_prev_on_memtable_count: _bindgen_ty_12 = 22;
-pub const rocksdb_seek_child_seek_time: _bindgen_ty_12 = 23;
-pub const rocksdb_seek_child_seek_count: _bindgen_ty_12 = 24;
-pub const rocksdb_seek_min_heap_time: _bindgen_ty_12 = 25;
-pub const rocksdb_seek_max_heap_time: _bindgen_ty_12 = 26;
-pub const rocksdb_seek_internal_seek_time: _bindgen_ty_12 = 27;
-pub const rocksdb_find_next_user_entry_time: _bindgen_ty_12 = 28;
-pub const rocksdb_write_wal_time: _bindgen_ty_12 = 29;
-pub const rocksdb_write_memtable_time: _bindgen_ty_12 = 30;
-pub const rocksdb_write_delay_time: _bindgen_ty_12 = 31;
-pub const rocksdb_write_pre_and_post_process_time: _bindgen_ty_12 = 32;
-pub const rocksdb_db_mutex_lock_nanos: _bindgen_ty_12 = 33;
-pub const rocksdb_db_condition_wait_nanos: _bindgen_ty_12 = 34;
-pub const rocksdb_merge_operator_time_nanos: _bindgen_ty_12 = 35;
-pub const rocksdb_read_index_block_nanos: _bindgen_ty_12 = 36;
-pub const rocksdb_read_filter_block_nanos: _bindgen_ty_12 = 37;
-pub const rocksdb_new_table_block_iter_nanos: _bindgen_ty_12 = 38;
-pub const rocksdb_new_table_iterator_nanos: _bindgen_ty_12 = 39;
-pub const rocksdb_block_seek_nanos: _bindgen_ty_12 = 40;
-pub const rocksdb_find_table_nanos: _bindgen_ty_12 = 41;
-pub const rocksdb_bloom_memtable_hit_count: _bindgen_ty_12 = 42;
-pub const rocksdb_bloom_memtable_miss_count: _bindgen_ty_12 = 43;
-pub const rocksdb_bloom_sst_hit_count: _bindgen_ty_12 = 44;
-pub const rocksdb_bloom_sst_miss_count: _bindgen_ty_12 = 45;
-pub const rocksdb_key_lock_wait_time: _bindgen_ty_12 = 46;
-pub const rocksdb_key_lock_wait_count: _bindgen_ty_12 = 47;
-pub const rocksdb_env_new_sequential_file_nanos: _bindgen_ty_12 = 48;
-pub const rocksdb_env_new_random_access_file_nanos: _bindgen_ty_12 = 49;
-pub const rocksdb_env_new_writable_file_nanos: _bindgen_ty_12 = 50;
-pub const rocksdb_env_reuse_writable_file_nanos: _bindgen_ty_12 = 51;
-pub const rocksdb_env_new_random_rw_file_nanos: _bindgen_ty_12 = 52;
-pub const rocksdb_env_new_directory_nanos: _bindgen_ty_12 = 53;
-pub const rocksdb_env_file_exists_nanos: _bindgen_ty_12 = 54;
-pub const rocksdb_env_get_children_nanos: _bindgen_ty_12 = 55;
-pub const rocksdb_env_get_children_file_attributes_nanos: _bindgen_ty_12 = 56;
-pub const rocksdb_env_delete_file_nanos: _bindgen_ty_12 = 57;
-pub const rocksdb_env_create_dir_nanos: _bindgen_ty_12 = 58;
-pub const rocksdb_env_create_dir_if_missing_nanos: _bindgen_ty_12 = 59;
-pub const rocksdb_env_delete_dir_nanos: _bindgen_ty_12 = 60;
-pub const rocksdb_env_get_file_size_nanos: _bindgen_ty_12 = 61;
-pub const rocksdb_env_get_file_modification_time_nanos: _bindgen_ty_12 = 62;
-pub const rocksdb_env_rename_file_nanos: _bindgen_ty_12 = 63;
-pub const rocksdb_env_link_file_nanos: _bindgen_ty_12 = 64;
-pub const rocksdb_env_lock_file_nanos: _bindgen_ty_12 = 65;
-pub const rocksdb_env_unlock_file_nanos: _bindgen_ty_12 = 66;
-pub const rocksdb_env_new_logger_nanos: _bindgen_ty_12 = 67;
-pub const rocksdb_number_async_seek: _bindgen_ty_12 = 68;
-pub const rocksdb_blob_cache_hit_count: _bindgen_ty_12 = 69;
-pub const rocksdb_blob_read_count: _bindgen_ty_12 = 70;
-pub const rocksdb_blob_read_byte: _bindgen_ty_12 = 71;
-pub const rocksdb_blob_read_time: _bindgen_ty_12 = 72;
-pub const rocksdb_blob_checksum_time: _bindgen_ty_12 = 73;
-pub const rocksdb_blob_decompress_time: _bindgen_ty_12 = 74;
-pub const rocksdb_internal_range_del_reseek_count: _bindgen_ty_12 = 75;
-pub const rocksdb_block_read_cpu_time: _bindgen_ty_12 = 76;
-pub const rocksdb_internal_merge_point_lookup_count: _bindgen_ty_12 = 77;
-pub const rocksdb_total_metric_count: _bindgen_ty_12 = 80;
+pub const rocksdb_uninitialized: _bindgen_ty_12 = 0;
+pub const rocksdb_disable: _bindgen_ty_12 = 1;
+pub const rocksdb_enable_count: _bindgen_ty_12 = 2;
+pub const rocksdb_enable_time_except_for_mutex: _bindgen_ty_12 = 3;
+pub const rocksdb_enable_time: _bindgen_ty_12 = 4;
+pub const rocksdb_out_of_bounds: _bindgen_ty_12 = 5;
 pub type _bindgen_ty_12 = libc::c_uint;
+pub const rocksdb_user_key_comparison_count: _bindgen_ty_13 = 0;
+pub const rocksdb_block_cache_hit_count: _bindgen_ty_13 = 1;
+pub const rocksdb_block_read_count: _bindgen_ty_13 = 2;
+pub const rocksdb_block_read_byte: _bindgen_ty_13 = 3;
+pub const rocksdb_block_read_time: _bindgen_ty_13 = 4;
+pub const rocksdb_block_checksum_time: _bindgen_ty_13 = 5;
+pub const rocksdb_block_decompress_time: _bindgen_ty_13 = 6;
+pub const rocksdb_get_read_bytes: _bindgen_ty_13 = 7;
+pub const rocksdb_multiget_read_bytes: _bindgen_ty_13 = 8;
+pub const rocksdb_iter_read_bytes: _bindgen_ty_13 = 9;
+pub const rocksdb_internal_key_skipped_count: _bindgen_ty_13 = 10;
+pub const rocksdb_internal_delete_skipped_count: _bindgen_ty_13 = 11;
+pub const rocksdb_internal_recent_skipped_count: _bindgen_ty_13 = 12;
+pub const rocksdb_internal_merge_count: _bindgen_ty_13 = 13;
+pub const rocksdb_get_snapshot_time: _bindgen_ty_13 = 14;
+pub const rocksdb_get_from_memtable_time: _bindgen_ty_13 = 15;
+pub const rocksdb_get_from_memtable_count: _bindgen_ty_13 = 16;
+pub const rocksdb_get_post_process_time: _bindgen_ty_13 = 17;
+pub const rocksdb_get_from_output_files_time: _bindgen_ty_13 = 18;
+pub const rocksdb_seek_on_memtable_time: _bindgen_ty_13 = 19;
+pub const rocksdb_seek_on_memtable_count: _bindgen_ty_13 = 20;
+pub const rocksdb_next_on_memtable_count: _bindgen_ty_13 = 21;
+pub const rocksdb_prev_on_memtable_count: _bindgen_ty_13 = 22;
+pub const rocksdb_seek_child_seek_time: _bindgen_ty_13 = 23;
+pub const rocksdb_seek_child_seek_count: _bindgen_ty_13 = 24;
+pub const rocksdb_seek_min_heap_time: _bindgen_ty_13 = 25;
+pub const rocksdb_seek_max_heap_time: _bindgen_ty_13 = 26;
+pub const rocksdb_seek_internal_seek_time: _bindgen_ty_13 = 27;
+pub const rocksdb_find_next_user_entry_time: _bindgen_ty_13 = 28;
+pub const rocksdb_write_wal_time: _bindgen_ty_13 = 29;
+pub const rocksdb_write_memtable_time: _bindgen_ty_13 = 30;
+pub const rocksdb_write_delay_time: _bindgen_ty_13 = 31;
+pub const rocksdb_write_pre_and_post_process_time: _bindgen_ty_13 = 32;
+pub const rocksdb_db_mutex_lock_nanos: _bindgen_ty_13 = 33;
+pub const rocksdb_db_condition_wait_nanos: _bindgen_ty_13 = 34;
+pub const rocksdb_merge_operator_time_nanos: _bindgen_ty_13 = 35;
+pub const rocksdb_read_index_block_nanos: _bindgen_ty_13 = 36;
+pub const rocksdb_read_filter_block_nanos: _bindgen_ty_13 = 37;
+pub const rocksdb_new_table_block_iter_nanos: _bindgen_ty_13 = 38;
+pub const rocksdb_new_table_iterator_nanos: _bindgen_ty_13 = 39;
+pub const rocksdb_block_seek_nanos: _bindgen_ty_13 = 40;
+pub const rocksdb_find_table_nanos: _bindgen_ty_13 = 41;
+pub const rocksdb_bloom_memtable_hit_count: _bindgen_ty_13 = 42;
+pub const rocksdb_bloom_memtable_miss_count: _bindgen_ty_13 = 43;
+pub const rocksdb_bloom_sst_hit_count: _bindgen_ty_13 = 44;
+pub const rocksdb_bloom_sst_miss_count: _bindgen_ty_13 = 45;
+pub const rocksdb_key_lock_wait_time: _bindgen_ty_13 = 46;
+pub const rocksdb_key_lock_wait_count: _bindgen_ty_13 = 47;
+pub const rocksdb_env_new_sequential_file_nanos: _bindgen_ty_13 = 48;
+pub const rocksdb_env_new_random_access_file_nanos: _bindgen_ty_13 = 49;
+pub const rocksdb_env_new_writable_file_nanos: _bindgen_ty_13 = 50;
+pub const rocksdb_env_reuse_writable_file_nanos: _bindgen_ty_13 = 51;
+pub const rocksdb_env_new_random_rw_file_nanos: _bindgen_ty_13 = 52;
+pub const rocksdb_env_new_directory_nanos: _bindgen_ty_13 = 53;
+pub const rocksdb_env_file_exists_nanos: _bindgen_ty_13 = 54;
+pub const rocksdb_env_get_children_nanos: _bindgen_ty_13 = 55;
+pub const rocksdb_env_get_children_file_attributes_nanos: _bindgen_ty_13 = 56;
+pub const rocksdb_env_delete_file_nanos: _bindgen_ty_13 = 57;
+pub const rocksdb_env_create_dir_nanos: _bindgen_ty_13 = 58;
+pub const rocksdb_env_create_dir_if_missing_nanos: _bindgen_ty_13 = 59;
+pub const rocksdb_env_delete_dir_nanos: _bindgen_ty_13 = 60;
+pub const rocksdb_env_get_file_size_nanos: _bindgen_ty_13 = 61;
+pub const rocksdb_env_get_file_modification_time_nanos: _bindgen_ty_13 = 62;
+pub const rocksdb_env_rename_file_nanos: _bindgen_ty_13 = 63;
+pub const rocksdb_env_link_file_nanos: _bindgen_ty_13 = 64;
+pub const rocksdb_env_lock_file_nanos: _bindgen_ty_13 = 65;
+pub const rocksdb_env_unlock_file_nanos: _bindgen_ty_13 = 66;
+pub const rocksdb_env_new_logger_nanos: _bindgen_ty_13 = 67;
+pub const rocksdb_number_async_seek: _bindgen_ty_13 = 68;
+pub const rocksdb_blob_cache_hit_count: _bindgen_ty_13 = 69;
+pub const rocksdb_blob_read_count: _bindgen_ty_13 = 70;
+pub const rocksdb_blob_read_byte: _bindgen_ty_13 = 71;
+pub const rocksdb_blob_read_time: _bindgen_ty_13 = 72;
+pub const rocksdb_blob_checksum_time: _bindgen_ty_13 = 73;
+pub const rocksdb_blob_decompress_time: _bindgen_ty_13 = 74;
+pub const rocksdb_internal_range_del_reseek_count: _bindgen_ty_13 = 75;
+pub const rocksdb_block_read_cpu_time: _bindgen_ty_13 = 76;
+pub const rocksdb_internal_merge_point_lookup_count: _bindgen_ty_13 = 77;
+pub const rocksdb_data_block_read_byte: _bindgen_ty_13 = 78;
+pub const rocksdb_index_block_read_byte: _bindgen_ty_13 = 79;
+pub const rocksdb_filter_block_read_byte: _bindgen_ty_13 = 80;
+pub const rocksdb_compression_dict_block_read_byte: _bindgen_ty_13 = 81;
+pub const rocksdb_metadata_block_read_byte: _bindgen_ty_13 = 82;
+pub const rocksdb_total_metric_count: _bindgen_ty_13 = 85;
+pub type _bindgen_ty_13 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_set_perf_level(arg1: libc::c_int);
 }
@@ -4547,9 +4775,6 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn rocksdb_readoptions_get_tailing(arg1: *mut rocksdb_readoptions_t) -> libc::c_uchar;
-}
-unsafe extern "C" {
-    pub fn rocksdb_readoptions_set_managed(arg1: *mut rocksdb_readoptions_t, arg2: libc::c_uchar);
 }
 unsafe extern "C" {
     pub fn rocksdb_readoptions_set_readahead_size(arg1: *mut rocksdb_readoptions_t, arg2: usize);
@@ -5312,13 +5537,6 @@ unsafe extern "C" {
                 length: usize,
             ) -> libc::c_uchar,
         >,
-        in_range: ::std::option::Option<
-            unsafe extern "C" fn(
-                arg1: *mut libc::c_void,
-                key: *const libc::c_char,
-                length: usize,
-            ) -> libc::c_uchar,
-        >,
         name: ::std::option::Option<
             unsafe extern "C" fn(arg1: *mut libc::c_void) -> *const libc::c_char,
         >,
@@ -5334,9 +5552,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn rocksdb_slicetransform_destroy(arg1: *mut rocksdb_slicetransform_t);
 }
-pub const rocksdb_similar_size_compaction_stop_style: _bindgen_ty_13 = 0;
-pub const rocksdb_total_size_compaction_stop_style: _bindgen_ty_13 = 1;
-pub type _bindgen_ty_13 = libc::c_uint;
+pub const rocksdb_similar_size_compaction_stop_style: _bindgen_ty_14 = 0;
+pub const rocksdb_total_size_compaction_stop_style: _bindgen_ty_14 = 1;
+pub type _bindgen_ty_14 = libc::c_uint;
 unsafe extern "C" {
     pub fn rocksdb_universal_compaction_options_create()
     -> *mut rocksdb_universal_compaction_options_t;
@@ -5436,6 +5654,28 @@ unsafe extern "C" {
     pub fn rocksdb_fifo_compaction_options_get_max_table_files_size(
         fifo_opts: *mut rocksdb_fifo_compaction_options_t,
     ) -> u64;
+}
+unsafe extern "C" {
+    pub fn rocksdb_fifo_compaction_options_set_max_data_files_size(
+        fifo_opts: *mut rocksdb_fifo_compaction_options_t,
+        size: u64,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_fifo_compaction_options_get_max_data_files_size(
+        fifo_opts: *mut rocksdb_fifo_compaction_options_t,
+    ) -> u64;
+}
+unsafe extern "C" {
+    pub fn rocksdb_fifo_compaction_options_set_use_kv_ratio_compaction(
+        fifo_opts: *mut rocksdb_fifo_compaction_options_t,
+        use_kv_ratio_compaction: libc::c_uchar,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_fifo_compaction_options_get_use_kv_ratio_compaction(
+        fifo_opts: *mut rocksdb_fifo_compaction_options_t,
+    ) -> libc::c_uchar;
 }
 unsafe extern "C" {
     pub fn rocksdb_fifo_compaction_options_destroy(
@@ -6649,5 +6889,345 @@ unsafe extern "C" {
     pub fn rocksdb_wait_for_compact_options_get_timeout(
         opt: *mut rocksdb_wait_for_compact_options_t,
     ) -> u64;
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct rocksdb_pinnable_handle_t {
+    _unused: [u8; 0],
+}
+unsafe extern "C" {
+    pub fn rocksdb_get_pinned_v2(
+        db: *mut rocksdb_t,
+        options: *const rocksdb_readoptions_t,
+        key: *const libc::c_char,
+        keylen: usize,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut rocksdb_pinnable_handle_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_get_pinned_cf_v2(
+        db: *mut rocksdb_t,
+        options: *const rocksdb_readoptions_t,
+        column_family: *mut rocksdb_column_family_handle_t,
+        key: *const libc::c_char,
+        keylen: usize,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut rocksdb_pinnable_handle_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_pinnable_handle_get_value(
+        handle: *const rocksdb_pinnable_handle_t,
+        vallen: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_pinnable_handle_destroy(handle: *mut rocksdb_pinnable_handle_t);
+}
+unsafe extern "C" {
+    pub fn rocksdb_get_into_buffer(
+        db: *mut rocksdb_t,
+        options: *const rocksdb_readoptions_t,
+        key: *const libc::c_char,
+        keylen: usize,
+        buffer: *mut libc::c_char,
+        buffer_size: usize,
+        vallen: *mut usize,
+        found: *mut libc::c_uchar,
+        errptr: *mut *mut libc::c_char,
+    ) -> libc::c_uchar;
+}
+unsafe extern "C" {
+    pub fn rocksdb_get_into_buffer_cf(
+        db: *mut rocksdb_t,
+        options: *const rocksdb_readoptions_t,
+        column_family: *mut rocksdb_column_family_handle_t,
+        key: *const libc::c_char,
+        keylen: usize,
+        buffer: *mut libc::c_char,
+        buffer_size: usize,
+        vallen: *mut usize,
+        found: *mut libc::c_uchar,
+        errptr: *mut *mut libc::c_char,
+    ) -> libc::c_uchar;
+}
+pub const rocksdb_compactionservice_jobstatus_success: _bindgen_ty_15 = 0;
+pub const rocksdb_compactionservice_jobstatus_failure: _bindgen_ty_15 = 1;
+pub const rocksdb_compactionservice_jobstatus_aborted: _bindgen_ty_15 = 2;
+pub const rocksdb_compactionservice_jobstatus_use_local: _bindgen_ty_15 = 3;
+pub type _bindgen_ty_15 = libc::c_uint;
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_scheduleresponse_create(
+        scheduled_job_id: *const libc::c_char,
+        status: libc::c_int,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut rocksdb_compactionservice_scheduleresponse_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_scheduleresponse_create_with_status(
+        status: libc::c_int,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut rocksdb_compactionservice_scheduleresponse_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_scheduleresponse_getstatus(
+        response: *const rocksdb_compactionservice_scheduleresponse_t,
+    ) -> libc::c_int;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_scheduleresponse_get_scheduled_job_id(
+        response: *const rocksdb_compactionservice_scheduleresponse_t,
+        len: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_scheduleresponse_t_destroy(
+        response: *mut rocksdb_compactionservice_scheduleresponse_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_db_name(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+        len: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_db_id(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+        len: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_db_session_id(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+        len: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_cf_name(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+        len: *mut usize,
+    ) -> *const libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_cf_id(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> u32;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_job_id(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> u64;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_priority(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_int;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_compaction_reason(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_int;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_base_input_level(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_int;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_get_output_level(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_int;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_is_full_compaction(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_uchar;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_is_manual_compaction(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_uchar;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_jobinfo_t_is_bottommost_level(
+        info: *const rocksdb_compactionservice_jobinfo_t,
+    ) -> libc::c_uchar;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compactionservice_create(
+        state: *mut libc::c_void,
+        destructor: ::std::option::Option<unsafe extern "C" fn(arg1: *mut libc::c_void)>,
+        schedule: rocksdb_compaction_service_schedule_cb,
+        name: *const libc::c_char,
+        wait: rocksdb_compaction_service_wait_cb,
+        cancel_awaiting_jobs: rocksdb_compaction_service_cancel_awaiting_jobs_cb,
+        on_installation: rocksdb_compaction_service_on_installation_cb,
+    ) -> *mut rocksdb_compactionservice_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_options_set_compaction_service(
+        options: *mut rocksdb_options_t,
+        service: *mut rocksdb_compactionservice_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_create()
+    -> *mut rocksdb_compaction_service_options_override_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_create_from_options(
+        option: *mut rocksdb_options_t,
+    ) -> *mut rocksdb_compaction_service_options_override_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_destroy(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_env(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        env: *mut rocksdb_env_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_comparator(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        comparator: *mut rocksdb_comparator_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_merge_operator(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        merge_operator: *mut rocksdb_mergeoperator_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_compaction_filter(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        compaction_filter: *mut rocksdb_compactionfilter_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_compaction_filter_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        compaction_filter_factory: *mut rocksdb_compactionfilterfactory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_prefix_extractor(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        prefix_extractor: *mut rocksdb_slicetransform_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_block_based_table_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        table_options: *mut rocksdb_block_based_table_options_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_cuckoo_table_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        table_options: *mut rocksdb_cuckoo_table_options_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_add_event_listener(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        event_listener: *mut rocksdb_eventlistener_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_statistics(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        options: *mut rocksdb_options_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_info_log(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        logger: *mut rocksdb_logger_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_option(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        key: *const libc::c_char,
+        value: *const libc::c_char,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_file_checksum_gen_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        factory: *mut rocksdb_file_checksum_gen_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_set_sst_partitioner_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        factory: *mut rocksdb_sst_partitioner_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_compaction_service_options_override_add_table_properties_collector_factory(
+        override_options: *mut rocksdb_compaction_service_options_override_t,
+        factory: *mut rocksdb_table_properties_collector_factory_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_canceled_create() -> *mut libc::c_uchar;
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_canceled_destroy(canceled: *mut libc::c_uchar);
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_canceled_set(
+        canceled: *mut libc::c_uchar,
+        value: libc::c_uchar,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_options_create() -> *mut rocksdb_open_and_compact_options_t;
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_options_destroy(
+        options: *mut rocksdb_open_and_compact_options_t,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_options_set_canceled(
+        options: *mut rocksdb_open_and_compact_options_t,
+        canceled: *mut libc::c_uchar,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_options_set_allow_resumption(
+        options: *mut rocksdb_open_and_compact_options_t,
+        allow_resumption: libc::c_uchar,
+    );
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact(
+        db_path: *const libc::c_char,
+        output_directory: *const libc::c_char,
+        input: *const libc::c_char,
+        input_len: usize,
+        output_len: *mut usize,
+        override_options: *const rocksdb_compaction_service_options_override_t,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut libc::c_char;
+}
+unsafe extern "C" {
+    pub fn rocksdb_open_and_compact_with_options(
+        options: *const rocksdb_open_and_compact_options_t,
+        db_path: *const libc::c_char,
+        output_directory: *const libc::c_char,
+        input: *const libc::c_char,
+        input_len: usize,
+        output_len: *mut usize,
+        override_options: *const rocksdb_compaction_service_options_override_t,
+        errptr: *mut *mut libc::c_char,
+    ) -> *mut libc::c_char;
 }
 pub type __builtin_va_list = *mut libc::c_char;

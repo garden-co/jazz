@@ -78,14 +78,14 @@ build_and_store() {
   (
     cd "${REPO_ROOT}"
     env JAZZ_ROCKSDB_OFFLINE=1 CARGO_TARGET_DIR="${target_dir}" "$@" \
-      cargo build --manifest-path dev/vendor/librocksdb-sys/Cargo.toml \
+      cargo build --manifest-path dev/vendor/rust-librocksdb-sys/Cargo.toml \
       --release \
       --target "${target}" \
       --features "${ROCKSDB_FEATURES}"
   )
 
   local archive_path
-  archive_path="$(find "${target_dir}" -path "*/release/build/librocksdb-sys-*/out/librocksdb.a" -print | sed -n '1p')"
+  archive_path="$(find "${target_dir}" -path "*/release/build/rust-librocksdb-sys-*/out/librocksdb.a" -print | sed -n '1p')"
   if [[ -z "${archive_path}" ]]; then
     echo "failed to locate librocksdb.a for ${target}" >&2
     exit 1

@@ -18,7 +18,7 @@ export RUSTC_WRAPPER=sccache
 
 ### RocksDB artifact cache
 
-The repo-local `librocksdb-sys` patch now uses checked-in bindings, so `libclang`
+The repo-local `rust-librocksdb-sys` patch now uses checked-in bindings, so `libclang`
 is no longer required for RocksDB builds.
 
 Supported server targets now download a pinned prebuilt RocksDB archive from GHCR
@@ -27,7 +27,7 @@ into the local Cargo cache on the first build, then reuse it on later builds.
 The cache root defaults to:
 
 ```text
-$CARGO_HOME/jazz-cache/rocksdb/<manifest-digest>/<target-triple>/lib/librocksdb.a
+$CARGO_HOME/jazz-cache/rocksdb/<manifest-digest>/<feature-profile>/<target-triple>/lib/librocksdb.a
 ```
 
 Supported prebuilt target triples:

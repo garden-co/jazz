@@ -9,7 +9,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist/rocksdb}"
 GHCR_REPOSITORY="${GHCR_REPOSITORY:-ghcr.io/garden-co/jazz2-rocksdb-prebuilt}"
 ROCKSDB_FEATURES="${ROCKSDB_FEATURES:-lz4,zstd}"
 ROCKSDB_FEATURE_PROFILE="${ROCKSDB_FEATURE_PROFILE:-all-compression-codecs}"
-TAG_PREFIX="${TAG_PREFIX:-rocksdb-10.7.5-v1-${ROCKSDB_FEATURE_PROFILE}}"
+TAG_PREFIX="${TAG_PREFIX:-rocksdb-11.1.1-v1-${ROCKSDB_FEATURE_PROFILE}}"
 ARTIFACT_TYPE="application/vnd.garden-co.jazz.rocksdb.archive.v1+gzip"
 
 ALL_TARGETS=(
@@ -98,20 +98,21 @@ for target in "${TARGETS[@]}"; do
   fi
 
   tag="${TAG_PREFIX}-${target}"
+  archive_sha256="$(gzip -dc "${archive_path}" | sha256_stdin)"
   manifest_digest="$(oras push \
     --disable-path-validation \
     --no-tty \
     --artifact-type "${ARTIFACT_TYPE}" \
     --annotation "org.opencontainers.image.source=https://github.com/garden-co/jazz2" \
     --annotation "org.opencontainers.image.description=Prebuilt RocksDB archive for ${target} (${ROCKSDB_FEATURE_PROFILE}: ${ROCKSDB_FEATURES})" \
+    --annotation "org.garden-co.jazz.rocksdb.archive-sha256=${archive_sha256}" \
     --format json \
     "${GHCR_REPOSITORY}:${tag}" \
     "${archive_path}:${ARTIFACT_TYPE}" | jq -r '.digest')"
 
-  archive_sha256="$(gzip -dc "${archive_path}" | sha256_stdin)"
   blob_sha256="$(sha256_file "${archive_path}")"
 
-manifest_entries+=("$(jq -n \
+  manifest_entries+=("$(jq -n \
     --arg target "${target}" \
     --arg feature_profile "${ROCKSDB_FEATURE_PROFILE}" \
     --arg features "${ROCKSDB_FEATURES}" \

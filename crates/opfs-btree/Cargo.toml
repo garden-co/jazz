@@ -22,7 +22,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bf-tree = { version = "0.4.8", optional = true }
-rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -6,11 +6,10 @@ pub enum StdCppLib {
     StdCxx,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhcrArtifact {
     pub repository: &'static str,
-    pub manifest_digest: &'static str,
-    pub archive_sha256: &'static str,
+    pub reference: String,
     pub blob_filename: &'static str,
 }
 
@@ -19,8 +18,11 @@ pub struct LinkPlan {
     pub lib_dir: PathBuf,
     pub libs: Vec<&'static str>,
     pub stdcpp: StdCppLib,
+    pub rocksdb_version: &'static str,
     pub artifact: GhcrArtifact,
 }
+
+const ROCKSDB_VERSION: &str = "11.1.1";
 
 fn compression_feature_profile(feature_lz4: bool, feature_zstd: bool) -> Option<&'static str> {
     match (feature_lz4, feature_zstd) {
@@ -36,52 +38,35 @@ pub fn vendored_link_plan(
     feature_zstd: bool,
 ) -> Option<LinkPlan> {
     let feature_profile = compression_feature_profile(feature_lz4, feature_zstd)?;
-    let (stdcpp, manifest_digest, archive_sha256) = match target {
-        "aarch64-apple-darwin" => (
-            StdCppLib::Cxx,
-            "sha256:39977dc23d8b693d839c43652b1b45972e698bf3bf82ee7bd60ebb153d462463",
-            "6091551009fe4d5bfd38c67ee379d981e7e3e32ac20f7f221bb8688e3948d858",
-        ),
-        "x86_64-apple-darwin" => (
-            StdCppLib::Cxx,
-            "sha256:c5b85c9c8286e45075ffe7bfe5ae09c6241b5b36fe60a81bdeded3ad2bea4259",
-            "85ebe0302b55ed407685f0f67986dda83ebd6335028779a98cde710eb62bed67",
-        ),
-        "aarch64-unknown-linux-gnu" => (
-            StdCppLib::StdCxx,
-            "sha256:7e00966e869532780fbbc2cfb5d881e89b3beca8573941864d37bc351aaf231a",
-            "75aa0bec87eecd7c4a803ccf2ed337ae08e575ed79d74c9e1164bfcf7db31119",
-        ),
-        "x86_64-unknown-linux-gnu" => (
-            StdCppLib::StdCxx,
-            "sha256:66af20476b451d3a6745b22181d1cd29412371771826622308866578a2521a17",
-            "ebd96a6946ce24f46714d22be84622f1a2f5b975976eb0a9376bd3f739df8fd9",
-        ),
+    let stdcpp = match target {
+        "aarch64-apple-darwin" | "x86_64-apple-darwin" => StdCppLib::Cxx,
+        "aarch64-unknown-linux-gnu" | "x86_64-unknown-linux-gnu" => StdCppLib::StdCxx,
         _ => return None,
     };
+    let reference = format!("rocksdb-{ROCKSDB_VERSION}-v1-{feature_profile}-{target}");
 
     Some(LinkPlan {
-        lib_dir: cache_dir_for_manifest_digest(cache_root, target, manifest_digest, feature_profile),
+        lib_dir: cache_dir_for_artifact_reference(cache_root, target, &reference, feature_profile),
         libs: vec!["rocksdb"],
         stdcpp,
+        rocksdb_version: ROCKSDB_VERSION,
         artifact: GhcrArtifact {
             repository: "ghcr.io/garden-co/jazz2-rocksdb-prebuilt",
-            manifest_digest,
-            archive_sha256,
+            reference,
             blob_filename: "librocksdb.a.gz",
         },
     })
 }
 
-pub fn cache_dir_for_manifest_digest(
+pub fn cache_dir_for_artifact_reference(
     cache_root: &Path,
     target: &str,
-    manifest_digest: &str,
+    reference: &str,
     feature_profile: &str,
 ) -> PathBuf {
     cache_root
         .join("rocksdb")
-        .join(manifest_digest.replace(':', "-"))
+        .join(reference.replace([':', '/'], "-"))
         .join(feature_profile)
         .join(target)
         .join("lib")
@@ -89,39 +74,57 @@ pub fn cache_dir_for_manifest_digest(
 
 #[cfg(test)]
 mod tests {
-    use super::{StdCppLib, cache_dir_for_manifest_digest, vendored_link_plan};
+    use super::{StdCppLib, cache_dir_for_artifact_reference, vendored_link_plan};
     use std::path::Path;
 
     #[test]
     fn macos_arm64_links_expected_archives() {
-        let plan = vendored_link_plan(Path::new("/tmp/jazz-cache"), "aarch64-apple-darwin", true, true)
-            .expect("supported target should use vendored archives");
+        let plan = vendored_link_plan(
+            Path::new("/tmp/jazz-cache"),
+            "aarch64-apple-darwin",
+            true,
+            true,
+        )
+        .expect("supported target should use vendored archives");
 
         assert_eq!(
             plan.lib_dir,
             Path::new("/tmp/jazz-cache")
                 .join("rocksdb")
-                .join("sha256-39977dc23d8b693d839c43652b1b45972e698bf3bf82ee7bd60ebb153d462463")
+                .join("rocksdb-11.1.1-v1-all-compression-codecs-aarch64-apple-darwin")
+                .join("all-compression-codecs")
                 .join("aarch64-apple-darwin")
                 .join("lib")
         );
         assert_eq!(plan.libs, vec!["rocksdb"]);
         assert_eq!(plan.stdcpp, StdCppLib::Cxx);
-        assert_eq!(plan.artifact.repository, "ghcr.io/garden-co/jazz2-rocksdb-prebuilt");
         assert_eq!(
-            plan.artifact.manifest_digest,
-            "sha256:39977dc23d8b693d839c43652b1b45972e698bf3bf82ee7bd60ebb153d462463"
+            plan.artifact.repository,
+            "ghcr.io/garden-co/jazz2-rocksdb-prebuilt"
+        );
+        assert_eq!(
+            plan.artifact.reference,
+            "rocksdb-11.1.1-v1-all-compression-codecs-aarch64-apple-darwin"
         );
     }
 
     #[test]
     fn linux_x64_uses_stdcxx() {
-        let plan = vendored_link_plan(Path::new("/tmp/jazz-cache"), "x86_64-unknown-linux-gnu", true, true)
-            .expect("supported target should use vendored archives");
+        let plan = vendored_link_plan(
+            Path::new("/tmp/jazz-cache"),
+            "x86_64-unknown-linux-gnu",
+            true,
+            true,
+        )
+        .expect("supported target should use vendored archives");
 
         assert_eq!(plan.libs, vec!["rocksdb"]);
         assert_eq!(plan.stdcpp, StdCppLib::StdCxx);
-        assert_eq!(plan.artifact.archive_sha256.len(), 64);
+        assert_eq!(plan.rocksdb_version, "11.1.1");
+        assert_eq!(
+            plan.artifact.reference,
+            "rocksdb-11.1.1-v1-all-compression-codecs-x86_64-unknown-linux-gnu"
+        );
     }
 
     #[test]
@@ -160,17 +163,17 @@ mod tests {
     }
 
     #[test]
-    fn cache_dir_uses_digest_without_colons() {
+    fn cache_dir_uses_safe_artifact_reference() {
         assert_eq!(
-            cache_dir_for_manifest_digest(
+            cache_dir_for_artifact_reference(
                 Path::new("/tmp/jazz-cache"),
                 "x86_64-unknown-linux-gnu",
-                "sha256:abcd1234",
+                "rocksdb:11.1.1/test",
                 "all-compression-codecs"
             ),
             Path::new("/tmp/jazz-cache")
                 .join("rocksdb")
-                .join("sha256-abcd1234")
+                .join("rocksdb-11.1.1-test")
                 .join("all-compression-codecs")
                 .join("x86_64-unknown-linux-gnu")
                 .join("lib")
