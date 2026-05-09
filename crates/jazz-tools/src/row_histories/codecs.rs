@@ -163,9 +163,7 @@ fn history_row_system_values(row: &StoredRowBatch) -> Vec<Value> {
     ]
 }
 
-fn history_row_system_column_count() -> usize {
-    history_row_system_columns().len()
-}
+const HISTORY_ROW_SYSTEM_COLUMN_COUNT: usize = 10;
 
 fn visible_row_system_columns() -> Vec<ColumnDescriptor> {
     let mut columns = vec![
@@ -243,9 +241,7 @@ fn visible_row_system_values(entry: &VisibleRowEntry) -> Vec<Value> {
     values
 }
 
-fn visible_row_system_column_count() -> usize {
-    visible_row_system_columns().len()
-}
+const VISIBLE_ROW_SYSTEM_COLUMN_COUNT: usize = 18;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FlatRowCodecs {
@@ -277,8 +273,8 @@ pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCod
     let user_descriptor = Arc::new(user_descriptor.clone());
     let history_descriptor = Arc::new(history_row_physical_descriptor(user_descriptor.as_ref()));
     let visible_descriptor = Arc::new(visible_row_physical_descriptor(user_descriptor.as_ref()));
-    let history_system_count = history_row_system_column_count();
-    let visible_system_count = visible_row_system_column_count();
+    let history_system_count = HISTORY_ROW_SYSTEM_COLUMN_COUNT;
+    let visible_system_count = VISIBLE_ROW_SYSTEM_COLUMN_COUNT;
     let user_projection_len = user_descriptor.columns.len();
     let codecs = Arc::new(FlatRowCodecs {
         user_descriptor: user_descriptor.clone(),
