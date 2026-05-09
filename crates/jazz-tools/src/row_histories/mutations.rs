@@ -211,7 +211,7 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
             &table,
             object_id,
             &branch,
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
         )?
     };
     let previous_visible = previous_entry
@@ -257,7 +257,7 @@ pub(crate) fn apply_row_batch_with_context<H: Storage>(
         patched_history.push(row.clone());
     }
     let current_entry =
-        visible_entry_from_history_rows(context.user_descriptor.as_ref(), &patched_history)
+        visible_entry_from_history_rows(context.user_descriptor().as_ref(), &patched_history)
             .map_err(|err| {
                 RowHistoryError::StorageError(StorageError::IoError(format!(
                     "rebuild visible entry after append: {err}"
@@ -354,7 +354,7 @@ pub fn patch_row_batch_state<H: Storage>(
         &table,
         object_id,
         &branch,
-        context.user_descriptor.as_ref(),
+        context.user_descriptor().as_ref(),
     )?;
     let previous_visible = previous_entry
         .as_ref()
@@ -378,13 +378,12 @@ pub fn patch_row_batch_state<H: Storage>(
     };
     *existing = patched_row.clone();
     let patched_entry =
-        visible_entry_from_history_rows(context.user_descriptor.as_ref(), &history_rows).map_err(
-            |err| {
+        visible_entry_from_history_rows(context.user_descriptor().as_ref(), &history_rows)
+            .map_err(|err| {
                 RowHistoryError::StorageError(StorageError::IoError(format!(
                     "rebuild visible entry after patch: {err}"
                 )))
-            },
-        )?;
+            })?;
     let visible_entries: Vec<_> = patched_entry.iter().cloned().collect();
     if patched_entry.is_some() {
         io.apply_row_mutation(

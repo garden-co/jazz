@@ -1326,7 +1326,7 @@ pub trait Storage {
             current_row.row_id,
         )?;
         let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
             &patched_history,
         )
         .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?

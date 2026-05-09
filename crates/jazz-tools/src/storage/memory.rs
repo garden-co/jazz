@@ -696,7 +696,7 @@ impl Storage for MemoryStorage {
         for (branch, row_id, context_row, history_rows) in rebuild_inputs {
             let context = resolve_history_row_write_context(self, table, &context_row)?;
             if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-                context.user_descriptor.as_ref(),
+                context.user_descriptor().as_ref(),
                 &history_rows,
             )
             .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -868,7 +868,7 @@ impl Storage for MemoryStorage {
         let mut history_rows = regions.history_rows_for(branch, row_id);
         apply_batch_fate_tiers_to_rows(self, &mut history_rows)?;
         crate::row_histories::visible_row_preview_from_history_rows(
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
             &history_rows,
             Some(required_tier),
         )
