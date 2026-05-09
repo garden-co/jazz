@@ -1694,9 +1694,22 @@ export class JazzClient {
     this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
   }
 
+  private replayRejectedBatchRowsById(batchId: string): boolean {
+    const fate = this.batchFate(batchId);
+    if (fate?.kind !== "rejected") {
+      return false;
+    }
+    const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
+    this.replayRejectedBatchRows(batch);
+    return true;
+  }
+
   private replayRejectedBatchRollbacks(): void {
     for (const record of this.rejectedBatchRollbackRecords.values()) {
       this.replayRejectedBatchRows(record);
+    }
+    for (const batchId of this.hydratedWorkerBatchIds) {
+      this.replayRejectedBatchRowsById(batchId);
     }
   }
 
@@ -2570,11 +2583,7 @@ export class JazzClient {
           continue;
         }
         if (outcome.error) {
-          const fate = this.batchFate(batchId);
-          if (fate?.kind === "rejected") {
-            const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
-            this.replayRejectedBatchRows(batch);
-          }
+          this.replayRejectedBatchRowsById(batchId);
           waiter.reject(outcome.error);
           rejectedBatchIdsHandledByWaiters.add(batchId);
         } else {
@@ -2667,8 +2676,7 @@ export class JazzClient {
       if (!settlement || settlement.kind !== "rejected") {
         continue;
       }
-      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
-      this.replayRejectedBatchRows(batch);
+      this.replayRejectedBatchRowsById(batchId);
       if (batchesHandledByLiveWaiters.has(batchId)) {
         continue;
       }
@@ -2676,6 +2684,7 @@ export class JazzClient {
         continue;
       }
 
+      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
       const event: MutationErrorEvent = {
         code: settlement.code,
         reason: settlement.reason,
@@ -2706,6 +2715,9 @@ export class JazzClient {
   waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
     const outcome = this.batchWaitOutcome(batchId, tier);
     if (outcome.settled) {
+      if (outcome.error) {
+        this.replayRejectedBatchRowsById(batchId);
+      }
       return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
     }
 
