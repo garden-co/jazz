@@ -211,10 +211,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let mut batch_patch_succeeded_by_table = std::collections::HashMap::new();
 
         for (member, row_locator, row) in self.local_batch_rows(batch_id) {
-            if !matches!(
-                row.state,
-                RowState::VisibleDirect | RowState::StagingPending | RowState::Superseded
-            ) {
+            let was_visible = matches!(row.state, RowState::VisibleDirect)
+                || (matches!(row.state, RowState::Rejected)
+                    && self
+                        .storage
+                        .load_visible_region_row(
+                            row_locator.table.as_str(),
+                            row.branch.as_str(),
+                            member.object_id,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some_and(|visible_row| visible_row.batch_id() == row.batch_id()));
+
+            if !was_visible && !matches!(row.state, RowState::StagingPending | RowState::Superseded)
+            {
                 continue;
             }
 
@@ -225,7 +236,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 member.object_id,
                 row.batch_id(),
                 row.data.to_vec(),
-                matches!(row.state, RowState::VisibleDirect),
+                was_visible,
                 row.delete_kind.is_some(),
                 self.local_batch_row_was_insert(row_locator.table.as_str(), &row),
             ));
