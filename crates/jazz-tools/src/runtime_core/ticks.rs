@@ -866,10 +866,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .copied()
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
-                let is_query_settled = matches!(
-                    &msg.payload,
-                    crate::sync_manager::SyncPayload::QuerySettled { .. }
-                );
                 if msg.payload.writes_storage() {
                     self.mark_storage_write_pending_flush();
                 }
@@ -877,18 +873,6 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 applied_messages += 1;
                 applied_since_last_tick = true;
                 last_applied = sequence;
-
-                // QuerySettled is an ordered stream barrier for first-callback
-                // delivery. If we queue many later rows before ticking, an
-                // early settled query waits behind unrelated replay work that
-                // merely arrived in the same transport drain.
-                if is_query_settled {
-                    self.next_expected_server_seq
-                        .insert(server_id, sequence.saturating_add(1));
-                    self.last_applied_server_seq.insert(server_id, last_applied);
-                    self.immediate_tick();
-                    applied_since_last_tick = false;
-                }
             }
             self.next_expected_server_seq
                 .insert(server_id, next_expected);
