@@ -21,6 +21,9 @@ carrying payloads such as:
 - `Error`
 - `Heartbeat`
 
+Each WebSocket message is a binary frame with a 4-byte big-endian length prefix
+followed by postcard-encoded transport payload bytes.
+
 The connection is app-scoped, so every non-health server interaction uses the same `/apps/<app_id>/...`
 prefix as the cloud server.
 

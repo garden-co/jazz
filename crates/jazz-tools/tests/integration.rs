@@ -71,7 +71,7 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
         catalogue_state_hash: None,
         declared_schema_hash: None,
     };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
+    let payload = postcard::to_allocvec(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
         .await
         .map_err(|e| format!("ws send failed: {e}"))?;
@@ -79,15 +79,16 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
+            if let Ok(connected) = postcard::from_bytes::<ConnectedResponse>(inner) {
                 return Ok(connected);
             }
-            let msg = serde_json::from_slice::<serde_json::Value>(inner)
+            let msg = postcard::from_bytes::<jazz_tools::transport_protocol::ServerEvent>(inner)
                 .ok()
-                .and_then(|v| {
-                    v.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string)
+                .and_then(|event| match event {
+                    jazz_tools::transport_protocol::ServerEvent::Error { message, .. } => {
+                        Some(message)
+                    }
+                    _ => None,
                 })
                 .unwrap_or_else(|| "auth rejected".to_string());
             Err(msg)
@@ -370,7 +371,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
         catalogue_state_hash: None,
         declared_schema_hash: None,
     };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
+    let payload = postcard::to_allocvec(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
         .await
         .expect("ws send handshake");

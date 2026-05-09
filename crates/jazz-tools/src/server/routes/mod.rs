@@ -317,13 +317,37 @@ mod tests {
             payloads: vec![p1, p2],
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = postcard::to_allocvec(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
         assert!(
             result.is_ok(),
             "two-payload batch should be accepted: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_sync_batch_rejects_json_payload() {
+        let state = make_sync_test_state("test-backend-secret").await;
+        let client_id = ClientId::new();
+        let _ = state.runtime.ensure_client_as_backend(client_id);
+
+        let batch = SyncBatchRequest {
+            payloads: vec![row_version_created_payload(
+                "00000000-0000-0000-0000-000000000001",
+            )],
+            client_id,
+        };
+        let json_payload = serde_json::to_vec(&batch).unwrap();
+
+        let result = state
+            .process_ws_client_frame(client_id, &json_payload)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "JSON websocket sync payloads should be rejected after the postcard switch"
         );
     }
 
@@ -606,7 +630,7 @@ mod tests {
             payloads,
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = postcard::to_allocvec(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -2133,9 +2157,10 @@ mod tests {
             catalogue_state_hash: None,
             declared_schema_hash: None,
         };
-        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
         ws.send(WsMessage::Binary(
-            crate::transport_manager::frame_encode(&payload).into(),
+            crate::transport_manager::frame_encode_postcard(&handshake)
+                .expect("serialize handshake")
+                .into(),
         ))
         .await
         .expect("send handshake");
@@ -2148,10 +2173,9 @@ mod tests {
         let WsMessage::Binary(connected_frame) = connected else {
             panic!("expected binary ConnectedResponse frame, got {connected:?}");
         };
-        let connected_payload = crate::transport_manager::frame_decode(&connected_frame)
-            .expect("decode ConnectedResponse frame");
         let connected_response: crate::transport_manager::ConnectedResponse =
-            serde_json::from_slice(connected_payload).expect("parse ConnectedResponse");
+            crate::transport_manager::frame_decode_postcard(&connected_frame)
+                .expect("parse ConnectedResponse");
         assert_eq!(
             connected_response.sync_protocol_version,
             crate::transport_manager::SYNC_PROTOCOL_VERSION
@@ -2176,7 +2200,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ws_handler_rejects_pre_versioned_handshake_loudly() {
+    async fn ws_handler_rejects_old_protocol_postcard_handshake_loudly() {
         let state = make_sync_test_state("test-backend-secret").await;
         let app = create_router(state);
 
@@ -2190,17 +2214,20 @@ mod tests {
 
         let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "client_id": ClientId::new().to_string(),
-            "auth": {
-                "backend_secret": "test-backend-secret"
+        let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: 2,
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig {
+                backend_secret: Some("test-backend-secret".to_string()),
+                ..Default::default()
             },
-            "catalogue_state_hash": null,
-            "declared_schema_hash": null
-        }))
-        .expect("serialize old handshake");
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
         ws.send(WsMessage::Binary(
-            crate::transport_manager::frame_encode(&payload).into(),
+            crate::transport_manager::frame_encode_postcard(&handshake)
+                .expect("serialize old handshake")
+                .into(),
         ))
         .await
         .expect("send handshake");
@@ -2213,10 +2240,9 @@ mod tests {
         let WsMessage::Binary(error_frame) = error_frame else {
             panic!("expected binary ServerEvent::Error frame, got {error_frame:?}");
         };
-        let payload =
-            crate::transport_manager::frame_decode(&error_frame).expect("decode error frame");
         let event: crate::jazz_transport::ServerEvent =
-            serde_json::from_slice(payload).expect("parse error event");
+            crate::transport_manager::frame_decode_postcard(&error_frame)
+                .expect("parse error event");
         match event {
             crate::jazz_transport::ServerEvent::Error { message, code } => {
                 assert_eq!(code, crate::jazz_transport::ErrorCode::BadRequest);
@@ -2225,7 +2251,7 @@ mod tests {
                     "unexpected error message: {message}"
                 );
                 assert!(
-                    message.contains("client sent 0"),
+                    message.contains("client sent 2"),
                     "unexpected error message: {message}"
                 );
             }

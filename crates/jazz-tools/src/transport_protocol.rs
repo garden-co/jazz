@@ -13,7 +13,7 @@
 //!
 //! # Wire Format
 //!
-//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+//! Each frame: `[4 bytes: u32 big-endian length][N bytes: postcard]`
 
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +63,6 @@ pub struct SyncBatchResponse {
 /// underlying objects, and the client's local QueryManager handles query
 /// notifications based on the synced data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
 pub enum ServerEvent {
     /// Connection established, server sends connection ID and confirms client ID.
     Connected {
@@ -73,7 +72,6 @@ pub enum ServerEvent {
         /// Next stream sequence expected from server for this connection.
         next_sync_seq: Option<u64>,
         /// Canonical digest of the server's catalogue state, when available.
-        #[serde(skip_serializing_if = "Option::is_none")]
         catalogue_state_hash: Option<String>,
     },
 
@@ -260,13 +258,13 @@ impl UnauthenticatedResponse {
 impl ServerEvent {
     /// Encode as a length-prefixed binary frame.
     ///
-    /// Format: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+    /// Format: `[4 bytes: u32 big-endian length][N bytes: postcard]`
     pub fn encode_frame(&self) -> Vec<u8> {
-        let json = serde_json::to_vec(self).unwrap_or_default();
-        let len = (json.len() as u32).to_be_bytes();
-        let mut buf = Vec::with_capacity(4 + json.len());
+        let payload = postcard::to_allocvec(self).unwrap_or_default();
+        let len = (payload.len() as u32).to_be_bytes();
+        let mut buf = Vec::with_capacity(4 + payload.len());
         buf.extend_from_slice(&len);
-        buf.extend_from_slice(&json);
+        buf.extend_from_slice(&payload);
         buf
     }
 
@@ -282,7 +280,7 @@ impl ServerEvent {
         if buf.len() < 4 + len {
             return None;
         }
-        let event: ServerEvent = serde_json::from_slice(&buf[4..4 + len]).ok()?;
+        let event: ServerEvent = postcard::from_bytes(&buf[4..4 + len]).ok()?;
         Some((event, 4 + len))
     }
 }
@@ -327,6 +325,33 @@ mod tests {
     }
 
     #[test]
+    fn server_event_frame_payload_is_postcard_not_json() {
+        let event = ServerEvent::Heartbeat;
+        let frame = event.encode_frame();
+        let inner = &frame[4..];
+
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(inner).is_err(),
+            "websocket ServerEvent payloads should be postcard bytes, not JSON"
+        );
+        assert!(ServerEvent::decode_frame(&frame).is_some());
+    }
+
+    #[test]
+    fn server_event_decode_rejects_json_frame_payload() {
+        let event = ServerEvent::Heartbeat;
+        let json = serde_json::to_vec(&event).unwrap();
+        let mut frame = Vec::with_capacity(4 + json.len());
+        frame.extend_from_slice(&(json.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&json);
+
+        assert!(
+            ServerEvent::decode_frame(&frame).is_none(),
+            "JSON websocket frames should not decode after the postcard wire-format switch"
+        );
+    }
+
+    #[test]
     fn test_decode_frame_incomplete() {
         // Too short for length prefix
         assert!(ServerEvent::decode_frame(&[0, 0]).is_none());
@@ -352,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_batch_request_serialization() {
+    fn test_sync_batch_request_postcard_roundtrip() {
         use crate::metadata::RowProvenance;
         use crate::object::ObjectId;
         use crate::row_histories::{RowState, StoredRowBatch};
@@ -377,12 +402,13 @@ mod tests {
             client_id: ClientId::new(),
         };
 
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("payloads"));
-        assert!(json.contains("RowBatchCreated"));
-        assert!(json.contains("main"));
+        let bytes = postcard::to_allocvec(&request).unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).is_err(),
+            "websocket SyncBatchRequest payloads should be postcard, not JSON"
+        );
 
-        let parsed: SyncBatchRequest = serde_json::from_str(&json).unwrap();
+        let parsed: SyncBatchRequest = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         assert!(matches!(
             parsed.payloads[0],

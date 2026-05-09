@@ -343,7 +343,7 @@ fn build_catalogue_runtime(
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
             tokio::spawn(async move {
-                let frame = serde_json::to_vec(&jazz_tools::sync_manager::OutboxEntry {
+                let frame = postcard::to_allocvec(&jazz_tools::sync_manager::OutboxEntry {
                     destination: Destination::Server(ServerId::default()),
                     payload,
                 })

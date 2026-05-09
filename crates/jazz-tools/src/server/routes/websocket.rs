@@ -256,12 +256,8 @@ async fn send_ws_error_with_code(
         message: message.to_string(),
         code,
     };
-    if let Ok(bytes) = serde_json::to_vec(&event) {
-        let _ = socket
-            .send(Message::Binary(crate::transport_manager::frame_encode(
-                &bytes,
-            )))
-            .await;
+    if let Ok(frame) = crate::transport_manager::frame_encode_postcard(&event) {
+        let _ = socket.send(Message::Binary(frame)).await;
     }
 }
 
@@ -288,21 +284,16 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let payload = match crate::transport_manager::frame_decode(&first) {
-        Some(p) => p.to_vec(),
+    let handshake = match crate::transport_manager::frame_decode_postcard::<
+        crate::transport_manager::AuthHandshake,
+    >(&first)
+    {
+        Some(h) => h,
         None => {
             let _ = socket.close().await;
             return;
         }
     };
-    let handshake =
-        match serde_json::from_slice::<crate::transport_manager::AuthHandshake>(&payload) {
-            Ok(h) => h,
-            Err(_) => {
-                let _ = socket.close().await;
-                return;
-            }
-        };
 
     // Older, pre-versioned clients deserialize as protocol version 0. Reject
     // them explicitly so developers see an actionable update prompt instead
@@ -402,21 +393,15 @@ async fn handle_ws_connection(
         next_sync_seq: Some(next_sync_seq),
         catalogue_state_hash: state.runtime.catalogue_state_hash().ok(),
     };
-    let resp_bytes = match serde_json::to_vec(&resp) {
-        Ok(b) => b,
+    let resp_frame = match crate::transport_manager::frame_encode_postcard(&resp) {
+        Ok(frame) => frame,
         Err(_) => {
             ws_cleanup(&state, connection_id, client_id).await;
             let _ = socket.close().await;
             return;
         }
     };
-    if socket
-        .send(Message::Binary(crate::transport_manager::frame_encode(
-            &resp_bytes,
-        )))
-        .await
-        .is_err()
-    {
+    if socket.send(Message::Binary(resp_frame)).await.is_err() {
         ws_cleanup(&state, connection_id, client_id).await;
         return;
     }
@@ -469,14 +454,12 @@ async fn handle_ws_connection(
                 } else {
                     crate::jazz_transport::ServerEvent::SyncUpdateBatch { updates }
                 };
-                let bytes = match serde_json::to_vec(&event) {
-                    Ok(b) => b,
+                let frame = match crate::transport_manager::frame_encode_postcard(&event) {
+                    Ok(frame) => frame,
                     Err(_) => continue,
                 };
                 if socket
-                    .send(Message::Binary(
-                        crate::transport_manager::frame_encode(&bytes),
-                    ))
+                    .send(Message::Binary(frame))
                     .await
                     .is_err()
                 {
@@ -485,11 +468,9 @@ async fn handle_ws_connection(
             }
             _ = heartbeat.tick() => {
                 let event = crate::jazz_transport::ServerEvent::Heartbeat;
-                let Ok(bytes) = serde_json::to_vec(&event) else { continue };
+                let Ok(frame) = crate::transport_manager::frame_encode_postcard(&event) else { continue };
                 if socket
-                    .send(Message::Binary(
-                        crate::transport_manager::frame_encode(&bytes),
-                    ))
+                    .send(Message::Binary(frame))
                     .await
                     .is_err()
                 {

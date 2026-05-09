@@ -6,8 +6,9 @@
 use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
 use futures::channel::mpsc;
+use serde::de::DeserializeOwned;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 2;
+pub const SYNC_PROTOCOL_VERSION: u32 = 3;
 
 pub trait TickNotifier: 'static {
     fn notify(&self);
@@ -146,7 +147,41 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     pub admin_secret: Option<String>,
     pub peer_secret: Option<String>,
+    #[serde(default, with = "auth_backend_session_serde")]
     pub backend_session: Option<serde_json::Value>,
+}
+
+mod auth_backend_session_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<serde_json::Value>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+
+        let json: Option<String> = value
+            .as_ref()
+            .map(|session| serde_json::to_string(session).map_err(serde::ser::Error::custom))
+            .transpose()?;
+
+        json.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<serde_json::Value>::deserialize(deserializer);
+        }
+
+        let json = Option::<String>::deserialize(deserializer)?;
+        json.map(|session| serde_json::from_str(&session).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -253,6 +288,26 @@ mod handshake_tests {
     }
 
     #[test]
+    fn connected_response_postcard_frame_roundtrip() {
+        let response = ConnectedResponse {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
+            connection_id: "conn-1".to_string(),
+            client_id: "client-1".to_string(),
+            next_sync_seq: Some(42),
+            catalogue_state_hash: Some("digest-123".to_string()),
+        };
+
+        let frame = frame_encode_postcard(&response).expect("encode ConnectedResponse");
+        let decoded: ConnectedResponse =
+            frame_decode_postcard(&frame).expect("decode ConnectedResponse");
+
+        assert_eq!(decoded.sync_protocol_version, SYNC_PROTOCOL_VERSION);
+        assert_eq!(decoded.connection_id, "conn-1");
+        assert_eq!(decoded.next_sync_seq, Some(42));
+        assert_eq!(decoded.catalogue_state_hash.as_deref(), Some("digest-123"));
+    }
+
+    #[test]
     fn auth_config_serializes_peer_secret_and_redacts_it_from_debug() {
         let auth = AuthConfig {
             peer_secret: Some("cluster-secret".to_string()),
@@ -265,6 +320,37 @@ mod handshake_tests {
         let debug = format!("{auth:?}");
         assert!(debug.contains("peer_secret"));
         assert!(!debug.contains("cluster-secret"));
+    }
+
+    #[test]
+    fn auth_handshake_postcard_roundtrip_preserves_backend_session() {
+        let handshake = AuthHandshake {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
+            client_id: "client-1".to_string(),
+            auth: AuthConfig {
+                backend_secret: Some("backend-secret".to_string()),
+                backend_session: Some(serde_json::json!({
+                    "user_id": "alice",
+                    "claims": {
+                        "role": "admin",
+                    },
+                    "auth_mode": "trusted",
+                })),
+                ..Default::default()
+            },
+            catalogue_state_hash: Some("catalogue-digest".to_string()),
+            declared_schema_hash: Some(SchemaHash::from_bytes([9; 32]).to_string()),
+        };
+
+        let frame = frame_encode_postcard(&handshake).expect("encode postcard handshake");
+        let decoded: AuthHandshake =
+            frame_decode_postcard(&frame).expect("decode postcard handshake");
+
+        assert_eq!(decoded.sync_protocol_version, SYNC_PROTOCOL_VERSION);
+        assert_eq!(
+            decoded.auth.backend_session, handshake.auth.backend_session,
+            "backend session claims should survive postcard framing"
+        );
     }
 }
 
@@ -399,6 +485,15 @@ pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Encode a value as a 4-byte big-endian length-prefixed postcard frame.
+pub(crate) fn frame_encode_postcard<T>(value: &T) -> Result<Vec<u8>, postcard::Error>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let payload = postcard::to_allocvec(value)?;
+    Ok(frame_encode(&payload))
+}
+
 /// Decode a 4-byte big-endian length-prefixed frame, returning the payload slice.
 pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
     if data.len() < 4 {
@@ -409,6 +504,15 @@ pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
     Some(&data[4..4 + len])
+}
+
+/// Decode a single length-prefixed postcard frame.
+pub(crate) fn frame_decode_postcard<T>(data: &[u8]) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    let payload = frame_decode(data)?;
+    postcard::from_bytes(payload).ok()
 }
 
 /// Outcome of the auth handshake.
@@ -443,9 +547,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             catalogue_state_hash,
             declared_schema_hash,
         };
-        let payload =
-            serde_json::to_vec(&handshake).expect("AuthHandshake serialisation infallible");
-        frame_encode(&payload)
+        frame_encode_postcard(&handshake).expect("AuthHandshake serialisation infallible")
     }
 
     /// Send the pre-built handshake frame and wait for the server's response.
@@ -472,7 +574,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         };
 
         // First try to parse as the success path.
-        if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(resp_payload) {
+        if let Ok(resp) = postcard::from_bytes::<ConnectedResponse>(resp_payload) {
             if resp.sync_protocol_version != SYNC_PROTOCOL_VERSION {
                 return HandshakeResult::NetworkError(format!(
                     "incompatible Jazz sync protocol: server sent {}, client requires {}. Please update Jazz.",
@@ -484,7 +586,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 
         // Fall back: check whether the server sent an explicit Error event.
         if let Ok(crate::transport_protocol::ServerEvent::Error { message, code }) =
-            serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload)
+            postcard::from_bytes::<crate::transport_protocol::ServerEvent>(resp_payload)
         {
             if code == crate::transport_protocol::ErrorCode::Unauthorized {
                 return HandshakeResult::AuthFailure(message);
@@ -711,15 +813,13 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return ConnectedExit::Shutdown; };
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
-                    let frame = frame_encode(&bytes);
+                    let Ok(frame) = frame_encode_postcard(&entry) else { continue; };
                     if ws.send(&frame).await.is_err() { return ConnectedExit::NetworkError; }
                 }
                 incoming = ws.recv() => {
                     match incoming {
                         Ok(Some(data)) => {
-                            let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Some(event) = frame_decode_postcard::<crate::transport_protocol::ServerEvent>(&data) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
@@ -898,15 +998,13 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return WasmConnectedExit::Shutdown; };
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
-                    let frame = frame_encode(&bytes);
+                    let Ok(frame) = frame_encode_postcard(&entry) else { continue; };
                     if ws.send(&frame).await.is_err() { return WasmConnectedExit::NetworkError; }
                 }
                 incoming = ws.recv().fuse() => {
                     match incoming {
                         Ok(Some(data)) => {
-                            let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Some(event) = frame_decode_postcard::<crate::transport_protocol::ServerEvent>(&data) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
@@ -947,8 +1045,7 @@ mod tests {
                 next_sync_seq: Some(0),
                 catalogue_state_hash: None,
             };
-            let payload = serde_json::to_vec(&resp).unwrap();
-            let frame = frame_encode(&payload);
+            let frame = frame_encode_postcard(&resp).unwrap();
             let mut inbound = VecDeque::new();
             inbound.push_back(frame);
             Ok(MockStream {
@@ -1052,8 +1149,7 @@ mod tests {
             next_sync_seq: Some(0),
             catalogue_state_hash: None,
         };
-        let payload = serde_json::to_vec(&resp).unwrap();
-        frame_encode(&payload)
+        frame_encode_postcard(&resp).unwrap()
     }
 
     #[derive(Clone)]
@@ -1236,10 +1332,7 @@ mod tests {
         let latest_handshake = frames
             .iter()
             .rev()
-            .find_map(|f| {
-                let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
-            })
+            .find_map(|f| frame_decode_postcard::<AuthHandshake>(f))
             .expect("at least one AuthHandshake frame sent after update_auth");
         assert_eq!(
             latest_handshake.auth.jwt_token.as_deref(),
@@ -1302,10 +1395,7 @@ mod tests {
         let latest_handshake = frames
             .iter()
             .rev()
-            .find_map(|f| {
-                let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
-            })
+            .find_map(|f| frame_decode_postcard::<AuthHandshake>(f))
             .expect("at least one AuthHandshake frame");
         assert_eq!(
             latest_handshake.auth.jwt_token.as_deref(),
