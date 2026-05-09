@@ -525,39 +525,10 @@ impl PreparedRowWriteContext {
     }
 }
 
-type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
 type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
 type BranchSchemaHashCache = HashMap<(usize, String), Vec<SchemaHash>>;
 type TableCatalogueDescriptorCache =
     HashMap<(usize, String), Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>>;
-
-fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
-    static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_row_raw_table_id(
-    kind: RowRawTableKind,
-    table: &str,
-    schema_hash: SchemaHash,
-) -> RowRawTableId {
-    let cache_key = (kind, table.to_string(), schema_hash);
-    if let Some(cached) = row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .get(&cache_key)
-        .cloned()
-    {
-        return cached;
-    }
-
-    let created = RowRawTableId::new(kind, table, schema_hash);
-    row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .insert(cache_key, created.clone());
-    created
-}
 
 fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDescriptor>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<RowDescriptor>>>> = OnceLock::new();
@@ -1207,11 +1178,11 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
 }
 
 fn history_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::History, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::History, table, schema_hash)
 }
 
 fn visible_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::Visible, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::Visible, table, schema_hash)
 }
 
 fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
