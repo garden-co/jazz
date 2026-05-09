@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { SubscriptionManager } from "./subscription-manager.js";
-import type { WasmRow, RowDelta } from "../drivers/types.js";
+import type { ColumnDescriptor, NativeRowDelta, WasmRow, RowDelta } from "../drivers/types.js";
 
 interface TestItem {
   id: string;
@@ -34,6 +34,41 @@ function makeDelta(changes: RowDelta = []): RowDelta {
   return changes;
 }
 
+const nativeColumns: ColumnDescriptor[] = [
+  { name: "name", column_type: { type: "Text" }, nullable: false },
+  { name: "count", column_type: { type: "Integer" }, nullable: false },
+];
+
+function uuidBytes(id: string): Uint8Array {
+  return Uint8Array.from(
+    id
+      .replaceAll("-", "")
+      .match(/../g)!
+      .map((hex) => Number.parseInt(hex, 16)),
+  );
+}
+
+function pushU32(target: number[], value: number): void {
+  target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+}
+
+function nativeRowData(name: string, count: number): Uint8Array {
+  const text = new TextEncoder().encode(name);
+  const data = new Uint8Array(4 + text.byteLength);
+  new DataView(data.buffer).setInt32(0, count, true);
+  data.set(text, 4);
+  return data;
+}
+
+function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
+  const data = nativeRowData(name, count);
+  const bytes: number[] = [...uuidBytes(id)];
+  pushU32(bytes, index);
+  pushU32(bytes, data.byteLength);
+  bytes.push(...data);
+  return Uint8Array.from(bytes);
+}
+
 describe("SubscriptionManager", () => {
   it("passes delta by reference (zero-copy)", () => {
     const manager = new SubscriptionManager<TestItem>();
@@ -59,6 +94,32 @@ describe("SubscriptionManager", () => {
     expect(result.delta).toHaveLength(2);
     expect(result.all.map((item) => item.id)).toEqual(["1", "2"]);
     expect(manager.size).toBe(2);
+  });
+
+  it("decodes native subscription additions", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const delta: NativeRowDelta = {
+      __jazzNativeRowDelta: true,
+      added: nativeAddedRecord(id, 0, "native", 42),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 1,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+
+    const result = manager.handleDelta(delta, transform, nativeColumns);
+
+    expect(result.all).toEqual([{ id, name: "native", count: 42 }]);
+    expect(result.delta).toEqual([
+      {
+        kind: 0,
+        id,
+        index: 0,
+        row: makeRow(id, "native", 42),
+      },
+    ]);
   });
 
   it("tracks content updates", () => {

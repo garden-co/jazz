@@ -2022,6 +2022,7 @@ export class Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const nativeOutputColumns = outputSchema[outputTable]?.columns;
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
@@ -2032,7 +2033,7 @@ export class Db {
       );
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform);
+      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
       callback(typedDelta);
     };
 
@@ -2420,6 +2421,7 @@ class ClientBackedDb extends Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const nativeOutputColumns = outputSchema[outputTable]?.columns;
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
@@ -2433,7 +2435,7 @@ class ClientBackedDb extends Db {
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
       (delta) => {
-        const typedDelta = manager.handleDelta(delta, transform);
+        const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
         callback(typedDelta);
       },
       this.session,

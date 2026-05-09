@@ -21,6 +21,8 @@ use std::sync::Once;
 use jazz_tools::binding_support::parse_external_object_id;
 use js_sys::Function;
 use js_sys::Uint8Array;
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Object, Reflect};
 use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use tracing::warn;
@@ -88,14 +90,10 @@ use jazz_tools::binding_support::{
 };
 use jazz_tools::identity;
 use jazz_tools::object::ObjectId;
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::{Session, WriteContext};
-#[cfg(target_arch = "wasm32")]
-use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{SchemaHash, Value};
 use jazz_tools::runtime_core::{
     QueryLocalOverlay, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
@@ -116,11 +114,6 @@ use jazz_tools::sync_manager::{
 
 use crate::query::parse_query;
 use crate::types::SubscriptionRow;
-#[cfg(target_arch = "wasm32")]
-use crate::types::{
-    SubscriptionRowAdded, SubscriptionRowChange, SubscriptionRowDelta, SubscriptionRowRemoved,
-    SubscriptionRowUpdated,
-};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,53 +296,88 @@ fn parse_subscription_inputs(
 #[cfg(target_arch = "wasm32")]
 fn make_subscription_callback(on_update: Function) -> impl Fn(SubscriptionDelta) + 'static {
     move |delta: SubscriptionDelta| {
-        let row_to_wasm = |row: &Row, descriptor: &RowDescriptor| -> SubscriptionRow {
-            let values = decode_row(descriptor, &row.data)
-                .map(|vals| vals.into_iter().map(Value::from).collect::<Vec<_>>())
-                .unwrap_or_default();
-            SubscriptionRow {
-                id: row.id.uuid().to_string(),
-                values,
-            }
-        };
-
-        let descriptor = &delta.descriptor;
-        let wasm_delta = SubscriptionRowDelta(
-            delta
-                .ordered_delta
-                .removed
-                .iter()
-                .map(|change| {
-                    SubscriptionRowChange::Removed(SubscriptionRowRemoved {
-                        kind: 1,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                    })
-                })
-                .chain(delta.ordered_delta.updated.iter().map(|change| {
-                    SubscriptionRowChange::Updated(SubscriptionRowUpdated {
-                        kind: 2,
-                        id: change.id.uuid().to_string(),
-                        index: change.new_index,
-                        row: change.row.as_ref().map(|row| row_to_wasm(row, descriptor)),
-                    })
-                }))
-                .chain(delta.ordered_delta.added.iter().map(|change| {
-                    SubscriptionRowChange::Added(SubscriptionRowAdded {
-                        kind: 0,
-                        id: change.id.uuid().to_string(),
-                        index: change.index,
-                        row: row_to_wasm(&change.row, descriptor),
-                    })
-                }))
-                .collect::<Vec<_>>(),
-        );
-
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        if let Ok(delta_value) = wasm_delta.serialize(&serializer) {
+        let delta_value = native_subscription_delta_to_js(&delta);
+        if !delta_value.is_undefined() {
             let _ = on_update.call1(&JsValue::NULL, &delta_value);
         }
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn push_u32(buffer: &mut Vec<u8>, value: usize) {
+    buffer.extend_from_slice(&(value as u32).to_le_bytes());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn push_row_record(buffer: &mut Vec<u8>, id: ObjectId, index: usize, data: &[u8]) {
+    buffer.extend_from_slice(id.uuid().as_bytes());
+    push_u32(buffer, index);
+    push_u32(buffer, data.len());
+    buffer.extend_from_slice(data);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn set_property(object: &Object, key: &str, value: &JsValue) {
+    let _ = Reflect::set(object, &JsValue::from_str(key), value);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_subscription_delta_to_js(delta: &SubscriptionDelta) -> JsValue {
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+
+    for change in &delta.ordered_delta.added {
+        push_row_record(&mut added, change.id, change.index, &change.row.data);
+    }
+
+    for change in &delta.ordered_delta.removed {
+        removed.extend_from_slice(change.id.uuid().as_bytes());
+        push_u32(&mut removed, change.index);
+    }
+
+    for change in &delta.ordered_delta.updated {
+        updated.extend_from_slice(change.id.uuid().as_bytes());
+        push_u32(&mut updated, change.new_index);
+        match &change.row {
+            Some(row) => {
+                updated.push(1);
+                push_u32(&mut updated, row.data.len());
+                updated.extend_from_slice(&row.data);
+            }
+            None => updated.push(0),
+        }
+    }
+
+    let object = Object::new();
+    set_property(&object, "__jazzNativeRowDelta", &JsValue::from_bool(true));
+    set_property(&object, "added", &Uint8Array::from(added.as_slice()).into());
+    set_property(
+        &object,
+        "removed",
+        &Uint8Array::from(removed.as_slice()).into(),
+    );
+    set_property(
+        &object,
+        "updated",
+        &Uint8Array::from(updated.as_slice()).into(),
+    );
+    set_property(
+        &object,
+        "addedCount",
+        &JsValue::from_f64(delta.ordered_delta.added.len() as f64),
+    );
+    set_property(
+        &object,
+        "removedCount",
+        &JsValue::from_f64(delta.ordered_delta.removed.len() as f64),
+    );
+    set_property(
+        &object,
+        "updatedCount",
+        &JsValue::from_f64(delta.ordered_delta.updated.len() as f64),
+    );
+    object.into()
 }
 
 fn parse_node_durability_tiers(tier: Option<&str>) -> Result<Vec<DurabilityTier>, JsError> {

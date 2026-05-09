@@ -5,7 +5,14 @@
  * WASM row deltas into typed object deltas with full state tracking.
  */
 
-import type { WasmRow, RowDelta as WireRowDelta } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  NativeRowDelta,
+  SubscriptionWireDelta,
+  WasmRow,
+  RowDelta as WireRowDelta,
+} from "../drivers/types.js";
+import { decodeNativeRow } from "./native-row-format.js";
 
 const RowChangeKind = {
   Added: 0 as const,
@@ -63,7 +70,25 @@ export class SubscriptionManager<T extends { id: string }> {
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
-  handleDelta(delta: WireRowDelta, transform: (row: WasmRow) => T): SubscriptionDelta<T> {
+  handleDelta(
+    delta: SubscriptionWireDelta,
+    transform: (row: WasmRow) => T,
+    nativeColumns?: readonly ColumnDescriptor[],
+  ): SubscriptionDelta<T> {
+    if (isNativeRowDelta(delta)) {
+      if (!nativeColumns) {
+        throw new Error("Native subscription delta requires output columns for decoding");
+      }
+      return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform);
+    }
+
+    return this.handleWireDelta(delta, transform);
+  }
+
+  private handleWireDelta(
+    delta: WireRowDelta,
+    transform: (row: WasmRow) => T,
+  ): SubscriptionDelta<T> {
     delta.sort((a, b) => a.index - b.index);
 
     for (const change of delta) {
@@ -114,4 +139,90 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
+}
+
+function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
+  return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
+}
+
+function readUuid(bytes: Uint8Array, offset: number): string {
+  const hex = Array.from(bytes.subarray(offset, offset + 16), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+    16,
+    20,
+  )}-${hex.slice(20)}`;
+}
+
+function decodeNativeDelta(
+  native: NativeRowDelta,
+  columns: readonly ColumnDescriptor[],
+): WireRowDelta {
+  const delta: WireRowDelta = [];
+
+  {
+    const bytes = native.added;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    for (let i = 0; i < native.addedCount; i++) {
+      const id = readUuid(bytes, offset);
+      offset += 16;
+      const index = view.getUint32(offset, true);
+      offset += 4;
+      const len = view.getUint32(offset, true);
+      offset += 4;
+      const data = bytes.subarray(offset, offset + len);
+      offset += len;
+      delta.push({
+        kind: RowChangeKind.Added,
+        id,
+        index,
+        row: decodeNativeRow(id, columns, data),
+      });
+    }
+  }
+
+  {
+    const bytes = native.removed;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    for (let i = 0; i < native.removedCount; i++) {
+      const id = readUuid(bytes, offset);
+      offset += 16;
+      const index = view.getUint32(offset, true);
+      offset += 4;
+      delta.push({ kind: RowChangeKind.Removed, id, index });
+    }
+  }
+
+  {
+    const bytes = native.updated;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    for (let i = 0; i < native.updatedCount; i++) {
+      const id = readUuid(bytes, offset);
+      offset += 16;
+      const index = view.getUint32(offset, true);
+      offset += 4;
+      const flags = bytes[offset] ?? 0;
+      offset += 1;
+      if (flags & 1) {
+        const len = view.getUint32(offset, true);
+        offset += 4;
+        const data = bytes.subarray(offset, offset + len);
+        offset += len;
+        delta.push({
+          kind: RowChangeKind.Updated,
+          id,
+          index,
+          row: decodeNativeRow(id, columns, data),
+        });
+      } else {
+        delta.push({ kind: RowChangeKind.Updated, id, index });
+      }
+    }
+  }
+
+  return delta;
 }

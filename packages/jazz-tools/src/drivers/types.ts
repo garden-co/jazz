@@ -60,6 +60,18 @@ export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDel
 
 export type RowDelta = WireRowChange[];
 
+export interface NativeRowDelta {
+  __jazzNativeRowDelta: true;
+  added: Uint8Array;
+  removed: Uint8Array;
+  updated: Uint8Array;
+  addedCount: number;
+  removedCount: number;
+  updatedCount: number;
+}
+
+export type SubscriptionWireDelta = RowDelta | NativeRowDelta;
+
 export type ColumnType =
   | { type: "Integer" }
   | { type: "BigInt" }
