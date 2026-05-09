@@ -452,7 +452,7 @@ pub struct QueryManager {
     /// Visible rows observed through normal row visibility processing, keyed by
     /// batch. Batch fate processing uses this to mark affected query rows
     /// without rescanning and decoding every subscribed visible region.
-    pub(super) visible_rows_by_batch: HashMap<BatchId, Vec<(String, ObjectId)>>,
+    pub(super) visible_rows_by_batch: HashMap<BatchId, HashSet<(String, ObjectId)>>,
 
     /// Currently queued SyncManager batch fates whose query effects have
     /// already been applied by this manager.
@@ -1166,11 +1166,9 @@ impl QueryManager {
                 .unwrap_or_default();
             if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
                 for member in record.members {
-                    rows.push((member.table_name, member.object_id));
+                    rows.insert((member.table_name, member.object_id));
                 }
             }
-            rows.sort();
-            rows.dedup();
             marked_row_count += rows.len();
             for (table_name, object_id) in rows {
                 self.mark_local_row_updated_in_subscriptions(table_name.as_str(), object_id);
@@ -1680,9 +1678,7 @@ impl QueryManager {
             && previous_row.state.is_visible()
             && let Some(rows) = self.visible_rows_by_batch.get_mut(&previous_row.batch_id)
         {
-            rows.retain(|(table, row_id)| {
-                table.as_str() != logical_table.as_str() || *row_id != update.object_id
-            });
+            rows.remove(&(logical_table.clone(), update.object_id));
             if rows.is_empty() {
                 self.visible_rows_by_batch.remove(&previous_row.batch_id);
             }
@@ -1692,10 +1688,7 @@ impl QueryManager {
                 .visible_rows_by_batch
                 .entry(current_batch_id)
                 .or_default();
-            let member = (logical_table.clone(), update.object_id);
-            if !rows.contains(&member) {
-                rows.push(member);
-            }
+            rows.insert((logical_table.clone(), update.object_id));
         }
 
         if local_update {
