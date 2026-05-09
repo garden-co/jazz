@@ -11,6 +11,7 @@ use crate::row_format::{decode_row, encode_row};
 pub struct CatalogueEntry {
     pub object_id: ObjectId,
     pub metadata: HashMap<String, String>,
+    #[serde(with = "serde_bytes")]
     pub content: Vec<u8>,
 }
 

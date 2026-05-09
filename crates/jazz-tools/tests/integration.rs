@@ -71,7 +71,7 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
         catalogue_state_hash: None,
         declared_schema_hash: None,
     };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
+    let payload = rmp_serde::to_vec_named(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
         .await
         .map_err(|e| format!("ws send failed: {e}"))?;
@@ -79,10 +79,10 @@ async fn ws_handshake(port: u16, jwt_token: &str) -> Result<ConnectedResponse, S
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = serde_json::from_slice::<ConnectedResponse>(inner) {
+            if let Ok(connected) = rmp_serde::from_slice::<ConnectedResponse>(inner) {
                 return Ok(connected);
             }
-            let msg = serde_json::from_slice::<serde_json::Value>(inner)
+            let msg = rmp_serde::from_slice::<serde_json::Value>(inner)
                 .ok()
                 .and_then(|v| {
                     v.get("message")
@@ -370,7 +370,7 @@ async fn test_ws_connection_stays_open_after_handshake() {
         catalogue_state_hash: None,
         declared_schema_hash: None,
     };
-    let payload = serde_json::to_vec(&handshake).expect("serialize AuthHandshake");
+    let payload = rmp_serde::to_vec_named(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
         .await
         .expect("ws send handshake");

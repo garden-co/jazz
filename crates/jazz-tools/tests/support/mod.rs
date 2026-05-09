@@ -324,6 +324,14 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
     .expect("encode jwt")
 }
 
+fn encode_ws_payload<T: serde::Serialize>(payload: &T) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    payload
+        .serialize(&mut rmp_serde::Serializer::new(&mut bytes).with_struct_map())
+        .expect("serialize websocket payload");
+    bytes
+}
+
 fn build_catalogue_runtime(
     schema_manager: SchemaManager,
     storage: MemoryStorage,
@@ -343,11 +351,10 @@ fn build_catalogue_runtime(
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
             tokio::spawn(async move {
-                let frame = serde_json::to_vec(&jazz_tools::sync_manager::OutboxEntry {
+                let frame = encode_ws_payload(&jazz_tools::sync_manager::OutboxEntry {
                     destination: Destination::Server(ServerId::default()),
                     payload,
-                })
-                .expect("serialize OutboxEntry");
+                });
                 if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
                     if let Ok(mut errors) = push_errors.lock() {
                         errors.push(error);
@@ -437,6 +444,7 @@ pub async fn push_catalogue_in_memory(
     }
 
     wait_for_in_flight_pushes(&in_flight_pushes).await;
+    state.runtime.flush().await?;
 
     let errors = push_errors.lock().unwrap().clone();
     if !errors.is_empty() {

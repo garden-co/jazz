@@ -5,9 +5,12 @@
 
 use crate::query_manager::types::SchemaHash;
 use crate::sync_manager::types::{ClientId, InboxEntry, OutboxEntry, ServerId};
+use crate::transport_wire;
 use futures::channel::mpsc;
 
-pub const SYNC_PROTOCOL_VERSION: u32 = 2;
+pub(crate) use crate::transport_wire::{frame_decode, frame_encode};
+
+pub const SYNC_PROTOCOL_VERSION: u32 = 3;
 
 pub trait TickNotifier: 'static {
     fn notify(&self);
@@ -387,30 +390,6 @@ pub fn create<W: StreamAdapter, T: TickNotifier>(
     (handle, manager)
 }
 
-/// Encode a payload as a 4-byte big-endian length-prefixed frame.
-pub(crate) fn frame_encode(payload: &[u8]) -> Vec<u8> {
-    debug_assert!(
-        payload.len() <= u32::MAX as usize,
-        "frame payload exceeds u32 limit"
-    );
-    let mut out = Vec::with_capacity(4 + payload.len());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    out
-}
-
-/// Decode a 4-byte big-endian length-prefixed frame, returning the payload slice.
-pub(crate) fn frame_decode(data: &[u8]) -> Option<&[u8]> {
-    if data.len() < 4 {
-        return None;
-    }
-    let len = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-    if data.len() < 4 + len {
-        return None;
-    }
-    Some(&data[4..4 + len])
-}
-
 /// Outcome of the auth handshake.
 pub(crate) enum HandshakeResult {
     /// Server accepted; connection is open.
@@ -444,7 +423,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
             declared_schema_hash,
         };
         let payload =
-            serde_json::to_vec(&handshake).expect("AuthHandshake serialisation infallible");
+            transport_wire::encode(&handshake).expect("AuthHandshake serialisation infallible");
         frame_encode(&payload)
     }
 
@@ -472,7 +451,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
         };
 
         // First try to parse as the success path.
-        if let Ok(resp) = serde_json::from_slice::<ConnectedResponse>(resp_payload) {
+        if let Ok(resp) = transport_wire::decode::<ConnectedResponse>(resp_payload) {
             if resp.sync_protocol_version != SYNC_PROTOCOL_VERSION {
                 return HandshakeResult::NetworkError(format!(
                     "incompatible Jazz sync protocol: server sent {}, client requires {}. Please update Jazz.",
@@ -484,7 +463,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
 
         // Fall back: check whether the server sent an explicit Error event.
         if let Ok(crate::transport_protocol::ServerEvent::Error { message, code }) =
-            serde_json::from_slice::<crate::transport_protocol::ServerEvent>(resp_payload)
+            transport_wire::decode::<crate::transport_protocol::ServerEvent>(resp_payload)
         {
             if code == crate::transport_protocol::ErrorCode::Unauthorized {
                 return HandshakeResult::AuthFailure(message);
@@ -711,7 +690,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return ConnectedExit::Shutdown; };
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
+                    let Ok(bytes) = transport_wire::encode(&entry) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return ConnectedExit::NetworkError; }
                 }
@@ -719,7 +698,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Ok(event) = transport_wire::decode::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return ConnectedExit::NetworkError,
@@ -898,7 +877,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     // outbox closed = handle dropped; control_rx will also return None shortly.
                     // Route to Shutdown so the same clean-exit path is taken.
                     let Some(entry) = out else { return WasmConnectedExit::Shutdown; };
-                    let Ok(bytes) = serde_json::to_vec(&entry) else { continue; };
+                    let Ok(bytes) = transport_wire::encode(&entry) else { continue; };
                     let frame = frame_encode(&bytes);
                     if ws.send(&frame).await.is_err() { return WasmConnectedExit::NetworkError; }
                 }
@@ -906,7 +885,7 @@ impl<W: StreamAdapter + 'static, T: TickNotifier + 'static> TransportManager<W, 
                     match incoming {
                         Ok(Some(data)) => {
                             let Some(payload) = frame_decode(&data) else { continue; };
-                            let Ok(event) = serde_json::from_slice::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
+                            let Ok(event) = transport_wire::decode::<crate::transport_protocol::ServerEvent>(payload) else { continue; };
                             self.dispatch_server_event(event);
                         }
                         Ok(None) | Err(_) => return WasmConnectedExit::NetworkError,
@@ -947,7 +926,7 @@ mod tests {
                 next_sync_seq: Some(0),
                 catalogue_state_hash: None,
             };
-            let payload = serde_json::to_vec(&resp).unwrap();
+            let payload = transport_wire::encode(&resp).unwrap();
             let frame = frame_encode(&payload);
             let mut inbound = VecDeque::new();
             inbound.push_back(frame);
@@ -1052,7 +1031,7 @@ mod tests {
             next_sync_seq: Some(0),
             catalogue_state_hash: None,
         };
-        let payload = serde_json::to_vec(&resp).unwrap();
+        let payload = transport_wire::encode(&resp).unwrap();
         frame_encode(&payload)
     }
 
@@ -1062,6 +1041,28 @@ mod tests {
         fn notify(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn auth_handshake_frame_uses_messagepack_payload() {
+        let (_handle, manager) = create::<MockStream, CountingTick>(
+            "mock://".to_string(),
+            AuthConfig::default(),
+            CountingTick(Arc::new(AtomicUsize::new(0))),
+        );
+
+        let frame = manager.build_handshake_frame();
+        let payload = frame_decode(&frame).expect("handshake frame has payload");
+
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(payload).is_err(),
+            "handshake payload should not be JSON"
+        );
+
+        let decoded: AuthHandshake =
+            rmp_serde::from_slice(payload).expect("handshake payload should be MessagePack");
+        assert_eq!(decoded.sync_protocol_version, SYNC_PROTOCOL_VERSION);
+        assert_eq!(decoded.client_id, manager.client_id.to_string());
     }
 
     #[tokio::test]
@@ -1238,7 +1239,7 @@ mod tests {
             .rev()
             .find_map(|f| {
                 let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
+                transport_wire::decode::<AuthHandshake>(payload).ok()
             })
             .expect("at least one AuthHandshake frame sent after update_auth");
         assert_eq!(
@@ -1304,7 +1305,7 @@ mod tests {
             .rev()
             .find_map(|f| {
                 let payload = frame_decode(f)?;
-                serde_json::from_slice::<AuthHandshake>(payload).ok()
+                transport_wire::decode::<AuthHandshake>(payload).ok()
             })
             .expect("at least one AuthHandshake frame");
         assert_eq!(

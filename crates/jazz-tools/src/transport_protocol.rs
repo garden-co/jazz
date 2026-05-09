@@ -13,7 +13,7 @@
 //!
 //! # Wire Format
 //!
-//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+//! Each frame: `[4 bytes: u32 big-endian length][N bytes: MessagePack]`
 
 use serde::{Deserialize, Serialize};
 
@@ -260,14 +260,9 @@ impl UnauthenticatedResponse {
 impl ServerEvent {
     /// Encode as a length-prefixed binary frame.
     ///
-    /// Format: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+    /// Format: `[4 bytes: u32 big-endian length][N bytes: MessagePack]`
     pub fn encode_frame(&self) -> Vec<u8> {
-        let json = serde_json::to_vec(self).unwrap_or_default();
-        let len = (json.len() as u32).to_be_bytes();
-        let mut buf = Vec::with_capacity(4 + json.len());
-        buf.extend_from_slice(&len);
-        buf.extend_from_slice(&json);
-        buf
+        crate::transport_wire::encode_frame(self).unwrap_or_default()
     }
 
     /// Decode a single frame from a buffer.
@@ -282,7 +277,7 @@ impl ServerEvent {
         if buf.len() < 4 + len {
             return None;
         }
-        let event: ServerEvent = serde_json::from_slice(&buf[4..4 + len]).ok()?;
+        let event: ServerEvent = crate::transport_wire::decode(&buf[4..4 + len]).ok()?;
         Some((event, 4 + len))
     }
 }
@@ -302,6 +297,10 @@ mod tests {
 
         let frame = event.encode_frame();
         assert!(frame.len() > 4);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&frame[4..]).is_err(),
+            "ServerEvent frames should carry MessagePack payloads, not JSON"
+        );
 
         let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
         assert_eq!(consumed, frame.len());

@@ -326,7 +326,7 @@ impl ServerState {
     /// Process a raw binary payload received from a WebSocket client and push it
     /// into the runtime sync inbox.
     ///
-    /// Frames are expected to be `OutboxEntry` JSON (as serialised by
+    /// Frames are expected to be `OutboxEntry` MessagePack (as serialised by
     /// `TransportManager::run_connected`). If that parse fails we fall back to a
     /// raw `SyncBatchRequest` shape, which some callers send directly.
     pub async fn process_ws_client_frame(
@@ -335,7 +335,7 @@ impl ServerState {
         payload: &[u8],
     ) -> Result<(), String> {
         if let Ok(entry) =
-            serde_json::from_slice::<crate::sync_manager::types::OutboxEntry>(payload)
+            crate::transport_wire::decode::<crate::sync_manager::types::OutboxEntry>(payload)
         {
             let inbox = InboxEntry {
                 source: Source::Client(client_id),
@@ -347,7 +347,8 @@ impl ServerState {
                 .map_err(|e| e.to_string());
         }
 
-        match serde_json::from_slice::<crate::transport_protocol::SyncBatchRequest>(payload) {
+        match crate::transport_wire::decode::<crate::transport_protocol::SyncBatchRequest>(payload)
+        {
             Ok(batch) => {
                 for p in batch.payloads {
                     let inbox = InboxEntry {

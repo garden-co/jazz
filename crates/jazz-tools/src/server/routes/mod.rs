@@ -317,7 +317,7 @@ mod tests {
             payloads: vec![p1, p2],
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = rmp_serde::to_vec_named(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -606,7 +606,7 @@ mod tests {
             payloads,
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = rmp_serde::to_vec_named(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -2133,7 +2133,7 @@ mod tests {
             catalogue_state_hash: None,
             declared_schema_hash: None,
         };
-        let payload = serde_json::to_vec(&handshake).expect("serialize handshake");
+        let payload = crate::transport_wire::encode(&handshake).expect("serialize handshake");
         ws.send(WsMessage::Binary(
             crate::transport_manager::frame_encode(&payload).into(),
         ))
@@ -2151,7 +2151,7 @@ mod tests {
         let connected_payload = crate::transport_manager::frame_decode(&connected_frame)
             .expect("decode ConnectedResponse frame");
         let connected_response: crate::transport_manager::ConnectedResponse =
-            serde_json::from_slice(connected_payload).expect("parse ConnectedResponse");
+            crate::transport_wire::decode(connected_payload).expect("parse ConnectedResponse");
         assert_eq!(
             connected_response.sync_protocol_version,
             crate::transport_manager::SYNC_PROTOCOL_VERSION
@@ -2190,7 +2190,7 @@ mod tests {
 
         let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
-        let payload = serde_json::to_vec(&serde_json::json!({
+        let payload = crate::transport_wire::encode(&serde_json::json!({
             "client_id": ClientId::new().to_string(),
             "auth": {
                 "backend_secret": "test-backend-secret"
@@ -2216,7 +2216,7 @@ mod tests {
         let payload =
             crate::transport_manager::frame_decode(&error_frame).expect("decode error frame");
         let event: crate::jazz_transport::ServerEvent =
-            serde_json::from_slice(payload).expect("parse error event");
+            crate::transport_wire::decode(payload).expect("parse error event");
         match event {
             crate::jazz_transport::ServerEvent::Error { message, code } => {
                 assert_eq!(code, crate::jazz_transport::ErrorCode::BadRequest);
