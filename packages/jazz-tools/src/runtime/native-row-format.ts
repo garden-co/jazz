@@ -1,4 +1,5 @@
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../drivers/types.js";
+import { isProvenanceMagicTimestampColumn } from "../magic-columns.js";
 
 const textDecoder = new TextDecoder();
 
@@ -52,6 +53,8 @@ type RowLayout = {
   variableColumnCount: number;
 };
 
+const layoutCache = new WeakMap<readonly ColumnDescriptor[], RowLayout>();
+
 function compileLayout(columns: readonly ColumnDescriptor[]): RowLayout {
   const layoutColumns: LayoutColumn[] = [];
   let fixedOffset = 0;
@@ -78,6 +81,16 @@ function compileLayout(columns: readonly ColumnDescriptor[]): RowLayout {
     fixedSectionSize: fixedOffset,
     variableColumnCount: variableIndex,
   };
+}
+
+function getLayout(columns: readonly ColumnDescriptor[]): RowLayout {
+  const cached = layoutCache.get(columns);
+  if (cached) {
+    return cached;
+  }
+  const layout = compileLayout(columns);
+  layoutCache.set(columns, layout);
+  return layout;
 }
 
 function columnBytes(
@@ -176,6 +189,85 @@ function decodeNonNullValue(bytes: Uint8Array, type: ColumnType): Value {
   }
 }
 
+function timestampToDate(value: number, columnName?: string): Date {
+  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
+    return new Date(Math.trunc(value / 1_000));
+  }
+  return new Date(value);
+}
+
+function decodeNativePlainValue(bytes: Uint8Array, type: ColumnType, columnName?: string): unknown {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  switch (type.type) {
+    case "Integer":
+      return view.getInt32(0, true);
+    case "BigInt":
+      return Number(view.getBigInt64(0, true));
+    case "Double":
+      return view.getFloat64(0, true);
+    case "Boolean":
+      return bytes[0] !== 0;
+    case "Timestamp":
+      return timestampToDate(Number(view.getBigUint64(0, true)), columnName);
+    case "Uuid":
+      return uuidString(bytes.subarray(0, 16));
+    case "Bytea":
+      return bytes.slice();
+    case "Text":
+      return textDecoder.decode(bytes);
+    case "Json":
+      return JSON.parse(textDecoder.decode(bytes));
+    case "Enum":
+      if (type.variants.length <= 256 && bytes.byteLength === 1) {
+        return type.variants[bytes[0]] ?? "";
+      }
+      return textDecoder.decode(bytes);
+    case "Array":
+      return decodeNativePlainArray(bytes, type.element);
+    case "Row": {
+      if (bytes.byteLength === 0) {
+        throw new Error("Native nested row is missing id flag");
+      }
+      const hasId = bytes[0] === 1;
+      const id = hasId ? uuidString(bytes.subarray(1, 17)) : undefined;
+      const rowData = bytes.subarray(hasId ? 17 : 1);
+      return decodeNativeRowObject(id, type.columns, rowData);
+    }
+  }
+}
+
+function decodeNativePlainArray(bytes: Uint8Array, elementType: ColumnType): unknown[] {
+  if (bytes.byteLength < 4) {
+    throw new Error("Native array is missing element count");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const count = view.getUint32(0, true);
+  const fixed = fixedSize(elementType);
+  if (fixed !== null) {
+    const values: unknown[] = [];
+    let offset = 4;
+    for (let i = 0; i < count; i++) {
+      values.push(decodeNativePlainValue(bytes.subarray(offset, offset + fixed), elementType));
+      offset += fixed;
+    }
+    return values;
+  }
+
+  const offsetsStart = 4;
+  const offsetTableSize = count > 0 ? (count - 1) * 4 : 0;
+  const values: unknown[] = [];
+  const payloadStart = 4 + offsetTableSize;
+  for (let i = 0; i < count; i++) {
+    const start = i === 0 ? 0 : view.getUint32(offsetsStart + (i - 1) * 4, true);
+    const end =
+      i + 1 < count ? view.getUint32(offsetsStart + i * 4, true) : bytes.byteLength - payloadStart;
+    values.push(
+      decodeNativePlainValue(bytes.subarray(payloadStart + start, payloadStart + end), elementType),
+    );
+  }
+  return values;
+}
+
 function decodeArray(bytes: Uint8Array, elementType: ColumnType): Value[] {
   if (bytes.byteLength < 4) {
     throw new Error("Native array is missing element count");
@@ -212,7 +304,7 @@ export function decodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   rowData: Uint8Array,
 ): Value[] {
-  const layout = compileLayout(columns);
+  const layout = getLayout(columns);
   return columns.map((column, index) => {
     const { bytes, isNull } = columnBytes(rowData, columns, layout, index);
     return isNull ? { type: "Null" } : decodeNonNullValue(bytes, column.column_type);
@@ -228,4 +320,27 @@ export function decodeNativeRow(
     id,
     values: decodeNativeRowValues(columns, data),
   };
+}
+
+export function decodeNativeRowObject(
+  id: string | undefined,
+  columns: readonly ColumnDescriptor[],
+  data: Uint8Array,
+): Record<string, unknown> {
+  const layout = getLayout(columns);
+  const obj: Record<string, unknown> = {};
+  if (id !== undefined) {
+    obj.id = id;
+  }
+
+  for (let i = 0; i < columns.length; i++) {
+    const column = columns[i];
+    if (!column) continue;
+    const { bytes, isNull } = columnBytes(data, columns, layout, i);
+    obj[column.name] = isNull
+      ? null
+      : decodeNativePlainValue(bytes, column.column_type, column.name);
+  }
+
+  return obj;
 }

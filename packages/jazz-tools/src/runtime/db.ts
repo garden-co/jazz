@@ -2031,9 +2031,19 @@ export class Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const nativeTransform =
+      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
+        ? (row: Record<string, unknown>): T =>
+            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
+        : undefined;
 
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
+      const typedDelta = manager.handleDelta(
+        delta,
+        transform,
+        nativeOutputColumns,
+        nativeTransform,
+      );
       callback(typedDelta);
     };
 
@@ -2430,12 +2440,22 @@ class ClientBackedDb extends Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
+    const nativeTransform =
+      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
+        ? (row: Record<string, unknown>): T =>
+            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
+        : undefined;
     const queryOptions = ordinaryDbQueryOptions(options);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
       (delta) => {
-        const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
+        const typedDelta = manager.handleDelta(
+          delta,
+          transform,
+          nativeOutputColumns,
+          nativeTransform,
+        );
         callback(typedDelta);
       },
       this.session,

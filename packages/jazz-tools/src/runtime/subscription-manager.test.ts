@@ -70,13 +70,15 @@ function nativeAddedRecord(id: string, index: number, name: string, count: numbe
 }
 
 describe("SubscriptionManager", () => {
-  it("passes delta by reference (zero-copy)", () => {
+  it("transforms wire deltas into typed deltas", () => {
     const manager = new SubscriptionManager<TestItem>();
     const input = makeDelta([{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }]);
 
     const result = manager.handleDelta(input, transform);
 
-    expect(result.delta).toBe(input);
+    expect(result.delta).toEqual([
+      { kind: 0, id: "1", index: 0, item: { id: "1", name: "item1", count: 10 } },
+    ]);
     expect(result.all.map((item) => item.id)).toEqual(["1"]);
   });
 
@@ -117,7 +119,37 @@ describe("SubscriptionManager", () => {
         kind: 0,
         id,
         index: 0,
-        row: makeRow(id, "native", 42),
+        item: { id, name: "native", count: 42 },
+      },
+    ]);
+  });
+
+  it("decodes native subscription additions directly to typed rows", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000002";
+    const delta: NativeRowDelta = {
+      __jazzNativeRowDelta: true,
+      added: nativeAddedRecord(id, 0, "direct", 7),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 1,
+      removedCount: 0,
+      updatedCount: 0,
+    };
+
+    const result = manager.handleDelta(delta, transform, nativeColumns, (row) => ({
+      id: row.id as string,
+      name: row.name as string,
+      count: row.count as number,
+    }));
+
+    expect(result.all).toEqual([{ id, name: "direct", count: 7 }]);
+    expect(result.delta).toEqual([
+      {
+        kind: 0,
+        id,
+        index: 0,
+        item: { id, name: "direct", count: 7 },
       },
     ]);
   });
@@ -135,7 +167,12 @@ describe("SubscriptionManager", () => {
       transform,
     );
 
-    expect(result.delta[0]).toEqual({ kind: 2, id: "1", index: 0, row: makeRow("1", "item1", 15) });
+    expect(result.delta[0]).toEqual({
+      kind: 2,
+      id: "1",
+      index: 0,
+      item: { id: "1", name: "item1", count: 15 },
+    });
     expect(result.all[0]!.count).toBe(15);
   });
 
