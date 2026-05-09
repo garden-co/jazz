@@ -735,6 +735,41 @@ function settlementSatisfiesTier(
   return durabilityTierRank(settlement.confirmedTier) >= durabilityTierRank(tier);
 }
 
+function settlementConfirmedTierRank(settlement: BatchFate | null | undefined): number | null {
+  if (!settlement) {
+    return null;
+  }
+  if (settlement.kind !== "durableDirect" && settlement.kind !== "acceptedTransaction") {
+    return null;
+  }
+  return durabilityTierRank(settlement.confirmedTier);
+}
+
+function hydratedRecordShouldOverrideRuntime(
+  runtimeRecord: LocalBatchRecord | null | undefined,
+  hydratedRecord: LocalBatchRecord | null | undefined,
+): boolean {
+  if (!hydratedRecord) {
+    return false;
+  }
+  if (!runtimeRecord) {
+    return true;
+  }
+
+  const hydratedSettlement = hydratedRecord.latestSettlement;
+  const runtimeSettlement = runtimeRecord.latestSettlement;
+  if (hydratedSettlement?.kind === "rejected" && runtimeSettlement?.kind !== "rejected") {
+    return true;
+  }
+  if (runtimeSettlement?.kind === "rejected") {
+    return false;
+  }
+
+  const hydratedTier = settlementConfirmedTierRank(hydratedSettlement);
+  const runtimeTier = settlementConfirmedTierRank(runtimeSettlement);
+  return hydratedTier !== null && (runtimeTier === null || hydratedTier > runtimeTier);
+}
+
 function rejectionFromSettlement(
   settlement: BatchFate | null | undefined,
 ): PersistedWriteRejectedError | null {
@@ -1271,7 +1306,7 @@ export class JazzClient {
    */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
-  private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
+  private readonly hydratedWorkerBatchRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
   private readonly completedEmptyBatchIds = new Set<string>();
   private readonly pendingReplayedRejectedBatchIds = new Set<string>();
@@ -1539,14 +1574,11 @@ export class JazzClient {
 
   localBatchRecord(batchId: string): LocalBatchRecord | null {
     const runtimeRecord = this.requireBatchRecordMethod("loadLocalBatchRecord")(batchId);
-    const replayedRecord = this.replayedRejectedBatchRecords.get(batchId) ?? null;
-    if (
-      replayedRecord?.latestSettlement?.kind === "rejected" &&
-      runtimeRecord?.latestSettlement?.kind !== "rejected"
-    ) {
-      return replayedRecord;
+    const hydratedRecord = this.hydratedWorkerBatchRecords.get(batchId) ?? null;
+    if (hydratedRecordShouldOverrideRuntime(runtimeRecord, hydratedRecord)) {
+      return hydratedRecord;
     }
-    return runtimeRecord ?? replayedRecord ?? null;
+    return runtimeRecord ?? hydratedRecord ?? null;
   }
 
   localBatchRecords(): LocalBatchRecord[] {
@@ -1556,13 +1588,9 @@ export class JazzClient {
         record,
       ]),
     );
-    for (const [batchId, record] of this.replayedRejectedBatchRecords) {
+    for (const [batchId, record] of this.hydratedWorkerBatchRecords) {
       const runtimeRecord = records.get(batchId);
-      if (
-        !runtimeRecord ||
-        (record.latestSettlement?.kind === "rejected" &&
-          runtimeRecord.latestSettlement?.kind !== "rejected")
-      ) {
+      if (hydratedRecordShouldOverrideRuntime(runtimeRecord, record)) {
         records.set(batchId, record);
       }
     }
@@ -1607,7 +1635,7 @@ export class JazzClient {
     const acknowledgedInRuntime = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(
       batchId,
     );
-    const acknowledgedReplayed = this.replayedRejectedBatchRecords.delete(batchId);
+    const acknowledgedReplayed = this.hydratedWorkerBatchRecords.delete(batchId);
     this.pendingReplayedRejectedBatchIds.delete(batchId);
     const acknowledged = acknowledgedInRuntime || acknowledgedReplayed;
     if (acknowledged && rejection) {
@@ -1624,16 +1652,10 @@ export class JazzClient {
     for (const record of records) {
       this.hydratedWorkerBatchIds.add(record.batchId);
       const runtimeRecord = loadLocalBatchRecord(record.batchId);
-      if (
-        runtimeRecord &&
-        !(
-          record.latestSettlement?.kind === "rejected" &&
-          runtimeRecord.latestSettlement?.kind !== "rejected"
-        )
-      ) {
+      if (!hydratedRecordShouldOverrideRuntime(runtimeRecord, record)) {
         continue;
       }
-      this.replayedRejectedBatchRecords.set(record.batchId, record);
+      this.hydratedWorkerBatchRecords.set(record.batchId, record);
       if (record.latestSettlement?.kind === "rejected") {
         this.pendingReplayedRejectedBatchIds.add(record.batchId);
       }
@@ -1645,7 +1667,7 @@ export class JazzClient {
     if (record.latestSettlement?.kind !== "rejected") {
       return;
     }
-    this.replayedRejectedBatchRecords.set(record.batchId, record);
+    this.hydratedWorkerBatchRecords.set(record.batchId, record);
     this.pendingReplayedRejectedBatchIds.add(record.batchId);
   }
 

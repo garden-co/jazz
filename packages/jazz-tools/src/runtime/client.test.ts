@@ -3,6 +3,7 @@ import {
   WriteResult,
   JazzClient,
   resolveDefaultDurabilityTier,
+  type LocalBatchRecord,
   type MutationErrorEvent,
   type Runtime,
   WriteHandle,
@@ -84,6 +85,18 @@ function makeContext(): AppContext {
     schema: {},
     serverUrl: "https://example.test",
     jwtToken: "initial.jwt.token",
+  };
+}
+
+function makeLocalBatchRecord(
+  batchId: string,
+  latestSettlement: LocalBatchRecord["latestSettlement"] = null,
+): LocalBatchRecord {
+  return {
+    batchId,
+    mode: "direct",
+    sealed: true,
+    latestSettlement,
   };
 }
 
@@ -198,6 +211,51 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+  });
+});
+
+describe("JazzClient worker batch hydration", () => {
+  it("unblocks waits when the worker has a more durable settlement than the main runtime", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = makeFakeRuntime();
+      runtime.loadLocalBatchRecord.mockImplementation((batchId: string) => {
+        if (batchId !== "batch-chat") return null;
+        return makeLocalBatchRecord("batch-chat", {
+          kind: "durableDirect",
+          batchId: "batch-chat",
+          confirmedTier: "local",
+        });
+      });
+      runtime.loadLocalBatchRecords.mockReturnValue([
+        makeLocalBatchRecord("batch-chat", {
+          kind: "durableDirect",
+          batchId: "batch-chat",
+          confirmedTier: "local",
+        }),
+      ]);
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+      const wait = client.waitForPersistedBatch("batch-chat", "edge");
+
+      client.hydrateLocalBatchRecords([
+        makeLocalBatchRecord("batch-chat", {
+          kind: "durableDirect",
+          batchId: "batch-chat",
+          confirmedTier: "global",
+        }),
+      ]);
+
+      expect(client.localBatchRecord("batch-chat")?.latestSettlement).toMatchObject({
+        confirmedTier: "global",
+      });
+      expect(client.hasPendingHydratedBatchReconciliation("edge")).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(wait).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
