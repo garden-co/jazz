@@ -28,9 +28,9 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ColumnName, ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor,
-    RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple, Value,
-    build_ordered_delta_with_post_ids,
+    ColumnName, ComposedBranchName, LoadedRow, OrderedAdded, OrderedRowDelta, Row, RowDelta,
+    RowDescriptor, RowPolicyMode, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Tuple,
+    Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -1519,52 +1519,78 @@ impl QueryManager {
                 visible_tuples,
             );
 
-            let visible_rows = Self::rows_from_tuples(&subscription.graph, visible_tuples.as_ref());
-            let visible_rows_by_id: HashMap<_, _> = visible_rows
-                .iter()
-                .cloned()
-                .map(|row| (row.id, row))
-                .collect();
-            let visible_delta = Self::row_delta_from_rows(
-                &subscription.current_visible_rows,
-                &subscription.current_ordered_ids,
-                &visible_rows,
-            );
-            let ordered_ids_after: Vec<ObjectId> = visible_rows.iter().map(|row| row.id).collect();
-
             if !subscription.settled_once {
+                let visible_rows =
+                    Self::rows_from_tuples(&subscription.graph, visible_tuples.as_ref());
+                let row_count = visible_rows.len();
+                let ordered_ids_after: Vec<_> = visible_rows.iter().map(|row| row.id).collect();
+                let ordered_delta = OrderedRowDelta {
+                    added: visible_rows
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, row)| OrderedAdded {
+                            id: row.id,
+                            index,
+                            row,
+                        })
+                        .collect(),
+                    removed: Vec::new(),
+                    updated: Vec::new(),
+                    pending: false,
+                };
+                let visible_rows_by_id: HashMap<_, _> = visible_rows
+                    .iter()
+                    .cloned()
+                    .map(|row| (row.id, row))
+                    .collect();
+                let visible_delta = RowDelta {
+                    added: visible_rows,
+                    removed: Vec::new(),
+                    moved: Vec::new(),
+                    updated: Vec::new(),
+                };
                 tracing::trace!(
                     sub_id = sub_id.0,
                     table = %table,
-                    rows = visible_rows.len(),
+                    rows = row_count,
                     added = visible_delta.added.len(),
-                    removed = visible_delta.removed.len(),
-                    updated = visible_delta.updated.len(),
-                    moved = visible_delta.moved.len(),
                     settled_tier = ?subscription.query_frontier_settled_tier,
                     required_tier = ?subscription.durability_tier,
                     "jazz trace subscription first delivery"
                 );
                 subscription.settled_once = true;
-                let ordered = build_ordered_delta_with_post_ids(
-                    &subscription.current_ordered_ids,
-                    &ordered_ids_after,
-                    &visible_delta,
-                    false,
-                );
-                subscription.current_ordered_ids = ordered.ordered_ids_after;
+                subscription.current_ordered_ids = ordered_ids_after;
                 subscription.current_visible_rows = visible_rows_by_id;
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: sub_id,
                     delta: visible_delta,
-                    ordered_delta: ordered.delta,
+                    ordered_delta,
                     descriptor: subscription.graph.combined_descriptor.clone(),
                 });
                 subscription.has_pending_local_updates = false;
                 subscription
                     .pending_local_row_ids
                     .retain(|id| self.pending_local_row_batches.contains_key(id));
-            } else if !visible_delta.is_empty() {
+            } else {
+                let visible_rows =
+                    Self::rows_from_tuples(&subscription.graph, visible_tuples.as_ref());
+                let visible_rows_by_id: HashMap<_, _> = visible_rows
+                    .iter()
+                    .cloned()
+                    .map(|row| (row.id, row))
+                    .collect();
+                let visible_delta = Self::row_delta_from_rows(
+                    &subscription.current_visible_rows,
+                    &subscription.current_ordered_ids,
+                    &visible_rows,
+                );
+                if visible_delta.is_empty() {
+                    self.subscriptions.insert(sub_id, subscription);
+                    continue;
+                }
+                let ordered_ids_after: Vec<ObjectId> =
+                    visible_rows.iter().map(|row| row.id).collect();
                 let ordered = build_ordered_delta_with_post_ids(
                     &subscription.current_ordered_ids,
                     &ordered_ids_after,
