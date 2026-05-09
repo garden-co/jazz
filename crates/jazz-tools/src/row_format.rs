@@ -180,6 +180,15 @@ pub fn compiled_row_layout(descriptor: &RowDescriptor) -> Arc<CompiledRowLayout>
 ///   - Subsequent offsets are u32 values
 /// - Variable data follows offset table
 pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8>, EncodingError> {
+    let layout = compiled_row_layout(descriptor);
+    encode_row_with_layout(descriptor, layout.as_ref(), values)
+}
+
+pub(crate) fn encode_row_with_layout(
+    descriptor: &RowDescriptor,
+    layout: &CompiledRowLayout,
+    values: &[Value],
+) -> Result<Vec<u8>, EncodingError> {
     if values.len() != descriptor.columns.len() {
         return Err(EncodingError::ColumnCountMismatch {
             expected: descriptor.columns.len(),
@@ -187,7 +196,6 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
         });
     }
 
-    let layout = compiled_row_layout(descriptor);
     let offset_table_size = layout.variable_column_count.saturating_sub(1) * size_of::<u32>();
     let estimated_var_data_len = descriptor
         .columns
