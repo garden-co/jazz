@@ -263,6 +263,214 @@ pub(crate) fn encode_row_with_layout(
     Ok(result)
 }
 
+/// Encode a destination row whose leading columns are supplied as values and
+/// whose remaining columns are projected from an already-encoded source row.
+///
+/// This is used by flat row-history storage: Jazz system columns are new, but
+/// user columns already arrive in native row format. Copying their encoded
+/// bytes avoids decode-then-reencode work on replay hot paths.
+pub(crate) fn encode_row_with_prefix_and_projected_tail(
+    dst_descriptor: &RowDescriptor,
+    dst_layout: &CompiledRowLayout,
+    prefix_values: &[Value],
+    src_descriptor: &RowDescriptor,
+    src_layout: &CompiledRowLayout,
+    src_data: &[u8],
+) -> Result<Vec<u8>, EncodingError> {
+    if prefix_values.len() > dst_descriptor.columns.len() {
+        return Err(EncodingError::ColumnCountMismatch {
+            expected: dst_descriptor.columns.len(),
+            actual: prefix_values.len(),
+        });
+    }
+    let projected_column_count = dst_descriptor.columns.len() - prefix_values.len();
+    if projected_column_count != src_descriptor.columns.len() {
+        return Err(EncodingError::ColumnCountMismatch {
+            expected: projected_column_count,
+            actual: src_descriptor.columns.len(),
+        });
+    }
+
+    let offset_table_size = dst_layout.variable_column_count.saturating_sub(1) * size_of::<u32>();
+    let estimated_prefix_var_data_len = dst_descriptor
+        .columns
+        .iter()
+        .zip(prefix_values.iter())
+        .filter(|(col, _)| col.column_type.is_variable())
+        .map(|(col, val)| estimated_variable_value_len(col, val))
+        .sum::<usize>();
+
+    let mut fixed_data = Vec::with_capacity(dst_layout.fixed_section_size);
+    let mut var_data = Vec::with_capacity(estimated_prefix_var_data_len + src_data.len());
+    let mut var_offsets: Vec<u32> = Vec::with_capacity(dst_layout.variable_column_count);
+
+    for (dst_col_index, dst_col) in dst_descriptor.columns.iter().enumerate() {
+        if dst_col.column_type.is_variable() {
+            continue;
+        }
+
+        if dst_col_index < prefix_values.len() {
+            let value = &prefix_values[dst_col_index];
+            validate_column_value(dst_col, value)?;
+            encode_fixed_value(&mut fixed_data, dst_col, value);
+        } else {
+            let src_col_index = dst_col_index - prefix_values.len();
+            copy_projected_fixed_column(
+                &mut fixed_data,
+                src_descriptor,
+                src_layout,
+                src_data,
+                src_col_index,
+                dst_col,
+            )?;
+        }
+    }
+
+    for (dst_col_index, dst_col) in dst_descriptor.columns.iter().enumerate() {
+        if !dst_col.column_type.is_variable() {
+            continue;
+        }
+
+        var_offsets.push(var_data.len() as u32);
+
+        if dst_col_index < prefix_values.len() {
+            let value = &prefix_values[dst_col_index];
+            validate_column_value(dst_col, value)?;
+            encode_variable_value(&mut var_data, dst_col, value);
+        } else {
+            let src_col_index = dst_col_index - prefix_values.len();
+            copy_projected_variable_column(
+                &mut var_data,
+                src_descriptor,
+                src_layout,
+                src_data,
+                src_col_index,
+                dst_col,
+            )?;
+        }
+    }
+
+    let mut result =
+        Vec::with_capacity(dst_layout.fixed_section_size + offset_table_size + var_data.len());
+    result.extend(fixed_data);
+    for offset in var_offsets.iter().skip(1) {
+        result.extend_from_slice(&offset.to_le_bytes());
+    }
+    result.extend(var_data);
+
+    Ok(result)
+}
+
+fn validate_column_value(col: &ColumnDescriptor, val: &Value) -> Result<(), EncodingError> {
+    if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
+        return Err(EncodingError::TypeMismatch {
+            column: col.name.to_string(),
+            expected: col.column_type.clone(),
+            actual: val.column_type(),
+        });
+    }
+
+    if val.is_null() && !col.nullable {
+        return Err(EncodingError::NullNotAllowed {
+            column: col.name.to_string(),
+        });
+    }
+
+    if !val.is_null() {
+        validate_value_size(val, &col.column_type, col.name_str())?;
+    }
+
+    Ok(())
+}
+
+fn copy_projected_fixed_column(
+    fixed_data: &mut Vec<u8>,
+    src_descriptor: &RowDescriptor,
+    src_layout: &CompiledRowLayout,
+    src_data: &[u8],
+    src_col_index: usize,
+    dst_col: &ColumnDescriptor,
+) -> Result<(), EncodingError> {
+    let value_size =
+        dst_col
+            .column_type
+            .fixed_size()
+            .ok_or_else(|| EncodingError::MalformedData {
+                message: format!("destination column {} is not fixed-size", dst_col.name),
+            })?;
+
+    if src_data.is_empty() {
+        if dst_col.nullable {
+            fixed_data.push(0);
+            fixed_data.extend(std::iter::repeat_n(0, value_size));
+            return Ok(());
+        }
+        return Err(EncodingError::NullNotAllowed {
+            column: dst_col.name.to_string(),
+        });
+    }
+
+    let (bytes, is_null) =
+        column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col_index)?;
+
+    if dst_col.nullable {
+        if is_null {
+            fixed_data.push(0);
+            fixed_data.extend(std::iter::repeat_n(0, value_size));
+        } else {
+            fixed_data.push(1);
+            fixed_data.extend_from_slice(bytes);
+        }
+    } else if is_null {
+        return Err(EncodingError::NullNotAllowed {
+            column: dst_col.name.to_string(),
+        });
+    } else {
+        fixed_data.extend_from_slice(bytes);
+    }
+
+    Ok(())
+}
+
+fn copy_projected_variable_column(
+    var_data: &mut Vec<u8>,
+    src_descriptor: &RowDescriptor,
+    src_layout: &CompiledRowLayout,
+    src_data: &[u8],
+    src_col_index: usize,
+    dst_col: &ColumnDescriptor,
+) -> Result<(), EncodingError> {
+    if src_data.is_empty() {
+        if dst_col.nullable {
+            var_data.push(0);
+            return Ok(());
+        }
+        return Err(EncodingError::NullNotAllowed {
+            column: dst_col.name.to_string(),
+        });
+    }
+
+    let (bytes, is_null) =
+        column_bytes_internal_with_layout(src_descriptor, src_layout, src_data, src_col_index)?;
+
+    if dst_col.nullable {
+        if is_null {
+            var_data.push(0);
+        } else {
+            var_data.push(1);
+            var_data.extend_from_slice(bytes);
+        }
+    } else if is_null {
+        return Err(EncodingError::NullNotAllowed {
+            column: dst_col.name.to_string(),
+        });
+    } else {
+        var_data.extend_from_slice(bytes);
+    }
+
+    Ok(())
+}
+
 fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
     let nullable_prefix = usize::from(col.nullable);
     if val.is_null() {
@@ -2542,6 +2750,71 @@ mod tests {
 
         assert_eq!(encoded, vec![2]);
         assert_eq!(decoded, vec![Value::Text("done".to_string())]);
+    }
+
+    #[test]
+    fn encode_prefix_and_projected_tail_matches_value_encoding() {
+        let src_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("age", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            )
+            .nullable(),
+        ]);
+        let dst_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("_jazz_updated_at", ColumnType::Timestamp),
+            ColumnDescriptor::new(
+                "_jazz_state",
+                ColumnType::Enum {
+                    variants: vec!["pending".to_string(), "visible".to_string()],
+                },
+            ),
+            ColumnDescriptor::new("name", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("age", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            )
+            .nullable(),
+        ]);
+
+        let src_values = vec![
+            Value::Text("Alpha".to_string()),
+            Value::Integer(42),
+            Value::Array(vec![
+                Value::Text("one".to_string()),
+                Value::Text("two".to_string()),
+            ]),
+        ];
+        let prefix_values = vec![Value::Timestamp(1234), Value::Text("visible".to_string())];
+        let src_data = encode_row(&src_descriptor, &src_values).unwrap();
+        let dst_layout = compiled_row_layout(&dst_descriptor);
+        let src_layout = compiled_row_layout(&src_descriptor);
+        let projected = encode_row_with_prefix_and_projected_tail(
+            &dst_descriptor,
+            dst_layout.as_ref(),
+            &prefix_values,
+            &src_descriptor,
+            src_layout.as_ref(),
+            &src_data,
+        )
+        .unwrap();
+
+        let mut expected_values = prefix_values;
+        expected_values.extend(src_values);
+        let expected = encode_row(&dst_descriptor, &expected_values).unwrap();
+
+        assert_eq!(projected, expected);
+        assert_eq!(
+            decode_row(&dst_descriptor, &projected).unwrap(),
+            expected_values
+        );
     }
 
     #[test]

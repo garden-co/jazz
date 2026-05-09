@@ -12,7 +12,8 @@ use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, Value};
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
-    compiled_row_layout, decode_row, encode_row_with_layout, project_row_with_layout,
+    compiled_row_layout, decode_row, encode_row_with_prefix_and_projected_tail,
+    project_row_with_layout,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -246,6 +247,7 @@ const VISIBLE_ROW_SYSTEM_COLUMN_COUNT: usize = 18;
 #[derive(Debug, Clone)]
 pub(crate) struct FlatRowCodecs {
     user_descriptor: Arc<RowDescriptor>,
+    user_layout: Arc<CompiledRowLayout>,
     history_descriptor: Arc<RowDescriptor>,
     history_layout: Arc<CompiledRowLayout>,
     history_user_projection: Vec<(usize, usize)>,
@@ -278,6 +280,7 @@ pub(crate) fn flat_row_codecs(user_descriptor: &RowDescriptor) -> Arc<FlatRowCod
     let user_projection_len = user_descriptor.columns.len();
     let codecs = Arc::new(FlatRowCodecs {
         user_descriptor: user_descriptor.clone(),
+        user_layout: compiled_row_layout(user_descriptor.as_ref()),
         history_layout: compiled_row_layout(history_descriptor.as_ref()),
         history_descriptor,
         history_user_projection: (0..user_projection_len)
@@ -339,13 +342,13 @@ pub fn encode_flat_history_row(
     row: &StoredRowBatch,
 ) -> Result<Vec<u8>, EncodingError> {
     let codecs = flat_row_codecs(user_descriptor);
-    let mut values = history_row_system_values(row);
-    values.extend(flat_user_values(user_descriptor, &row.data)?);
-
-    encode_row_with_layout(
+    encode_row_with_prefix_and_projected_tail(
         codecs.history_descriptor.as_ref(),
         codecs.history_layout.as_ref(),
-        &values,
+        &history_row_system_values(row),
+        user_descriptor,
+        codecs.user_layout.as_ref(),
+        &row.data,
     )
 }
 
@@ -366,12 +369,13 @@ pub fn encode_flat_visible_row_entry(
     entry: &VisibleRowEntry,
 ) -> Result<Vec<u8>, EncodingError> {
     let codecs = flat_row_codecs(user_descriptor);
-    let mut values = visible_row_system_values(entry);
-    values.extend(flat_user_values(user_descriptor, &entry.current_row.data)?);
-    encode_row_with_layout(
+    encode_row_with_prefix_and_projected_tail(
         codecs.visible_descriptor.as_ref(),
         codecs.visible_layout.as_ref(),
-        &values,
+        &visible_row_system_values(entry),
+        user_descriptor,
+        codecs.user_layout.as_ref(),
+        &entry.current_row.data,
     )
 }
 
