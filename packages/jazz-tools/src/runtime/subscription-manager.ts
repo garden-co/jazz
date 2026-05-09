@@ -69,8 +69,11 @@ export class SubscriptionManager<T extends { id: string }> {
     for (const change of delta) {
       switch (change.kind) {
         case RowChangeKind.Added:
+          const alreadyPresent = this.currentResults.has(change.id);
           this.currentResults.set(change.id, transform(change.row));
-          this.removeId(change.id);
+          if (alreadyPresent) {
+            this.removeId(change.id);
+          }
           this.insertIdAt(change.id, change.index);
           break;
         case RowChangeKind.Removed:
