@@ -1055,9 +1055,22 @@ export class Db {
       this.markUnauthenticated(reason);
     });
     bridge.onLocalBatchRecordsSync((batches) => {
+      console.info("[jazz rejection replay] local-batch-records-sync", {
+        count: batches.length,
+        rejected: batches.filter((batch) => batch.latestSettlement?.kind === "rejected").length,
+      });
       client.hydrateLocalBatchRecords(batches);
     });
     bridge.onMutationErrorReplay((batch) => {
+      console.info("[jazz rejection replay] mutation-error-replay", {
+        batchId: batch.batchId,
+        hasEncodedRecord: !!batch.encodedRecord,
+        settlement: batch.latestSettlement?.kind,
+        hasExistingRecord: !!client.localBatchRecord(batch.batchId),
+        hasPendingWaiter: client.hasPendingBatchWaiter(batch.batchId),
+        hasHydratedWorkerBatch: client.hasHydratedWorkerBatch(batch.batchId),
+        hasAcknowledged: client.hasAcknowledgedRejectedBatch(batch.batchId),
+      });
       if (client.hasAcknowledgedRejectedBatch(batch.batchId)) {
         this.workerBridge?.acknowledgeRejectedBatch(batch.batchId);
         return;

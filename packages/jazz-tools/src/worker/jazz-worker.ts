@@ -116,6 +116,11 @@ function replayNewlyRejectedBatchesToMain(): void {
           latestSettlement: fate,
         },
       );
+      console.info("[jazz rejection replay] worker posts", {
+        batchId,
+        hasEncodedRecord: !!batch.encodedRecord,
+        hasLocalBatchRecord: !!runtime.loadLocalBatchRecord?.(batchId),
+      });
       post({ type: "mutation-error-replay", batch });
     }
   } catch (error) {
