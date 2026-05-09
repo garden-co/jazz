@@ -2570,6 +2570,11 @@ export class JazzClient {
           continue;
         }
         if (outcome.error) {
+          const fate = this.batchFate(batchId);
+          if (fate?.kind === "rejected") {
+            const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
+            this.replayRejectedBatchRows(batch);
+          }
           waiter.reject(outcome.error);
           rejectedBatchIdsHandledByWaiters.add(batchId);
         } else {
@@ -2662,6 +2667,8 @@ export class JazzClient {
       if (!settlement || settlement.kind !== "rejected") {
         continue;
       }
+      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
+      this.replayRejectedBatchRows(batch);
       if (batchesHandledByLiveWaiters.has(batchId)) {
         continue;
       }
@@ -2669,7 +2676,6 @@ export class JazzClient {
         continue;
       }
 
-      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
       const event: MutationErrorEvent = {
         code: settlement.code,
         reason: settlement.reason,
