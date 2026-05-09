@@ -250,13 +250,15 @@ impl SyncManager {
         storage: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-    ) {
+    ) -> bool {
         let existing_row_locator = storage.load_row_locator(object_id).ok().flatten();
         if existing_row_locator.is_none()
             && let Some(row_locator) = crate::storage::row_locator_from_metadata(&metadata)
         {
             let _ = storage.put_row_locator(object_id, Some(&row_locator));
+            return true;
         }
+        false
     }
 
     fn row_metadata_from_payload<H: Storage>(
@@ -383,7 +385,8 @@ impl SyncManager {
         row.confirmed_tier = None;
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
-        self.ensure_object_metadata(storage, row.row_id, metadata.clone());
+        let is_newly_located_object =
+            self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
         let visibility_change = match self.row_context_from_metadata(storage, row.row_id, &metadata)
         {
@@ -401,7 +404,7 @@ impl SyncManager {
                         table,
                         branch,
                         context,
-                        is_known_new_object: false,
+                        is_known_new_object: is_newly_located_object && row.parents.is_empty(),
                     },
                 ) {
                     Ok(applied) => applied.visibility_change,
