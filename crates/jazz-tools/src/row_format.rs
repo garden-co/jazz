@@ -708,7 +708,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
-        Value::Array(elements) => buf.extend(encode_array(elements, &col.column_type)),
+        Value::Array(elements) => encode_array_into(buf, elements, &col.column_type),
         Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
             if let ColumnType::Row { columns: desc } = &col.column_type {
@@ -1396,17 +1396,23 @@ fn encode_array_simple(elements: &[Value]) -> Vec<u8> {
 /// The `array_type` parameter is needed to properly encode Row elements,
 /// which require their descriptor for encoding.
 pub fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
+    let mut result = Vec::new();
+    encode_array_into(&mut result, elements, array_type);
+    result
+}
+
+fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnType) {
     let count = elements.len() as u32;
-    let mut result = count.to_le_bytes().to_vec();
+    buf.extend_from_slice(&count.to_le_bytes());
 
     if elements.is_empty() {
-        return result;
+        return;
     }
 
     // Get the element type from the array type
     let element_type = match array_type {
         ColumnType::Array { element: elem_type } => elem_type.as_ref(),
-        _ => return result, // Not an array type
+        _ => return, // Not an array type
     };
 
     // Check if element type is fixed-size
@@ -1415,7 +1421,7 @@ pub fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
     if is_fixed {
         // Fixed-size elements: just concatenate encoded values (no offset table)
         for elem in elements {
-            result.extend(encode_value_with_type(elem, element_type));
+            encode_value_with_type_into(buf, elem, element_type);
         }
     } else {
         // Variable-length elements: build offset table (skip first) + data
@@ -1428,16 +1434,30 @@ pub fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
         let mut offset: u32 = 0;
         for data in &element_data[..element_data.len().saturating_sub(1)] {
             offset += data.len() as u32;
-            result.extend(offset.to_le_bytes());
+            buf.extend(offset.to_le_bytes());
         }
 
         // Append element data
         for data in element_data {
-            result.extend(data);
+            buf.extend(data);
         }
     }
+}
 
-    result
+fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &ColumnType) {
+    match (value, col_type) {
+        (Value::Text(raw), ColumnType::Enum { variants }) if col_type.fixed_size().is_some() => {
+            buf.push(encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!()));
+        }
+        (Value::Integer(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
+        (Value::BigInt(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
+        (Value::Double(f), _) => buf.extend_from_slice(&f.to_le_bytes()),
+        (Value::Boolean(b), _) => buf.push(if *b { 1 } else { 0 }),
+        (Value::Timestamp(t), _) => buf.extend_from_slice(&t.to_le_bytes()),
+        (Value::Uuid(id), _) => buf.extend_from_slice(id.uuid().as_bytes()),
+        (Value::BatchId(bytes), _) => buf.extend_from_slice(bytes),
+        _ => buf.extend(encode_value_with_type(value, col_type)),
+    }
 }
 
 /// Decode an array from binary format.
