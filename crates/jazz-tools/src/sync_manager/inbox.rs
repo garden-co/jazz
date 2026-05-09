@@ -9,7 +9,7 @@ use crate::row_histories::{
 };
 use crate::storage::{
     PreparedRowWriteContext, RowLocator, Storage, metadata_from_row_locator,
-    prepared_row_table_context_for_schema_hash, prepared_row_write_context_for_table_context,
+    prepared_row_table_context_for_schema_hash, prepared_row_write_context_from_table_context,
     row_locator_from_metadata,
 };
 use std::collections::{HashMap, HashSet};
@@ -250,15 +250,23 @@ impl SyncManager {
         storage: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let existing_row_locator = storage.load_row_locator(object_id).ok().flatten();
-        if existing_row_locator.is_none()
-            && let Some(row_locator) = crate::storage::row_locator_from_metadata(&metadata)
-        {
-            let _ = storage.put_row_locator(object_id, Some(&row_locator));
-            return true;
+        let Some(metadata_row_locator) = crate::storage::row_locator_from_metadata(&metadata)
+        else {
+            return (false, false);
+        };
+        let metadata_schema_hash = metadata_row_locator.origin_schema_hash;
+        match existing_row_locator {
+            Some(existing_row_locator) => (
+                false,
+                existing_row_locator.origin_schema_hash != metadata_schema_hash,
+            ),
+            None => {
+                let _ = storage.put_row_locator(object_id, Some(&metadata_row_locator));
+                (true, false)
+            }
         }
-        false
     }
 
     fn row_metadata_from_payload<H: Storage>(
@@ -281,8 +289,8 @@ impl SyncManager {
     fn row_context_from_metadata<H: Storage>(
         &mut self,
         storage: &H,
-        row_id: ObjectId,
         metadata: &HashMap<String, String>,
+        needs_exact_locator: bool,
     ) -> Option<(RowLocator, PreparedRowWriteContext)> {
         let row_locator = row_locator_from_metadata(metadata)?;
         let schema_hash = row_locator.origin_schema_hash?;
@@ -298,7 +306,7 @@ impl SyncManager {
             context
         };
         let write_context =
-            prepared_row_write_context_for_table_context(storage, table_context, row_id).ok()?;
+            prepared_row_write_context_from_table_context(table_context, needs_exact_locator);
         Some((row_locator, write_context))
     }
 
@@ -385,53 +393,55 @@ impl SyncManager {
         row.confirmed_tier = None;
 
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
-        let is_newly_located_object =
+        let (is_newly_located_object, needs_exact_locator) =
             self.ensure_object_metadata(storage, row.row_id, metadata.clone());
         let branch_name = BranchName::new(&row.branch);
-        let visibility_change = match self.row_context_from_metadata(storage, row.row_id, &metadata)
-        {
-            Some((row_locator, context)) => {
-                let table = row_locator.table.to_string();
-                let branch = row.branch.clone();
-                match apply_row_batch_with_context(
-                    storage,
-                    ApplyRowBatchWithContext {
-                        object_id: row.row_id,
-                        branch_name: &branch_name,
-                        row: row.clone(),
-                        index_mutations: &[],
-                        row_locator,
-                        table,
-                        branch,
-                        context,
-                        is_known_new_object: is_newly_located_object && row.parents.is_empty(),
-                    },
-                ) {
-                    Ok(applied) => applied.visibility_change,
-                    Err(err) => {
-                        tracing::warn!(
-                            row_id = %row.row_id,
-                            %branch_name,
-                            ?err,
-                            "failed to apply synced row batch"
-                        );
-                        return None;
+        let visibility_change =
+            match self.row_context_from_metadata(storage, &metadata, needs_exact_locator) {
+                Some((row_locator, context)) => {
+                    let table = row_locator.table.to_string();
+                    let branch = row.branch.clone();
+                    match apply_row_batch_with_context(
+                        storage,
+                        ApplyRowBatchWithContext {
+                            object_id: row.row_id,
+                            branch_name: &branch_name,
+                            row: row.clone(),
+                            index_mutations: &[],
+                            row_locator,
+                            table,
+                            branch,
+                            context,
+                            is_known_new_object: is_newly_located_object && row.parents.is_empty(),
+                        },
+                    ) {
+                        Ok(applied) => applied.visibility_change,
+                        Err(err) => {
+                            tracing::warn!(
+                                row_id = %row.row_id,
+                                %branch_name,
+                                ?err,
+                                "failed to apply synced row batch"
+                            );
+                            return None;
+                        }
                     }
                 }
-            }
-            None => match apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[]) {
-                Ok(applied) => applied.visibility_change,
-                Err(err) => {
-                    tracing::warn!(
-                        row_id = %row.row_id,
-                        %branch_name,
-                        ?err,
-                        "failed to apply synced row batch"
-                    );
-                    return None;
+                None => {
+                    match apply_row_batch(storage, row.row_id, &branch_name, row.clone(), &[]) {
+                        Ok(applied) => applied.visibility_change,
+                        Err(err) => {
+                            tracing::warn!(
+                                row_id = %row.row_id,
+                                %branch_name,
+                                ?err,
+                                "failed to apply synced row batch"
+                            );
+                            return None;
+                        }
+                    }
                 }
-            },
-        };
+            };
         if record_local_fate
             && let Some(confirmed_tier) = authoritative_tier
             && row.state.is_visible()

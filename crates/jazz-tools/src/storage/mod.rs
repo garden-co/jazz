@@ -1264,22 +1264,6 @@ pub(crate) fn prepared_row_write_context_from_table_context(
     }
 }
 
-pub(crate) fn prepared_row_write_context_for_table_context<H: Storage + ?Sized>(
-    storage: &H,
-    table_context: Arc<PreparedRowTableContext>,
-    row_id: ObjectId,
-) -> Result<PreparedRowWriteContext, StorageError> {
-    let schema_hash = table_context.history_row_raw_table_id.schema_hash;
-    let needs_exact_locator = storage
-        .load_row_locator(row_id)?
-        .and_then(|locator| locator.origin_schema_hash)
-        != Some(schema_hash);
-    Ok(prepared_row_write_context_from_table_context(
-        table_context,
-        needs_exact_locator,
-    ))
-}
-
 pub(crate) fn prepared_row_write_context_for_known_exact_locator(
     table_name: &str,
     schema_hash: SchemaHash,
