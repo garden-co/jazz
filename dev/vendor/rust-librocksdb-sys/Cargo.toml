@@ -36,7 +36,11 @@ tikv-jemalloc-sys = { version = "0.6", features = [
   "unprefixed_malloc_on_supported_platforms",
 ], optional = true }
 lz4-sys = { version = "1.11", optional = true }
-zstd-sys = { version = "2.0", features = ["zdict_builder", "experimental"], optional = true }
+zstd-sys = { version = "2.0", default-features = false, features = [
+  "legacy",
+  "zdict_builder",
+  "experimental",
+], optional = true }
 libz-sys = { version = "1.1", default-features = false, optional = true }
 bzip2-sys = { version = "0.1", default-features = false, optional = true }
 
