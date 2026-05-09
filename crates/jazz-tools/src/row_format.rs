@@ -300,9 +300,10 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
         .map(|(col, val)| estimated_variable_value_len(col, val))
         .sum::<usize>();
 
-    let mut fixed_data = Vec::with_capacity(dst_layout.fixed_section_size);
     let mut var_data = Vec::with_capacity(estimated_prefix_var_data_len + src_data.len());
     let mut var_offsets: Vec<u32> = Vec::with_capacity(dst_layout.variable_column_count);
+    let mut result =
+        Vec::with_capacity(dst_layout.fixed_section_size + offset_table_size + var_data.capacity());
 
     for (dst_col_index, dst_col) in dst_descriptor.columns.iter().enumerate() {
         if dst_col.column_type.is_variable() {
@@ -312,11 +313,11 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
         if dst_col_index < prefix_values.len() {
             let value = &prefix_values[dst_col_index];
             validate_column_value(dst_col, value)?;
-            encode_fixed_value(&mut fixed_data, dst_col, value);
+            encode_fixed_value(&mut result, dst_col, value);
         } else {
             let src_col_index = dst_col_index - prefix_values.len();
             copy_projected_fixed_column(
-                &mut fixed_data,
+                &mut result,
                 src_descriptor,
                 src_layout,
                 src_data,
@@ -350,9 +351,6 @@ pub(crate) fn encode_row_with_prefix_and_projected_tail(
         }
     }
 
-    let mut result =
-        Vec::with_capacity(dst_layout.fixed_section_size + offset_table_size + var_data.len());
-    result.extend(fixed_data);
     for offset in var_offsets.iter().skip(1) {
         result.extend_from_slice(&offset.to_le_bytes());
     }
