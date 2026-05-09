@@ -875,13 +875,13 @@ impl Storage for MemoryStorage {
         else {
             return Ok(None);
         };
-        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
         let current_tier = row_confirmed_tier_with_batch_fate(self, &entry.current_row)?;
         if current_tier.is_some_and(|tier| tier >= required_tier) {
             let mut current_row = entry.current_row.clone();
             current_row.confirmed_tier = current_tier;
             return Ok(Some(current_row));
         }
+        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
         let mut history_rows = regions.history_rows_for(branch, row_id);
         apply_batch_fate_tiers_to_rows(self, &mut history_rows)?;
         crate::row_histories::visible_row_preview_from_history_rows(
