@@ -9,13 +9,17 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         table: &str,
         row: &crate::row_histories::StoredRowBatch,
     ) -> bool {
+        if !row.parents.is_empty() {
+            return false;
+        }
+
         let Ok(history_rows) = self.storage.scan_history_row_batches(table, row.row_id) else {
-            return row.parents.is_empty();
+            return true;
         };
         !history_rows.iter().any(|candidate| {
             candidate.branch == row.branch
                 && candidate.batch_id != row.batch_id
-                && candidate.state.is_visible()
+                && !matches!(candidate.state, RowState::Rejected)
         })
     }
 

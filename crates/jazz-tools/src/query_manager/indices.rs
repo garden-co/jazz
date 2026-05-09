@@ -1,4 +1,5 @@
 use crate::object::ObjectId;
+use crate::row_histories::{RowState, VisibleRowEntry};
 use crate::storage::{IndexMutation, Storage, StorageError, validate_index_value_size};
 
 use crate::row_format::CompiledRowLayout;
@@ -516,6 +517,31 @@ impl QueryManager {
         row_id: ObjectId,
         restored_data: &[u8],
     ) {
+        if let Ok(history_rows) = storage.scan_history_row_batches(table, row_id)
+            && let Some(mut restored_row) = history_rows
+                .into_iter()
+                .filter(|row| {
+                    row.branch.as_str() == branch
+                        && !matches!(row.state, RowState::Rejected)
+                        && row.delete_kind.is_none()
+                })
+                .max_by_key(|row| row.updated_at)
+        {
+            restored_row.state = RowState::VisibleDirect;
+            let visible_entry = VisibleRowEntry::new(restored_row.clone());
+            if let Err(error) =
+                storage.apply_row_mutation(table, &[restored_row], &[visible_entry], &[])
+            {
+                tracing::warn!(
+                    table,
+                    branch,
+                    object_id = %row_id,
+                    %error,
+                    "failed to restore rejected delete visible row"
+                );
+            }
+        }
+
         let table_name = TableName::new(table);
         if let Some(table_schema) = self.schema.get(&table_name)
             && let Err(error) = Self::update_indices_for_undelete_on_branch(
