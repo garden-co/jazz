@@ -1036,6 +1036,56 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 }
 
 #[test]
+fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-reject-replay-record-test",
+    );
+
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    let branch_name = core.schema_manager().branch_name();
+    let batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
+    let record = core
+        .local_batch_record_for_rejection_replay(batch_id)
+        .unwrap()
+        .expect("sealed rejected batches should remain replayable");
+    assert_eq!(record.batch_id, batch_id);
+    assert!(record.sealed);
+    assert!(matches!(
+        record.latest_fate,
+        Some(crate::batch_fate::BatchFate::Rejected { .. })
+    ));
+    assert_eq!(record.members.len(), 1);
+    assert_eq!(record.members[0].object_id, row_id);
+    assert!(record.sealed_submission.is_some());
+}
+
+#[test]
 fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
     // Simulates a crash between "rejection settlement persisted" and
     // "visible row deleted + query retracted": the local batch record has a

@@ -709,6 +709,76 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))
     }
 
+    /// Load the replay payload for a rejected local batch.
+    ///
+    /// Browser workers can receive a batch fate after a restart where they no
+    /// longer have the user-facing `LocalBatchRecord`, but they still retain the
+    /// sealed submission and row histories needed to replay the rollback on the
+    /// main thread. Keep this separate from `local_batch_record()` so explicit
+    /// acknowledgements still use deletion of the local batch record as their
+    /// public retention boundary.
+    pub fn local_batch_record_for_rejection_replay(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        if let Some(record) = self.local_batch_record(batch_id)? {
+            return Ok(Some(record));
+        }
+
+        let Some(fate) = self
+            .storage
+            .load_authoritative_batch_fate(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))?
+        else {
+            return Ok(None);
+        };
+        if !matches!(fate, BatchFate::Rejected { .. }) {
+            return Ok(None);
+        }
+
+        let Some(submission) = self
+            .storage
+            .load_sealed_batch_submission(batch_id)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("load sealed batch submission: {err}"))
+            })?
+        else {
+            return Ok(None);
+        };
+
+        let mut record = LocalBatchRecord::new(batch_id, BatchMode::Direct, true, Some(fate));
+        record.sealed_submission = Some(submission.clone());
+
+        for sealed_member in submission.members {
+            let row_locator = match self
+                .storage
+                .load_row_locator(sealed_member.object_id)
+                .map_err(|err| RuntimeError::WriteError(format!("load row locator: {err}")))?
+            {
+                Some(row_locator) => row_locator,
+                None => continue,
+            };
+            let schema_hash = self.local_batch_member_schema_hash(
+                submission.target_branch_name,
+                sealed_member.object_id,
+                batch_id,
+            )?;
+            record.upsert_member(LocalBatchMember {
+                object_id: sealed_member.object_id,
+                table_name: row_locator.table.to_string(),
+                branch_name: submission.target_branch_name,
+                schema_hash,
+                row_digest: sealed_member.row_digest,
+            });
+        }
+
+        if record.members.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(record))
+        }
+    }
+
     /// Scan all replayable local batch records currently retained by this
     /// runtime.
     pub fn local_batch_records(&self) -> Result<Vec<LocalBatchRecord>, RuntimeError> {

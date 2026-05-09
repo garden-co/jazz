@@ -1301,7 +1301,7 @@ impl WasmRuntime {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
         let core = self.core.borrow();
         let record = core
-            .local_batch_record(batch_id)
+            .local_batch_record_for_rejection_replay(batch_id)
             .map_err(|e| JsError::new(&format!("Load local batch record failed: {e}")))?;
         match record {
             Some(record) => {

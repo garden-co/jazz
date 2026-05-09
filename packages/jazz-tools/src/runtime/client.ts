@@ -1667,11 +1667,6 @@ export class JazzClient {
   }
 
   replayRejectedBatchRecord(record: LocalBatchRecord): void {
-    console.info("[jazz rejection replay] record", {
-      batchId: record.batchId,
-      hasEncodedRecord: !!record.encodedRecord,
-      settlement: record.latestSettlement?.kind,
-    });
     const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
     this.hydratedWorkerBatchIds.add(record.batchId);
     if (publicRecord.latestSettlement?.kind !== "rejected") {
@@ -1696,11 +1691,6 @@ export class JazzClient {
     if (settlement?.kind !== "rejected") {
       return;
     }
-    console.info("[jazz rejection replay] rows", {
-      batchId: record.batchId,
-      hasRuntimeReplay: !!this.runtime.replayBatchRejection,
-      hasRecord: !!this.localBatchRecord(record.batchId),
-    });
     this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
   }
 
@@ -1710,12 +1700,6 @@ export class JazzClient {
       return false;
     }
     const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
-    console.info("[jazz rejection replay] by id", {
-      batchId,
-      fate: fate.kind,
-      hasLocalBatchRecord: !!this.localBatchRecord(batchId),
-      hydratedWorkerBatches: this.hydratedWorkerBatchIds.size,
-    });
     this.replayRejectedBatchRows(batch);
     return true;
   }
