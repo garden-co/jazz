@@ -73,6 +73,19 @@ impl MemoryStorage {
         self.ensured_raw_table_headers.insert(raw_table.to_string());
         Ok(())
     }
+
+    fn ensure_cached_row_raw_table_header(
+        &mut self,
+        raw_table: &str,
+        row_raw_table_id: &RowRawTableId,
+        user_descriptor: &RowDescriptor,
+    ) -> Result<(), StorageError> {
+        if self.ensured_raw_table_headers.contains(raw_table) {
+            return Ok(());
+        }
+        let header = row_raw_table_header(row_raw_table_id, user_descriptor);
+        self.ensure_cached_raw_table_header(raw_table, &header)
+    }
 }
 
 impl Default for MemoryStorage {
@@ -131,9 +144,10 @@ impl Storage for MemoryStorage {
         let table = table.to_string();
 
         for (row, encoded) in history_rows.iter().zip(encoded_history_rows) {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 encoded.row_raw_table.as_str(),
-                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+                &encoded.row_raw_table_id,
+                &encoded.user_descriptor,
             )?;
             if encoded.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -166,9 +180,10 @@ impl Storage for MemoryStorage {
         }
 
         for (entry, encoded) in visible_entries.iter().zip(encoded_visible_rows) {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 encoded.row_raw_table.as_str(),
-                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+                &encoded.row_raw_table_id,
+                &encoded.user_descriptor,
             )?;
             if encoded.needs_exact_locator {
                 self.put_visible_row_table_locator(
@@ -206,9 +221,10 @@ impl Storage for MemoryStorage {
         let table = table.to_string();
 
         for row in history_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -249,9 +265,10 @@ impl Storage for MemoryStorage {
         }
 
         for row in visible_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_visible_row_table_locator(
@@ -538,9 +555,10 @@ impl Storage for MemoryStorage {
             }
         }
         for row in &encoded_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -597,9 +615,10 @@ impl Storage for MemoryStorage {
             }
         }
         for row in encoded_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_visible_row_table_locator(
