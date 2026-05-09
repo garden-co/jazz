@@ -385,7 +385,7 @@ This inventory includes test, spec, benchmark-test, config, and test-support fil
 - `crates/jazz-tools/src/test_row_history.rs`
 - `crates/jazz-tools/tests/auth_test.rs`
 - `crates/jazz-tools/tests/test_server.rs`
-- `dev/vendor/librocksdb-sys/src/test.rs`
+- `dev/vendor/rust-librocksdb-sys/src/test.rs`
 
 ### TypeScript runtime
 

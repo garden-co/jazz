@@ -316,6 +316,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -468,6 +486,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -513,6 +540,17 @@ checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
  "half",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1800,8 +1838,8 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "reqwest",
- "rocksdb",
  "rusqlite",
+ "rust-rocksdb",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -1955,6 +1993,16 @@ checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
 
 [[package]]
 name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
+name = "libloading"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
@@ -1987,22 +2035,6 @@ dependencies = [
  "cc",
  "cmake",
  "libc",
-]
-
-[[package]]
-name = "librocksdb-sys"
-version = "0.18.0+10.7.5"
-dependencies = [
- "bzip2-sys",
- "cc",
- "flate2",
- "libc",
- "libz-sys",
- "lz4-sys",
- "serde",
- "serde_json",
- "sha2",
- "zstd-sys",
 ]
 
 [[package]]
@@ -2209,7 +2241,7 @@ version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eb602b84d7c1edae45e50bbf1374696548f36ae179dfa667f577e384bb90c2b"
 dependencies = [
- "libloading",
+ "libloading 0.9.0",
 ]
 
 [[package]]
@@ -2501,7 +2533,7 @@ dependencies = [
  "bf-tree",
  "criterion",
  "js-sys",
- "rocksdb",
+ "rust-rocksdb",
  "rustc-hash",
  "serde",
  "serde-wasm-bindgen 0.6.5",
@@ -3082,15 +3114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocksdb"
-version = "0.24.0"
-source = "git+https://github.com/garden-co/rust-rocksdb.git?branch=feat%2Ftdb-flush#d333834a2a5498b9994b0e553098906602332494"
-dependencies = [
- "libc",
- "librocksdb-sys",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3102,6 +3125,32 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+]
+
+[[package]]
+name = "rust-librocksdb-sys"
+version = "0.44.0+11.1.1"
+dependencies = [
+ "bzip2-sys",
+ "cc",
+ "flate2",
+ "libc",
+ "libz-sys",
+ "lz4-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zstd-sys",
+]
+
+[[package]]
+name = "rust-rocksdb"
+version = "0.48.0"
+source = "git+https://github.com/zaidoon1/rust-rocksdb.git?tag=v0.48.0#365105f9ae34e0c34adbe6256f38ea5d214a5e63"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "rust-librocksdb-sys",
 ]
 
 [[package]]
@@ -5192,6 +5241,7 @@ version = "2.0.16+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
 dependencies = [
+ "bindgen",
  "cc",
  "pkg-config",
 ]

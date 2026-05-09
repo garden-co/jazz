@@ -1,15 +1,15 @@
 #[path = "src/build_support.rs"]
 mod build_support;
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
-use std::io::{Read, Write};
 
 use build_support::{LinkPlan, StdCppLib, vendored_link_plan};
 use flate2::read::GzDecoder;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 // On these platforms jemalloc-sys will use a prefixed jemalloc which cannot be linked together
@@ -47,6 +47,8 @@ struct GhcrTokenResponse {
 
 #[derive(Debug, Deserialize)]
 struct GhcrManifest {
+    #[serde(default)]
+    annotations: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     layers: Vec<GhcrBlobDescriptor>,
     #[serde(default)]
@@ -146,7 +148,7 @@ fn fetch_vendored_librocksdb(plan: &LinkPlan, archive_path: &Path) -> Result<(),
         "cargo:warning=fetching prebuilt RocksDB archive for {} from {}@{}",
         env::var("TARGET").unwrap_or_else(|_| "unknown-target".to_owned()),
         plan.artifact.repository,
-        plan.artifact.manifest_digest
+        plan.artifact.reference
     );
 
     fs::create_dir_all(&plan.lib_dir).map_err(|error| {
@@ -163,7 +165,7 @@ fn fetch_vendored_librocksdb(plan: &LinkPlan, archive_path: &Path) -> Result<(),
     let archive_tmp_path = plan.lib_dir.join("librocksdb.a.download");
 
     let token = fetch_ghcr_token(plan)?;
-    let blob = fetch_ghcr_blob_descriptor(plan, &token)?;
+    let (blob, archive_sha256) = fetch_ghcr_blob_descriptor(plan, &token)?;
     let blob_url = format!(
         "https://ghcr.io/v2/{}/blobs/{}",
         plan.artifact.repository.trim_start_matches("ghcr.io/"),
@@ -172,35 +174,39 @@ fn fetch_vendored_librocksdb(plan: &LinkPlan, archive_path: &Path) -> Result<(),
 
     curl_download(&blob_url, &compressed_tmp_path, Some(&token), None)?;
     verify_sha256(&compressed_tmp_path, &blob.digest)?;
-    unpack_vendored_archive(&compressed_tmp_path, &archive_tmp_path, plan.artifact.archive_sha256)?;
+    unpack_vendored_archive(&compressed_tmp_path, &archive_tmp_path, &archive_sha256)?;
 
-    fs::rename(&archive_tmp_path, archive_path).or_else(|error| {
-        if archive_path.exists() {
-            fs::remove_file(&archive_tmp_path).ok();
-            Ok(())
-        } else {
-            Err(error)
-        }
-    }).map_err(|error| {
-        format!(
-            "failed to stage RocksDB archive {}: {error}",
-            archive_path.display()
-        )
-    })?;
+    fs::rename(&archive_tmp_path, archive_path)
+        .or_else(|error| {
+            if archive_path.exists() {
+                fs::remove_file(&archive_tmp_path).ok();
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| {
+            format!(
+                "failed to stage RocksDB archive {}: {error}",
+                archive_path.display()
+            )
+        })?;
 
-    fs::rename(&compressed_tmp_path, &compressed_path).or_else(|error| {
-        if compressed_path.exists() {
-            fs::remove_file(&compressed_tmp_path).ok();
-            Ok(())
-        } else {
-            Err(error)
-        }
-    }).map_err(|error| {
-        format!(
-            "failed to stage compressed RocksDB archive {}: {error}",
-            compressed_path.display()
-        )
-    })?;
+    fs::rename(&compressed_tmp_path, &compressed_path)
+        .or_else(|error| {
+            if compressed_path.exists() {
+                fs::remove_file(&compressed_tmp_path).ok();
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| {
+            format!(
+                "failed to stage compressed RocksDB archive {}: {error}",
+                compressed_path.display()
+            )
+        })?;
 
     Ok(())
 }
@@ -241,11 +247,11 @@ fn ghcr_basic_auth() -> Option<(String, String)> {
 fn fetch_ghcr_blob_descriptor(
     plan: &LinkPlan,
     token: &str,
-) -> Result<GhcrBlobDescriptor, String> {
+) -> Result<(GhcrBlobDescriptor, String), String> {
     let manifest_url = format!(
         "https://ghcr.io/v2/{}/manifests/{}",
         plan.artifact.repository.trim_start_matches("ghcr.io/"),
-        plan.artifact.manifest_digest
+        plan.artifact.reference
     );
     let manifest: GhcrManifest = curl_json(
         &manifest_url,
@@ -255,8 +261,18 @@ fn fetch_ghcr_blob_descriptor(
         ),
         None,
     )?;
+    let archive_sha256 = manifest
+        .annotations
+        .get("org.garden-co.jazz.rocksdb.archive-sha256")
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "GHCR manifest {} missing org.garden-co.jazz.rocksdb.archive-sha256 annotation",
+                plan.artifact.reference
+            )
+        })?;
 
-    manifest
+    let blob = manifest
         .blobs
         .into_iter()
         .chain(manifest.layers)
@@ -264,9 +280,11 @@ fn fetch_ghcr_blob_descriptor(
         .ok_or_else(|| {
             format!(
                 "GHCR manifest {} did not include any blobs or layers",
-                plan.artifact.manifest_digest
+                plan.artifact.reference
             )
-        })
+        })?;
+
+    Ok((blob, archive_sha256))
 }
 
 fn curl_json<T: DeserializeOwned>(
@@ -319,7 +337,9 @@ fn curl_command(
         command.arg("--user").arg(format!("{username}:{password}"));
     }
     if let Some(token) = bearer_token {
-        command.arg("--header").arg(format!("Authorization: Bearer {token}"));
+        command
+            .arg("--header")
+            .arg(format!("Authorization: Bearer {token}"));
     }
     if let Some(accept) = accept {
         command.arg("--header").arg(format!("Accept: {accept}"));
@@ -394,12 +414,14 @@ fn unpack_vendored_archive(
         if bytes_read == 0 {
             break;
         }
-        destination.write_all(&buffer[..bytes_read]).map_err(|error| {
-            format!(
-                "failed to write unpacked vendored archive {}: {error}",
-                archive_path.display()
-            )
-        })?;
+        destination
+            .write_all(&buffer[..bytes_read])
+            .map_err(|error| {
+                format!(
+                    "failed to write unpacked vendored archive {}: {error}",
+                    archive_path.display()
+                )
+            })?;
         hasher.update(&buffer[..bytes_read]);
     }
 
@@ -542,6 +564,10 @@ fn build_rocksdb(source_root: &Path) {
         if let Some(path) = env::var_os("DEP_ZSTD_INCLUDE") {
             config.include(path);
         }
+
+        if cfg!(feature = "zstd-static-linking-only") {
+            config.define("ZSTD_STATIC_LINKING_ONLY", Some("1"));
+        }
     }
 
     if cfg!(feature = "zlib") {
@@ -560,6 +586,11 @@ fn build_rocksdb(source_root: &Path) {
 
     if cfg!(feature = "rtti") {
         config.define("USE_RTTI", Some("1"));
+    }
+
+    #[cfg(feature = "malloc-usable-size")]
+    if target.contains("linux") {
+        config.define("ROCKSDB_MALLOC_USABLE_SIZE", Some("1"));
     }
 
     // https://github.com/facebook/rocksdb/blob/be7703b27d9b3ac458641aaadf27042d86f6869c/Makefile#L195
@@ -666,7 +697,8 @@ fn build_rocksdb(source_root: &Path) {
         config.define("ROCKSDB_PLATFORM_POSIX", None);
         config.define("ROCKSDB_LIB_IO_POSIX", None);
 
-        env::set_var("IPHONEOS_DEPLOYMENT_TARGET", "12.0");
+        // SAFETY: Build script is single-threaded and runs before crate code.
+        unsafe { env::set_var("IPHONEOS_DEPLOYMENT_TARGET", "12.0") };
     } else if target.contains("darwin") {
         config.define("OS_MACOSX", None);
         config.define("ROCKSDB_PLATFORM_POSIX", None);
@@ -925,7 +957,10 @@ fn main() {
             }
 
             let source_root = upstream_checkout_root();
-            println!("cargo:rerun-if-changed={}", source_root.join("rocksdb").display());
+            println!(
+                "cargo:rerun-if-changed={}",
+                source_root.join("rocksdb").display()
+            );
             fail_on_empty_directory(&source_root.join("rocksdb"));
             build_rocksdb(&source_root);
             upstream_source_root = Some(source_root);
@@ -935,7 +970,10 @@ fn main() {
     }
     if cfg!(feature = "snappy") && !try_to_find_and_link_lib("SNAPPY") {
         let source_root = upstream_source_root.get_or_insert_with(upstream_checkout_root);
-        println!("cargo:rerun-if-changed={}", source_root.join("snappy").display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            source_root.join("snappy").display()
+        );
         fail_on_empty_directory(&source_root.join("snappy"));
         build_snappy(source_root);
     }
