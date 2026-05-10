@@ -87,8 +87,7 @@ impl SyncManager {
     }
 
     fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) -> bool {
-        self.persist_authoritative_batch_fate(storage, fate)
-            .unwrap_or(false)
+        self.persist_authoritative_batch_fate(storage, fate).is_ok()
     }
 
     fn validate_sealed_batch_submission(
@@ -1061,12 +1060,9 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFate { fate } => {
-                let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
-                    Ok(changed) => changed,
+                match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok(_) => self.pending_batch_fates.push(fate.clone()),
                     Err(_) => return,
-                };
-                if changed {
-                    self.pending_batch_fates.push(fate.clone());
                 }
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
