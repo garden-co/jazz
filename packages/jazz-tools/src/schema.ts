@@ -214,6 +214,7 @@ export interface TablePolicies {
 export interface Table {
   name: string;
   columns: Column[];
+  indexedColumns?: string[];
   policies?: TablePolicies;
 }
 

@@ -89,6 +89,20 @@ impl SchemaHash {
 
             // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
+
+            // Hash the optional index override. Absence means historical
+            // "index every declared user column"; an explicit subset changes
+            // query-planning/index-maintenance semantics and therefore belongs
+            // to the schema identity.
+            hasher.update(&[1]);
+            if let Some(indexed_columns) = &table_schema.indexed_columns {
+                let mut columns: Vec<_> = indexed_columns.iter().map(|c| c.as_str()).collect();
+                columns.sort_unstable();
+                for column in columns {
+                    hasher.update(column.as_bytes());
+                    hasher.update(&[0]);
+                }
+            }
         }
 
         Self(*hasher.finalize().as_bytes())

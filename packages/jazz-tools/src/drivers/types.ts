@@ -136,6 +136,7 @@ export interface TablePolicies {
 
 export interface TableSchema {
   columns: ColumnDescriptor[];
+  indexed_columns?: string[];
   policies?: TablePolicies;
 }
 

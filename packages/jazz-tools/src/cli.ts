@@ -664,6 +664,22 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
   );
 }
 
+function indexedColumnsEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right || left.length !== right.length) {
+    return false;
+  }
+
+  const leftColumns = [...left].sort();
+  const rightColumns = [...right].sort();
+  return leftColumns.every((column, index) => column === rightColumns[index]);
+}
+
 function tableSchemasEqual(
   left: WasmSchema[string] | undefined,
   right: WasmSchema[string] | undefined,
@@ -673,6 +689,10 @@ function tableSchemasEqual(
   }
 
   if (left.columns.length !== right.columns.length) {
+    return false;
+  }
+
+  if (!indexedColumnsEqual(left.indexed_columns, right.indexed_columns)) {
     return false;
   }
 
