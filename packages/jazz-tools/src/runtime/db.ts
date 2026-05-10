@@ -10,7 +10,13 @@
  * - all/one are async (need storage I/O for queries)
  */
 
-import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  ColumnType,
+  WasmSchema,
+  WasmRow,
+  StorageDriver,
+} from "../drivers/types.js";
 import { getRuntimeSchemaCacheKey, normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
@@ -49,13 +55,16 @@ import {
   type FileWriteOptions,
 } from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
+import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
+  type NormalizedIncludeSpec,
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
+import { resolveSelectedColumns } from "./select-projection.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -346,6 +355,67 @@ function resolveSchemaWithTable(
   }
 
   return typeof fallbackSchema === "function" ? fallbackSchema() : fallbackSchema;
+}
+
+function resolveOutputColumnDescriptor(
+  tableName: string,
+  schema: WasmSchema,
+  columnName: string,
+): ColumnDescriptor | undefined {
+  const magicType = magicColumnType(columnName);
+  if (magicType) {
+    return {
+      name: columnName,
+      column_type: magicType,
+      nullable: isPermissionIntrospectionColumn(columnName),
+    };
+  }
+
+  return schema[tableName]?.columns.find((column) => column.name === columnName);
+}
+
+function resolveNativeSubscriptionColumns(
+  tableName: string,
+  schema: WasmSchema,
+  includes: NormalizedIncludeSpec,
+  projection?: readonly string[],
+): ColumnDescriptor[] {
+  const columns = resolveSelectedColumns(tableName, schema, projection)
+    .map((columnName) => resolveOutputColumnDescriptor(tableName, schema, columnName))
+    .filter((column): column is ColumnDescriptor => column !== undefined);
+
+  if (Object.keys(includes).length === 0) {
+    return columns;
+  }
+
+  const relationsByTable = analyzeRelations(schema);
+  const relations = relationsByTable.get(tableName) ?? [];
+
+  for (const [relationName, include] of Object.entries(includes)) {
+    const relation = relations.find((candidate) => candidate.name === relationName);
+    if (!relation) {
+      throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
+    }
+
+    const nestedColumns = resolveNativeSubscriptionColumns(
+      relation.toTable,
+      schema,
+      include.includes,
+      include.select.length > 0 ? include.select : undefined,
+    );
+    const columnType: ColumnType = {
+      type: "Array",
+      element: { type: "Row", columns: nestedColumns },
+    };
+
+    columns.push({
+      name: relationName,
+      column_type: columnType,
+      nullable: false,
+    });
+  }
+
+  return columns;
 }
 
 function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
@@ -2022,8 +2092,13 @@ export class Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    const nativeOutputColumns = outputSchema[outputTable]?.columns;
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const nativeOutputColumns = resolveNativeSubscriptionColumns(
+      outputTable,
+      outputSchema,
+      outputIncludes,
+      builtQuery.select,
+    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -2431,8 +2506,13 @@ class ClientBackedDb extends Db {
     );
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    const nativeOutputColumns = outputSchema[outputTable]?.columns;
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+    const nativeOutputColumns = resolveNativeSubscriptionColumns(
+      outputTable,
+      outputSchema,
+      outputIncludes,
+      builtQuery.select,
+    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
