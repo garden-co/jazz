@@ -61,12 +61,26 @@ fn v1_to_v2_lens() -> Lens {
     generate_lens(&schema_v1(), &schema_v2())
 }
 
+async fn seed_schema_catalogue(server: &TestingServer, schema: &jazz_tools::Schema) {
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(schema),
+        &[],
+    )
+    .await
+    .expect("push schema catalogue");
+}
+
 /// A dynamic server should fail closed before any permissions head is
 /// published, then expose rows once an explicit head is installed.
 #[tokio::test]
 async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
+    seed_schema_catalogue(&server, &schema).await;
 
     let mut reader_context = server.make_client_context_for_user(schema.clone(), "reader-dynamic");
     reader_context.backend_secret = None;
@@ -140,6 +154,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
+    seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
     let observer = TestingClient::builder()
         .with_server(&server)
@@ -298,6 +313,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
 async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
+    seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
     let observer = TestingClient::builder()
         .with_server(&server)
@@ -384,6 +400,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
 async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening() {
     let server = TestingServer::start().await;
     let schema = schema_v1();
+    seed_schema_catalogue(&server, &schema).await;
     let query = QueryBuilder::new("users").build();
 
     let reader = TestingClient::builder()
