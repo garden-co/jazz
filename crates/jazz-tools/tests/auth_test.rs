@@ -119,7 +119,7 @@ async fn ws_handshake_open(
         catalogue_state_hash: None,
         declared_schema_hash: None,
     };
-    let payload = rmp_serde::to_vec_named(&handshake).expect("serialize AuthHandshake");
+    let payload = jazz_tools::transport_wire::encode(&handshake).expect("serialize AuthHandshake");
     ws.send(Message::Binary(frame_encode(&payload).into()))
         .await
         .map_err(|e| format!("ws send failed: {e}"))?;
@@ -128,10 +128,10 @@ async fn ws_handshake_open(
     match ws.next().await {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            if let Ok(connected) = rmp_serde::from_slice::<ConnectedResponse>(inner) {
+            if let Ok(connected) = jazz_tools::transport_wire::decode::<ConnectedResponse>(inner) {
                 Ok((ws, connected))
             } else {
-                let msg = rmp_serde::from_slice::<serde_json::Value>(inner)
+                let msg = jazz_tools::transport_wire::decode::<serde_json::Value>(inner)
                     .ok()
                     .and_then(|v| {
                         v.get("message")
@@ -153,7 +153,7 @@ async fn ws_send_sync_payload(ws: &mut WsStream, payload: SyncPayload) -> Result
         client_id: ClientId::new(),
         payloads: vec![payload],
     };
-    let bytes = rmp_serde::to_vec_named(&batch).expect("serialize SyncBatchRequest");
+    let bytes = jazz_tools::transport_wire::encode(&batch).expect("serialize SyncBatchRequest");
     ws.send(Message::Binary(frame_encode(&bytes).into()))
         .await
         .map_err(|e| format!("ws send sync payload failed: {e}"))
@@ -171,7 +171,8 @@ async fn ws_recv_server_event(
     match message {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            rmp_serde::from_slice(inner).map_err(|e| format!("invalid server event: {e}"))
+            jazz_tools::transport_wire::decode(inner)
+                .map_err(|e| format!("invalid server event: {e}"))
         }
         Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
         Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),

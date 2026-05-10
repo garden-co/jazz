@@ -1060,7 +1060,7 @@ mod tests {
         );
 
         let decoded: AuthHandshake =
-            rmp_serde::from_slice(payload).expect("handshake payload should be MessagePack");
+            transport_wire::decode(payload).expect("handshake payload should be MessagePack");
         assert_eq!(decoded.sync_protocol_version, SYNC_PROTOCOL_VERSION);
         assert_eq!(decoded.client_id, manager.client_id.to_string());
     }

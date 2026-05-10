@@ -120,6 +120,7 @@ opentelemetry-otlp = { version = "0.31", features = [
 ], optional = true }
 opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
+lz4_flex = "0.11"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = { version = "0.3", features = ["futures"] }

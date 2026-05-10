@@ -317,7 +317,7 @@ mod tests {
             payloads: vec![p1, p2],
             client_id,
         };
-        let frame_payload = rmp_serde::to_vec_named(&batch).unwrap();
+        let frame_payload = crate::transport_wire::encode(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -606,7 +606,7 @@ mod tests {
             payloads,
             client_id,
         };
-        let frame_payload = rmp_serde::to_vec_named(&batch).unwrap();
+        let frame_payload = crate::transport_wire::encode(&batch).unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;

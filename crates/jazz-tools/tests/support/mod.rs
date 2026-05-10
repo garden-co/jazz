@@ -325,11 +325,7 @@ fn make_jwt(sub: &str, claims: JsonValue) -> String {
 }
 
 fn encode_ws_payload<T: serde::Serialize>(payload: &T) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    payload
-        .serialize(&mut rmp_serde::Serializer::new(&mut bytes).with_struct_map())
-        .expect("serialize websocket payload");
-    bytes
+    jazz_tools::transport_wire::encode(payload).expect("serialize websocket payload")
 }
 
 fn build_catalogue_runtime(

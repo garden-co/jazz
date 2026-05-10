@@ -101,7 +101,8 @@ async fn create_note_with_backend_attribution(
         payloads,
         client_id,
     };
-    let frame_payload = rmp_serde::to_vec_named(&batch).expect("serialize SyncBatchRequest");
+    let frame_payload =
+        jazz_tools::transport_wire::encode(&batch).expect("serialize SyncBatchRequest");
     let state = server.server_state();
     // Ensure the client is registered as a backend client before processing.
     state
