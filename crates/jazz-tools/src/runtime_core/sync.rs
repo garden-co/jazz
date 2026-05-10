@@ -13,29 +13,90 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
     fn pending_batch_ids_needing_reconciliation(&self) -> Vec<crate::row_histories::BatchId> {
-        let Ok(records) = self.storage.scan_local_batch_records() else {
-            return Vec::new();
-        };
         let terminal_tier = self.retained_batch_terminal_tier();
 
-        let mut batch_ids = records
+        let mut batch_ids = self
+            .storage
+            .scan_sealed_batch_submissions()
+            .unwrap_or_default()
             .into_iter()
-            .filter(|record| {
-                record.mode != crate::batch_fate::BatchMode::Transactional || record.sealed
+            .filter(|submission| {
+                match self
+                    .storage
+                    .load_authoritative_batch_fate(submission.batch_id)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                {
+                    None => true,
+                    Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
+                    Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
+                    Some(crate::batch_fate::BatchFate::DurableDirect {
+                        confirmed_tier, ..
+                    })
+                    | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
+                        confirmed_tier,
+                        ..
+                    }) => confirmed_tier < &terminal_tier,
+                }
             })
-            .filter(|record| match record.latest_fate.as_ref() {
-                None => true,
-                Some(crate::batch_fate::BatchFate::Missing { .. }) => true,
-                Some(crate::batch_fate::BatchFate::Rejected { .. }) => false,
-                Some(crate::batch_fate::BatchFate::DurableDirect { confirmed_tier, .. })
-                | Some(crate::batch_fate::BatchFate::AcceptedTransaction {
-                    confirmed_tier, ..
-                }) => confirmed_tier < &terminal_tier,
-            })
-            .map(|record| record.batch_id)
+            .map(|submission| submission.batch_id)
             .collect::<Vec<_>>();
+
+        batch_ids.extend(
+            self.storage
+                .scan_authoritative_batch_fates()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|fate| {
+                    Self::sealed_batch_still_needs_edge_reconciliation(Some(fate))
+                        && fate
+                            .confirmed_tier()
+                            .is_some_and(|tier| tier < terminal_tier)
+                })
+                .map(|fate| fate.batch_id()),
+        );
+        if let Ok(row_locators) = self.storage.scan_row_locators() {
+            for (object_id, row_locator) in row_locators {
+                let Ok(history_rows) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+                else {
+                    continue;
+                };
+                batch_ids.extend(history_rows.into_iter().filter_map(|row| {
+                    if !matches!(row.state, crate::row_histories::RowState::VisibleDirect) {
+                        return None;
+                    }
+                    let fate = self
+                        .storage
+                        .load_authoritative_batch_fate(row.batch_id)
+                        .ok()
+                        .flatten();
+                    Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref())
+                        .then_some(row.batch_id)
+                }));
+            }
+        }
+        batch_ids.extend(self.local_batch_record_cache.values().filter_map(|record| {
+            let authoritative_fate = self
+                .storage
+                .load_authoritative_batch_fate(record.batch_id)
+                .ok()
+                .flatten();
+            let latest_fate = authoritative_fate.as_ref().or(record.latest_fate.as_ref());
+            if !Self::sealed_batch_still_needs_edge_reconciliation(latest_fate) {
+                return None;
+            }
+
+            match latest_fate.and_then(|fate| fate.confirmed_tier()) {
+                Some(tier) if tier >= terminal_tier => None,
+                _ => Some(record.batch_id),
+            }
+        }));
         batch_ids.sort();
         batch_ids.dedup();
+        batch_ids.retain(|batch_id| !self.local_batch_rows(*batch_id).is_empty());
         batch_ids
     }
 
@@ -81,6 +142,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .query_manager_mut()
             .sync_manager_mut()
             .request_batch_fates_from_server(server_id, pending_batch_ids);
+        self.immediate_tick();
+    }
+
+    pub fn reconcile_local_batch_with_server(&mut self, batch_id: crate::row_histories::BatchId) {
+        let Some(server_id) = self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .server_ids()
+            .next()
+        else {
+            return;
+        };
+        self.retransmit_local_batch_to_servers(batch_id);
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .request_batch_fates_from_server(server_id, vec![batch_id]);
         self.immediate_tick();
     }
 

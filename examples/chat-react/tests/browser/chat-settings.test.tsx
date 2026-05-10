@@ -66,9 +66,11 @@ describe("ChatHeader + ChatSettings E2E", () => {
     r.render(<App config={{ appId, ...config }} />);
 
     await waitFor(
-      () => el.querySelector("#messageEditor") !== null || el.querySelector("article") !== null,
+      () =>
+        el.querySelector("#messageEditor") !== null ||
+        el.querySelector('[data-testid="chat-header"]') !== null,
       10000,
-      "App should render",
+      "App should render a chat",
     );
 
     return el;

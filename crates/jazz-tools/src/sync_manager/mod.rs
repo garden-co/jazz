@@ -409,6 +409,10 @@ impl SyncManager {
         self.pending_servers.remove(&server_id);
     }
 
+    pub fn server_ids(&self) -> impl Iterator<Item = ServerId> + '_ {
+        self.servers.keys().copied()
+    }
+
     pub fn has_servers_or_pending_servers(&self) -> bool {
         if !self.servers.is_empty() {
             return true;

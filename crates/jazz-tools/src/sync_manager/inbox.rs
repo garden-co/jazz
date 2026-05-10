@@ -1,8 +1,5 @@
 use super::*;
-use crate::batch_fate::{
-    BatchFate, BatchMode, LocalBatchMember, LocalBatchRecord, SealedBatchMember,
-    SealedBatchSubmission,
-};
+use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -81,149 +78,8 @@ impl SyncManager {
         });
     }
 
-    fn client_batch_mode(row: &StoredRowBatch) -> BatchMode {
-        match row.state {
-            RowState::StagingPending | RowState::VisibleTransactional => BatchMode::Transactional,
-            RowState::Superseded | RowState::Rejected | RowState::VisibleDirect => {
-                BatchMode::Direct
-            }
-        }
-    }
-
-    fn retain_client_local_batch_row<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        metadata: &HashMap<String, String>,
-        row: &StoredRowBatch,
-    ) {
-        let Some(table_name) = metadata
-            .get(MetadataKey::Table.as_str())
-            .cloned()
-            .or_else(|| {
-                storage
-                    .load_row_locator(row.row_id)
-                    .ok()
-                    .flatten()
-                    .map(|locator| locator.table.to_string())
-            })
-        else {
-            return;
-        };
-
-        let Some(schema_hash) = storage
-            .load_history_row_batch_table_locator(row.branch.as_str(), row.row_id, row.batch_id)
-            .ok()
-            .flatten()
-            .map(|locator| locator.schema_hash)
-            .or_else(|| {
-                storage
-                    .load_row_locator(row.row_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|locator| locator.origin_schema_hash)
-            })
-        else {
-            return;
-        };
-
-        let mut record = match storage.load_local_batch_record(row.batch_id) {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                LocalBatchRecord::new(row.batch_id, Self::client_batch_mode(row), false, None)
-            }
-            Err(_) => return,
-        };
-        record.upsert_member(LocalBatchMember {
-            object_id: row.row_id,
-            table_name,
-            branch_name: BranchName::new(&row.branch),
-            schema_hash,
-            row_digest: row.content_digest(),
-        });
-        if let Some(fate) = record.latest_fate.clone()
-            && let Some(submission) =
-                Self::seal_direct_client_record_from_fate(storage, &mut record, &fate)
-        {
-            self.seal_batch_to_servers(submission);
-        }
-        let _ = storage.upsert_local_batch_record(&record);
-    }
-
     fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) {
-        let batch_id = fate.batch_id();
-        let mut record = match storage.load_local_batch_record(batch_id) {
-            Ok(Some(record)) => record,
-            Ok(None) if matches!(fate, BatchFate::DurableDirect { .. }) => {
-                LocalBatchRecord::new(batch_id, BatchMode::Direct, false, None)
-            }
-            Ok(None) | Err(_) => return,
-        };
-        if let Some(submission) =
-            Self::seal_direct_client_record_from_fate(storage, &mut record, fate)
-        {
-            self.seal_batch_to_servers(submission);
-        }
-        record.apply_fate(fate.clone());
-        let _ = storage.upsert_local_batch_record(&record);
-    }
-
-    fn seal_direct_client_record_from_fate<H: Storage>(
-        storage: &H,
-        record: &mut LocalBatchRecord,
-        fate: &BatchFate,
-    ) -> Option<SealedBatchSubmission> {
-        if matches!(fate, BatchFate::DurableDirect { .. })
-            && record.mode == BatchMode::Direct
-            && record.sealed_submission.is_none()
-            && let Some(submission) =
-                Self::direct_submission_from_client_record(storage, fate, record)
-        {
-            record.mark_sealed(submission.clone());
-            return Some(submission);
-        }
-        None
-    }
-
-    fn direct_submission_from_client_record<H: Storage>(
-        _storage: &H,
-        _fate: &BatchFate,
-        record: &LocalBatchRecord,
-    ) -> Option<SealedBatchSubmission> {
-        let first_member = record.members.first()?;
-        let target_branch_name = first_member.branch_name;
-        if record
-            .members
-            .iter()
-            .any(|member| member.branch_name != target_branch_name)
-        {
-            return None;
-        };
-        let members = record
-            .members
-            .iter()
-            .map(|member| SealedBatchMember {
-                object_id: member.object_id,
-                row_digest: member.row_digest,
-            })
-            .collect();
-        Some(SealedBatchSubmission::new(
-            record.batch_id,
-            target_branch_name,
-            members,
-            Vec::new(),
-        ))
-    }
-
-    fn retain_client_sealed_batch_submission<H: Storage>(
-        &self,
-        storage: &mut H,
-        submission: &SealedBatchSubmission,
-    ) {
-        let Ok(Some(mut record)) = storage.load_local_batch_record(submission.batch_id) else {
-            return;
-        };
-        record.mark_sealed(submission.clone());
-        let _ = storage.upsert_local_batch_record(&record);
+        let _ = storage.upsert_authoritative_batch_fate(fate);
     }
 
     fn validate_sealed_batch_submission(
@@ -642,8 +498,8 @@ impl SyncManager {
                 object_ids.insert(key.row_id);
             }
         }
-        if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
-            object_ids.extend(record.members.iter().map(|member| member.object_id));
+        if let Ok(Some(submission)) = storage.load_sealed_batch_submission(batch_id) {
+            object_ids.extend(submission.members.iter().map(|member| member.object_id));
         }
         self.transactional_batch_rows(
             storage,
@@ -1638,7 +1494,6 @@ impl SyncManager {
 
                 if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone(), false)
                 {
-                    self.retain_client_local_batch_row(storage, &applied.metadata, &applied.row);
                     self.forward_row_batch_to_servers(
                         storage,
                         object_id,
@@ -1702,13 +1557,14 @@ impl SyncManager {
                     );
                     return;
                 }
-                if self
-                    .persist_sealed_batch_submission(storage, &submission)
-                    .is_err()
-                {
+                if let Err(error) = self.persist_sealed_batch_submission(storage, &submission) {
+                    tracing::warn!(
+                        batch_id = ?submission.batch_id,
+                        %error,
+                        "failed to persist sealed batch submission"
+                    );
                     return;
                 }
-                self.retain_client_sealed_batch_submission(storage, &submission);
                 self.seal_batch_to_servers(submission.clone());
                 self.try_accept_completed_sealed_batch_from_client(
                     storage,
