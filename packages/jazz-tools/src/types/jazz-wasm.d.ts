@@ -86,6 +86,7 @@ declare module "jazz-wasm" {
     replayBatchRejection(batchId: string, code: string, reason: string): void;
     drainRejectedBatchIds(): string[];
     acknowledgeRejectedBatch(batchId: string): boolean;
+    discardLocalBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
     retransmitLocalBatch(batchId: string): void;
     replayLocalBatchPayloads(batchId: string): Uint8Array[];

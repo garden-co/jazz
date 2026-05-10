@@ -1408,6 +1408,14 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Acknowledge rejected batch failed: {e}")))
     }
 
+    #[wasm_bindgen(js_name = discardLocalBatch)]
+    pub fn discard_local_batch(&self, batch_id: &str) -> Result<bool, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.discard_local_batch(batch_id)
+            .map_err(|e| JsError::new(&format!("Discard local batch failed: {e}")))
+    }
+
     #[wasm_bindgen(js_name = sealBatch)]
     pub fn seal_batch(&self, batch_id: &str) -> Result<(), JsError> {
         let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;

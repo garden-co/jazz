@@ -27,6 +27,7 @@ export declare class NapiRuntime {
   loadBatchFate(batchId: string): any | null
   drainRejectedBatchIds(): string[]
   acknowledgeRejectedBatch(batchId: string): boolean
+  discardLocalBatch(batchId: string): boolean
   sealBatch(batchId: string): void
   query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
   subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number

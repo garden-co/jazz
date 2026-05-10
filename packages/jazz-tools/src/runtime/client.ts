@@ -88,6 +88,7 @@ export interface Runtime {
   replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
+  discardLocalBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
   retransmitLocalBatch?(batch_id: string): void;
   replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
@@ -1766,8 +1767,7 @@ export class JazzClient {
   }
 
   discardLocalBatch(batchId: string): void {
-    this.runtime.replayBatchRejection?.(batchId, "local_rollback", "local transaction rolled back");
-    this.runtime.acknowledgeRejectedBatch?.(batchId);
+    this.runtime.discardLocalBatch?.(batchId);
   }
 
   /**

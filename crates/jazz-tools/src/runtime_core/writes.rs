@@ -955,6 +955,23 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         Ok(true)
     }
 
+    pub fn discard_local_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
+        self.local_batch_record_cache.remove(&batch_id);
+        let had_record = self
+            .storage
+            .load_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load local batch record: {err}")))?
+            .is_some();
+        self.mark_local_batch_rows_rejected(batch_id);
+        self.storage
+            .delete_local_batch_record(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("delete local batch record: {err}")))?;
+        self.durability.forget_batch(batch_id);
+        self.mark_storage_write_pending_flush();
+        self.immediate_tick();
+        Ok(had_record)
+    }
+
     pub fn seal_batch(&mut self, batch_id: BatchId) -> Result<(), RuntimeError> {
         let mut record = if let Some(record) = self.local_batch_record_cache.remove(&batch_id) {
             record
