@@ -149,7 +149,16 @@ impl OutputNode {
 
     /// Rebuild ordered output from a full ordered upstream input.
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
-        let delta = compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+        let delta = if self.ordered_tuples.is_empty() {
+            TupleDelta {
+                added: ordered_tuples.to_vec(),
+                removed: Vec::new(),
+                moved: Vec::new(),
+                updated: Vec::new(),
+            }
+        } else {
+            compute_tuple_delta(&self.ordered_tuples, ordered_tuples)
+        };
 
         self.apply_delta_to_scope(&delta);
         self.ordered_tuples = ordered_tuples.to_vec();

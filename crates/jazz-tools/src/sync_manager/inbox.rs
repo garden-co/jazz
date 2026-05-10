@@ -764,29 +764,32 @@ impl SyncManager {
         self.apply_transactional_batch_fate_to_rows(storage, origin_client_id, &fate, batch_rows);
     }
 
+    fn declared_rows_for_submission(
+        submission: &SealedBatchSubmission,
+        batch_rows: &[(String, StoredRowBatch)],
+    ) -> Option<Vec<(String, StoredRowBatch)>> {
+        let mut declared_rows = Vec::with_capacity(submission.members.len());
+        for member in &submission.members {
+            let matching_row = batch_rows.iter().find(|(_, row)| {
+                row.row_id == member.object_id
+                    && row.branch.as_str() == submission.target_branch_name.as_str()
+                    && row.content_digest() == member.row_digest
+            })?;
+            declared_rows.push(matching_row.clone());
+        }
+        Some(declared_rows)
+    }
+
     fn settle_sealed_batch<H: Storage>(
         &mut self,
         storage: &mut H,
         origin_client_id: Option<ClientId>,
         submission: SealedBatchSubmission,
         batch_rows: Vec<(String, StoredRowBatch)>,
+        declared_rows: Vec<(String, StoredRowBatch)>,
         mode: SealedBatchMode,
     ) {
         let batch_id = submission.batch_id;
-        let declared_rows: Vec<_> = submission
-            .members
-            .iter()
-            .filter_map(|member| {
-                batch_rows
-                    .iter()
-                    .find(|(_, row)| {
-                        row.row_id == member.object_id
-                            && row.branch.as_str() == submission.target_branch_name.as_str()
-                            && row.content_digest() == member.row_digest
-                    })
-                    .cloned()
-            })
-            .collect();
         let fate = match storage.load_authoritative_batch_fate(batch_id) {
             Ok(Some(BatchFate::DurableDirect { confirmed_tier, .. }))
                 if mode == SealedBatchMode::Direct =>
@@ -954,15 +957,10 @@ impl SyncManager {
             );
             return;
         }
-        if !submission.members.iter().all(|member| {
-            batch_rows.iter().any(|(_, row)| {
-                row.row_id == member.object_id
-                    && row.branch.as_str() == submission.target_branch_name.as_str()
-                    && row.content_digest() == member.row_digest
-            })
-        }) {
+        let Some(declared_rows) = Self::declared_rows_for_submission(&submission, &batch_rows)
+        else {
             return;
-        }
+        };
         let mode = match self.infer_sealed_batch_mode(&submission, &batch_rows) {
             Ok(Some(mode)) => mode,
             Ok(None) => return,
@@ -988,7 +986,14 @@ impl SyncManager {
             return;
         }
 
-        self.settle_sealed_batch(storage, Some(client_id), submission, batch_rows, mode);
+        self.settle_sealed_batch(
+            storage,
+            Some(client_id),
+            submission,
+            batch_rows,
+            declared_rows,
+            mode,
+        );
     }
 
     pub(crate) fn recover_completed_sealed_batches_with_storage<H: Storage>(
@@ -1029,15 +1034,10 @@ impl SyncManager {
                 recovered_any = true;
                 continue;
             }
-            if !submission.members.iter().all(|member| {
-                batch_rows.iter().any(|(_, row)| {
-                    row.row_id == member.object_id
-                        && row.branch.as_str() == submission.target_branch_name.as_str()
-                        && row.content_digest() == member.row_digest
-                })
-            }) {
+            let Some(declared_rows) = Self::declared_rows_for_submission(&submission, &batch_rows)
+            else {
                 continue;
-            }
+            };
             let mode = match self.infer_sealed_batch_mode(&submission, &batch_rows) {
                 Ok(Some(mode)) => mode,
                 Ok(None) => continue,
@@ -1055,7 +1055,7 @@ impl SyncManager {
                 continue;
             }
 
-            self.settle_sealed_batch(storage, None, submission, batch_rows, mode);
+            self.settle_sealed_batch(storage, None, submission, batch_rows, declared_rows, mode);
             recovered_any = true;
         }
 
