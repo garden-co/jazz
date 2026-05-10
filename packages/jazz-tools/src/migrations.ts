@@ -742,6 +742,17 @@ function tableMatchesAfterApplyingColumnOperations(
   return true;
 }
 
+function unwrapSchemaTables<TSchema extends SchemaLike>(
+  definition: NormalizedSchema<TSchema>,
+): Record<string, Record<string, AnyTypedColumnBuilder>> {
+  return Object.fromEntries(
+    Object.entries(definition).map(([tableName, tableDefinition]) => [
+      tableName,
+      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
+    ]),
+  );
+}
+
 function buildForwardLenses<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
@@ -793,8 +804,8 @@ function buildForwardLenses<
       ...Object.keys(migrate ?? {}),
     ]),
   ];
-  const sourceTables = fromDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
-  const targetTables = toDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
+  const sourceTables = unwrapSchemaTables(fromDefinition);
+  const targetTables = unwrapSchemaTables(toDefinition);
 
   for (const tableName of orderedTableNames) {
     const added = addedTableSet.has(tableName) ? true : undefined;
