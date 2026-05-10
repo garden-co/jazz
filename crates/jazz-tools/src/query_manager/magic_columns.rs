@@ -1,3 +1,5 @@
+use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+
 pub const RESERVED_MAGIC_COLUMN_PREFIX: char = '$';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,6 +37,28 @@ pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
         "$updatedBy" => Some(MagicColumnKind::UpdatedBy),
         "$updatedAt" => Some(MagicColumnKind::UpdatedAt),
         _ => None,
+    }
+}
+
+pub(crate) fn magic_column_descriptor(kind: MagicColumnKind) -> ColumnDescriptor {
+    let descriptor = ColumnDescriptor::new(
+        kind.column_name(),
+        match kind {
+            MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
+                ColumnType::Boolean
+            }
+            MagicColumnKind::CreatedBy | MagicColumnKind::UpdatedBy => ColumnType::Text,
+            MagicColumnKind::CreatedAt | MagicColumnKind::UpdatedAt => ColumnType::Timestamp,
+        },
+    );
+
+    if matches!(
+        kind,
+        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete
+    ) {
+        descriptor.nullable()
+    } else {
+        descriptor
     }
 }
 

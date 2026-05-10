@@ -6,12 +6,12 @@ use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::graph_nodes::policy_eval::{
     PolicyContextEvaluator, collect_policy_dependency_tables,
 };
-use crate::query_manager::magic_columns::MagicColumnKind;
+use crate::query_manager::magic_columns::{MagicColumnKind, magic_column_descriptor};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema,
-    TableName, Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    LoadedRow, Row, RowDescriptor, RowPolicyMode, Schema, TableName, Tuple, TupleDelta,
+    TupleDescriptor, TupleElement, Value,
 };
 use crate::storage::Storage;
 
@@ -106,29 +106,7 @@ impl MagicColumnsNode {
 
             if let Some(requests) = grouped.get(&element_index) {
                 for kind in &requests.kinds {
-                    descriptor.columns.push(ColumnDescriptor {
-                        name: ColumnName::new(kind.column_name()),
-                        column_type: match kind {
-                            MagicColumnKind::CanRead
-                            | MagicColumnKind::CanEdit
-                            | MagicColumnKind::CanDelete => ColumnType::Boolean,
-                            MagicColumnKind::CreatedBy | MagicColumnKind::UpdatedBy => {
-                                ColumnType::Text
-                            }
-                            MagicColumnKind::CreatedAt | MagicColumnKind::UpdatedAt => {
-                                ColumnType::Timestamp
-                            }
-                        },
-                        nullable: matches!(
-                            kind,
-                            MagicColumnKind::CanRead
-                                | MagicColumnKind::CanEdit
-                                | MagicColumnKind::CanDelete
-                        ),
-                        references: None,
-                        default: None,
-                        merge_strategy: None,
-                    });
+                    descriptor.columns.push(magic_column_descriptor(*kind));
                 }
 
                 if session.is_some()
