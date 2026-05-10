@@ -652,6 +652,46 @@ pub trait Storage {
         }
     }
 
+    fn acknowledge_rejected_batch_fate(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        ensure_raw_table_header(
+            self,
+            ACKNOWLEDGED_REJECTED_BATCH_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH,
+                ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1,
+            ),
+        )?;
+        self.raw_table_put(
+            ACKNOWLEDGED_REJECTED_BATCH_TABLE,
+            &local_batch_record_key(batch_id),
+            &[],
+        )
+    }
+
+    fn is_rejected_batch_fate_acknowledged(&self, batch_id: BatchId) -> Result<bool, StorageError> {
+        Ok(self
+            .raw_table_get(
+                ACKNOWLEDGED_REJECTED_BATCH_TABLE,
+                &local_batch_record_key(batch_id),
+            )?
+            .is_some())
+    }
+
+    fn scan_acknowledged_rejected_batch_fates(&self) -> Result<Vec<BatchId>, StorageError> {
+        let mut batch_ids = Vec::new();
+        for (key, _) in self.raw_table_scan_prefix(ACKNOWLEDGED_REJECTED_BATCH_TABLE, "batch:")? {
+            ensure_system_raw_table_header_validated_once(
+                self,
+                ACKNOWLEDGED_REJECTED_BATCH_TABLE,
+                STORAGE_KIND_ACKNOWLEDGED_REJECTED_BATCH,
+                ACKNOWLEDGED_REJECTED_BATCH_FORMAT_V1,
+            )?;
+            batch_ids.push(decode_local_batch_record_key(&key)?);
+        }
+        batch_ids.sort();
+        Ok(batch_ids)
+    }
+
     fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {
         let mut settlements = Vec::new();
         for (key, bytes) in
@@ -1724,6 +1764,18 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         batch_id: BatchId,
     ) -> Result<Option<BatchFate>, StorageError> {
         (**self).load_authoritative_batch_fate(batch_id)
+    }
+
+    fn acknowledge_rejected_batch_fate(&mut self, batch_id: BatchId) -> Result<(), StorageError> {
+        (**self).acknowledge_rejected_batch_fate(batch_id)
+    }
+
+    fn is_rejected_batch_fate_acknowledged(&self, batch_id: BatchId) -> Result<bool, StorageError> {
+        (**self).is_rejected_batch_fate_acknowledged(batch_id)
+    }
+
+    fn scan_acknowledged_rejected_batch_fates(&self) -> Result<Vec<BatchId>, StorageError> {
+        (**self).scan_acknowledged_rejected_batch_fates()
     }
 
     fn scan_authoritative_batch_fates(&self) -> Result<Vec<BatchFate>, StorageError> {

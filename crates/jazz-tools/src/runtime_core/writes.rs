@@ -6,6 +6,7 @@ use crate::batch_fate::{
 use crate::object::BranchName;
 use crate::query_manager::types::SchemaHash;
 use crate::row_histories::BatchId;
+use crate::storage::StorageError;
 use crate::sync_manager::RowBatchKey;
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
@@ -905,6 +906,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         code: &str,
         reason: &str,
     ) -> Result<(), RuntimeError> {
+        let acknowledged = self
+            .is_rejected_batch_acknowledged(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load rejected batch ack: {err}")))?;
         let already_rejected = matches!(
             self.storage
                 .load_authoritative_batch_fate(batch_id)
@@ -920,7 +924,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .upsert_authoritative_batch_fate(&fate)
             .map_err(|err| RuntimeError::WriteError(format!("persist batch fate: {err}")))?;
         self.mark_local_batch_rows_rejected(batch_id);
-        if !already_rejected {
+        if !already_rejected && !acknowledged {
             self.durability.record_rejection(batch_id, code, reason);
         }
         self.mark_storage_write_pending_flush();
@@ -937,7 +941,11 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// batch record that kept it alive across reconnect and restart.
     pub fn acknowledge_rejected_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {
         self.local_batch_record_cache.remove(&batch_id);
-        if self.acknowledged_rejected_batches.contains(&batch_id) {
+        if self
+            .is_rejected_batch_acknowledged(batch_id)
+            .map_err(|err| RuntimeError::WriteError(format!("load rejected batch ack: {err}")))?
+        {
+            self.acknowledged_rejected_batches.insert(batch_id);
             return Ok(false);
         }
         if !matches!(
@@ -950,9 +958,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
 
         self.durability.forget_batch(batch_id);
+        self.storage
+            .acknowledge_rejected_batch_fate(batch_id)
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("persist rejected batch ack: {err}"))
+            })?;
         self.acknowledged_rejected_batches.insert(batch_id);
         self.mark_storage_write_pending_flush();
         Ok(true)
+    }
+
+    pub(crate) fn is_rejected_batch_acknowledged(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<bool, StorageError> {
+        if self.acknowledged_rejected_batches.contains(&batch_id) {
+            return Ok(true);
+        }
+        self.storage.is_rejected_batch_fate_acknowledged(batch_id)
     }
 
     pub fn discard_local_batch(&mut self, batch_id: BatchId) -> Result<bool, RuntimeError> {

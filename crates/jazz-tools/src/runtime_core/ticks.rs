@@ -233,7 +233,12 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if let crate::batch_fate::BatchFate::Rejected { code, reason, .. } = &fate {
             self.mark_local_batch_rows_rejected(batch_id);
-            self.durability.record_rejection(batch_id, code, reason);
+            let acknowledged = self
+                .is_rejected_batch_acknowledged(batch_id)
+                .unwrap_or(false);
+            if !acknowledged {
+                self.durability.record_rejection(batch_id, code, reason);
+            }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
             self.retransmit_local_batch_to_servers(batch_id);
         } else if matches!(

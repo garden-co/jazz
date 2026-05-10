@@ -1429,6 +1429,64 @@ describe("Worker Bridge with OPFS", () => {
     });
   });
 
+  it("does not replay acknowledged rejected worker batches after restart", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-on-mutation-error-restart",
+      readOnlyPermissions,
+    );
+
+    const sharedLocalAuthToken = generateAuthSecret();
+    const dbName = uniqueDbName("sync-on-mutation-error-restart");
+    const createPersistentDb = () =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      });
+
+    const dbBeforeRestart = track(await createPersistentDb());
+    const mutationErrorSpy = vi.fn();
+    dbBeforeRestart.onMutationError(mutationErrorSpy);
+
+    const insertResult = dbBeforeRestart.insert(todos, {
+      title: "Rejected across restart",
+      done: false,
+    });
+
+    await waitForCondition(
+      async () => mutationErrorSpy.mock.calls.length > 0,
+      5000,
+      "onMutationError handler should receive rejection before restart",
+    );
+    expect(mutationErrorSpy).toHaveBeenCalledWith({
+      code: "permission_denied",
+      reason: "Insert denied by policy on table todos",
+      batch: {
+        batchId: insertResult.batchId,
+        mode: "direct",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId: insertResult.batchId,
+          code: "permission_denied",
+          reason: "Insert denied by policy on table todos",
+        },
+      },
+    });
+    await sleep(250);
+
+    await dbBeforeRestart.shutdown();
+    untrack(dbBeforeRestart);
+
+    const dbAfterAcknowledgement = track(await createPersistentDb());
+    const replayAfterAckSpy = vi.fn();
+    dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
+    await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
+    await sleep(500);
+    expect(replayAfterAckSpy).not.toHaveBeenCalled();
+  });
+
   describe("optimistic writes are reverted on server rejection", () => {
     it("insert", async () => {
       const syncServer = await publishSyncServerSchemaAndPermissions(

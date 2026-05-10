@@ -910,6 +910,23 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
         None
     );
     assert!(
+        matches!(
+            alice
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected { .. })
+        ),
+        "acknowledgement should leave the authoritative rejected fate intact"
+    );
+    assert!(
+        alice
+            .storage()
+            .is_rejected_batch_fate_acknowledged(batch_id)
+            .unwrap(),
+        "acknowledgement should persist a replay tombstone"
+    );
+    assert!(
         !alice.acknowledge_rejected_batch(batch_id).unwrap(),
         "acknowledging an already-pruned batch should be a no-op"
     );
@@ -930,7 +947,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     // alice -> worker
     //   alice receives a replayable transactional rejection
     //   restart preserves that rejected batch record
-    //   acknowledgement after restart prunes only the local batch record
+    //   acknowledgement after restart prunes the replayable records
     let schema = test_schema();
     let mut alice = create_runtime_with_schema(schema.clone(), "transactional-restart-reject-test");
     let mut worker = create_runtime_with_schema_and_sync_manager(
@@ -992,7 +1009,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 
     let storage = alice.into_storage();
     let mut restarted =
-        create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+        create_runtime_with_storage(schema.clone(), "transactional-restart-reject-test", storage);
 
     assert!(matches!(
         restarted
@@ -1023,8 +1040,36 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
             .unwrap(),
         None
     );
+    assert!(
+        matches!(
+            restarted
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected {
+                batch_id: settled_batch_id,
+                ..
+            }) if settled_batch_id == batch_id
+        ),
+        "acknowledgement should preserve the authoritative rejected fate"
+    );
+    assert!(
+        restarted
+            .storage()
+            .is_rejected_batch_fate_acknowledged(batch_id)
+            .unwrap(),
+        "acknowledgement should persist a replay tombstone"
+    );
 
-    let restarted_history_rows = restarted
+    let storage = restarted.into_storage();
+    let mut restarted_again =
+        create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+    assert!(
+        restarted_again.drain_rejected_batch_ids().is_empty(),
+        "acknowledged rejected batches must not replay after another restart"
+    );
+
+    let restarted_history_rows = restarted_again
         .storage()
         .scan_history_row_batches("users", row_id)
         .unwrap();
