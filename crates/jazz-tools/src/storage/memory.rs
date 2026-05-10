@@ -73,6 +73,19 @@ impl MemoryStorage {
         self.ensured_raw_table_headers.insert(raw_table.to_string());
         Ok(())
     }
+
+    fn ensure_cached_row_raw_table_header(
+        &mut self,
+        raw_table: &str,
+        row_raw_table_id: &RowRawTableId,
+        user_descriptor: &RowDescriptor,
+    ) -> Result<(), StorageError> {
+        if self.ensured_raw_table_headers.contains(raw_table) {
+            return Ok(());
+        }
+        let header = row_raw_table_header(row_raw_table_id, user_descriptor);
+        self.ensure_cached_raw_table_header(raw_table, &header)
+    }
 }
 
 impl Default for MemoryStorage {
@@ -92,6 +105,16 @@ impl Default for MemoryStorage {
 impl Storage for MemoryStorage {
     fn storage_cache_namespace(&self) -> usize {
         self.cache_namespace
+    }
+
+    fn scan_row_locators(&self) -> Result<RowLocatorRows, StorageError> {
+        let mut rows = self
+            .row_locators
+            .iter()
+            .map(|(object_id, locator)| (*object_id, locator.clone()))
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(object_id, _)| *object_id);
+        Ok(rows)
     }
 
     fn apply_prepared_row_mutation(
@@ -121,9 +144,10 @@ impl Storage for MemoryStorage {
         let table = table.to_string();
 
         for (row, encoded) in history_rows.iter().zip(encoded_history_rows) {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 encoded.row_raw_table.as_str(),
-                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+                &encoded.row_raw_table_id,
+                &encoded.user_descriptor,
             )?;
             if encoded.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -156,9 +180,10 @@ impl Storage for MemoryStorage {
         }
 
         for (entry, encoded) in visible_entries.iter().zip(encoded_visible_rows) {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 encoded.row_raw_table.as_str(),
-                &row_raw_table_header(&encoded.row_raw_table_id, &encoded.user_descriptor),
+                &encoded.row_raw_table_id,
+                &encoded.user_descriptor,
             )?;
             if encoded.needs_exact_locator {
                 self.put_visible_row_table_locator(
@@ -196,9 +221,10 @@ impl Storage for MemoryStorage {
         let table = table.to_string();
 
         for row in history_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -239,9 +265,10 @@ impl Storage for MemoryStorage {
         }
 
         for row in visible_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_visible_row_table_locator(
@@ -298,20 +325,8 @@ impl Storage for MemoryStorage {
         locator: Option<&RowLocator>,
     ) -> Result<(), StorageError> {
         if let Some(locator) = locator {
-            self.ensure_cached_raw_table_header(
-                ROW_LOCATOR_TABLE,
-                &RawTableHeader::system(STORAGE_KIND_ROW_LOCATOR, ROW_LOCATOR_STORAGE_FORMAT_V1),
-            )?;
-            let locator_bytes = encode_row_locator(locator)?;
-            self.raw_tables
-                .entry(ROW_LOCATOR_TABLE.to_string())
-                .or_default()
-                .insert(metadata_raw_key(id), locator_bytes);
             self.row_locators.insert(id, locator.clone());
         } else {
-            if let Some(rows) = self.raw_tables.get_mut(ROW_LOCATOR_TABLE) {
-                rows.remove(&metadata_raw_key(id));
-            }
             self.row_locators.remove(&id);
         }
 
@@ -540,9 +555,10 @@ impl Storage for MemoryStorage {
             }
         }
         for row in &encoded_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_history_row_batch_table_locator(
@@ -599,9 +615,10 @@ impl Storage for MemoryStorage {
             }
         }
         for row in encoded_rows {
-            self.ensure_cached_raw_table_header(
+            self.ensure_cached_row_raw_table_header(
                 row.row_raw_table.as_str(),
-                &row_raw_table_header(&row.row_raw_table_id, &row.user_descriptor),
+                &row.row_raw_table_id,
+                &row.user_descriptor,
             )?;
             if row.needs_exact_locator {
                 self.put_visible_row_table_locator(
@@ -696,7 +713,7 @@ impl Storage for MemoryStorage {
         for (branch, row_id, context_row, history_rows) in rebuild_inputs {
             let context = resolve_history_row_write_context(self, table, &context_row)?;
             if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-                context.user_descriptor.as_ref(),
+                context.user_descriptor().as_ref(),
                 &history_rows,
             )
             .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -858,17 +875,17 @@ impl Storage for MemoryStorage {
         else {
             return Ok(None);
         };
-        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
         let current_tier = row_confirmed_tier_with_batch_fate(self, &entry.current_row)?;
         if current_tier.is_some_and(|tier| tier >= required_tier) {
             let mut current_row = entry.current_row.clone();
             current_row.confirmed_tier = current_tier;
             return Ok(Some(current_row));
         }
+        let context = resolve_history_row_write_context(self, table, &entry.current_row)?;
         let mut history_rows = regions.history_rows_for(branch, row_id);
         apply_batch_fate_tiers_to_rows(self, &mut history_rows)?;
         crate::row_histories::visible_row_preview_from_history_rows(
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
             &history_rows,
             Some(required_tier),
         )

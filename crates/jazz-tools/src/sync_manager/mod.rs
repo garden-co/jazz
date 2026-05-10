@@ -8,8 +8,9 @@ use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::SchemaHash;
 use crate::row_histories::{BatchId, RowVisibilityChange};
-use crate::storage::Storage;
+use crate::storage::{PreparedRowTableContext, Storage};
 
 // Module declarations
 pub mod clock;
@@ -103,6 +104,14 @@ pub struct SyncManager {
     /// this connection. A large replay can deliver many rows from the same
     /// sealed batch across several ticks, so outbox-local dedupe is not enough.
     pub(super) sent_server_batch_fate_acks: HashSet<(ServerId, BatchId, DurabilityTier, bool)>,
+    /// Per-sync-manager replay cache for table/schema row write context.
+    ///
+    /// Incoming sync rows usually carry table + origin schema metadata. Rows in
+    /// a large replay share this context, so cache it above the per-row
+    /// visibility work instead of re-resolving descriptors and raw table IDs
+    /// from storage for every row.
+    pub(super) replay_table_contexts:
+        HashMap<(String, SchemaHash), std::sync::Arc<PreparedRowTableContext>>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -248,6 +257,7 @@ impl SyncManager {
             pending_batch_fates: Vec::new(),
             pending_client_batch_fates: HashMap::new(),
             sent_server_batch_fate_acks: HashSet::new(),
+            replay_table_contexts: HashMap::new(),
         }
     }
 

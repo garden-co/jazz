@@ -2,6 +2,7 @@ use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SchemaHash;
@@ -150,7 +151,7 @@ impl BatchFate {
         };
 
         encode_row(
-            &batch_fate_storage_descriptor(),
+            batch_fate_storage_descriptor(),
             &[
                 Value::Text(kind.to_string()),
                 Value::BatchId(*self.batch_id().as_bytes()),
@@ -164,7 +165,7 @@ impl BatchFate {
     }
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
-        let values = decode_row(&batch_fate_storage_descriptor(), bytes)
+        let values = decode_row(batch_fate_storage_descriptor(), bytes)
             .map_err(|err| format!("decode batch fate row: {err}"))?;
         let [
             kind,
@@ -867,45 +868,48 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     ])
 }
 
-fn batch_fate_storage_descriptor() -> RowDescriptor {
-    RowDescriptor::new(vec![
-        ColumnDescriptor::new(
-            "kind",
-            ColumnType::Enum {
-                variants: vec![
-                    "missing".to_string(),
-                    "rejected".to_string(),
-                    "durable_direct".to_string(),
-                    "accepted_transaction".to_string(),
-                ],
-            },
-        ),
-        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
-        ColumnDescriptor::new("code", ColumnType::Text).nullable(),
-        ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
-        ColumnDescriptor::new(
-            "confirmed_tier",
-            ColumnType::Enum {
-                variants: vec![
-                    "local".to_string(),
-                    "edge".to_string(),
-                    "global".to_string(),
-                ],
-            },
-        )
-        .nullable(),
-        ColumnDescriptor::new(
-            "visible_members",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Row {
-                    columns: Box::new(RowDescriptor::new(vec![
-                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
-                        ColumnDescriptor::new("branch_name", ColumnType::Text),
-                    ])),
-                }),
-            },
-        ),
-    ])
+fn batch_fate_storage_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "kind",
+                ColumnType::Enum {
+                    variants: vec![
+                        "missing".to_string(),
+                        "rejected".to_string(),
+                        "durable_direct".to_string(),
+                        "accepted_transaction".to_string(),
+                    ],
+                },
+            ),
+            ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+            ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+            ColumnDescriptor::new(
+                "confirmed_tier",
+                ColumnType::Enum {
+                    variants: vec![
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+            ColumnDescriptor::new(
+                "visible_members",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Row {
+                        columns: Box::new(RowDescriptor::new(vec![
+                            ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                            ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ])),
+                    }),
+                },
+            ),
+        ])
+    })
 }
 
 #[cfg(test)]

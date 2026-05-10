@@ -227,6 +227,88 @@ pub enum LocalUpdates {
     Deferred,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SubscriptionRowMark {
+    Updated,
+    Deleted,
+    UpdatedAndDeleted,
+}
+
+#[derive(Debug, Clone)]
+struct SubscriptionVisibilityEffect {
+    table: String,
+    row_id: ObjectId,
+    local_dirty: bool,
+    row_mark: SubscriptionRowMark,
+    local_row_overlay: bool,
+}
+
+#[derive(Debug, Default)]
+struct BatchedSubscriptionVisibilityEffects {
+    remote_dirty_tables: HashSet<String>,
+    local_dirty_tables: HashSet<String>,
+    remote_updated: HashMap<String, ahash::AHashSet<ObjectId>>,
+    local_updated: HashMap<String, ahash::AHashSet<ObjectId>>,
+    remote_deleted: HashMap<String, ahash::AHashSet<ObjectId>>,
+    local_deleted: HashMap<String, ahash::AHashSet<ObjectId>>,
+}
+
+impl BatchedSubscriptionVisibilityEffects {
+    fn push(&mut self, effect: SubscriptionVisibilityEffect) {
+        let SubscriptionVisibilityEffect {
+            table,
+            row_id,
+            local_dirty,
+            row_mark,
+            local_row_overlay,
+        } = effect;
+
+        if local_dirty {
+            self.local_dirty_tables.insert(table.clone());
+        } else {
+            self.remote_dirty_tables.insert(table.clone());
+        }
+
+        match (row_mark, local_row_overlay) {
+            (SubscriptionRowMark::Updated, true) => {
+                self.local_updated.entry(table).or_default().insert(row_id);
+            }
+            (SubscriptionRowMark::Updated, false) => {
+                self.remote_updated.entry(table).or_default().insert(row_id);
+            }
+            (SubscriptionRowMark::Deleted, true) => {
+                self.local_deleted.entry(table).or_default().insert(row_id);
+            }
+            (SubscriptionRowMark::Deleted, false) => {
+                self.remote_deleted.entry(table).or_default().insert(row_id);
+            }
+            (SubscriptionRowMark::UpdatedAndDeleted, true) => {
+                self.local_updated
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(row_id);
+                self.local_deleted.entry(table).or_default().insert(row_id);
+            }
+            (SubscriptionRowMark::UpdatedAndDeleted, false) => {
+                self.remote_updated
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(row_id);
+                self.remote_deleted.entry(table).or_default().insert(row_id);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remote_dirty_tables.is_empty()
+            && self.local_dirty_tables.is_empty()
+            && self.remote_updated.is_empty()
+            && self.local_updated.is_empty()
+            && self.remote_deleted.is_empty()
+            && self.local_deleted.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServerSubscriptionTelemetryGroup {
     #[serde(rename = "groupKey")]
@@ -1280,9 +1362,7 @@ impl QueryManager {
                 "processing row visibility changes"
             );
         }
-        for update in row_visibility_changes {
-            self.handle_row_update(storage, update);
-        }
+        self.handle_row_updates_batched(storage, row_visibility_changes);
 
         // 3. Process pending query unsubscriptions from downstream clients
         // before new subscriptions from the same tick. One-shot query helpers
@@ -1309,9 +1389,7 @@ impl QueryManager {
                 "processing row visibility changes from accepted permission checks"
             );
         }
-        for update in post_permission_row_visibility_changes {
-            self.handle_row_update(storage, update);
-        }
+        self.handle_row_updates_batched(storage, post_permission_row_visibility_changes);
         self.apply_pending_batch_fate_effects(storage);
 
         // 4c. Apply QuerySettled messages that do not depend on any earlier
@@ -1635,6 +1713,23 @@ impl QueryManager {
         local_update: bool,
         apply_index_mutations: bool,
     ) {
+        if let Some(effect) = self.prepare_row_update_with_origin(
+            storage,
+            update,
+            local_update,
+            apply_index_mutations,
+        ) {
+            self.apply_subscription_visibility_effect(effect);
+        }
+    }
+
+    fn prepare_row_update_with_origin(
+        &mut self,
+        storage: &mut dyn Storage,
+        update: RowVisibilityChange,
+        local_update: bool,
+        apply_index_mutations: bool,
+    ) -> Option<SubscriptionVisibilityEffect> {
         let original_table = update.row_locator.table.to_string();
         let branch = update.row.branch.as_str();
         let origin_schema_hash = update.row_locator.origin_schema_hash;
@@ -1656,7 +1751,7 @@ impl QueryManager {
                             "buffering row update for unknown schema hash; schema not yet known"
                         );
                         self.pending_row_visibility_changes.push(update);
-                        return;
+                        return None;
                     }
                 } else {
                     tracing::error!(
@@ -1666,7 +1761,7 @@ impl QueryManager {
                         "buffering row update for unknown branch; cannot parse schema hash"
                     );
                     self.pending_row_visibility_changes.push(update);
-                    return;
+                    return None;
                 }
             }
         };
@@ -1688,17 +1783,17 @@ impl QueryManager {
         let table_schema = if schema_hash == self.schema_context.current_hash {
             match self.schema.get(&table_name) {
                 Some(schema) => schema.clone(),
-                None => return,
+                None => return None,
             }
         } else if let Some(schema) = self.schema_context.get_schema(&schema_hash) {
             match schema.get(&table_name) {
                 Some(table_schema) => table_schema.clone(),
-                None => return,
+                None => return None,
             }
         } else if let Some(schema) = self.known_schemas.get(&schema_hash) {
             match schema.get(&table_name) {
                 Some(table_schema) => table_schema.clone(),
-                None => return,
+                None => return None,
             }
         } else {
             tracing::error!(
@@ -1708,7 +1803,7 @@ impl QueryManager {
                 "buffering row update because schema for branch is not available yet"
             );
             self.pending_row_visibility_changes.push(update);
-            return;
+            return None;
         };
 
         let descriptor = table_schema.columns.clone();
@@ -1750,7 +1845,7 @@ impl QueryManager {
         if self.visible_row_is_hard_deleted(storage, update.object_id, &update.row.branch)
             && !update.row.is_hard_deleted()
         {
-            return;
+            return None;
         }
 
         if update.row.is_hard_deleted() {
@@ -1766,17 +1861,13 @@ impl QueryManager {
                     table_schema.indexed_columns.as_deref(),
                 );
             }
-            if local_update {
-                self.mark_subscriptions_dirty_local(&logical_table);
-            } else {
-                self.mark_subscriptions_dirty(&logical_table);
-            }
-            if local_update {
-                self.mark_local_row_deleted_in_subscriptions(&logical_table, update.object_id);
-            } else {
-                self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
-            }
-            return;
+            return Some(SubscriptionVisibilityEffect {
+                table: logical_table,
+                row_id: update.object_id,
+                local_dirty: local_update,
+                row_mark: SubscriptionRowMark::Deleted,
+                local_row_overlay: local_update,
+            });
         }
 
         if update.row.is_soft_deleted() {
@@ -1816,13 +1907,13 @@ impl QueryManager {
                     }
                 }
             }
-            if local_update {
-                self.mark_subscriptions_dirty_local(&logical_table);
-            } else {
-                self.mark_subscriptions_dirty(&logical_table);
-            }
-            self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
-            return;
+            return Some(SubscriptionVisibilityEffect {
+                table: logical_table,
+                row_id: update.object_id,
+                local_dirty: local_update,
+                row_mark: SubscriptionRowMark::Deleted,
+                local_row_overlay: false,
+            });
         }
 
         let was_soft_deleted = old_row.is_some_and(StoredRowBatch::is_soft_deleted);
@@ -1848,17 +1939,13 @@ impl QueryManager {
                     "failed to update indices for synced undelete"
                 );
             }
-            if local_update {
-                self.mark_subscriptions_dirty_local(&logical_table);
-            } else {
-                self.mark_subscriptions_dirty(&logical_table);
-            }
-            if local_update {
-                self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
-            } else {
-                self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
-            }
-            return;
+            return Some(SubscriptionVisibilityEffect {
+                table: logical_table,
+                row_id: update.object_id,
+                local_dirty: local_update,
+                row_mark: SubscriptionRowMark::Updated,
+                local_row_overlay: local_update,
+            });
         }
 
         if old_row.is_none() {
@@ -1907,12 +1994,13 @@ impl QueryManager {
         }
 
         if local_update {
-            self.mark_subscriptions_dirty_local(&logical_table);
-        } else {
-            self.mark_subscriptions_dirty(&logical_table);
-        }
-        if local_update {
-            self.mark_local_row_updated_in_subscriptions(&logical_table, update.object_id);
+            Some(SubscriptionVisibilityEffect {
+                table: logical_table,
+                row_id: update.object_id,
+                local_dirty: true,
+                row_mark: SubscriptionRowMark::Updated,
+                local_row_overlay: true,
+            })
         } else {
             let self_referential_table_update = old_row.is_some()
                 && table_schema.columns.columns.iter().any(|column| {
@@ -1931,9 +2019,21 @@ impl QueryManager {
                     new_data,
                 )
             {
-                self.mark_row_deleted_in_subscriptions(&logical_table, update.object_id);
+                return Some(SubscriptionVisibilityEffect {
+                    table: logical_table,
+                    row_id: update.object_id,
+                    local_dirty: false,
+                    row_mark: SubscriptionRowMark::UpdatedAndDeleted,
+                    local_row_overlay: false,
+                });
             }
-            self.mark_row_updated_in_subscriptions(&logical_table, update.object_id);
+            Some(SubscriptionVisibilityEffect {
+                table: logical_table,
+                row_id: update.object_id,
+                local_dirty: false,
+                row_mark: SubscriptionRowMark::Updated,
+                local_row_overlay: false,
+            })
         }
     }
 
@@ -2031,6 +2131,61 @@ impl QueryManager {
     ) {
         self.handle_row_update_with_origin(storage, update, false, true);
     }
+
+    fn handle_row_updates_batched(
+        &mut self,
+        storage: &mut dyn Storage,
+        updates: Vec<RowVisibilityChange>,
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+
+        let mut effects = BatchedSubscriptionVisibilityEffects::default();
+        for update in updates {
+            if let Some(effect) = self.prepare_row_update_with_origin(storage, update, false, true)
+            {
+                effects.push(effect);
+            }
+        }
+        self.apply_batched_subscription_visibility_effects(effects);
+    }
+
+    fn apply_subscription_visibility_effect(&mut self, effect: SubscriptionVisibilityEffect) {
+        let mut effects = BatchedSubscriptionVisibilityEffects::default();
+        effects.push(effect);
+        self.apply_batched_subscription_visibility_effects(effects);
+    }
+
+    fn apply_batched_subscription_visibility_effects(
+        &mut self,
+        effects: BatchedSubscriptionVisibilityEffects,
+    ) {
+        if effects.is_empty() {
+            return;
+        }
+
+        for table in &effects.remote_dirty_tables {
+            self.mark_subscriptions_dirty(table);
+        }
+        for table in &effects.local_dirty_tables {
+            self.mark_subscriptions_dirty_local(table);
+        }
+
+        for (table, ids) in &effects.remote_updated {
+            self.mark_rows_updated_in_subscriptions(table, ids, false);
+        }
+        for (table, ids) in &effects.local_updated {
+            self.mark_rows_updated_in_subscriptions(table, ids, true);
+        }
+        for (table, ids) in &effects.remote_deleted {
+            self.mark_rows_deleted_in_subscriptions(table, ids, false);
+        }
+        for (table, ids) in &effects.local_deleted {
+            self.mark_rows_deleted_in_subscriptions(table, ids, true);
+        }
+    }
+
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {
         // Mark local subscriptions dirty
@@ -2064,20 +2219,25 @@ impl QueryManager {
         self.mark_subscriptions_dirty_with_origin(table, true);
     }
 
-    /// Mark a row as updated in all subscriptions for a table.
-    /// This triggers content change detection during settle().
-    /// Checks all tables involved in the subscription (including joined tables).
-    pub(crate) fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
-        // Mark local subscriptions
+    fn mark_rows_updated_in_subscriptions(
+        &mut self,
+        table: &str,
+        ids: &ahash::AHashSet<ObjectId>,
+        local_overlay: bool,
+    ) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
-                subscription.graph.mark_row_updated(id);
+                subscription.graph.mark_rows_updated(ids);
+                if local_overlay {
+                    subscription
+                        .pending_local_row_ids
+                        .extend(ids.iter().copied());
+                }
             }
         }
-        // Mark server subscriptions (serving downstream clients)
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
-                server_sub.graph.mark_row_updated(id);
+                server_sub.graph.mark_rows_updated(ids);
             }
         }
     }
@@ -2096,20 +2256,25 @@ impl QueryManager {
         }
     }
 
-    /// Mark a row as deleted in all subscriptions for a table.
-    /// This triggers removal delta emission during settle().
-    /// Checks all tables involved in the subscription (including joined tables).
-    pub(super) fn mark_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
-        // Mark local subscriptions
+    fn mark_rows_deleted_in_subscriptions(
+        &mut self,
+        table: &str,
+        ids: &ahash::AHashSet<ObjectId>,
+        local_overlay: bool,
+    ) {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
-                subscription.graph.mark_row_deleted(id);
+                subscription.graph.mark_rows_deleted(ids);
+                if local_overlay {
+                    subscription
+                        .pending_local_row_ids
+                        .extend(ids.iter().copied());
+                }
             }
         }
-        // Mark server subscriptions (serving downstream clients)
         for server_sub in self.server_subscriptions.values_mut() {
             if Self::subscription_involves_table(&server_sub.graph, table) {
-                server_sub.graph.mark_row_deleted(id);
+                server_sub.graph.mark_rows_deleted(ids);
             }
         }
     }

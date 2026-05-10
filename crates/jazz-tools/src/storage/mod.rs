@@ -499,46 +499,36 @@ struct ResolvedRowTable {
 }
 
 #[derive(Clone)]
-pub(crate) struct PreparedRowWriteContext {
+pub(crate) struct PreparedRowTableContext {
     pub history_row_raw_table_id: RowRawTableId,
     pub visible_row_raw_table_id: RowRawTableId,
     pub user_descriptor: Arc<RowDescriptor>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedRowWriteContext {
+    pub table_context: Arc<PreparedRowTableContext>,
     pub needs_exact_locator: bool,
 }
 
-type RowRawTableIdCache = HashMap<(RowRawTableKind, String, SchemaHash), RowRawTableId>;
+impl PreparedRowWriteContext {
+    pub(crate) fn history_row_raw_table_id(&self) -> &RowRawTableId {
+        &self.table_context.history_row_raw_table_id
+    }
+
+    pub(crate) fn visible_row_raw_table_id(&self) -> &RowRawTableId {
+        &self.table_context.visible_row_raw_table_id
+    }
+
+    pub(crate) fn user_descriptor(&self) -> &Arc<RowDescriptor> {
+        &self.table_context.user_descriptor
+    }
+}
+
 type CatalogueUserDescriptorCache = HashMap<(usize, String, SchemaHash), Arc<RowDescriptor>>;
 type BranchSchemaHashCache = HashMap<(usize, String), Vec<SchemaHash>>;
 type TableCatalogueDescriptorCache =
     HashMap<(usize, String), Vec<(SchemaHash, crate::query_manager::types::RowDescriptor)>>;
-
-fn row_raw_table_id_cache() -> &'static Mutex<RowRawTableIdCache> {
-    static CACHE: OnceLock<Mutex<RowRawTableIdCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_row_raw_table_id(
-    kind: RowRawTableKind,
-    table: &str,
-    schema_hash: SchemaHash,
-) -> RowRawTableId {
-    let cache_key = (kind, table.to_string(), schema_hash);
-    if let Some(cached) = row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .get(&cache_key)
-        .cloned()
-    {
-        return cached;
-    }
-
-    let created = RowRawTableId::new(kind, table, schema_hash);
-    row_raw_table_id_cache()
-        .lock()
-        .expect("row raw table id cache poisoned")
-        .insert(cache_key, created.clone());
-    created
-}
 
 fn row_raw_table_descriptor_cache() -> &'static Mutex<HashMap<String, Arc<RowDescriptor>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<RowDescriptor>>>> = OnceLock::new();
@@ -1188,11 +1178,11 @@ fn ensure_raw_table_header<H: Storage + ?Sized>(
 }
 
 fn history_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::History, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::History, table, schema_hash)
 }
 
 fn visible_row_raw_table_id(table: &str, schema_hash: SchemaHash) -> RowRawTableId {
-    cached_row_raw_table_id(RowRawTableKind::Visible, table, schema_hash)
+    RowRawTableId::new(RowRawTableKind::Visible, table, schema_hash)
 }
 
 fn load_user_descriptor_for_schema_hash<H: Storage + ?Sized>(
@@ -1215,12 +1205,34 @@ fn prepared_row_write_context_for_descriptor(
     user_descriptor: Arc<RowDescriptor>,
     needs_exact_locator: bool,
 ) -> Result<PreparedRowWriteContext, StorageError> {
-    Ok(PreparedRowWriteContext {
+    let table_context =
+        prepared_row_table_context_for_descriptor(table_name, schema_hash, user_descriptor)?;
+    Ok(prepared_row_write_context_from_table_context(
+        table_context,
+        needs_exact_locator,
+    ))
+}
+
+pub(crate) fn prepared_row_table_context_for_descriptor(
+    table_name: &str,
+    schema_hash: SchemaHash,
+    user_descriptor: Arc<RowDescriptor>,
+) -> Result<Arc<PreparedRowTableContext>, StorageError> {
+    Ok(Arc::new(PreparedRowTableContext {
         history_row_raw_table_id: history_row_raw_table_id(table_name, schema_hash),
         visible_row_raw_table_id: visible_row_raw_table_id(table_name, schema_hash),
         user_descriptor,
+    }))
+}
+
+pub(crate) fn prepared_row_write_context_from_table_context(
+    table_context: Arc<PreparedRowTableContext>,
+    needs_exact_locator: bool,
+) -> PreparedRowWriteContext {
+    PreparedRowWriteContext {
+        table_context,
         needs_exact_locator,
-    })
+    }
 }
 
 pub(crate) fn prepared_row_write_context_for_known_exact_locator(
@@ -1248,6 +1260,15 @@ pub(crate) fn prepared_row_write_context_for_schema_hash_and_descriptor<H: Stora
         user_descriptor,
         needs_exact_locator,
     )
+}
+
+pub(crate) fn prepared_row_table_context_for_schema_hash<H: Storage + ?Sized>(
+    storage: &H,
+    table_name: &str,
+    schema_hash: SchemaHash,
+) -> Result<Arc<PreparedRowTableContext>, StorageError> {
+    let user_descriptor = load_user_descriptor_for_schema_hash(storage, table_name, schema_hash)?;
+    prepared_row_table_context_for_descriptor(table_name, schema_hash, user_descriptor)
 }
 
 fn prepared_row_write_context_for_schema_hash<H: Storage + ?Sized>(
@@ -1897,16 +1918,16 @@ pub(crate) fn encode_history_row_bytes_with_context(
     row: &StoredRowBatch,
 ) -> Result<OwnedHistoryRowBytes, StorageError> {
     let bytes =
-        crate::row_histories::encode_flat_history_row(context.user_descriptor.as_ref(), row)
+        crate::row_histories::encode_flat_history_row(context.user_descriptor().as_ref(), row)
             .map_err(|err| StorageError::IoError(format!("encode flat history row: {err}")))?;
 
     Ok(OwnedHistoryRowBytes {
         row_raw_table: context
-            .history_row_raw_table_id
+            .history_row_raw_table_id()
             .raw_table_name()
             .to_string(),
-        row_raw_table_id: context.history_row_raw_table_id.clone(),
-        user_descriptor: context.user_descriptor.clone(),
+        row_raw_table_id: context.history_row_raw_table_id().clone(),
+        user_descriptor: context.user_descriptor().clone(),
         branch: row.branch.to_string(),
         row_id: row.row_id,
         batch_id: row.batch_id(),
@@ -1920,18 +1941,18 @@ pub(crate) fn encode_visible_row_bytes_with_context(
     entry: &VisibleRowEntry,
 ) -> Result<OwnedVisibleRowBytes, StorageError> {
     let bytes = crate::row_histories::encode_flat_visible_row_entry(
-        context.user_descriptor.as_ref(),
+        context.user_descriptor().as_ref(),
         entry,
     )
     .map_err(|err| StorageError::IoError(format!("encode flat visible row: {err}")))?;
 
     Ok(OwnedVisibleRowBytes {
         row_raw_table: context
-            .visible_row_raw_table_id
+            .visible_row_raw_table_id()
             .raw_table_name()
             .to_string(),
-        row_raw_table_id: context.visible_row_raw_table_id.clone(),
-        user_descriptor: context.user_descriptor.clone(),
+        row_raw_table_id: context.visible_row_raw_table_id().clone(),
+        user_descriptor: context.user_descriptor().clone(),
         branch: entry.current_row.branch.to_string(),
         row_id: entry.current_row.row_id,
         needs_exact_locator: context.needs_exact_locator,
@@ -2291,7 +2312,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
             continue;
         };
         if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-            context.user_descriptor.as_ref(),
+            context.user_descriptor().as_ref(),
             &history_rows,
         )
         .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -2314,7 +2335,7 @@ pub(crate) fn patch_row_region_rows_by_batch_with_storage<H: Storage + ?Sized>(
 
         if current.state.is_visible() {
             if let Some(entry) = VisibleRowEntry::rebuild_with_descriptor(
-                context.user_descriptor.as_ref(),
+                context.user_descriptor().as_ref(),
                 &history_rows,
             )
             .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
@@ -2368,7 +2389,7 @@ pub(crate) fn patch_exact_row_batch_with_storage<H: Storage + ?Sized>(
     let context = resolve_history_row_write_context(storage, table, &row)?;
 
     let visible_entries = VisibleRowEntry::rebuild_with_descriptor(
-        context.user_descriptor.as_ref(),
+        context.user_descriptor().as_ref(),
         &patched_history,
     )
     .map_err(|err| StorageError::IoError(format!("rebuild visible entry: {err}")))?
