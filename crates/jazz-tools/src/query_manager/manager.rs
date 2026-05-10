@@ -452,7 +452,14 @@ pub struct QueryManager {
     /// Visible rows observed through normal row visibility processing, keyed by
     /// batch. Batch fate processing uses this to mark affected query rows
     /// without rescanning and decoding every subscribed visible region.
-    pub(super) visible_rows_by_batch: HashMap<BatchId, Vec<(String, ObjectId)>>,
+    pub(super) visible_rows_by_batch: HashMap<BatchId, HashSet<(String, ObjectId)>>,
+
+    /// Authoritative batch fates loaded while settling subscriptions.
+    ///
+    /// A single replay can ask whether the same batch is transactional and
+    /// complete for every subscribed query. Keep that storage fact at manager
+    /// scope instead of reloading it once per subscription emission.
+    pub(super) authoritative_batch_fate_cache: HashMap<BatchId, Option<BatchFate>>,
 
     /// Currently queued SyncManager batch fates whose query effects have
     /// already been applied by this manager.
@@ -566,6 +573,7 @@ impl QueryManager {
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
             visible_rows_by_batch: HashMap::new(),
+            authoritative_batch_fate_cache: HashMap::new(),
             applied_pending_batch_fates: Vec::new(),
             known_schemas: Arc::new(HashMap::new()),
             pending_catalogue_schema_hashes: HashSet::new(),
@@ -1158,6 +1166,13 @@ impl QueryManager {
         let unique_batch_count = batch_ids.len();
         let mut marked_row_count = 0usize;
         for batch_id in batch_ids {
+            self.authoritative_batch_fate_cache.insert(
+                batch_id,
+                storage
+                    .load_authoritative_batch_fate(batch_id)
+                    .ok()
+                    .flatten(),
+            );
             self.mark_subscriptions_visibility_recompute_for_batch(batch_id);
             let mut rows = self
                 .visible_rows_by_batch
@@ -1166,11 +1181,9 @@ impl QueryManager {
                 .unwrap_or_default();
             if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
                 for member in record.members {
-                    rows.push((member.table_name, member.object_id));
+                    rows.insert((member.table_name, member.object_id));
                 }
             }
-            rows.sort();
-            rows.dedup();
             marked_row_count += rows.len();
             for (table_name, object_id) in rows {
                 self.mark_local_row_updated_in_subscriptions(table_name.as_str(), object_id);
@@ -1680,9 +1693,7 @@ impl QueryManager {
             && previous_row.state.is_visible()
             && let Some(rows) = self.visible_rows_by_batch.get_mut(&previous_row.batch_id)
         {
-            rows.retain(|(table, row_id)| {
-                table.as_str() != logical_table.as_str() || *row_id != update.object_id
-            });
+            rows.remove(&(logical_table.clone(), update.object_id));
             if rows.is_empty() {
                 self.visible_rows_by_batch.remove(&previous_row.batch_id);
             }
@@ -1692,10 +1703,7 @@ impl QueryManager {
                 .visible_rows_by_batch
                 .entry(current_batch_id)
                 .or_default();
-            let member = (logical_table.clone(), update.object_id);
-            if !rows.contains(&member) {
-                rows.push(member);
-            }
+            rows.insert((logical_table.clone(), update.object_id));
         }
 
         if local_update {
@@ -2657,29 +2665,42 @@ impl QueryManager {
             .collect()
     }
 
-    fn transactional_batch_complete_for_query_scope(
+    fn authoritative_batch_fate_cached(
+        &mut self,
         storage: &dyn Storage,
-        settlement_cache: &mut HashMap<BatchId, Option<BatchFate>>,
+        batch_id: BatchId,
+    ) -> Option<BatchFate> {
+        if let Some(settlement) = self.authoritative_batch_fate_cache.get(&batch_id) {
+            return settlement.clone();
+        }
+
+        let settlement = match storage.load_authoritative_batch_fate(batch_id) {
+            Ok(settlement) => settlement,
+            Err(error) => {
+                tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
+                None
+            }
+        };
+        self.authoritative_batch_fate_cache
+            .insert(batch_id, settlement.clone());
+        settlement
+    }
+
+    fn transactional_batch_complete_for_query_scope(
+        &mut self,
+        storage: &dyn Storage,
         batch_id: BatchId,
         local_scope: &HashSet<(ObjectId, BranchName)>,
         query_scope: &HashSet<(ObjectId, BranchName)>,
     ) -> bool {
-        let settlement = settlement_cache
-            .entry(batch_id)
-            .or_insert_with(|| match storage.load_authoritative_batch_fate(batch_id) {
-                Ok(settlement) => settlement,
-                Err(error) => {
-                    tracing::warn!(?batch_id, %error, "failed to load authoritative batch settlement");
-                    None
-                }
-            });
+        let settlement = self.authoritative_batch_fate_cached(storage, batch_id);
 
         !matches!(settlement, Some(BatchFate::AcceptedTransaction { .. }))
             || query_scope.is_subset(local_scope)
     }
 
     fn filter_transaction_visible_tuples<'a>(
-        &self,
+        &mut self,
         storage: &dyn Storage,
         query_id: QueryId,
         tuples: Cow<'a, [Tuple]>,
@@ -2692,14 +2713,12 @@ impl QueryManager {
         let mut query_scope = local_scope.clone();
         query_scope.extend(self.sync_manager.remote_query_scope(query_id));
 
-        let mut settlement_cache: HashMap<BatchId, Option<BatchFate>> = HashMap::new();
         let mut first_hidden = None;
 
         for (index, tuple) in tuples.as_ref().iter().enumerate() {
             let is_visible = tuple.batch_provenance().iter().copied().all(|batch_id| {
-                Self::transactional_batch_complete_for_query_scope(
+                self.transactional_batch_complete_for_query_scope(
                     storage,
-                    &mut settlement_cache,
                     batch_id,
                     &local_scope,
                     &query_scope,
@@ -2719,9 +2738,8 @@ impl QueryManager {
         filtered.extend_from_slice(&tuples.as_ref()[..first_hidden]);
         for tuple in &tuples.as_ref()[first_hidden + 1..] {
             if tuple.batch_provenance().iter().copied().all(|batch_id| {
-                Self::transactional_batch_complete_for_query_scope(
+                self.transactional_batch_complete_for_query_scope(
                     storage,
-                    &mut settlement_cache,
                     batch_id,
                     &local_scope,
                     &query_scope,

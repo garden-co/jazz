@@ -44,6 +44,7 @@ pub struct MemoryStorage {
     cache_namespace: usize,
     /// Ordered raw-table storage.
     raw_tables: HashMap<String, RawTableEntries>,
+    authoritative_batch_fates: std::cell::RefCell<HashMap<BatchId, BatchFate>>,
     /// Raw table headers already validated/inserted in this storage instance.
     ensured_raw_table_headers: HashSet<String>,
     /// Decoded row locators keyed by logical row id.
@@ -79,6 +80,7 @@ impl Default for MemoryStorage {
         Self {
             cache_namespace: next_storage_cache_namespace(),
             raw_tables: HashMap::new(),
+            authoritative_batch_fates: std::cell::RefCell::new(HashMap::new()),
             ensured_raw_table_headers: HashSet::new(),
             row_locators: HashMap::new(),
             row_histories: HashMap::new(),
@@ -365,6 +367,67 @@ impl Storage for MemoryStorage {
             .get(table)
             .and_then(|rows| rows.get(key))
             .cloned())
+    }
+
+    fn upsert_authoritative_batch_fate(
+        &mut self,
+        settlement: &BatchFate,
+    ) -> Result<(), StorageError> {
+        let settlement = self
+            .authoritative_batch_fates
+            .borrow()
+            .get(&settlement.batch_id())
+            .map(|existing| existing.merged_with(settlement))
+            .unwrap_or_else(|| settlement.clone());
+        ensure_raw_table_header(
+            self,
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            &RawTableHeader::system(
+                STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
+                AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
+            ),
+        )?;
+        let bytes = settlement.encode_storage_row().map_err(|err| {
+            StorageError::IoError(format!("encode authoritative batch settlement: {err}"))
+        })?;
+        self.raw_table_put(
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            &local_batch_record_key(settlement.batch_id()),
+            &bytes,
+        )?;
+        self.authoritative_batch_fates
+            .borrow_mut()
+            .insert(settlement.batch_id(), settlement);
+        Ok(())
+    }
+
+    fn load_authoritative_batch_fate(
+        &self,
+        batch_id: BatchId,
+    ) -> Result<Option<BatchFate>, StorageError> {
+        if let Some(settlement) = self.authoritative_batch_fates.borrow().get(&batch_id) {
+            return Ok(Some(settlement.clone()));
+        }
+        let Some(bytes) = self.raw_table_get(
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            &local_batch_record_key(batch_id),
+        )?
+        else {
+            return Ok(None);
+        };
+        ensure_system_raw_table_header_validated_once(
+            self,
+            AUTHORITATIVE_BATCH_SETTLEMENT_TABLE,
+            STORAGE_KIND_AUTHORITATIVE_BATCH_SETTLEMENT,
+            AUTHORITATIVE_BATCH_SETTLEMENT_FORMAT_V2,
+        )?;
+        let settlement = BatchFate::decode_storage_row(&bytes).map_err(|err| {
+            StorageError::IoError(format!("decode authoritative batch settlement: {err}"))
+        })?;
+        self.authoritative_batch_fates
+            .borrow_mut()
+            .insert(batch_id, settlement.clone());
+        Ok(Some(settlement))
     }
 
     fn raw_table_scan_prefix(

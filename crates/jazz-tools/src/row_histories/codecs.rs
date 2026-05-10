@@ -12,7 +12,7 @@ use crate::object::ObjectId;
 use crate::query_manager::types::{ColumnDescriptor, ColumnType, RowBytes, RowDescriptor, Value};
 use crate::row_format::{
     CompiledRowLayout, EncodingError, column_bytes_with_layout, column_is_null_with_layout,
-    compiled_row_layout, decode_row, encode_row, project_row_with_layout,
+    compiled_row_layout, decode_row, encode_row_with_layout, project_row_with_layout,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -346,7 +346,11 @@ pub fn encode_flat_history_row(
     let mut values = history_row_system_values(row);
     values.extend(flat_user_values(user_descriptor, &row.data)?);
 
-    encode_row(codecs.history_descriptor.as_ref(), &values)
+    encode_row_with_layout(
+        codecs.history_descriptor.as_ref(),
+        codecs.history_layout.as_ref(),
+        &values,
+    )
 }
 
 /// Decode a flat physical row back into the current `StoredRowBatch` shape.
@@ -368,7 +372,11 @@ pub fn encode_flat_visible_row_entry(
     let codecs = flat_row_codecs(user_descriptor);
     let mut values = visible_row_system_values(entry);
     values.extend(flat_user_values(user_descriptor, &entry.current_row.data)?);
-    encode_row(codecs.visible_descriptor.as_ref(), &values)
+    encode_row_with_layout(
+        codecs.visible_descriptor.as_ref(),
+        codecs.visible_layout.as_ref(),
+        &values,
+    )
 }
 
 pub fn decode_flat_visible_row_entry(

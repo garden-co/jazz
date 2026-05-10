@@ -86,8 +86,8 @@ impl SyncManager {
         });
     }
 
-    fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) {
-        let _ = storage.upsert_authoritative_batch_fate(fate);
+    fn retain_client_batch_fate<H: Storage>(&mut self, storage: &mut H, fate: &BatchFate) -> bool {
+        self.persist_authoritative_batch_fate(storage, fate).is_ok()
     }
 
     fn validate_sealed_batch_submission(
@@ -201,9 +201,17 @@ impl SyncManager {
         &self,
         storage: &mut H,
         fate: &BatchFate,
-    ) -> Result<(), crate::storage::StorageError> {
+    ) -> Result<bool, crate::storage::StorageError> {
+        let previous = storage.load_authoritative_batch_fate(fate.batch_id())?;
+        let merged = match previous.as_ref() {
+            Some(existing) => existing.merged_with(fate),
+            None => fate.clone(),
+        };
+        if previous.as_ref() == Some(&merged) {
+            return Ok(false);
+        }
         storage
-            .upsert_authoritative_batch_fate(fate)
+            .upsert_authoritative_batch_fate(&merged)
             .map_err(|error| {
                 tracing::trace!(
                     batch_id = ?fate.batch_id(),
@@ -211,7 +219,8 @@ impl SyncManager {
                     "failed to persist authoritative batch fate"
                 );
                 error
-            })
+            })?;
+        Ok(true)
     }
 
     fn persist_sealed_batch_submission<H: Storage>(
@@ -377,10 +386,10 @@ impl SyncManager {
                     unreachable!("row.state.is_visible() guarded non-visible states")
                 }
             };
-            if self
-                .persist_authoritative_batch_fate(storage, &fate)
-                .is_ok()
-            {
+            if matches!(
+                self.persist_authoritative_batch_fate(storage, &fate),
+                Ok(true)
+            ) {
                 self.pending_batch_fates.push(fate.clone());
             }
         }
@@ -667,13 +676,11 @@ impl SyncManager {
         fate: BatchFate,
         batch_rows: &[(String, StoredRowBatch)],
     ) {
-        if self
-            .persist_authoritative_batch_fate(storage, &fate)
-            .is_err()
-        {
-            return;
+        match self.persist_authoritative_batch_fate(storage, &fate) {
+            Ok(true) => self.pending_batch_fates.push(fate.clone()),
+            Ok(false) => {}
+            Err(_) => return,
         }
-        self.pending_batch_fates.push(fate.clone());
         if let Err(error) = storage.delete_sealed_batch_submission(fate.batch_id()) {
             tracing::warn!(
                 batch_id = ?fate.batch_id(),
@@ -722,11 +729,12 @@ impl SyncManager {
                     batch_id,
                     confirmed_tier,
                 };
-                if self
-                    .persist_authoritative_batch_fate(storage, &fate)
-                    .is_err()
-                {
-                    return;
+                let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok(changed) => changed,
+                    Err(_) => return,
+                };
+                if changed {
+                    self.pending_batch_fates.push(fate.clone());
                 }
                 fate
             }
@@ -748,11 +756,12 @@ impl SyncManager {
                             confirmed_tier,
                         },
                     };
-                    if self
-                        .persist_authoritative_batch_fate(storage, &fate)
-                        .is_err()
-                    {
-                        return;
+                    let changed = match self.persist_authoritative_batch_fate(storage, &fate) {
+                        Ok(changed) => changed,
+                        Err(_) => return,
+                    };
+                    if changed {
+                        self.pending_batch_fates.push(fate.clone());
                     }
                     fate
                 }
@@ -763,11 +772,10 @@ impl SyncManager {
             }
         };
 
-        if !matches!(fate, BatchFate::Missing { .. }) {
-            self.pending_batch_fates.push(fate.clone());
-            if let Err(error) = storage.delete_sealed_batch_submission(batch_id) {
-                tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
-            }
+        if !matches!(fate, BatchFate::Missing { .. })
+            && let Err(error) = storage.delete_sealed_batch_submission(batch_id)
+        {
+            tracing::warn!(?batch_id, %error, "failed to delete sealed batch submission");
         }
         if matches!(fate, BatchFate::DurableDirect { .. }) {
             let mut interested_clients = self.interested_clients_for_batch_fate(storage, &fate);
@@ -1052,13 +1060,10 @@ impl SyncManager {
                 }
             }
             SyncPayload::BatchFate { fate } => {
-                if self
-                    .persist_authoritative_batch_fate(storage, &fate)
-                    .is_err()
-                {
-                    return;
+                match self.persist_authoritative_batch_fate(storage, &fate) {
+                    Ok(_) => self.pending_batch_fates.push(fate.clone()),
+                    Err(_) => return,
                 }
-                self.pending_batch_fates.push(fate.clone());
                 if let BatchFate::AcceptedTransaction { batch_id, .. } = fate {
                     let rows = self.known_transactional_batch_rows_for_fate(storage, batch_id);
                     self.apply_transactional_batch_fate_to_rows(storage, None, &fate, &rows);
@@ -1440,8 +1445,9 @@ impl SyncManager {
                     });
             }
             SyncPayload::BatchFate { fate } => {
-                self.retain_client_batch_fate(storage, fate);
-                self.pending_batch_fates.push(fate.clone());
+                if self.retain_client_batch_fate(storage, fate) {
+                    self.pending_batch_fates.push(fate.clone());
+                }
             }
             SyncPayload::BatchFateNeeded { batch_ids } => {
                 self.respond_to_batch_fate_request(
@@ -1589,8 +1595,9 @@ impl SyncManager {
                 );
             }
             SyncPayload::BatchFate { fate } => {
-                self.retain_client_batch_fate(storage, &fate);
-                self.pending_batch_fates.push(fate.clone());
+                if self.retain_client_batch_fate(storage, &fate) {
+                    self.pending_batch_fates.push(fate.clone());
+                }
             }
             SyncPayload::BatchFateNeeded { batch_ids } => {
                 self.respond_to_batch_fate_request(

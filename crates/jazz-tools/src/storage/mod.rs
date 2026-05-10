@@ -805,7 +805,16 @@ fn history_row_batch_table_locator_key(
 }
 
 fn local_batch_record_key(batch_id: BatchId) -> String {
-    format!("batch:{}", hex::encode(batch_id.as_bytes()))
+    const PREFIX: &str = "batch:";
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut key = String::with_capacity(PREFIX.len() + batch_id.as_bytes().len() * 2);
+    key.push_str(PREFIX);
+    for &byte in batch_id.as_bytes() {
+        key.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        key.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    key
 }
 
 fn decode_local_batch_record_key(key: &str) -> Result<BatchId, StorageError> {
