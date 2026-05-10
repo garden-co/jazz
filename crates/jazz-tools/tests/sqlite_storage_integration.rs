@@ -22,7 +22,9 @@ use jazz_tools::{
     AppContext, ClientStorage, ColumnType, JazzClient, QueryBuilder, SchemaBuilder, TableSchema,
     Value,
 };
-use support::{TestingClient, publish_allow_all_permissions, wait_for_query};
+use support::{
+    TestingClient, publish_allow_all_permissions, push_catalogue_in_memory, wait_for_query,
+};
 use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -234,6 +236,17 @@ async fn make_client(
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(&schema),
+        &[],
+    )
+    .await
+    .expect("push schema catalogue");
+
     let client = TestingClient::builder()
         .with_server(server)
         .with_schema(schema.clone())
@@ -269,6 +282,17 @@ async fn make_client_external_jwks(
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        "main",
+        std::slice::from_ref(&schema),
+        &[],
+    )
+    .await
+    .expect("push schema catalogue");
+
     let context = AppContext {
         app_id: server.app_id(),
         client_id: None,
