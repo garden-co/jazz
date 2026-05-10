@@ -188,7 +188,41 @@ pub struct AuthConfig {
     pub backend_secret: Option<String>,
     pub admin_secret: Option<String>,
     pub peer_secret: Option<String>,
+    #[serde(default, with = "auth_backend_session_serde")]
     pub backend_session: Option<serde_json::Value>,
+}
+
+mod auth_backend_session_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &Option<serde_json::Value>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return value.serialize(serializer);
+        }
+
+        let json = value
+            .as_ref()
+            .map(|session| serde_json::to_string(session).map_err(serde::ser::Error::custom))
+            .transpose()?;
+
+        json.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Option::<serde_json::Value>::deserialize(deserializer);
+        }
+
+        let json = Option::<String>::deserialize(deserializer)?;
+        json.map(|session| serde_json::from_str(&session).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -307,6 +341,37 @@ mod handshake_tests {
         let debug = format!("{auth:?}");
         assert!(debug.contains("peer_secret"));
         assert!(!debug.contains("cluster-secret"));
+    }
+
+    #[test]
+    fn auth_handshake_postcard_roundtrip_preserves_backend_session() {
+        let handshake = AuthHandshake {
+            sync_protocol_version: SYNC_PROTOCOL_VERSION,
+            client_id: "client-1".to_string(),
+            auth: AuthConfig {
+                backend_secret: Some("backend-secret".to_string()),
+                backend_session: Some(serde_json::json!({
+                    "user_id": "alice",
+                    "claims": {
+                        "role": "admin",
+                    },
+                    "auth_mode": "trusted",
+                })),
+                ..Default::default()
+            },
+            catalogue_state_hash: Some("catalogue-digest".to_string()),
+            declared_schema_hash: Some(SchemaHash::from_bytes([9; 32]).to_string()),
+        };
+
+        let bytes = postcard::to_allocvec(&handshake).expect("encode postcard handshake");
+        let decoded: AuthHandshake =
+            postcard::from_bytes(&bytes).expect("decode postcard handshake");
+
+        assert_eq!(decoded.sync_protocol_version, SYNC_PROTOCOL_VERSION);
+        assert_eq!(
+            decoded.auth.backend_session, handshake.auth.backend_session,
+            "backend session claims should survive postcard encoding"
+        );
     }
 }
 
