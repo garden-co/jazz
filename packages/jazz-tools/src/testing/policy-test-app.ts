@@ -17,6 +17,7 @@ type ExpectLike = (value: unknown) => {
   toThrow(expected?: unknown): void;
 };
 type TestDbMethodCallback = (db: DbTransactionScope) => unknown;
+type TestDbFactory = () => Db;
 
 /**
  * Db used for testing permissions.
@@ -37,20 +38,20 @@ export type TestDb = Db & {
   expectDenied(callback: TestDbMethodCallback): void;
 };
 
-function asTestDb(db: Db, expect: ExpectLike): TestDb {
+function asTestDb(db: Db, expect: ExpectLike, createProbeDb: TestDbFactory): TestDb {
   const testDb = db as TestDb;
 
   Object.defineProperties(testDb, {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
+        const tx = createProbeDb().beginTransaction();
         expect(() => callback(tx)).not.toThrow();
         tx.rollback();
       },
     },
     expectDenied: {
       value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
+        const tx = createProbeDb().beginTransaction();
         expect(() => callback(tx)).toThrow('WriteError("policy denied');
         tx.rollback();
       },
@@ -65,11 +66,15 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
  * for seeding the database and validating policy checks.
  */
 export class PolicyTestApp {
+  private readonly probeContexts: JazzContext[] = [];
+
   constructor(
     private readonly expect: ExpectLike,
     private readonly app: any,
+    private readonly permissions: CompiledPermissions,
     private readonly jazzContext: JazzContext,
     private readonly server: LocalJazzServerHandle,
+    private readonly backendSecret: string,
   ) {}
 
   /**
@@ -86,15 +91,31 @@ export class PolicyTestApp {
    */
   as(session: Session): TestDb {
     const db = this.jazzContext.forSession(session, this.app);
-    return asTestDb(db, this.expect);
+    return asTestDb(db, this.expect, () => this.createProbeDb(session));
   }
 
   /**
    * Shutdown the test app. This will stop the local Jazz client and server.
    */
   async shutdown(): Promise<void> {
+    await Promise.all(this.probeContexts.splice(0).map((context) => context.shutdown()));
     await this.jazzContext.shutdown();
     await this.server.stop();
+  }
+
+  private createProbeDb(session: Session): Db {
+    const context = createJazzContext({
+      appId: this.server.appId,
+      app: this.app,
+      permissions: this.permissions,
+      driver: { type: "memory" },
+      serverUrl: this.server.url,
+      backendSecret: this.backendSecret,
+      env: "test",
+      userBranch: "main",
+    });
+    this.probeContexts.push(context);
+    return context.forSession(session, this.app);
   }
 }
 
@@ -146,5 +167,5 @@ export async function createPolicyTestApp(
     userBranch: "main",
   });
 
-  return new PolicyTestApp(expectFn, app, jazzContext, server);
+  return new PolicyTestApp(expectFn, app, permissions, jazzContext, server, backendSecret);
 }
