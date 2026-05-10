@@ -6,7 +6,13 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import type {
+  InsertValues,
+  Value,
+  RowDelta,
+  SubscriptionWireDelta,
+  WasmSchema,
+} from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   applyUserAuthHeaders,
@@ -314,7 +320,7 @@ interface PersistedMutationResult {
 /**
  * Subscription callback type.
  */
-export type SubscriptionCallback = (delta: RowDelta) => void;
+export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
@@ -587,13 +593,15 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   return raw;
 }
 
-function normalizeSubscriptionCallbackArgs(args: unknown[]): RowDelta | string | undefined {
+function normalizeSubscriptionCallbackArgs(
+  args: unknown[],
+): SubscriptionWireDelta | string | undefined {
   if (args.length === 1) {
-    return args[0] as RowDelta | string;
+    return args[0] as SubscriptionWireDelta | string;
   }
 
   if (args.length === 2 && args[0] == null) {
-    return args[1] as RowDelta | string | undefined;
+    return args[1] as SubscriptionWireDelta | string | undefined;
   }
 
   console.error("Invalid subscription callback arguments", args);
@@ -2045,9 +2053,9 @@ export class JazzClient {
 
   private alignSubscriptionDeltaToDeclaredSchema(
     queryJson: string,
-    delta: RowDelta,
+    delta: SubscriptionWireDelta,
     runtimeSchema?: WasmSchema,
-  ): RowDelta {
+  ): SubscriptionWireDelta {
     if (this.returnsDeclaredSchemaRows()) {
       return delta;
     }
@@ -2434,7 +2442,7 @@ export class JazzClient {
           return;
         }
 
-        const delta: RowDelta =
+        const delta: SubscriptionWireDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(
           this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
