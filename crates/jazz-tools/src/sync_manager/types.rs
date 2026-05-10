@@ -586,6 +586,7 @@ mod tests {
             query_id: QueryId(7),
             query: Box::new(Query::new("todos")),
             session: Some(Session::new("alice").with_auth_mode(AuthMode::LocalFirst)),
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: Vec::new(),
         };
