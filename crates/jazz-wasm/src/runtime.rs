@@ -1380,7 +1380,7 @@ impl WasmRuntime {
     pub fn load_local_batch_records(&self) -> Result<JsValue, JsError> {
         let core = self.core.borrow();
         let records = core
-            .local_batch_records()
+            .local_batch_records_for_worker_sync()
             .map_err(|e| JsError::new(&format!("Load local batch records failed: {e}")))?;
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         serialize_local_batch_records(&records)
@@ -1414,6 +1414,40 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.seal_batch(batch_id)
             .map_err(|e| JsError::new(&format!("Seal batch failed: {e}")))
+    }
+
+    #[wasm_bindgen(js_name = retransmitLocalBatch)]
+    pub fn retransmit_local_batch(&self, batch_id: &str) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.retransmit_local_batch_to_servers(batch_id);
+        core.batched_tick();
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = replayLocalBatchPayloads)]
+    pub fn replay_local_batch_payloads(&self, batch_id: &str) -> Result<js_sys::Array, JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let core = self.core.borrow();
+        let array = js_sys::Array::new();
+
+        for payload in core.local_batch_replay_payloads(batch_id) {
+            let bytes = payload
+                .to_bytes()
+                .map_err(|e| JsError::new(&format!("Encode local batch replay failed: {e}")))?;
+            array.push(&Uint8Array::from(bytes.as_slice()));
+        }
+
+        Ok(array)
+    }
+
+    #[wasm_bindgen(js_name = reconcileLocalBatchWithServer)]
+    pub fn reconcile_local_batch_with_server(&self, batch_id: &str) -> Result<(), JsError> {
+        let batch_id = parse_batch_id_input(batch_id).map_err(|err| JsError::new(&err))?;
+        let mut core = self.core.borrow_mut();
+        core.reconcile_local_batch_with_server(batch_id);
+        core.batched_tick();
+        Ok(())
     }
 
     // =========================================================================
@@ -1537,9 +1571,17 @@ impl WasmRuntime {
         next_sync_seq: Option<f64>,
     ) -> Result<(), JsError> {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
+        let transport_server_id = self
+            .core
+            .borrow()
+            .transport()
+            .map(|handle| handle.server_id);
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
             if let Some(server_id) = *slot {
+                server_id
+            } else if let Some(server_id) = transport_server_id {
+                *slot = Some(server_id);
                 server_id
             } else {
                 let server_id = ServerId::new();
@@ -1901,9 +1943,16 @@ impl WasmRuntime {
         let tick = WasmTickNotifier { scheduler };
         let manager = {
             let mut core = self.core.borrow_mut();
-            jazz_tools::runtime_core::install_transport::<_, _, crate::ws_stream::WasmWsStream, _>(
-                &mut core, url, auth, tick,
-            )
+            let manager = jazz_tools::runtime_core::install_transport::<
+                _,
+                _,
+                crate::ws_stream::WasmWsStream,
+                _,
+            >(&mut core, url, auth, tick);
+            if let Some(handle) = core.transport() {
+                *self.upstream_server_id.borrow_mut() = Some(handle.server_id);
+            }
+            manager
         };
         wasm_bindgen_futures::spawn_local(manager.run());
         Ok(())

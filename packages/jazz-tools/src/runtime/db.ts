@@ -956,6 +956,9 @@ export class Db {
         onAuthFailure: (reason) => {
           this.markUnauthenticated(reason);
         },
+        onBeforeLocalBatchWait: async (batchId) => {
+          await this.workerBridge?.waitForLocalSyncFlush(batchId);
+        },
         onRejectedBatchAcknowledged: (batchId) => {
           this.workerBridge?.acknowledgeRejectedBatch(batchId);
         },
@@ -1019,7 +1022,9 @@ export class Db {
     }
     if (!options?.tier || options.tier === "local") {
       if (client?.hasPendingHydratedBatchReconciliation("edge")) {
+        await this.workerBridge.waitForLocalSyncFlush();
         await this.workerBridge.waitForUpstreamServerConnection();
+        this.workerBridge.replayWorkerUpstreamConnection();
         await this.waitForHydratedWorkerBatchReconciliation(client, "edge");
       }
       return;
@@ -1035,6 +1040,13 @@ export class Db {
     while (client.hasPendingHydratedBatchReconciliation(tier)) {
       if (Date.now() >= deadline) {
         return;
+      }
+      const pendingBatchIds = client.pendingHydratedBatchReconciliationIds(tier);
+      if (pendingBatchIds.length === 0) {
+        return;
+      }
+      for (const batchId of pendingBatchIds) {
+        await this.workerBridge?.waitForLocalSyncFlush(batchId);
       }
       await sleep(20);
     }

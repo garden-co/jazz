@@ -2,7 +2,9 @@ use super::*;
 use crate::batch_fate::BatchFate;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
-use crate::row_histories::{BatchId, RowState, StoredRowBatch, patch_row_batch_state};
+use crate::row_histories::{
+    BatchId, RowState, RowVisibilityChange, StoredRowBatch, VisibleRowEntry, patch_row_batch_state,
+};
 use crate::storage::Storage;
 use std::collections::{HashMap, HashSet};
 
@@ -263,6 +265,7 @@ impl SyncManager {
 
         for row in self.local_batch_rows(storage, batch_id, fallback_row) {
             let branch_name = BranchName::new(&row.branch);
+            let was_visible_delete = row.state.is_visible() && row.delete_kind.is_some();
             let visibility_change = patch_row_batch_state(
                 storage,
                 row.row_id,
@@ -283,6 +286,19 @@ impl SyncManager {
                     origin_client_id,
                 );
             }
+            if was_visible_delete
+                && let Some(update) =
+                    self.restore_permission_rejected_delete_row(storage, row.clone())
+            {
+                let restored_branch_name = BranchName::new(&update.row.branch);
+                self.pending_row_visibility_changes.push(update.clone());
+                self.forward_update_to_clients_except_with_storage(
+                    storage,
+                    update.object_id,
+                    restored_branch_name,
+                    origin_client_id,
+                );
+            }
         }
 
         let mut clients = self.interested_clients_for_batch_fate(storage, &fate);
@@ -291,5 +307,53 @@ impl SyncManager {
         for client_id in clients {
             self.queue_batch_fate_to_client(client_id, fate.clone());
         }
+    }
+
+    fn restore_permission_rejected_delete_row<H: Storage>(
+        &self,
+        storage: &mut H,
+        rejected_delete_row: StoredRowBatch,
+    ) -> Option<RowVisibilityChange> {
+        let row_locator = storage
+            .load_row_locator(rejected_delete_row.row_id)
+            .ok()
+            .flatten()?;
+        let table = row_locator.table.to_string();
+        let mut restored_row = storage
+            .scan_history_row_batches(&table, rejected_delete_row.row_id)
+            .ok()?
+            .into_iter()
+            .filter(|row| {
+                row.branch == rejected_delete_row.branch
+                    && !matches!(row.state, RowState::Rejected)
+                    && row.delete_kind.is_none()
+            })
+            .max_by_key(|row| row.updated_at)?;
+
+        restored_row.state = RowState::VisibleDirect;
+        let visible_entry = VisibleRowEntry::new(restored_row.clone());
+        if let Err(error) = storage.apply_row_mutation(
+            &table,
+            std::slice::from_ref(&restored_row),
+            std::slice::from_ref(&visible_entry),
+            &[],
+        ) {
+            tracing::warn!(
+                table,
+                branch = restored_row.branch.as_str(),
+                object_id = %restored_row.row_id,
+                %error,
+                "failed to restore permission-rejected delete visible row"
+            );
+            return None;
+        }
+
+        Some(RowVisibilityChange {
+            object_id: restored_row.row_id,
+            row_locator,
+            row: restored_row,
+            previous_row: Some(rejected_delete_row),
+            is_new_object: false,
+        })
     }
 }

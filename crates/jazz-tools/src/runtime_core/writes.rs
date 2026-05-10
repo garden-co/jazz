@@ -746,7 +746,16 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             return Ok(None);
         };
 
-        let mut record = LocalBatchRecord::new(batch_id, BatchMode::Direct, true, Some(fate));
+        self.local_batch_record_from_sealed_submission(submission, Some(fate))
+    }
+
+    fn local_batch_record_from_sealed_submission(
+        &self,
+        submission: SealedBatchSubmission,
+        fate: Option<BatchFate>,
+    ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
+        let mut record =
+            LocalBatchRecord::new(submission.batch_id, BatchMode::Direct, true, fate.clone());
         record.sealed_submission = Some(submission.clone());
 
         for sealed_member in submission.members {
@@ -761,7 +770,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             let schema_hash = self.local_batch_member_schema_hash(
                 submission.target_branch_name,
                 sealed_member.object_id,
-                batch_id,
+                submission.batch_id,
             )?;
             record.upsert_member(LocalBatchMember {
                 object_id: sealed_member.object_id,
@@ -777,6 +786,88 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         } else {
             Ok(Some(record))
         }
+    }
+
+    pub(crate) fn sealed_batch_still_needs_edge_reconciliation(fate: Option<&BatchFate>) -> bool {
+        match fate {
+            Some(BatchFate::Rejected { .. } | BatchFate::Missing { .. }) => false,
+            Some(BatchFate::DurableDirect { confirmed_tier, .. })
+            | Some(BatchFate::AcceptedTransaction { confirmed_tier, .. }) => {
+                *confirmed_tier < DurabilityTier::EdgeServer
+            }
+            None => true,
+        }
+    }
+
+    /// Load retained local batch records plus sealed submissions that still
+    /// need edge reconciliation. Browser workers send this set to the main
+    /// runtime during startup so local queries know when they must wait for the
+    /// upstream fate before rendering locally durable optimistic rows.
+    pub fn local_batch_records_for_worker_sync(
+        &self,
+    ) -> Result<Vec<LocalBatchRecord>, RuntimeError> {
+        let mut records = self.local_batch_records()?;
+        let retained_batch_ids: std::collections::HashSet<_> =
+            records.iter().map(|record| record.batch_id).collect();
+        let submissions = self
+            .storage
+            .scan_sealed_batch_submissions()
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("scan sealed batch submissions: {err}"))
+            })?;
+
+        for submission in submissions {
+            if retained_batch_ids.contains(&submission.batch_id) {
+                continue;
+            }
+            let fate = self
+                .storage
+                .load_authoritative_batch_fate(submission.batch_id)
+                .map_err(|err| RuntimeError::WriteError(format!("load batch fate: {err}")))?;
+            if !Self::sealed_batch_still_needs_edge_reconciliation(fate.as_ref()) {
+                continue;
+            }
+            if let Some(record) =
+                self.local_batch_record_from_sealed_submission(submission, fate)?
+            {
+                records.push(record);
+            }
+        }
+
+        let retained_batch_ids: std::collections::HashSet<_> =
+            records.iter().map(|record| record.batch_id).collect();
+        let fates = self
+            .storage
+            .scan_authoritative_batch_fates()
+            .map_err(|err| {
+                RuntimeError::WriteError(format!("scan authoritative batch fates: {err}"))
+            })?;
+        for fate in fates {
+            if retained_batch_ids.contains(&fate.batch_id()) {
+                continue;
+            }
+            if !Self::sealed_batch_still_needs_edge_reconciliation(Some(&fate)) {
+                continue;
+            }
+            let local_rows = self.local_batch_rows(fate.batch_id());
+            if let Some(submission) =
+                Self::direct_sealed_submission_from_local_batch_rows(fate.batch_id(), &local_rows)
+                && let Some(record) =
+                    self.local_batch_record_from_sealed_submission(submission, Some(fate.clone()))?
+            {
+                records.push(record);
+                continue;
+            }
+            records.push(LocalBatchRecord::new(
+                fate.batch_id(),
+                BatchMode::Direct,
+                true,
+                Some(fate),
+            ));
+        }
+
+        records.sort_by_key(|record| record.batch_id);
+        Ok(records)
     }
 
     /// Scan all replayable local batch records currently retained by this

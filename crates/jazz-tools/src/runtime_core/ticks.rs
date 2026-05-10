@@ -1,7 +1,8 @@
 use super::*;
-use crate::batch_fate::LocalBatchMember;
+use crate::batch_fate::{LocalBatchMember, SealedBatchMember, SealedBatchSubmission};
 use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
+use crate::sync_manager::{RowMetadata, SyncPayload};
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn local_batch_row_was_insert(
@@ -23,7 +24,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         })
     }
 
-    fn local_batch_rows(
+    pub(crate) fn local_batch_rows(
         &self,
         batch_id: crate::row_histories::BatchId,
     ) -> Vec<(
@@ -31,45 +32,43 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
-        let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) else {
-            return Vec::new();
-        };
-
         let mut rows = Vec::new();
-        for sealed_member in submission.members {
-            let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
-            else {
-                continue;
-            };
-            let Some(row) = self
-                .storage
-                .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
-                .ok()
-                .and_then(|rows| {
-                    rows.into_iter().find(|row| {
-                        row.batch_id == batch_id
-                            && row.branch.as_str() == submission.target_branch_name.as_str()
-                            && row.content_digest() == sealed_member.row_digest
+        if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
+            for sealed_member in submission.members {
+                let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
+                else {
+                    continue;
+                };
+                let Some(row) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
+                    .ok()
+                    .and_then(|rows| {
+                        rows.into_iter().find(|row| {
+                            row.batch_id == batch_id
+                                && row.branch.as_str() == submission.target_branch_name.as_str()
+                                && row.content_digest() == sealed_member.row_digest
+                        })
                     })
-                })
-            else {
-                continue;
-            };
-            let Ok(schema_hash) = self.local_batch_member_schema_hash(
-                submission.target_branch_name,
-                sealed_member.object_id,
-                batch_id,
-            ) else {
-                continue;
-            };
-            let member = LocalBatchMember {
-                object_id: sealed_member.object_id,
-                table_name: row_locator.table.to_string(),
-                branch_name: submission.target_branch_name,
-                schema_hash,
-                row_digest: sealed_member.row_digest,
-            };
-            rows.push((member, row_locator, row));
+                else {
+                    continue;
+                };
+                let Ok(schema_hash) = self.local_batch_member_schema_hash(
+                    submission.target_branch_name,
+                    sealed_member.object_id,
+                    batch_id,
+                ) else {
+                    continue;
+                };
+                let member = LocalBatchMember {
+                    object_id: sealed_member.object_id,
+                    table_name: row_locator.table.to_string(),
+                    branch_name: submission.target_branch_name,
+                    schema_hash,
+                    row_digest: sealed_member.row_digest,
+                };
+                rows.push((member, row_locator, row));
+            }
         }
 
         if rows.is_empty()
@@ -136,6 +135,37 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 rows.push((member, row_locator, row));
             }
         }
+        if rows.is_empty()
+            && let Ok(row_locators) = self.storage.scan_row_locators()
+        {
+            for (object_id, row_locator) in row_locators {
+                let Ok(history_rows) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+                else {
+                    continue;
+                };
+                for row in history_rows
+                    .into_iter()
+                    .filter(|row| row.batch_id == batch_id)
+                {
+                    let branch_name = BranchName::new(row.branch.as_str());
+                    let Ok(schema_hash) =
+                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
+                    else {
+                        continue;
+                    };
+                    let member = LocalBatchMember {
+                        object_id,
+                        table_name: row_locator.table.to_string(),
+                        branch_name,
+                        schema_hash,
+                        row_digest: row.content_digest(),
+                    };
+                    rows.push((member, row_locator.clone(), row));
+                }
+            }
+        }
 
         rows.sort_by(
             |(left_member, left_locator, left_row), (right_member, right_locator, right_row)| {
@@ -161,6 +191,34 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             },
         );
         rows
+    }
+
+    pub(crate) fn direct_sealed_submission_from_local_batch_rows(
+        batch_id: crate::row_histories::BatchId,
+        rows: &[(
+            LocalBatchMember,
+            crate::storage::RowLocator,
+            crate::row_histories::StoredRowBatch,
+        )],
+    ) -> Option<SealedBatchSubmission> {
+        let first_branch = rows.first()?.0.branch_name;
+        if rows
+            .iter()
+            .any(|(member, _, _)| member.branch_name != first_branch)
+        {
+            return None;
+        }
+        Some(SealedBatchSubmission::new(
+            batch_id,
+            first_branch,
+            rows.iter()
+                .map(|(member, _, _)| SealedBatchMember {
+                    object_id: member.object_id,
+                    row_digest: member.row_digest,
+                })
+                .collect(),
+            Vec::new(),
+        ))
     }
 
     fn apply_received_batch_fate(&mut self, fate: crate::batch_fate::BatchFate) {
@@ -349,27 +407,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(super) fn retransmit_local_batch_to_servers(
-        &mut self,
-        batch_id: crate::row_histories::BatchId,
-    ) {
+    pub fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
         let sealed_submission = self
             .storage
             .load_sealed_batch_submission(batch_id)
             .ok()
             .flatten();
 
-        let rows_to_retransmit = self
-            .local_batch_rows(batch_id)
-            .into_iter()
+        let local_rows = self.local_batch_rows(batch_id);
+        let rows_to_retransmit = local_rows
+            .iter()
             .map(|(member, row_locator, row)| {
                 (
                     member.object_id,
-                    metadata_from_row_locator(&row_locator),
-                    row,
+                    metadata_from_row_locator(row_locator),
+                    row.clone(),
                 )
             })
             .collect::<Vec<_>>();
+        let sealed_submission = sealed_submission.or_else(|| {
+            Self::direct_sealed_submission_from_local_batch_rows(batch_id, &local_rows)
+        });
 
         let sync_manager = self.schema_manager.query_manager_mut().sync_manager_mut();
         for (row_id, metadata, row) in rows_to_retransmit {
@@ -885,5 +943,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if released_server_hold {
             self.immediate_tick();
         }
+    }
+
+    pub fn local_batch_replay_payloads(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<SyncPayload> {
+        let local_rows = self.local_batch_rows(batch_id);
+        let mut payloads = local_rows
+            .iter()
+            .map(|(member, row_locator, row)| SyncPayload::RowBatchCreated {
+                metadata: Some(RowMetadata {
+                    id: member.object_id,
+                    metadata: metadata_from_row_locator(row_locator),
+                }),
+                row: row.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(submission) =
+            Self::direct_sealed_submission_from_local_batch_rows(batch_id, &local_rows)
+        {
+            payloads.push(SyncPayload::SealBatch { submission });
+        }
+
+        payloads
     }
 }

@@ -1068,6 +1068,8 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
             reason: "writer lacks publish rights".to_string(),
         })
         .unwrap();
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
 
     assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
     let record = core
@@ -1083,6 +1085,128 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
     assert_eq!(record.members.len(), 1);
     assert_eq!(record.members[0].object_id, row_id);
     assert!(record.sealed_submission.is_some());
+}
+
+#[test]
+fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-pending-worker-sync-record-test",
+    );
+
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    let branch_name = core.schema_manager().branch_name();
+    let batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+
+    assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
+    let records = core.local_batch_records_for_worker_sync().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].batch_id, batch_id);
+    assert!(matches!(
+        records[0].latest_fate,
+        Some(crate::batch_fate::BatchFate::DurableDirect {
+            confirmed_tier: DurabilityTier::Local,
+            ..
+        })
+    ));
+    assert_eq!(records[0].members.len(), 1);
+    assert_eq!(records[0].members[0].object_id, row_id);
+}
+
+#[test]
+fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-pending-fate-worker-sync-record-test",
+    );
+    let batch_id = BatchId::new();
+
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        })
+        .unwrap();
+
+    let records = core.local_batch_records_for_worker_sync().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].batch_id, batch_id);
+    assert!(records[0].members.is_empty());
+    assert!(matches!(
+        records[0].latest_fate,
+        Some(crate::batch_fate::BatchFate::DurableDirect {
+            confirmed_tier: DurabilityTier::Local,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
+    let schema = test_schema();
+    let mut main = create_runtime_with_schema(schema.clone(), "worker-local-replay-test");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "worker-local-replay-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let client_id = ClientId::new();
+    worker.add_client(client_id, None);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Peer);
+
+    let ((row_id, _row_values), batch_id) = main
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let payloads = main.local_batch_replay_payloads(batch_id);
+    assert_eq!(payloads.len(), 2);
+
+    for payload in payloads {
+        worker.park_sync_message(InboxEntry {
+            source: Source::Client(client_id),
+            payload,
+        });
+    }
+    worker.batched_tick();
+    worker.immediate_tick();
+
+    let records = worker.local_batch_records_for_worker_sync().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.batch_id == batch_id && record.members.len() == 1),
+        "worker should retain memberful batch record after local replay; records={records:?}"
+    );
+    assert!(
+        worker
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .iter()
+            .any(|row| row.batch_id == batch_id),
+        "worker should persist replayed row history"
+    );
 }
 
 #[test]

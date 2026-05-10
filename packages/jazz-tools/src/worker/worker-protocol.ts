@@ -37,6 +37,8 @@ export interface InitMessage {
 export interface SyncToWorkerMessage {
   type: "sync";
   payload: Uint8Array[];
+  ackId?: number;
+  ackBatchId?: string;
 }
 
 export interface SequencedSyncPayload {
@@ -214,6 +216,14 @@ export interface ShutdownOkMessage {
   type: "shutdown-ok";
 }
 
+/** Worker has applied a main-thread sync batch and flushed local durability. */
+export interface SyncAckMessage {
+  type: "sync-ack";
+  ackId: number;
+  hasBatchRecord?: boolean;
+  batchReconciled?: boolean;
+}
+
 export interface DebugLensEdgeState {
   sourceHash: string;
   targetHash: string;
@@ -250,5 +260,6 @@ export type WorkerToMainMessage =
   | ErrorMessage
   | WorkerAuthFailedMessage
   | ShutdownOkMessage
+  | SyncAckMessage
   | DebugSchemaStateOkMessage
   | DebugSeedLiveSchemaOkMessage;

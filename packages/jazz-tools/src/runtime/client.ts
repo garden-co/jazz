@@ -89,6 +89,9 @@ export interface Runtime {
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
+  retransmitLocalBatch?(batch_id: string): void;
+  replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
+  reconcileLocalBatchWithServer?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -116,6 +119,7 @@ export interface Runtime {
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
+  reconcileLocalBatchWithServer?(batch_id: string): void;
   addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
@@ -314,6 +318,7 @@ export type SubscriptionCallback = (delta: RowDelta) => void;
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   onRejectedBatchAcknowledged?: (batchId: string) => void;
 }
 
@@ -1283,6 +1288,7 @@ export class JazzClient {
   private readonly completedEmptyBatchIds = new Set<string>();
   private readonly pendingReplayedRejectedBatchIds = new Set<string>();
   private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
+  private readonly onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   private pendingBatchWaitPollTimer: ReturnType<typeof setTimeout> | null = null;
   private settlementPollTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
@@ -1332,6 +1338,7 @@ export class JazzClient {
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
     this.onRejectedBatchAcknowledged = runtimeOptions?.onRejectedBatchAcknowledged;
+    this.onBeforeLocalBatchWait = runtimeOptions?.onBeforeLocalBatchWait;
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -1607,6 +1614,20 @@ export class JazzClient {
       }
     }
     return false;
+  }
+
+  pendingHydratedBatchReconciliationIds(tier: DurabilityTier): string[] {
+    const pending: string[] = [];
+    for (const batchId of this.hydratedWorkerBatchIds) {
+      const settlement = this.batchFate(batchId);
+      if (rejectionFromSettlement(settlement)) {
+        continue;
+      }
+      if (!settlementSatisfiesTier(settlement, tier)) {
+        pending.push(batchId);
+      }
+    }
+    return pending;
   }
 
   hasHydratedWorkerBatch(batchId: string): boolean {
@@ -2712,13 +2733,20 @@ export class JazzClient {
     return [...new Set([...runtimeBatchIds, ...replayedBatchIds])].sort();
   }
 
-  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+  async waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    if (tier === "local" && this.onBeforeLocalBatchWait) {
+      await this.onBeforeLocalBatchWait(batchId);
+    }
+
     const outcome = this.batchWaitOutcome(batchId, tier);
     if (outcome.settled) {
       if (outcome.error) {
         this.replayRejectedBatchRowsById(batchId);
       }
-      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
+      if (outcome.error) {
+        throw outcome.error;
+      }
+      return;
     }
 
     return new Promise<void>((resolve, reject) => {

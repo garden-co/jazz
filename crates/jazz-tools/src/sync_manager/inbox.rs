@@ -1557,10 +1557,12 @@ impl SyncManager {
                     );
                     return;
                 }
-                if self
-                    .persist_sealed_batch_submission(storage, &submission)
-                    .is_err()
-                {
+                if let Err(error) = self.persist_sealed_batch_submission(storage, &submission) {
+                    tracing::warn!(
+                        batch_id = ?submission.batch_id,
+                        %error,
+                        "failed to persist sealed batch submission"
+                    );
                     return;
                 }
                 self.seal_batch_to_servers(submission.clone());

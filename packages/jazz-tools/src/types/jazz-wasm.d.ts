@@ -87,6 +87,9 @@ declare module "jazz-wasm" {
     drainRejectedBatchIds(): string[];
     acknowledgeRejectedBatch(batchId: string): boolean;
     sealBatch(batchId: string): void;
+    retransmitLocalBatch(batchId: string): void;
+    replayLocalBatchPayloads(batchId: string): Uint8Array[];
+    reconcileLocalBatchWithServer(batchId: string): void;
     query(
       queryJson: string,
       sessionJson?: string | null,
@@ -112,6 +115,7 @@ declare module "jazz-wasm" {
     onSyncMessageToSend(callback: SyncOutboxCallback): void;
     addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
     removeServer(): void;
+    reconcileLocalBatchWithServer?(batchId: string): void;
     batchedTick?(): void;
     addClient(): string;
     getSchema(): unknown;
