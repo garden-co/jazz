@@ -11,11 +11,15 @@ use axum::{
     response::Response,
 };
 
-use crate::middleware::auth::{extract_session, validate_admin_secret, validate_backend_secret};
+use crate::middleware::auth::{
+    extract_session, validate_admin_secret, validate_backend_secret, validate_peer_secret,
+};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
 
 use super::utils::connection_schema_diagnostics_from_handshake;
+
+const MAX_WS_SYNC_UPDATES_PER_FRAME: usize = 256;
 
 pub(super) async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -28,6 +32,7 @@ pub(super) async fn ws_handler(
 /// Outcome of authenticating a WS handshake.
 #[derive(Debug)]
 pub(super) enum WsClientSetup {
+    Peer,
     Backend,
     Session(crate::query_manager::session::Session),
 }
@@ -35,9 +40,10 @@ pub(super) enum WsClientSetup {
 /// Authenticate a WebSocket `AuthHandshake`.
 ///
 /// Priority is:
-/// 1. `admin_secret` valid → `WsClientSetup::Backend`
-/// 2. `backend_secret` present + no session header → `WsClientSetup::Backend`
-/// 3. Otherwise → `extract_session` → `WsClientSetup::Session`
+/// 1. `peer_secret` valid → `WsClientSetup::Peer`
+/// 2. `admin_secret` valid → `WsClientSetup::Backend`
+/// 3. `backend_secret` present + no session header → `WsClientSetup::Backend`
+/// 4. Otherwise → `extract_session` → `WsClientSetup::Session`
 ///
 /// Returns `Err(message)` on auth failure; the caller should send a
 /// `ServerEvent::Error` frame before closing.
@@ -50,6 +56,12 @@ pub(super) async fn authenticate_ws_handshake(
     use base64::Engine as _;
 
     let auth = &handshake.auth;
+
+    if let Some(peer_secret) = auth.peer_secret.as_deref() {
+        validate_peer_secret(Some(peer_secret), &state.auth_config)
+            .map_err(|(_, msg)| msg.to_string())?;
+        return Ok(WsClientSetup::Peer);
+    }
 
     // `admin_secret` is an explicit request to run this WS transport as the
     // backend. Validate it first and short-circuit all user-scoped auth.
@@ -131,6 +143,7 @@ fn request_uses_cookie_auth(
         || handshake.auth.backend_secret.is_some()
         || handshake.auth.backend_session.is_some()
         || handshake.auth.admin_secret.is_some()
+        || handshake.auth.peer_secret.is_some()
         || request_headers
             .get(axum::http::header::AUTHORIZATION)
             .is_some()
@@ -334,6 +347,7 @@ async fn handle_ws_connection(
         }
     };
     let role = match &setup {
+        WsClientSetup::Peer => "peer",
         WsClientSetup::Backend => "backend",
         WsClientSetup::Session(_) => "session",
     };
@@ -353,6 +367,9 @@ async fn handle_ws_connection(
 
     // 5. Ensure the client state in the runtime.
     match setup {
+        WsClientSetup::Peer => {
+            let _ = state.runtime.ensure_client_as_peer(client_id);
+        }
         WsClientSetup::Backend => {
             let _ = state.runtime.ensure_client_as_backend(client_id);
         }
@@ -430,11 +447,31 @@ async fn handle_ws_connection(
             },
             update = sync_rx.recv() => {
                 let Some(u) = update else { break };
-                let event = crate::jazz_transport::ServerEvent::SyncUpdate {
+                let mut updates = Vec::with_capacity(MAX_WS_SYNC_UPDATES_PER_FRAME);
+                updates.push(crate::jazz_transport::SequencedSyncPayload {
                     seq: Some(u.seq),
-                    payload: Box::new(u.payload),
+                    payload: u.payload,
+                });
+                while updates.len() < MAX_WS_SYNC_UPDATES_PER_FRAME {
+                    match sync_rx.try_recv() {
+                        Ok(u) => updates.push(crate::jazz_transport::SequencedSyncPayload {
+                            seq: Some(u.seq),
+                            payload: u.payload,
+                        }),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+                let event = if updates.len() == 1 {
+                    let update = updates.pop().expect("single update is present");
+                    crate::jazz_transport::ServerEvent::SyncUpdate {
+                        seq: update.seq,
+                        payload: Box::new(update.payload),
+                    }
+                } else {
+                    crate::jazz_transport::ServerEvent::SyncUpdateBatch { updates }
                 };
-                let bytes = match serde_json::to_vec(&event) {
+                let bytes = match event.encode_payload() {
                     Ok(b) => b,
                     Err(_) => continue,
                 };
@@ -450,7 +487,7 @@ async fn handle_ws_connection(
             }
             _ = heartbeat.tick() => {
                 let event = crate::jazz_transport::ServerEvent::Heartbeat;
-                let Ok(bytes) = serde_json::to_vec(&event) else { continue };
+                let Ok(bytes) = event.encode_payload() else { continue };
                 if socket
                     .send(Message::Binary(
                         crate::transport_manager::frame_encode(&bytes),

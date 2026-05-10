@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchMode, BatchSettlement, LocalBatchRecord, VisibleBatchMember};
+use crate::batch_fate::{BatchFate, BatchMode, LocalBatchRecord};
 use crate::object::ObjectId;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
@@ -273,17 +273,9 @@ fn serialize_batch_mode(mode: BatchMode) -> &'static str {
     }
 }
 
-fn serialize_visible_batch_member(member: &VisibleBatchMember) -> JsonValue {
-    json!({
-        "objectId": member.object_id.uuid().to_string(),
-        "branchName": member.branch_name.to_string(),
-        "batchId": member.batch_id.to_string(),
-    })
-}
-
-fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
+pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
     match settlement {
-        BatchSettlement::Rejected {
+        BatchFate::Rejected {
             batch_id,
             code,
             reason,
@@ -293,33 +285,23 @@ fn serialize_batch_settlement(settlement: &BatchSettlement) -> JsonValue {
             "code": code,
             "reason": reason,
         }),
-        BatchSettlement::DurableDirect {
+        BatchFate::DurableDirect {
             batch_id,
             confirmed_tier,
-            visible_members,
         } => json!({
             "kind": "durableDirect",
             "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
-            "visibleMembers": visible_members
-                .iter()
-                .map(serialize_visible_batch_member)
-                .collect::<Vec<_>>(),
         }),
-        BatchSettlement::AcceptedTransaction {
+        BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier,
-            visible_members,
         } => json!({
             "kind": "acceptedTransaction",
             "batchId": batch_id.to_string(),
             "confirmedTier": serialize_durability_tier(*confirmed_tier),
-            "visibleMembers": visible_members
-                .iter()
-                .map(serialize_visible_batch_member)
-                .collect::<Vec<_>>(),
         }),
-        BatchSettlement::Missing { batch_id } => json!({
+        BatchFate::Missing { batch_id } => json!({
             "kind": "missing",
             "batchId": batch_id.to_string(),
         }),
@@ -331,7 +313,7 @@ pub fn serialize_local_batch_record(record: &LocalBatchRecord) -> JsonValue {
         "batchId": record.batch_id.to_string(),
         "mode": serialize_batch_mode(record.mode),
         "sealed": record.sealed,
-        "latestSettlement": record.latest_settlement.as_ref().map(serialize_batch_settlement),
+        "latestSettlement": record.latest_fate.as_ref().map(serialize_batch_fate),
     })
 }
 

@@ -3,7 +3,7 @@
 //!
 //! Extracted from `RuntimeCore` so the orchestrator no longer carries the
 //! bookkeeping for who-is-waiting-on-which-tier; it only delegates the
-//! six primitive operations (`register_watcher`, `record_ack`,
+//! primitive operations (`register_watcher`, `record_ack`,
 //! `record_rejection`, `drain_rejected`, `forget_batch`) defined here.
 
 use std::collections::{BTreeSet, HashMap};
@@ -63,6 +63,20 @@ impl DurabilityTracker {
         }
         if !remaining.is_empty() {
             self.ack_watchers.insert(key, remaining);
+        }
+    }
+
+    /// Resolve every watcher on `batch_id` whose requested tier is satisfied by
+    /// `acked_tier`; keep the rest registered.
+    pub(crate) fn record_batch_ack(&mut self, batch_id: BatchId, acked_tier: DurabilityTier) {
+        let affected_keys: Vec<_> = self
+            .ack_watchers
+            .keys()
+            .copied()
+            .filter(|key| key.batch_id == batch_id)
+            .collect();
+        for key in affected_keys {
+            self.record_ack(key, acked_tier);
         }
     }
 

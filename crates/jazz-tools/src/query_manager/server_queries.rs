@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,7 +10,7 @@ use crate::row_histories::BatchId;
 use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{
-    ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, QueryId, SyncPayload,
+    ClientId, ClientRole, DurabilityTier, PendingPermissionCheck, SyncPayload,
 };
 
 use super::manager::{QueryManager, SchemaWarningAccumulator, ServerQuerySubscription};
@@ -20,6 +21,8 @@ use super::types::{
     ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
     Value,
 };
+
+const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 32;
 
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
@@ -72,6 +75,33 @@ struct UpdatePermissionRequest<'a> {
 }
 
 impl QueryManager {
+    fn should_emit_query_settled_to_downstream(
+        required_tier: Option<DurabilityTier>,
+        tier: DurabilityTier,
+        sent_below_required_settled: &mut bool,
+        last_emitted_settled_tier: &mut Option<DurabilityTier>,
+        scope_changed: bool,
+    ) -> bool {
+        let is_required_tier = required_tier.is_none_or(|required_tier| tier >= required_tier);
+
+        if is_required_tier
+            && (scope_changed || last_emitted_settled_tier.is_none_or(|last_tier| tier > last_tier))
+        {
+            *last_emitted_settled_tier =
+                Some(last_emitted_settled_tier.map_or(tier, |last_tier| last_tier.max(tier)));
+            return true;
+        }
+
+        if !is_required_tier && !*sent_below_required_settled {
+            *sent_below_required_settled = true;
+            *last_emitted_settled_tier =
+                Some(last_emitted_settled_tier.map_or(tier, |last_tier| last_tier.max(tier)));
+            return true;
+        }
+
+        false
+    }
+
     pub(super) fn missing_permissions_head_reason() -> &'static str {
         "backend has no published permissions head; push permissions before running session-scoped queries or writes against this backend"
     }
@@ -673,14 +703,6 @@ impl QueryManager {
         })
     }
 
-    fn should_sync_policy_context_rows(
-        &self,
-        client_id: ClientId,
-        session: Option<&Session>,
-    ) -> bool {
-        self.client_bypasses_authorization_filtering(client_id, session)
-    }
-
     fn client_bypasses_authorization_filtering(
         &self,
         client_id: ClientId,
@@ -759,11 +781,22 @@ impl QueryManager {
     /// 3. Set the scope in SyncManager (which triggers initial sync)
     pub(super) fn process_pending_query_subscriptions<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
+        let mut pending_by_key = HashMap::new();
+        let mut pending_keys = Vec::new();
+        for sub in pending {
+            let key = (sub.client_id, sub.query_id);
+            if !pending_by_key.contains_key(&key) {
+                pending_keys.push(key);
+            }
+            pending_by_key.insert(key, sub);
+        }
         let mut deferred = Vec::new();
         let mut schema_warning_notifications = Vec::new();
-        let mut settled_notifications = Vec::new();
 
-        for sub in pending {
+        for (key_index, key) in pending_keys.iter().copied().enumerate() {
+            let Some(sub) = pending_by_key.remove(&key) else {
+                continue;
+            };
             let Some((schema_for_compile, subscription_context)) =
                 self.build_server_subscription_context(&sub.query)
             else {
@@ -781,6 +814,62 @@ impl QueryManager {
                     .get_client(sub.client_id)
                     .and_then(|c| c.session.clone())
             });
+            let existing_subscription_state = self
+                .server_subscriptions
+                .get(&(sub.client_id, sub.query_id))
+                .map(|existing| {
+                    (
+                        existing.query == sub.query
+                            && existing.session == session_for_policy
+                            && existing.required_tier == sub.required_tier
+                            && existing.propagation == sub.propagation
+                            && existing.policy_context_tables == sub.policy_context_tables,
+                        existing.sent_below_required_settled,
+                        existing.last_emitted_settled_tier,
+                        existing.last_scope.clone(),
+                        existing.settled_once,
+                    )
+                });
+            let equivalent_existing_subscription = existing_subscription_state
+                .as_ref()
+                .is_some_and(|(equivalent, ..)| *equivalent);
+
+            if equivalent_existing_subscription
+                && existing_subscription_state
+                    .as_ref()
+                    .is_some_and(|(_, _, _, _, settled_once)| *settled_once)
+            {
+                let settled_tier = self
+                    .sync_manager
+                    .max_local_durability_tier()
+                    .unwrap_or(DurabilityTier::Local);
+                let mut emission_scope = None;
+
+                if let Some(existing) = self
+                    .server_subscriptions
+                    .get_mut(&(sub.client_id, sub.query_id))
+                    && Self::should_emit_query_settled_to_downstream(
+                        existing.required_tier,
+                        settled_tier,
+                        &mut existing.sent_below_required_settled,
+                        &mut existing.last_emitted_settled_tier,
+                        false,
+                    )
+                {
+                    emission_scope = Some(existing.last_scope.clone());
+                }
+
+                if let Some(scope) = emission_scope.as_ref() {
+                    self.sync_manager.emit_query_settled(
+                        sub.client_id,
+                        sub.query_id,
+                        settled_tier,
+                        scope,
+                    );
+                }
+
+                continue;
+            }
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
@@ -825,8 +914,6 @@ impl QueryManager {
                 continue;
             };
 
-            let sync_policy_context_rows =
-                self.should_sync_policy_context_rows(sub.client_id, session_for_policy.as_ref());
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
@@ -879,18 +966,16 @@ impl QueryManager {
                 .client_bypasses_authorization_filtering(sub.client_id, session_for_policy.as_ref())
             {
                 let result_scope = graph.sync_scope_object_ids();
-                Some(
-                    if sync_policy_context_rows || !policy_context_tables.is_empty() {
-                        Self::scope_with_policy_context_rows_for_tables(
-                            &result_scope,
-                            &policy_context_tables,
-                            &branches,
-                            storage_ref,
-                        )
-                    } else {
-                        result_scope
-                    },
-                )
+                Some(if !policy_context_tables.is_empty() {
+                    Self::scope_with_policy_context_rows_for_tables(
+                        &result_scope,
+                        &policy_context_tables,
+                        &branches,
+                        storage_ref,
+                    )
+                } else {
+                    result_scope
+                })
             } else {
                 self.authorized_scope_from_graph_if_available(
                     storage_ref,
@@ -900,38 +985,72 @@ impl QueryManager {
                     session_for_policy.as_ref(),
                 )
             };
-            if let Some(scope) = scope.as_ref() {
-                // Set scope in SyncManager (triggers initial sync)
-                self.sync_manager.set_client_query_scope_with_storage(
-                    storage_ref,
-                    sub.client_id,
-                    sub.query_id,
-                    scope.clone(),
-                    session_for_policy.clone(),
-                );
-            }
-
             let settled_once = scope.is_some();
+            let mut sent_below_required_settled = existing_subscription_state
+                .as_ref()
+                .filter(|(equivalent, ..)| *equivalent)
+                .map(|(_, sent_below_required_settled, ..)| *sent_below_required_settled)
+                .unwrap_or(false);
+            let mut last_emitted_settled_tier = existing_subscription_state
+                .as_ref()
+                .filter(|(equivalent, ..)| *equivalent)
+                .and_then(|(_, _, last_emitted_settled_tier, _, _)| *last_emitted_settled_tier);
+
             if let Some(scope) = scope.as_ref() {
+                let scope_changed = !equivalent_existing_subscription
+                    || existing_subscription_state
+                        .as_ref()
+                        .is_none_or(|(_, _, _, last_scope, _)| *last_scope != *scope);
+
+                if scope_changed {
+                    self.sync_manager.set_client_query_scope_with_storage(
+                        storage_ref,
+                        sub.client_id,
+                        sub.query_id,
+                        scope.clone(),
+                        session_for_policy.clone(),
+                    );
+                }
+
                 let settled_tier = self
                     .sync_manager
                     .max_local_durability_tier()
                     .unwrap_or(DurabilityTier::Local);
-                settled_notifications.push((
-                    sub.client_id,
-                    sub.query_id,
+                if Self::should_emit_query_settled_to_downstream(
+                    sub.required_tier,
                     settled_tier,
-                    scope.clone(),
-                ));
+                    &mut sent_below_required_settled,
+                    &mut last_emitted_settled_tier,
+                    scope_changed,
+                ) {
+                    // Keep the QuerySettled marker immediately after the rows
+                    // for this query's scope. Deferring all settlements until
+                    // after every pending subscription lets one huge query put
+                    // unrelated smaller queries' first callbacks behind its
+                    // entire row replay.
+                    self.sync_manager.emit_query_settled(
+                        sub.client_id,
+                        sub.query_id,
+                        settled_tier,
+                        scope,
+                    );
+                }
             }
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
             if sub.propagation == crate::sync_manager::QueryPropagation::Full {
+                tracing::trace!(
+                    %sub.client_id,
+                    query_id = sub.query_id.0,
+                    table = %sub.query.table,
+                    "jazz trace forwarding downstream query subscription upstream"
+                );
                 self.sync_manager.send_query_subscription_to_servers(
                     sub.query_id,
                     sub.query.clone(),
                     session_for_policy.clone(),
+                    None,
                     sub.propagation,
                     sub.policy_context_tables.clone(),
                 );
@@ -947,6 +1066,9 @@ impl QueryManager {
                     session: session_for_policy,
                     branches,
                     policy_context_tables: sub.policy_context_tables,
+                    required_tier: sub.required_tier,
+                    sent_below_required_settled,
+                    last_emitted_settled_tier,
                     last_scope: scope.unwrap_or_default(),
                     needs_recompile: false,
                     settled_once,
@@ -954,15 +1076,19 @@ impl QueryManager {
                     reported_schema_warnings,
                 },
             );
+
+            if self.sync_manager.outbox().len() >= MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS {
+                for remaining_key in pending_keys.iter().skip(key_index + 1) {
+                    if let Some(sub) = pending_by_key.remove(remaining_key) {
+                        deferred.push(sub);
+                    }
+                }
+                break;
+            }
         }
 
         for (client_id, warning) in schema_warning_notifications {
             self.sync_manager.emit_schema_warning(client_id, warning);
-        }
-
-        for (client_id, query_id, tier, scope) in settled_notifications {
-            self.sync_manager
-                .emit_query_settled(client_id, query_id, tier, &scope);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -1001,19 +1127,6 @@ impl QueryManager {
     /// a client's query subscription.
     #[allow(clippy::type_complexity)]
     pub(super) fn settle_server_subscriptions(&mut self, storage: &dyn Storage) {
-        // Collect updates to avoid borrow issues
-        let mut scope_updates: Vec<(
-            ClientId,
-            QueryId,
-            HashSet<(ObjectId, BranchName)>,
-            Option<Session>,
-        )> = Vec::new();
-        let mut settled_notifications: Vec<(
-            ClientId,
-            QueryId,
-            DurabilityTier,
-            HashSet<(ObjectId, BranchName)>,
-        )> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
@@ -1028,9 +1141,10 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
+            let had_dirty_graph = sub.graph.has_dirty_nodes();
 
             // Row loader for this subscription
-            let new_scope = {
+            let new_scope: Option<Cow<'_, HashSet<(ObjectId, BranchName)>>> = {
                 {
                     let row_loader =
                         |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
@@ -1068,21 +1182,19 @@ impl QueryManager {
                 let policy_context_tables =
                     Self::merged_policy_context_tables(&sub.graph, &sub.policy_context_tables);
                 if self.client_bypasses_authorization_filtering(client_id, sub.session.as_ref()) {
-                    let result_scope = sub.graph.sync_scope_object_ids();
-                    Some(
-                        if self.should_sync_policy_context_rows(client_id, sub.session.as_ref())
-                            || !policy_context_tables.is_empty()
-                        {
-                            Self::scope_with_policy_context_rows_for_tables(
-                                &result_scope,
-                                &policy_context_tables,
-                                branches,
-                                storage,
-                            )
-                        } else {
-                            result_scope
-                        },
-                    )
+                    if !policy_context_tables.is_empty() {
+                        let result_scope = sub.graph.sync_scope_object_ids();
+                        Some(Cow::Owned(Self::scope_with_policy_context_rows_for_tables(
+                            &result_scope,
+                            &policy_context_tables,
+                            branches,
+                            storage,
+                        )))
+                    } else if let Some(scope) = sub.graph.sync_scope_object_ids_ref() {
+                        Some(Cow::Borrowed(scope))
+                    } else {
+                        Some(Cow::Owned(sub.graph.sync_scope_object_ids()))
+                    }
                 } else {
                     self.authorized_scope_from_graph_if_available(
                         storage,
@@ -1091,19 +1203,21 @@ impl QueryManager {
                         &branch_schema_map,
                         sub.session.as_ref(),
                     )
+                    .map(Cow::Owned)
                 }
             };
-            let scope_unavailable = new_scope.is_none();
             if let Some(new_scope) = new_scope {
-                let scope_changed = new_scope != sub.last_scope;
+                let scope_changed = new_scope.as_ref() != &sub.last_scope;
                 if scope_changed {
-                    scope_updates.push((
+                    let owned_scope = new_scope.into_owned();
+                    self.sync_manager.set_client_query_scope_with_storage(
+                        storage,
                         client_id,
                         query_id,
-                        new_scope.clone(),
+                        owned_scope.clone(),
                         sub.session.clone(),
-                    ));
-                    sub.last_scope = new_scope.clone();
+                    );
+                    sub.last_scope = owned_scope;
                 }
 
                 // Emit an authoritative QuerySettled once the scope for this
@@ -1116,47 +1230,61 @@ impl QueryManager {
                         .sync_manager
                         .max_local_durability_tier()
                         .unwrap_or(DurabilityTier::Local);
-                    settled_notifications.push((client_id, query_id, settled_tier, new_scope));
-                } else if scope_changed {
+                    if Self::should_emit_query_settled_to_downstream(
+                        sub.required_tier,
+                        settled_tier,
+                        &mut sub.sent_below_required_settled,
+                        &mut sub.last_emitted_settled_tier,
+                        true,
+                    ) {
+                        tracing::trace!(
+                            %client_id,
+                            query_id = query_id.0,
+                            tier = ?settled_tier,
+                            scope_len = sub.last_scope.len(),
+                            "jazz trace server subscription settled"
+                        );
+                        self.sync_manager.emit_query_settled(
+                            client_id,
+                            query_id,
+                            settled_tier,
+                            &sub.last_scope,
+                        );
+                    }
+                } else if scope_changed || had_dirty_graph {
                     let settled_tier = self
                         .sync_manager
                         .max_local_durability_tier()
                         .unwrap_or(DurabilityTier::Local);
-                    settled_notifications.push((
-                        client_id,
-                        query_id,
+                    if Self::should_emit_query_settled_to_downstream(
+                        sub.required_tier,
                         settled_tier,
-                        sub.last_scope.clone(),
-                    ));
+                        &mut sub.sent_below_required_settled,
+                        &mut sub.last_emitted_settled_tier,
+                        scope_changed,
+                    ) {
+                        tracing::trace!(
+                            %client_id,
+                            query_id = query_id.0,
+                            tier = ?settled_tier,
+                            scope_len = sub.last_scope.len(),
+                            "jazz trace server subscription settled"
+                        );
+                        self.sync_manager.emit_query_settled(
+                            client_id,
+                            query_id,
+                            settled_tier,
+                            &sub.last_scope,
+                        );
+                    }
                 }
-            }
-
-            if scope_unavailable {
-                tracing::trace!(
-                    ?query_id,
-                    %client_id,
-                    "server subscription scope unavailable; holding QuerySettled"
-                );
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
         }
 
-        // Apply scope updates
-        for (client_id, query_id, new_scope, session) in scope_updates {
-            self.sync_manager.set_client_query_scope_with_storage(
-                storage, client_id, query_id, new_scope, session,
-            );
-        }
-
         for (client_id, warning) in schema_warning_notifications {
             self.sync_manager.emit_schema_warning(client_id, warning);
-        }
-
-        // Emit QuerySettled notifications
-        for (client_id, query_id, tier, scope) in settled_notifications {
-            self.sync_manager
-                .emit_query_settled(client_id, query_id, tier, &scope);
         }
     }
 
@@ -1516,7 +1644,7 @@ impl QueryManager {
     fn evaluate_update_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
         request: UpdatePermissionRequest<'_>,
     ) {
         let UpdatePermissionRequest {
@@ -1535,6 +1663,19 @@ impl QueryManager {
             self.sync_manager
                 .reject_permission_check(storage, check, err.to_string());
             return;
+        }
+
+        if check
+            .old_content
+            .as_ref()
+            .is_none_or(|content| content.is_empty())
+            && let Ok(Some(previous_row)) = storage.load_visible_region_row(
+                table_name.as_str(),
+                branch_name.as_str(),
+                object_id,
+            )
+        {
+            check.old_content = Some(previous_row.data.to_vec());
         }
 
         let Some(table_schema) = auth_schema.get(&table_name) else {

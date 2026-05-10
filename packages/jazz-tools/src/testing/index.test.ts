@@ -8,11 +8,13 @@ import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
   TestingServer,
+  type LocalJazzServerHandle,
   pushSchemaCatalogue,
   startLocalJazzServer,
 } from "./index.js";
 
 const tempRoots: string[] = [];
+const localServers = new Set<LocalJazzServerHandle>();
 const testSchema = {
   todos: s.table({
     title: s.string(),
@@ -30,6 +32,16 @@ const testPermissions = definePermissions(testApp, ({ policy, session }) => {
 });
 
 afterEach(async () => {
+  await Promise.all(
+    Array.from(localServers, async (server) => {
+      try {
+        await server.stop();
+      } finally {
+        localServers.delete(server);
+      }
+    }),
+  );
+
   await Promise.all(
     tempRoots.splice(0).map((rootPath) => rm(rootPath, { recursive: true, force: true })),
   );
@@ -83,6 +95,22 @@ async function getAvailablePort(): Promise<number> {
       });
     });
   });
+}
+
+async function startTrackedLocalJazzServer(
+  options: Parameters<typeof startLocalJazzServer>[0],
+): Promise<LocalJazzServerHandle> {
+  const server = await startLocalJazzServer(options);
+  localServers.add(server);
+  return server;
+}
+
+async function stopTrackedLocalJazzServer(server: LocalJazzServerHandle): Promise<void> {
+  try {
+    await server.stop();
+  } finally {
+    localServers.delete(server);
+  }
 }
 
 describe("TestingServer", () => {
@@ -153,7 +181,7 @@ describe("startLocalJazzServer", () => {
     const dataDir = join(captureRoot, "data-dir");
     const port = await getAvailablePort();
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       port,
       dataDir,
@@ -161,26 +189,28 @@ describe("startLocalJazzServer", () => {
       adminSecret: "test-admin-secret",
     });
 
-    const healthResponse = await fetch(`${server.url}/health`);
-    expect(healthResponse.status).toBe(200);
-    expect(server.adminSecret).toBe("test-admin-secret");
-    expect(server.backendSecret).toBe("test-backend-secret");
-
-    await server.stop();
+    try {
+      const healthResponse = await fetch(`${server.url}/health`);
+      expect(healthResponse.status).toBe(200);
+      expect(server.adminSecret).toBe("test-admin-secret");
+      expect(server.backendSecret).toBe("test-backend-secret");
+    } finally {
+      await stopTrackedLocalJazzServer(server);
+    }
   }, 15_000);
 
   it("allocates a fresh port when no explicit port is provided", async () => {
     const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
     const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
 
-    const firstServer = await startLocalJazzServer({
+    const firstServer = await startTrackedLocalJazzServer({
       appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
       dataDir: join(firstRoot, "data-dir"),
     });
     const firstPort = firstServer.port;
-    await firstServer.stop();
+    await stopTrackedLocalJazzServer(firstServer);
 
-    const secondServer = await startLocalJazzServer({
+    const secondServer = await startTrackedLocalJazzServer({
       appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
       dataDir: join(secondRoot, "data-dir"),
     });
@@ -190,7 +220,7 @@ describe("startLocalJazzServer", () => {
       const healthResponse = await fetch(`${secondServer.url}/health`);
       expect(healthResponse.status).toBe(200);
     } finally {
-      await secondServer.stop();
+      await stopTrackedLocalJazzServer(secondServer);
     }
   }, 20_000);
 
@@ -199,13 +229,13 @@ describe("startLocalJazzServer", () => {
     const dataDir = join(captureRoot, "data-dir");
     const port = await getAvailablePort();
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
       port,
       dataDir,
     });
 
-    await server.stop();
+    await stopTrackedLocalJazzServer(server);
 
     const canRebind = await canBindPort(port);
     expect(canRebind).toBe(true);
@@ -216,24 +246,26 @@ describe("startLocalJazzServer", () => {
     const dataDir = join(captureRoot, "data-dir");
     const port = await getAvailablePort();
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
       port,
       dataDir,
       enableLogs: true,
     });
 
-    const healthResponse = await fetch(`${server.url}/health`);
-    expect(healthResponse.status).toBe(200);
-
-    await server.stop();
+    try {
+      const healthResponse = await fetch(`${server.url}/health`);
+      expect(healthResponse.status).toBe(200);
+    } finally {
+      await stopTrackedLocalJazzServer(server);
+    }
   }, 15_000);
 
   it("accepts a schema publish via /admin/schemas when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000001",
       port,
       adminSecret,
@@ -251,7 +283,7 @@ describe("startLocalJazzServer", () => {
 
       expect(response.status).toBe(201);
     } finally {
-      await server.stop();
+      await stopTrackedLocalJazzServer(server);
     }
   });
 
@@ -259,7 +291,7 @@ describe("startLocalJazzServer", () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000001",
       port,
       adminSecret,
@@ -277,7 +309,7 @@ describe("startLocalJazzServer", () => {
 
       expect(response.status).toBe(401);
     } finally {
-      await server.stop();
+      await stopTrackedLocalJazzServer(server);
     }
   });
 });
@@ -300,7 +332,7 @@ describe("pushSchemaCatalogue", () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
-    const server = await startLocalJazzServer({
+    const server = await startTrackedLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000001",
       port,
       adminSecret,
@@ -326,7 +358,7 @@ describe("pushSchemaCatalogue", () => {
       const body = (await response.json()) as { hashes?: string[] };
       expect(body.hashes?.length).toBeGreaterThan(0);
     } finally {
-      await server.stop();
+      await stopTrackedLocalJazzServer(server);
     }
   }, 30_000);
 
@@ -366,5 +398,35 @@ describe("createPolicyTestApp", () => {
     } finally {
       await policyTestApp.shutdown();
     }
-  }, 30_000);
+  }, 10_000);
+
+  it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+
+      alice.expectAllowed((db) => {
+        db.insert(testApp.todos, {
+          title: "Alice can insert her own todo",
+          done: false,
+          ownerId: "alice",
+        });
+      });
+
+      bob.expectDenied((db) => {
+        db.insert(testApp.todos, {
+          title: "Bob cannot insert Alice's todo",
+          done: false,
+          ownerId: "alice",
+        });
+      });
+
+      await expect(alice.all(testApp.todos)).resolves.toEqual([]);
+      await expect(bob.all(testApp.todos)).resolves.toEqual([]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
 });

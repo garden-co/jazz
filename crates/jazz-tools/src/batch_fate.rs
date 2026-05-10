@@ -2,6 +2,7 @@ use crate::digest::Digest32;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::sync::OnceLock;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::SchemaHash;
@@ -37,13 +38,6 @@ impl BatchMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VisibleBatchMember {
-    pub object_id: ObjectId,
-    pub branch_name: BranchName,
-    pub batch_id: BatchId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalBatchMember {
     pub object_id: ObjectId,
     pub table_name: String,
@@ -53,7 +47,7 @@ pub struct LocalBatchMember {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BatchSettlement {
+pub enum BatchFate {
     Missing {
         batch_id: BatchId,
     },
@@ -65,16 +59,14 @@ pub enum BatchSettlement {
     DurableDirect {
         batch_id: BatchId,
         confirmed_tier: DurabilityTier,
-        visible_members: Vec<VisibleBatchMember>,
     },
     AcceptedTransaction {
         batch_id: BatchId,
         confirmed_tier: DurabilityTier,
-        visible_members: Vec<VisibleBatchMember>,
     },
 }
 
-impl BatchSettlement {
+impl BatchFate {
     pub fn batch_id(&self) -> BatchId {
         match self {
             Self::Missing { batch_id }
@@ -89,6 +81,40 @@ impl BatchSettlement {
             Self::DurableDirect { confirmed_tier, .. }
             | Self::AcceptedTransaction { confirmed_tier, .. } => Some(*confirmed_tier),
             Self::Missing { .. } | Self::Rejected { .. } => None,
+        }
+    }
+
+    pub fn merged_with(&self, incoming: &BatchFate) -> BatchFate {
+        match (self, incoming) {
+            (
+                Self::DurableDirect {
+                    batch_id,
+                    confirmed_tier: existing_tier,
+                    ..
+                },
+                Self::DurableDirect {
+                    confirmed_tier: incoming_tier,
+                    ..
+                },
+            ) => Self::DurableDirect {
+                batch_id: *batch_id,
+                confirmed_tier: (*existing_tier).max(*incoming_tier),
+            },
+            (
+                Self::AcceptedTransaction {
+                    batch_id,
+                    confirmed_tier: existing_tier,
+                    ..
+                },
+                Self::AcceptedTransaction {
+                    confirmed_tier: incoming_tier,
+                    ..
+                },
+            ) => Self::AcceptedTransaction {
+                batch_id: *batch_id,
+                confirmed_tier: (*existing_tier).max(*incoming_tier),
+            },
+            _ => incoming.clone(),
         }
     }
 
@@ -108,32 +134,24 @@ impl BatchSettlement {
                 Value::Null,
                 Value::Array(Vec::new()),
             ),
-            Self::DurableDirect {
-                confirmed_tier,
-                visible_members,
-                ..
-            } => (
+            Self::DurableDirect { confirmed_tier, .. } => (
                 "durable_direct",
                 Value::Null,
                 Value::Null,
                 Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
-                encode_visible_batch_members_value(self.batch_id(), visible_members),
+                Value::Array(Vec::new()),
             ),
-            Self::AcceptedTransaction {
-                confirmed_tier,
-                visible_members,
-                ..
-            } => (
+            Self::AcceptedTransaction { confirmed_tier, .. } => (
                 "accepted_transaction",
                 Value::Null,
                 Value::Null,
                 Value::Text(durability_tier_to_str(*confirmed_tier).to_string()),
-                encode_visible_batch_members_value(self.batch_id(), visible_members),
+                Value::Array(Vec::new()),
             ),
         };
 
         encode_row(
-            &batch_settlement_storage_descriptor(),
+            batch_fate_storage_descriptor(),
             &[
                 Value::Text(kind.to_string()),
                 Value::BatchId(*self.batch_id().as_bytes()),
@@ -143,30 +161,28 @@ impl BatchSettlement {
                 visible_members,
             ],
         )
-        .map_err(|err| format!("encode batch settlement row: {err}"))
+        .map_err(|err| format!("encode batch fate row: {err}"))
     }
 
     pub fn decode_storage_row(bytes: &[u8]) -> Result<Self, String> {
-        let values = decode_row(&batch_settlement_storage_descriptor(), bytes)
-            .map_err(|err| format!("decode batch settlement row: {err}"))?;
+        let values = decode_row(batch_fate_storage_descriptor(), bytes)
+            .map_err(|err| format!("decode batch fate row: {err}"))?;
         let [
             kind,
             batch_id,
             code,
             reason,
             confirmed_tier,
-            visible_members,
+            _legacy_visible_members,
         ] = values.as_slice()
         else {
-            return Err("unexpected batch settlement shape".to_string());
+            return Err("unexpected batch fate shape".to_string());
         };
 
         let kind = match kind {
             Value::Text(value) => value.as_str(),
             other => {
-                return Err(format!(
-                    "expected batch settlement kind text, got {other:?}"
-                ));
+                return Err(format!("expected batch fate kind text, got {other:?}"));
             }
         };
         let batch_id = decode_batch_id_value(batch_id, "expected batch id to be 16 bytes")?;
@@ -176,48 +192,24 @@ impl BatchSettlement {
             "rejected" => Ok(Self::Rejected {
                 batch_id,
                 code: decode_nullable_text(code, "rejected code")?
-                    .ok_or_else(|| "rejected settlement missing code".to_string())?,
+                    .ok_or_else(|| "rejected fate missing code".to_string())?,
                 reason: decode_nullable_text(reason, "rejected reason")?
-                    .ok_or_else(|| "rejected settlement missing reason".to_string())?,
+                    .ok_or_else(|| "rejected fate missing reason".to_string())?,
             }),
             "durable_direct" => Ok(Self::DurableDirect {
                 batch_id,
-                confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?.ok_or_else(
-                    || "durable direct settlement missing confirmed tier".to_string(),
-                )?,
-                visible_members: decode_visible_batch_members_value(batch_id, visible_members)?,
+                confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?
+                    .ok_or_else(|| "durable direct fate missing confirmed tier".to_string())?,
             }),
             "accepted_transaction" => Ok(Self::AcceptedTransaction {
                 batch_id,
                 confirmed_tier: decode_nullable_durability_tier(confirmed_tier)?.ok_or_else(
-                    || "accepted transaction settlement missing confirmed tier".to_string(),
+                    || "accepted transaction fate missing confirmed tier".to_string(),
                 )?,
-                visible_members: decode_visible_batch_members_value(batch_id, visible_members)?,
             }),
-            other => Err(format!("unknown batch settlement kind '{other}'")),
+            other => Err(format!("unknown batch fate kind '{other}'")),
         }
     }
-}
-
-fn merged_visible_batch_members(
-    current: &[VisibleBatchMember],
-    incoming: &[VisibleBatchMember],
-) -> Vec<VisibleBatchMember> {
-    let mut merged = current.to_vec();
-    for member in incoming {
-        if !merged.iter().any(|existing| existing == member) {
-            merged.push(member.clone());
-        }
-    }
-    merged.sort_by(|left, right| {
-        left.object_id
-            .uuid()
-            .as_bytes()
-            .cmp(right.object_id.uuid().as_bytes())
-            .then_with(|| left.branch_name.as_str().cmp(right.branch_name.as_str()))
-            .then_with(|| left.batch_id.as_bytes().cmp(right.batch_id.as_bytes()))
-    });
-    merged
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,7 +219,7 @@ pub struct LocalBatchRecord {
     pub sealed: bool,
     pub members: Vec<LocalBatchMember>,
     pub sealed_submission: Option<SealedBatchSubmission>,
-    pub latest_settlement: Option<BatchSettlement>,
+    pub latest_fate: Option<BatchFate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,7 +249,7 @@ impl LocalBatchRecord {
         batch_id: BatchId,
         mode: BatchMode,
         sealed: bool,
-        latest_settlement: Option<BatchSettlement>,
+        latest_fate: Option<BatchFate>,
     ) -> Self {
         Self {
             batch_id,
@@ -265,7 +257,7 @@ impl LocalBatchRecord {
             sealed,
             members: Vec::new(),
             sealed_submission: None,
-            latest_settlement,
+            latest_fate,
         }
     }
 
@@ -316,82 +308,69 @@ impl LocalBatchRecord {
         self.sealed_submission = Some(submission);
     }
 
-    pub fn apply_settlement(&mut self, settlement: BatchSettlement) {
+    pub fn apply_fate(&mut self, fate: BatchFate) {
         assert_eq!(
-            settlement.batch_id(),
+            fate.batch_id(),
             self.batch_id,
-            "settlement batch id should match record batch id"
+            "fate batch id should match record batch id"
         );
 
-        match (&self.latest_settlement, settlement) {
-            (Some(BatchSettlement::Rejected { .. }), _) => {}
-            (_, rejected @ BatchSettlement::Rejected { .. }) => {
-                self.latest_settlement = Some(rejected);
+        match (&self.latest_fate, fate) {
+            (Some(BatchFate::Rejected { .. }), _) => {}
+            (_, rejected @ BatchFate::Rejected { .. }) => {
+                self.latest_fate = Some(rejected);
             }
             (
-                Some(BatchSettlement::DurableDirect {
+                Some(BatchFate::DurableDirect {
                     confirmed_tier: current_tier,
-                    visible_members: current_members,
                     ..
                 }),
-                BatchSettlement::DurableDirect {
+                BatchFate::DurableDirect {
                     batch_id,
                     confirmed_tier,
-                    visible_members,
                 },
             ) => {
                 if confirmed_tier >= *current_tier {
-                    self.latest_settlement = Some(BatchSettlement::DurableDirect {
+                    self.latest_fate = Some(BatchFate::DurableDirect {
                         batch_id,
                         confirmed_tier,
-                        visible_members: merged_visible_batch_members(
-                            current_members,
-                            &visible_members,
-                        ),
                     });
                 }
             }
             (
-                Some(BatchSettlement::AcceptedTransaction {
+                Some(BatchFate::AcceptedTransaction {
                     confirmed_tier: current_tier,
-                    visible_members: current_members,
                     ..
                 }),
-                BatchSettlement::AcceptedTransaction {
+                BatchFate::AcceptedTransaction {
                     batch_id,
                     confirmed_tier,
-                    visible_members,
                 },
             ) => {
                 if confirmed_tier >= *current_tier {
-                    self.latest_settlement = Some(BatchSettlement::AcceptedTransaction {
+                    self.latest_fate = Some(BatchFate::AcceptedTransaction {
                         batch_id,
                         confirmed_tier,
-                        visible_members: merged_visible_batch_members(
-                            current_members,
-                            &visible_members,
-                        ),
                     });
                 }
             }
             (
-                Some(BatchSettlement::DurableDirect { .. })
-                | Some(BatchSettlement::AcceptedTransaction { .. }),
-                BatchSettlement::Missing { .. },
+                Some(BatchFate::DurableDirect { .. }) | Some(BatchFate::AcceptedTransaction { .. }),
+                BatchFate::Missing { .. },
             ) => {}
-            (_, settlement) => {
-                self.latest_settlement = Some(settlement);
+            (_, fate) => {
+                self.latest_fate = Some(fate);
             }
         }
     }
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
-        let latest_settlement = self
-            .latest_settlement
+        let latest_fate = self
+            .latest_fate
             .as_ref()
-            .map(BatchSettlement::encode_storage_row)
+            .map(BatchFate::encode_storage_row)
             .transpose()
-            .map_err(|err| format!("encode settlement: {err}"))?;
+            .map_err(|err| format!("encode fate: {err}"))?;
         let sealed_submission = self
             .sealed_submission
             .as_ref()
@@ -418,7 +397,7 @@ impl LocalBatchRecord {
                     .collect(),
             ),
             sealed_submission.map(Value::Bytea).unwrap_or(Value::Null),
-            latest_settlement.map(Value::Bytea).unwrap_or(Value::Null),
+            latest_fate.map(Value::Bytea).unwrap_or(Value::Null),
         ];
         encode_row(&storage_descriptor(), &values).map_err(|err| format!("encode batch row: {err}"))
     }
@@ -432,7 +411,7 @@ impl LocalBatchRecord {
             sealed,
             members,
             sealed_submission,
-            latest_settlement,
+            latest_fate,
         ] = values.as_slice()
         else {
             return Err("unexpected local batch record shape".to_string());
@@ -546,16 +525,14 @@ impl LocalBatchRecord {
                 ));
             }
         };
-        let latest_settlement = match latest_settlement {
+        let latest_fate = match latest_fate {
             Value::Null => None,
             Value::Bytea(bytes) => Some(
-                BatchSettlement::decode_storage_row(bytes)
-                    .map_err(|err| format!("decode latest settlement: {err}"))?,
+                BatchFate::decode_storage_row(bytes)
+                    .map_err(|err| format!("decode latest fate: {err}"))?,
             ),
             other => {
-                return Err(format!(
-                    "expected latest settlement bytes or null, got {other:?}"
-                ));
+                return Err(format!("expected latest fate bytes or null, got {other:?}"));
             }
         };
 
@@ -565,7 +542,7 @@ impl LocalBatchRecord {
             sealed,
             members,
             sealed_submission,
-            latest_settlement,
+            latest_fate,
         })
     }
 }
@@ -813,79 +790,6 @@ fn decode_batch_id_value(value: &Value, context: &str) -> Result<BatchId, String
     }
 }
 
-fn encode_visible_batch_members_value(
-    batch_id: BatchId,
-    visible_members: &[VisibleBatchMember],
-) -> Value {
-    Value::Array(
-        visible_members
-            .iter()
-            .map(|member| {
-                assert_eq!(
-                    member.batch_id, batch_id,
-                    "visible batch member batch ids should match enclosing settlement batch id"
-                );
-                Value::Row {
-                    id: None,
-                    values: vec![
-                        Value::Bytea(member.object_id.uuid().as_bytes().to_vec()),
-                        Value::Text(member.branch_name.as_str().to_string()),
-                    ],
-                }
-            })
-            .collect(),
-    )
-}
-
-fn decode_visible_batch_members_value(
-    batch_id: BatchId,
-    value: &Value,
-) -> Result<Vec<VisibleBatchMember>, String> {
-    match value {
-        Value::Array(elements) => elements
-            .iter()
-            .map(|element| match element {
-                Value::Row { values, .. } => {
-                    let [object_id, branch_name] = values.as_slice() else {
-                        return Err(
-                            "expected visible batch member row to have two values".to_string()
-                        );
-                    };
-                    let object_id = match object_id {
-                        Value::Bytea(bytes) => uuid::Uuid::from_slice(bytes)
-                            .map(ObjectId::from_uuid)
-                            .map_err(|err| {
-                                format!("decode visible batch member object id uuid: {err}")
-                            })?,
-                        other => {
-                            return Err(format!(
-                                "expected visible batch member object id bytes, got {other:?}"
-                            ));
-                        }
-                    };
-                    let branch_name = match branch_name {
-                        Value::Text(raw) => BranchName::new(raw),
-                        other => {
-                            return Err(format!(
-                                "expected visible batch member branch text, got {other:?}"
-                            ));
-                        }
-                    };
-                    Ok(VisibleBatchMember {
-                        object_id,
-                        branch_name,
-                        batch_id,
-                    })
-                }
-                other => Err(format!("expected visible batch member row, got {other:?}")),
-            })
-            .collect(),
-        other => Err(format!(
-            "expected visible batch members array, got {other:?}"
-        )),
-    }
-}
-
 fn decode_nullable_text(value: &Value, label: &str) -> Result<Option<String>, String> {
     match value {
         Value::Null => Ok(None),
@@ -929,7 +833,7 @@ fn storage_descriptor() -> RowDescriptor {
             },
         ),
         ColumnDescriptor::new("sealed_submission", ColumnType::Bytea).nullable(),
-        ColumnDescriptor::new("latest_settlement", ColumnType::Bytea).nullable(),
+        ColumnDescriptor::new("latest_fate", ColumnType::Bytea).nullable(),
     ])
 }
 
@@ -964,45 +868,48 @@ fn sealed_batch_submission_storage_descriptor() -> RowDescriptor {
     ])
 }
 
-fn batch_settlement_storage_descriptor() -> RowDescriptor {
-    RowDescriptor::new(vec![
-        ColumnDescriptor::new(
-            "kind",
-            ColumnType::Enum {
-                variants: vec![
-                    "missing".to_string(),
-                    "rejected".to_string(),
-                    "durable_direct".to_string(),
-                    "accepted_transaction".to_string(),
-                ],
-            },
-        ),
-        ColumnDescriptor::new("batch_id", ColumnType::BatchId),
-        ColumnDescriptor::new("code", ColumnType::Text).nullable(),
-        ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
-        ColumnDescriptor::new(
-            "confirmed_tier",
-            ColumnType::Enum {
-                variants: vec![
-                    "local".to_string(),
-                    "edge".to_string(),
-                    "global".to_string(),
-                ],
-            },
-        )
-        .nullable(),
-        ColumnDescriptor::new(
-            "visible_members",
-            ColumnType::Array {
-                element: Box::new(ColumnType::Row {
-                    columns: Box::new(RowDescriptor::new(vec![
-                        ColumnDescriptor::new("object_id", ColumnType::Bytea),
-                        ColumnDescriptor::new("branch_name", ColumnType::Text),
-                    ])),
-                }),
-            },
-        ),
-    ])
+fn batch_fate_storage_descriptor() -> &'static RowDescriptor {
+    static DESCRIPTOR: OnceLock<RowDescriptor> = OnceLock::new();
+    DESCRIPTOR.get_or_init(|| {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "kind",
+                ColumnType::Enum {
+                    variants: vec![
+                        "missing".to_string(),
+                        "rejected".to_string(),
+                        "durable_direct".to_string(),
+                        "accepted_transaction".to_string(),
+                    ],
+                },
+            ),
+            ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+            ColumnDescriptor::new("code", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("reason", ColumnType::Text).nullable(),
+            ColumnDescriptor::new(
+                "confirmed_tier",
+                ColumnType::Enum {
+                    variants: vec![
+                        "local".to_string(),
+                        "edge".to_string(),
+                        "global".to_string(),
+                    ],
+                },
+            )
+            .nullable(),
+            ColumnDescriptor::new(
+                "visible_members",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Row {
+                        columns: Box::new(RowDescriptor::new(vec![
+                            ColumnDescriptor::new("object_id", ColumnType::Bytea),
+                            ColumnDescriptor::new("branch_name", ColumnType::Text),
+                        ])),
+                    }),
+                },
+            ),
+        ])
+    })
 }
 
 #[cfg(test)]
@@ -1016,14 +923,9 @@ mod tests {
             batch_id,
             BatchMode::Direct,
             true,
-            Some(BatchSettlement::DurableDirect {
+            Some(BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::Local,
-                visible_members: vec![VisibleBatchMember {
-                    object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(7)),
-                    branch_name: BranchName::new("main"),
-                    batch_id,
-                }],
             }),
         );
         record.upsert_member(LocalBatchMember {
@@ -1086,77 +988,71 @@ mod tests {
             batch_id,
             BatchMode::Direct,
             true,
-            Some(BatchSettlement::DurableDirect {
+            Some(BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_members: Vec::new(),
             }),
         );
 
-        record.apply_settlement(BatchSettlement::DurableDirect {
+        record.apply_fate(BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: Vec::new(),
         });
 
         assert_eq!(
-            record.latest_settlement,
-            Some(BatchSettlement::DurableDirect {
+            record.latest_fate,
+            Some(BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_members: Vec::new(),
             })
         );
     }
 
     #[test]
-    fn local_batch_record_merges_visible_members_for_shared_direct_batches() {
+    fn local_batch_record_merges_fate_by_highest_tier_only() {
         let batch_id = BatchId::new();
-        let first_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(1));
-        let second_row_id = ObjectId::from_uuid(uuid::Uuid::from_u128(2));
         let mut record = LocalBatchRecord::new(
             batch_id,
             BatchMode::Direct,
             true,
-            Some(BatchSettlement::DurableDirect {
+            Some(BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::Local,
-                visible_members: vec![VisibleBatchMember {
-                    object_id: first_row_id,
-                    branch_name: BranchName::new("main"),
-                    batch_id,
-                }],
             }),
         );
 
-        record.apply_settlement(BatchSettlement::DurableDirect {
+        record.apply_fate(BatchFate::DurableDirect {
             batch_id,
-            confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![VisibleBatchMember {
-                object_id: second_row_id,
-                branch_name: BranchName::new("main"),
-                batch_id,
-            }],
+            confirmed_tier: DurabilityTier::GlobalServer,
         });
 
         assert_eq!(
-            record.latest_settlement,
-            Some(BatchSettlement::DurableDirect {
+            record.latest_fate,
+            Some(BatchFate::DurableDirect {
                 batch_id,
-                confirmed_tier: DurabilityTier::Local,
-                visible_members: vec![
-                    VisibleBatchMember {
-                        object_id: first_row_id,
-                        branch_name: BranchName::new("main"),
-                        batch_id,
-                    },
-                    VisibleBatchMember {
-                        object_id: second_row_id,
-                        branch_name: BranchName::new("main"),
-                        batch_id,
-                    },
-                ],
+                confirmed_tier: DurabilityTier::GlobalServer,
             })
+        );
+    }
+
+    #[test]
+    fn batch_fate_merge_keeps_highest_tier() {
+        let batch_id = BatchId::new();
+        let current = BatchFate::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        };
+        let incoming = BatchFate::AcceptedTransaction {
+            batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        };
+
+        assert_eq!(
+            current.merged_with(&incoming),
+            BatchFate::AcceptedTransaction {
+                batch_id,
+                confirmed_tier: DurabilityTier::GlobalServer,
+            }
         );
     }
 
@@ -1260,37 +1156,32 @@ mod tests {
     }
 
     #[test]
-    fn batch_settlement_storage_row_uses_structured_row_format() {
+    fn batch_fate_storage_row_uses_structured_row_format() {
         let batch_id = BatchId::new();
-        let settlement = BatchSettlement::Rejected {
+        let fate = BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
             reason: "alice cannot write here".to_string(),
         };
 
-        let bytes = settlement.encode_storage_row().expect("encode settlement");
-        let values = decode_row(&batch_settlement_storage_descriptor(), &bytes)
-            .expect("decode settlement as row-format");
+        let bytes = fate.encode_storage_row().expect("encode fate");
+        let values = decode_row(&batch_fate_storage_descriptor(), &bytes)
+            .expect("decode fate as row-format");
 
         assert_eq!(values[0], Value::Text("rejected".to_string()));
         assert_eq!(values[1], Value::BatchId(*batch_id.as_bytes()));
     }
 
     #[test]
-    fn batch_settlement_storage_row_compacts_enums_and_member_batch_id() {
+    fn batch_fate_storage_row_compacts_enums_and_member_batch_id() {
         let batch_id = BatchId::new();
-        let settlement = BatchSettlement::DurableDirect {
+        let fate = BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
-            visible_members: vec![VisibleBatchMember {
-                object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(9)),
-                branch_name: BranchName::new("main"),
-                batch_id,
-            }],
         };
 
-        let bytes = settlement.encode_storage_row().expect("encode settlement");
-        let descriptor = batch_settlement_storage_descriptor();
+        let bytes = fate.encode_storage_row().expect("encode fate");
+        let descriptor = batch_fate_storage_descriptor();
         let layout = crate::row_format::compiled_row_layout(&descriptor);
 
         let kind =
@@ -1305,13 +1196,10 @@ mod tests {
         assert_eq!(kind.len(), 1);
         assert_eq!(tier.len(), 1);
 
-        let values = decode_row(&descriptor, &bytes).expect("decode settlement");
+        let values = decode_row(&descriptor, &bytes).expect("decode fate");
         let Value::Array(members) = &values[5] else {
             panic!("expected visible member array");
         };
-        let Value::Row { values, .. } = &members[0] else {
-            panic!("expected visible member row");
-        };
-        assert_eq!(values.len(), 2);
+        assert!(members.is_empty());
     }
 }

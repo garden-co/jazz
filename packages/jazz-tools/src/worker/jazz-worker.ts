@@ -82,11 +82,19 @@ function syncRetainedLocalBatchRecordsToMain(): void {
     return;
   }
   try {
-    const batches = runtime.loadLocalBatchRecords?.() ?? [];
+    const batches = (runtime.loadLocalBatchRecords?.() ?? []).map(attachEncodedLocalBatchRecord);
     post({ type: "local-batch-records-sync", batches });
   } catch (error) {
     console.warn("[worker] loadLocalBatchRecords failed:", error);
   }
+}
+
+function attachEncodedLocalBatchRecord(batch: any): any {
+  if (!runtime?.loadLocalBatchRecordStorageRow || !batch?.batchId) {
+    return batch;
+  }
+  const encodedRecord = runtime.loadLocalBatchRecordStorageRow(batch.batchId);
+  return encodedRecord ? { ...batch, encodedRecord } : batch;
 }
 
 function replayNewlyRejectedBatchesToMain(): void {
@@ -96,10 +104,18 @@ function replayNewlyRejectedBatchesToMain(): void {
   try {
     const batchIds = runtime.drainRejectedBatchIds?.() ?? [];
     for (const batchId of batchIds) {
-      const batch = runtime.loadLocalBatchRecord?.(batchId);
-      if (batch?.latestSettlement?.kind !== "rejected") {
+      const fate = runtime.loadBatchFate?.(batchId) ?? null;
+      if (fate?.kind !== "rejected") {
         continue;
       }
+      const batch = attachEncodedLocalBatchRecord(
+        runtime.loadLocalBatchRecord?.(batchId) ?? {
+          batchId,
+          mode: "direct",
+          sealed: true,
+          latestSettlement: fate,
+        },
+      );
       post({ type: "mutation-error-replay", batch });
     }
   } catch (error) {
@@ -311,13 +327,17 @@ export function mergeAuth(
  * marked as down instead of optimistically assuming it is up.
  */
 export function performUpstreamConnect(
-  runtime: { connect?: (url: string, auth: string) => void },
+  runtime: {
+    connect?: (url: string, auth: string) => void;
+    batchedTick?: () => void;
+  },
   post: (msg: WorkerToMainMessage) => void,
   wsUrl: string,
   authJson: string,
 ): void {
   try {
     runtime.connect?.(wsUrl, authJson);
+    runtime.batchedTick?.();
     post({ type: "upstream-connected" });
   } catch (err) {
     console.error("[worker] runtime.connect failed:", err);
@@ -464,6 +484,9 @@ async function handleInit(msg: InitMessage): Promise<void> {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
     }
+    if (bufferedSyncMessages.length > 0 || bufferedPeerSyncMessages.length > 0) {
+      runtime.batchedTick?.();
+    }
 
     // Bootstrap catalogue-only sync from worker to main runtime.
     // This sends persisted schema/lens objects (including rehydrated ones)
@@ -477,7 +500,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     }
 
     syncRetainedLocalBatchRecordsToMain();
-    queueRejectedBatchReplayToMain();
+    replayNewlyRejectedBatchesToMain();
 
     post({ type: "init-ok", clientId: mainClientId! });
 
@@ -548,6 +571,53 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         for (const payload of payloads) {
           runtime.onSyncMessageReceivedFromClient(mainClientId, payload);
         }
+        runtime.batchedTick?.();
+        if (msg.ackId !== undefined) {
+          replayNewlyRejectedBatchesToMain();
+          try {
+            runtime.flushWal?.();
+          } catch (error) {
+            console.warn("[worker] flushWal on sync ack failed:", error);
+          }
+          let hasBatchRecord: boolean | undefined;
+          if (msg.ackBatchId) {
+            try {
+              const replayPayloads = runtime.replayLocalBatchPayloads?.(msg.ackBatchId) ?? [];
+              hasBatchRecord = replayPayloads.length > 1;
+              if (hasBatchRecord) {
+                const sealPayload = replayPayloads[replayPayloads.length - 1];
+                if (sealPayload) {
+                  runtime.onSyncMessageReceivedFromClient(mainClientId, sealPayload);
+                  runtime.batchedTick?.();
+                }
+                runtime.addServer?.();
+                runtime.reconcileLocalBatchWithServer?.(msg.ackBatchId);
+                runtime.batchedTick?.();
+              }
+            } catch (error) {
+              hasBatchRecord = false;
+              console.warn("[worker] local batch reconciliation failed:", error);
+            }
+          }
+          let batchReconciled: boolean | undefined;
+          if (msg.ackBatchId) {
+            try {
+              const fate = runtime.loadBatchFate?.(msg.ackBatchId);
+              batchReconciled =
+                fate?.kind === "rejected" ||
+                fate?.kind === "acceptedTransaction" ||
+                (fate?.kind === "durableDirect" && fate.confirmedTier !== "local");
+            } catch {
+              batchReconciled = false;
+            }
+          }
+          post({
+            type: "sync-ack",
+            ackId: msg.ackId,
+            hasBatchRecord,
+            batchReconciled,
+          });
+        }
       } else {
         pendingSyncMessages.push(...payloads);
       }
@@ -576,6 +646,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       for (const payload of msg.payload) {
         runtime.onSyncMessageReceivedFromClient(peerClientId, payload);
       }
+      runtime.batchedTick?.();
       break;
     }
 
@@ -603,6 +674,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       if (runtime) {
         try {
           runtime.disconnect?.();
+          runtime.removeServer?.();
+          runtime.batchedTick?.();
           post({ type: "upstream-disconnected" });
         } catch (e) {
           console.error("[worker] disconnect-upstream failed:", e);
@@ -613,6 +686,7 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "reconnect-upstream": {
       if (runtime && currentWsUrl) {
+        runtime.removeServer?.();
         performUpstreamConnect(runtime, post, currentWsUrl, JSON.stringify(currentAuth));
       }
       break;
@@ -623,6 +697,8 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       disposeWasmTelemetry?.();
       disposeWasmTelemetry = null;
       if (runtime) {
+        runtime.batchedTick?.();
+        runtime.flushWal?.();
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
       }

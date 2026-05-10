@@ -34,6 +34,7 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
     hasWorker,
     useBinaryEncoding,
     onAuthFailure,
+    onBeforeLocalBatchWait,
     onRejectedBatchAcknowledged,
   }: DbRuntimeClientContext<DbConfig>): JazzClient {
     return JazzClient.connectSync(
@@ -54,6 +55,7 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
       {
         useBinaryEncoding,
         onAuthFailure,
+        onBeforeLocalBatchWait,
         onRejectedBatchAcknowledged,
       },
     );

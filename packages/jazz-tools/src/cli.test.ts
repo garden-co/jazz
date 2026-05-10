@@ -164,6 +164,22 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
+function rootSchemaWithIndexedTodo(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }).indexOnly(["ownerId"]),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
 function rootSchemaWithTodoNotes(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -2292,6 +2308,70 @@ describe("cli deploy", () => {
 
     expect(permissionsPublishBody.schemaHash).toBe(schemaHash);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBe(currentHead.bundleObjectId);
+  });
+
+  it("publishes a new structural schema when only indexed columns changed", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithIndexedTodo());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let schemaPublishBody: any;
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
+        return storedSchemaResponse({
+          todos: storedRootSchema().todos,
+        });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
+        schemaPublishBody = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            hash: nextSchemaHash,
+          }),
+          { status: 201 },
+        );
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash: nextSchemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deploy({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+    });
+
+    expect(schemaPublishBody.schema.todos.indexed_columns).toEqual(["ownerId"]);
   });
 
   it("fails when retargeting permissions to a schema with no local migration path from the previous head", async () => {

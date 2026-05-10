@@ -81,11 +81,9 @@ fn rc_sealed_direct_batch_replays_row_and_seal_after_offline_write() {
     core.seal_batch(batch_id).unwrap();
     let sealed_submission = core
         .storage()
-        .load_local_batch_record(batch_id)
+        .load_sealed_batch_submission(batch_id)
         .unwrap()
-        .expect("offline write should retain a local batch record")
-        .sealed_submission
-        .expect("offline direct write should still seal the local batch");
+        .expect("offline direct write should persist one sealed submission");
 
     core.add_server(server_id);
     core.batched_tick();
@@ -138,15 +136,10 @@ fn rc_late_insert_settlement_does_not_hide_newer_update() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id: insert_batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                    object_id: id,
-                    branch_name,
-                    batch_id: insert_batch_id,
-                }],
             },
         },
     });
@@ -257,7 +250,7 @@ fn rc_direct_batch_reuses_loaded_local_batch_record_while_building() {
 }
 
 #[test]
-fn rc_worker_direct_batch_persists_visible_members_on_seal() {
+fn rc_worker_direct_batch_persists_batch_fate_on_seal() {
     let mut s = create_3tier_rc();
     let batch_id = BatchId::new();
     let write_context = WriteContext::default()
@@ -290,36 +283,18 @@ fn rc_worker_direct_batch_persists_visible_members_on_seal() {
     s.b.seal_batch(batch_id).unwrap();
 
     let branch_name = s.b.schema_manager().branch_name();
-    let local_record =
-        s.b.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("sealed direct batch should persist one record for shared writes");
-    assert!(local_record.sealed);
-
-    match local_record.latest_settlement {
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+    match s
+        .b
+        .storage()
+        .load_authoritative_batch_fate(batch_id)
+        .unwrap()
+    {
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: settled_batch_id,
             confirmed_tier,
-            visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
             assert_eq!(confirmed_tier, DurabilityTier::Local);
-            assert_eq!(
-                visible_members.len(),
-                2,
-                "shared direct batches should retain all current members under one settlement"
-            );
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == first_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == second_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
         }
         other => panic!("expected durable direct settlement, got {other:?}"),
     }
@@ -330,9 +305,23 @@ fn rc_worker_direct_batch_persists_visible_members_on_seal() {
             .unwrap()
             .expect("sealed direct batch member should stay visible");
     assert_eq!(
-        first_visible_row.confirmed_tier,
+        first_visible_row.confirmed_tier, None,
+        "sealing a direct batch should leave row-local tier empty"
+    );
+    let first_local_row =
+        s.b.storage()
+            .load_visible_region_row_for_tier(
+                "users",
+                branch_name.as_str(),
+                first_row_id,
+                DurabilityTier::Local,
+            )
+            .unwrap()
+            .expect("sealed direct batch member should be locally durable via settlement storage");
+    assert_eq!(
+        first_local_row.confirmed_tier,
         Some(DurabilityTier::Local),
-        "sealing a direct batch should make member rows locally durable"
+        "tiered reads should project local durability from the batch settlement"
     );
 }
 
@@ -354,19 +343,13 @@ fn rc_sealed_direct_batch_rejects_further_writes() {
 
     core.seal_batch(batch_id).unwrap();
 
-    let record = core
+    let submission = core
         .storage()
-        .load_local_batch_record(batch_id)
+        .load_sealed_batch_submission(batch_id)
         .unwrap()
-        .expect("sealed direct batch should keep its local record");
-    assert_eq!(record.mode, crate::batch_fate::BatchMode::Direct);
-    assert!(record.sealed);
+        .expect("sealed direct batch should keep its sealed submission");
     assert_eq!(
-        record
-            .sealed_submission
-            .as_ref()
-            .expect("sealed direct batch should persist a submission")
-            .captured_frontier,
+        submission.captured_frontier,
         Vec::<CapturedFrontierMember>::new(),
         "direct batch seals should not capture transactional frontier state"
     );
@@ -457,21 +440,15 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
 
     let settlement = restarted
         .storage()
-        .load_authoritative_batch_settlement(batch_id)
+        .load_authoritative_batch_fate(batch_id)
         .unwrap()
         .expect("restart should recover and settle completed sealed batch");
     assert!(matches!(
         settlement,
-        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+        crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier: DurabilityTier::Local,
-            ref visible_members,
         } if settled_batch_id == batch_id
-            && *visible_members == vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name: crate::object::BranchName::new("main"),
-                batch_id,
-            }]
     ));
 
     let visible = restarted

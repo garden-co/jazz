@@ -16,15 +16,10 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id: insert_batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                    object_id: id,
-                    branch_name,
-                    batch_id: insert_batch_id,
-                }],
             },
         },
     });
@@ -35,21 +30,13 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
             .unwrap();
     s.a.seal_batch(update_batch_id).unwrap();
 
-    let update_record =
-        s.a.storage()
-            .load_local_batch_record(update_batch_id)
-            .unwrap()
-            .expect("direct update should create a local batch record");
     assert_eq!(
-        update_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(update_batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: update_batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: id,
-                branch_name,
-                batch_id: update_batch_id,
-            }],
         })
     );
 
@@ -63,7 +50,7 @@ fn rc_update_direct_batch_remains_pending_until_terminal_settlement() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids == &vec![update_batch_id]
     )));
 }
@@ -84,15 +71,10 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id: insert_batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                    object_id: id,
-                    branch_name,
-                    batch_id: insert_batch_id,
-                }],
             },
         },
     });
@@ -101,21 +83,13 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
     let delete_batch_id = s.a.delete(id, None).unwrap();
     s.a.seal_batch(delete_batch_id).unwrap();
 
-    let delete_record =
-        s.a.storage()
-            .load_local_batch_record(delete_batch_id)
-            .unwrap()
-            .expect("direct delete should create a local batch record");
     assert_eq!(
-        delete_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(delete_batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id: delete_batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: id,
-                branch_name,
-                batch_id: delete_batch_id,
-            }],
         })
     );
 
@@ -129,7 +103,7 @@ fn rc_delete_direct_batch_remains_pending_until_terminal_settlement() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids == &vec![delete_batch_id]
     )));
 }
@@ -194,12 +168,11 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 
     core.push_sync_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
         },
     });
     core.immediate_tick();
@@ -207,7 +180,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
     assert_eq!(
         receiver.try_recv(),
         Ok(Some(Ok(()))),
-        "row persisted receiver should resolve from row-batch state changes alone"
+        "row persisted receiver should resolve from batch settlements alone"
     );
     assert_eq!(
         *calls.lock().unwrap(),
@@ -217,7 +190,7 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 }
 
 #[test]
-fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id() {
+fn rc_insert_persisted_resolves_batch_fate_by_batch_id() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) =
         s.a.insert_persisted(
@@ -238,20 +211,19 @@ fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_batch_id
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id: ObjectId::new(),
-            branch_name,
-            batch_id: row_batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id: row_batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
         },
     });
     s.a.immediate_tick();
 
     assert_eq!(
         receiver.try_recv(),
-        Ok(None),
-        "row persisted receivers should ignore row-state acks for a different row, even if the batch id matches"
+        Ok(Some(Ok(()))),
+        "row persisted receivers should resolve from whole-batch fate for their row's batch id"
     );
 }
 
@@ -329,56 +301,37 @@ fn rc_insert_persisted_tracks_local_batch_record_and_settlement() {
             .expect("insert should create one visible row");
     let batch_id = visible_row.batch_id;
 
-    let initial_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("persisted write should create a local batch record");
-    assert_eq!(initial_record.batch_id, batch_id);
-    assert_eq!(initial_record.mode, crate::batch_fate::BatchMode::Direct);
     assert_eq!(
-        initial_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         }),
         "standalone persisted direct writes auto-seal and start locally durable"
     );
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::RowBatchStateChanged {
-            row_id,
-            branch_name,
-            batch_id,
-            state: None,
-            confirmed_tier: Some(DurabilityTier::Local),
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
         },
     });
     s.a.immediate_tick();
 
     assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("settled local batch record should still be present");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 }
@@ -421,7 +374,7 @@ fn rc_insert_persisted_retains_batch_after_waiter_tier_is_met() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
     )));
 }
@@ -462,21 +415,13 @@ fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
         "edge confirmation should resolve the caller-facing wait"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("edge-accepted direct batch should stay retained");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::EdgeServer,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 
@@ -490,7 +435,7 @@ fn rc_insert_persisted_retains_batch_after_edge_waiter_tier_is_met() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
     )));
 }
@@ -523,35 +468,22 @@ fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::GlobalServer,
-                visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                    object_id: row_id,
-                    branch_name,
-                    batch_id,
-                }],
             },
         },
     });
     s.a.immediate_tick();
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("terminally accepted direct batch should still be inspectable");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::GlobalServer,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 
@@ -565,13 +497,13 @@ fn rc_insert_persisted_terminal_direct_settlement_stops_reconciliation() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids.contains(&batch_id)
     )));
 }
 
 #[test]
-fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed() {
+fn rc_insert_persisted_resolves_from_batch_fate_without_row_state_changed() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) =
         s.a.insert_persisted(
@@ -592,15 +524,10 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
 
     s.a.push_sync_inbox(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::DurableDirect {
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::DurableDirect {
                 batch_id,
                 confirmed_tier: DurabilityTier::EdgeServer,
-                visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                    object_id: row_id,
-                    branch_name,
-                    batch_id,
-                }],
             },
         },
     });
@@ -617,7 +544,22 @@ fn rc_insert_persisted_resolves_from_batch_settlement_without_row_state_changed(
             .load_visible_region_row("users", branch_name.as_str(), row_id)
             .unwrap()
             .expect("settled direct row should remain visible");
-    assert_eq!(visible_row.confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(visible_row.confirmed_tier, None);
+
+    let edge_visible_row =
+        s.a.storage()
+            .load_visible_region_row_for_tier(
+                "users",
+                branch_name.as_str(),
+                row_id,
+                DurabilityTier::EdgeServer,
+            )
+            .unwrap()
+            .expect("settled direct row should satisfy edge-tier reads");
+    assert_eq!(
+        edge_visible_row.confirmed_tier,
+        Some(DurabilityTier::EdgeServer)
+    );
 }
 
 #[test]
@@ -663,27 +605,19 @@ fn rc_insert_persisted_reconnect_reconciles_pending_batch_from_server() {
         "reconnect should reconcile the still-pending batch from the server's current durable truth"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("reconciled local batch record should still be present");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::DurableDirect {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::DurableDirect {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 }
 
 #[test]
-fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
+fn rc_add_server_requests_pending_batch_fate_reconciliation() {
     let mut s = create_3tier_rc();
     let write_context = WriteContext {
         session: None,
@@ -721,13 +655,13 @@ fn rc_add_server_requests_pending_batch_settlement_reconciliation() {
         entry,
         OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         } if *server_id == s.b_server_for_a && batch_ids == &vec![batch_id]
     )));
 }
 
 #[test]
-fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
+fn rc_missing_batch_fate_retransmits_original_captured_frontier() {
     let mut s = create_3tier_rc();
     let existing_row_id = ObjectId::new();
     let later_row_id = ObjectId::new();
@@ -771,10 +705,8 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
 
     let sealed_submission =
         s.a.storage()
-            .load_local_batch_record(batch_id)
+            .load_sealed_batch_submission(batch_id)
             .unwrap()
-            .expect("sealed batch should retain a local batch record")
-            .sealed_submission
             .expect("sealed batch should persist its original submission");
     assert_eq!(
         sealed_submission.captured_frontier,
@@ -800,8 +732,8 @@ fn rc_missing_batch_settlement_retransmits_original_captured_frontier() {
 
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Missing { batch_id },
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
         },
     });
     s.a.batched_tick();

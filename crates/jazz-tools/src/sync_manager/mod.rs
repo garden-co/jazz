@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::SchemaHash;
 use crate::row_histories::{BatchId, RowVisibilityChange};
-use crate::storage::Storage;
+use crate::storage::{PreparedRowTableContext, Storage};
 
 // Module declarations
 pub mod clock;
@@ -32,6 +33,16 @@ pub use types::*;
 /// treat it as offline.
 pub const PENDING_SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
+pub(crate) struct OutgoingQuerySubscription {
+    pub(crate) query_id: QueryId,
+    pub(crate) query: Query,
+    pub(crate) session: Option<Session>,
+    pub(crate) required_tier: Option<DurabilityTier>,
+    pub(crate) propagation: QueryPropagation,
+    pub(crate) policy_context_tables: Vec<String>,
+}
+
 // ============================================================================
 // SyncManager
 // ============================================================================
@@ -49,6 +60,7 @@ pub struct SyncManager {
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) pending_servers: HashMap<ServerId, Instant>,
+    pub(super) pending_server_query_subscriptions: HashSet<(ServerId, QueryId)>,
     pub(super) clients: HashMap<ClientId, ClientState>,
 
     pub(super) inbox: Vec<InboxEntry>,
@@ -75,17 +87,31 @@ pub struct SyncManager {
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Latest remote scope snapshots keyed by upstream server and query id.
     pub(super) remote_query_scopes: HashMap<(ServerId, QueryId), HashSet<(ObjectId, BranchName)>>,
+    /// Durability tier associated with each latest remote scope snapshot.
+    pub(super) remote_query_scope_tiers: HashMap<(ServerId, QueryId), DurabilityTier>,
     /// Query ids whose remote scope changed since the last QueryManager process.
     pub(super) remote_query_scope_dirty: HashSet<QueryId>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<PendingQuerySettled>,
     /// Pending query rejections waiting for QueryManager to fail local subscriptions.
     pub(super) pending_query_rejections: Vec<PendingQueryRejection>,
-    /// Pending replayable batch settlements for RuntimeCore to process.
-    pub(super) pending_batch_settlements: Vec<BatchSettlement>,
+    /// Pending replayable batch fates for RuntimeCore to process.
+    pub(super) pending_batch_fates: Vec<BatchFate>,
 
-    /// Row batch-member state acks received during inbox processing.
-    pub(super) received_row_batch_acks: Vec<(RowBatchKey, DurabilityTier)>,
+    /// Batch fates to send to clients after a full inbox batch has been processed.
+    pub(super) pending_client_batch_fates: HashMap<ClientId, HashSet<BatchId>>,
+    /// Durability acknowledgements already sent to an upstream server during
+    /// this connection. A large replay can deliver many rows from the same
+    /// sealed batch across several ticks, so outbox-local dedupe is not enough.
+    pub(super) sent_server_batch_fate_acks: HashSet<(ServerId, BatchId, DurabilityTier, bool)>,
+    /// Per-sync-manager replay cache for table/schema row write context.
+    ///
+    /// Incoming sync rows usually carry table + origin schema metadata. Rows in
+    /// a large replay share this context, so cache it above the per-row
+    /// visibility work instead of re-resolving descriptors and raw table IDs
+    /// from storage for every row.
+    pub(super) replay_table_contexts:
+        HashMap<(String, SchemaHash), std::sync::Arc<PreparedRowTableContext>>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -121,10 +147,14 @@ impl std::fmt::Debug for SyncManager {
             .field("row_batch_interest", &self.row_batch_interest)
             .field("query_origin", &self.query_origin)
             .field("remote_query_scopes", &self.remote_query_scopes)
+            .field("remote_query_scope_tiers", &self.remote_query_scope_tiers)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("pending_query_rejections", &self.pending_query_rejections)
-            .field("pending_batch_settlements", &self.pending_batch_settlements)
-            .field("received_row_batch_acks", &self.received_row_batch_acks)
+            .field("pending_batch_fates", &self.pending_batch_fates)
+            .field(
+                "pending_client_batch_fates",
+                &self.pending_client_batch_fates,
+            )
             .finish()
     }
 }
@@ -186,7 +216,7 @@ pub(crate) fn log_connection_schema_diagnostics(
             .iter()
             .map(short_hash)
             .collect();
-        tracing::warn!(
+        tracing::trace!(
             origin = origin,
             client_schema_hash = %client_hash,
             unreachable_schema_hashes = ?unreachable_hashes,
@@ -206,6 +236,7 @@ impl SyncManager {
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             pending_servers: HashMap::new(),
+            pending_server_query_subscriptions: HashSet::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
@@ -219,11 +250,14 @@ impl SyncManager {
             row_batch_interest: HashMap::new(),
             query_origin: HashMap::new(),
             remote_query_scopes: HashMap::new(),
+            remote_query_scope_tiers: HashMap::new(),
             remote_query_scope_dirty: HashSet::new(),
             pending_query_settled: Vec::new(),
             pending_query_rejections: Vec::new(),
-            pending_batch_settlements: Vec::new(),
-            received_row_batch_acks: Vec::new(),
+            pending_batch_fates: Vec::new(),
+            pending_client_batch_fates: HashMap::new(),
+            sent_server_batch_fate_acks: HashSet::new(),
+            replay_table_contexts: HashMap::new(),
         }
     }
 
@@ -362,9 +396,15 @@ impl SyncManager {
                 * std::mem::size_of::<RowVisibilityChange>()
             + self.pending_catalogue_updates.len() * std::mem::size_of::<CatalogueEntry>()
             + self.pending_query_settled.len() * std::mem::size_of::<PendingQuerySettled>()
-            + self.pending_batch_settlements.len() * std::mem::size_of::<BatchSettlement>()
-            + self.received_row_batch_acks.len()
-                * std::mem::size_of::<(RowBatchKey, DurabilityTier)>();
+            + self.pending_batch_fates.len() * std::mem::size_of::<BatchFate>()
+            + self
+                .pending_client_batch_fates
+                .values()
+                .map(|batch_ids| {
+                    std::mem::size_of::<ClientId>()
+                        + batch_ids.len() * std::mem::size_of::<BatchId>()
+                })
+                .sum::<usize>();
 
         let total = catalogue + connections + subscriptions + queues;
         (catalogue, connections, subscriptions, queues, total)
@@ -398,6 +438,12 @@ impl SyncManager {
 
     pub fn remove_pending_server(&mut self, server_id: ServerId) {
         self.pending_servers.remove(&server_id);
+        self.pending_server_query_subscriptions
+            .retain(|(id, _)| *id != server_id);
+    }
+
+    pub fn server_ids(&self) -> impl Iterator<Item = ServerId> + '_ {
+        self.servers.keys().copied()
     }
 
     pub fn has_servers_or_pending_servers(&self) -> bool {
@@ -410,31 +456,25 @@ impl SyncManager {
             .any(|since| now.duration_since(*since) < PENDING_SERVER_TIMEOUT)
     }
 
-    pub fn request_batch_settlements_from_server(
+    pub fn request_batch_fates_from_server(
         &mut self,
         server_id: ServerId,
-        batch_ids: Vec<crate::row_histories::BatchId>,
+        mut batch_ids: Vec<crate::row_histories::BatchId>,
     ) {
         if batch_ids.is_empty() {
             return;
         }
+        batch_ids.sort();
+        batch_ids.dedup();
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::BatchSettlementNeeded { batch_ids },
+            payload: SyncPayload::BatchFateNeeded { batch_ids },
         });
     }
 
     pub fn seal_batch_to_servers(&mut self, submission: SealedBatchSubmission) {
-        let now = Instant::now();
-        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
-        server_ids.extend(
-            self.pending_servers
-                .iter()
-                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
-                .map(|(server_id, _)| *server_id),
-        );
-        for server_id in server_ids {
+        for server_id in self.outbound_server_ids() {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::SealBatch {
@@ -444,10 +484,26 @@ impl SyncManager {
         }
     }
 
+    fn outbound_server_ids(&self) -> Vec<ServerId> {
+        let now = Instant::now();
+        let mut server_ids: Vec<_> = self.servers.keys().copied().collect();
+        server_ids.extend(
+            self.pending_servers
+                .iter()
+                .filter(|(_, since)| now.duration_since(**since) < PENDING_SERVER_TIMEOUT)
+                .map(|(server_id, _)| *server_id),
+        );
+        server_ids
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
         self.pending_servers.remove(&server_id);
+        self.pending_server_query_subscriptions
+            .retain(|(id, _)| *id != server_id);
+        self.sent_server_batch_fate_acks
+            .retain(|(id, ..)| *id != server_id);
         let mut removed_query_ids = HashSet::new();
         self.remote_query_scopes
             .retain(|(remote_server_id, query_id), _| {
@@ -457,6 +513,8 @@ impl SyncManager {
                 }
                 keep
             });
+        self.remote_query_scope_tiers
+            .retain(|(remote_server_id, _), _| *remote_server_id != server_id);
         self.remote_query_scope_dirty.extend(removed_query_ids);
     }
 
@@ -571,6 +629,14 @@ impl SyncManager {
         for entry in entries {
             self.process_inbox_entry(storage, entry);
         }
+        let pending_client_batch_fates = std::mem::take(&mut self.pending_client_batch_fates);
+        for (client_id, batch_ids) in pending_client_batch_fates {
+            self.respond_to_batch_fate_request(
+                storage,
+                Destination::Client(client_id),
+                batch_ids.into_iter().collect(),
+            );
+        }
     }
 
     // ========================================================================
@@ -582,6 +648,10 @@ impl SyncManager {
     /// QueryManager will build QueryGraphs for these and call back with computed scopes.
     pub fn take_pending_query_subscriptions(&mut self) -> Vec<PendingQuerySubscription> {
         std::mem::take(&mut self.pending_query_subscriptions)
+    }
+
+    pub fn has_pending_query_subscriptions(&self) -> bool {
+        !self.pending_query_subscriptions.is_empty()
     }
 
     /// Re-queue pending query subscriptions that couldn't be processed yet.
@@ -644,14 +714,26 @@ impl SyncManager {
 
         self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
+        let mut newly_visible_batch_ids = HashSet::new();
         for (object_id, branch_name) in newly_visible_for_query {
-            self.queue_initial_sync_to_client_with_storage(
+            if let Some(batch_id) = self.queue_initial_row_to_client_with_storage(
                 storage,
                 client_id,
                 object_id,
                 branch_name,
                 true,
-            );
+            ) {
+                newly_visible_batch_ids.insert(batch_id);
+            }
+        }
+
+        // Initial query scope delivery can include many rows from the same
+        // sealed batch. Queue rows first so client interest is complete, then
+        // send one fate per batch instead of one growing fate per row.
+        for batch_id in newly_visible_batch_ids {
+            if let Some(fate) = self.load_batch_fate_by_batch_id_from_storage(storage, batch_id) {
+                self.queue_batch_fate_to_client(client_id, fate);
+            }
         }
     }
 
@@ -727,18 +809,29 @@ impl SyncManager {
         query_id: QueryId,
         query: Query,
         session: Option<Session>,
+        required_tier: Option<DurabilityTier>,
         propagation: QueryPropagation,
         policy_context_tables: Vec<String>,
     ) {
-        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        let server_ids = self.outbound_server_ids();
+        tracing::trace!(
+            server_count = server_ids.len(),
+            query_id = query_id.0,
+            table = %query.table,
+            ?propagation,
+            "jazz trace send query subscription to servers"
+        );
         for server_id in server_ids {
             self.send_query_subscription_to_server(
                 server_id,
-                query_id,
-                query.clone(),
-                session.clone(),
-                propagation,
-                policy_context_tables.clone(),
+                OutgoingQuerySubscription {
+                    query_id,
+                    query: query.clone(),
+                    session: session.clone(),
+                    required_tier,
+                    propagation,
+                    policy_context_tables: policy_context_tables.clone(),
+                },
             );
         }
     }
@@ -746,36 +839,64 @@ impl SyncManager {
     /// Send a QuerySubscription to one specific server.
     ///
     /// Used when replaying existing subscriptions after a late server connect.
-    pub fn send_query_subscription_to_server(
+    pub(crate) fn send_query_subscription_to_server(
         &mut self,
         server_id: ServerId,
-        query_id: QueryId,
-        query: Query,
-        session: Option<Session>,
-        propagation: QueryPropagation,
-        policy_context_tables: Vec<String>,
+        subscription: OutgoingQuerySubscription,
     ) {
-        if !self.servers.contains_key(&server_id) {
+        let OutgoingQuerySubscription {
+            query_id,
+            query,
+            session,
+            required_tier,
+            propagation,
+            policy_context_tables,
+        } = subscription;
+        let is_connected = self.servers.contains_key(&server_id);
+        let is_pending = self.pending_servers.contains_key(&server_id);
+        if !is_connected && !is_pending {
             return;
         }
 
+        tracing::trace!(
+            %server_id,
+            query_id = query_id.0,
+            table = %query.table,
+            ?propagation,
+            "jazz trace sending query subscription upstream"
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
                 session,
+                required_tier,
                 propagation,
                 policy_context_tables,
             },
         });
+
+        if !is_connected && is_pending {
+            self.pending_server_query_subscriptions
+                .insert((server_id, query_id));
+        }
+    }
+
+    pub(crate) fn consume_pending_query_subscription_marker(
+        &mut self,
+        server_id: ServerId,
+        query_id: QueryId,
+    ) -> bool {
+        self.pending_server_query_subscriptions
+            .remove(&(server_id, query_id))
     }
 
     /// Send a QueryUnsubscription to all connected servers.
     ///
     /// Called by QueryManager when a client unsubscribes from a synced query.
     pub fn send_query_unsubscription_to_servers(&mut self, query_id: QueryId) {
-        for &server_id in self.servers.keys() {
+        for server_id in self.outbound_server_ids() {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::QueryUnsubscription { query_id },
@@ -807,6 +928,26 @@ impl SyncManager {
             .collect()
     }
 
+    /// Return the union of latest upstream scope snapshots at or above the
+    /// requested tier for this query.
+    pub fn remote_query_scope_at_least(
+        &self,
+        query_id: QueryId,
+        requested_tier: DurabilityTier,
+    ) -> HashSet<(ObjectId, BranchName)> {
+        self.remote_query_scopes
+            .iter()
+            .filter(|((server_id, remote_query_id), _)| {
+                *remote_query_id == query_id
+                    && self
+                        .remote_query_scope_tiers
+                        .get(&(*server_id, *remote_query_id))
+                        .is_some_and(|tier| *tier >= requested_tier)
+            })
+            .flat_map(|(_, scope)| scope.iter().copied())
+            .collect()
+    }
+
     /// Whether we have received at least one upstream scope snapshot for this query.
     pub fn has_remote_query_scope_snapshot(&self, query_id: QueryId) -> bool {
         self.remote_query_scopes
@@ -814,20 +955,36 @@ impl SyncManager {
             .any(|(_, remote_query_id)| *remote_query_id == query_id)
     }
 
+    /// Whether we have received at least one upstream scope snapshot for this
+    /// query at a tier that can authoritatively satisfy the requested tier.
+    pub fn has_remote_query_scope_snapshot_at_least(
+        &self,
+        query_id: QueryId,
+        requested_tier: DurabilityTier,
+    ) -> bool {
+        self.remote_query_scope_tiers
+            .iter()
+            .any(|((_, remote_query_id), tier)| {
+                *remote_query_id == query_id && *tier >= requested_tier
+            })
+    }
+
     /// Take query ids whose upstream scope changed since the last process pass.
     pub fn take_remote_query_scope_dirty(&mut self) -> HashSet<QueryId> {
         std::mem::take(&mut self.remote_query_scope_dirty)
     }
 
-    /// Take pending replayable batch settlements for RuntimeCore to process.
-    pub fn take_pending_batch_settlements(&mut self) -> Vec<BatchSettlement> {
-        std::mem::take(&mut self.pending_batch_settlements)
+    /// Take pending replayable batch fates for RuntimeCore to process.
+    pub fn take_pending_batch_fates(&mut self) -> Vec<BatchFate> {
+        std::mem::take(&mut self.pending_batch_fates)
     }
 
-    /// Take received row batch-member persistence state since last call.
-    /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_batch_acks(&mut self) -> Vec<(RowBatchKey, DurabilityTier)> {
-        std::mem::take(&mut self.received_row_batch_acks)
+    pub fn pending_batch_fates(&self) -> &[BatchFate] {
+        &self.pending_batch_fates
+    }
+
+    pub fn push_pending_batch_fate(&mut self, fate: BatchFate) {
+        self.pending_batch_fates.push(fate);
     }
 
     /// Take pending row visibility changes for QueryManager to materialize
@@ -857,6 +1014,13 @@ impl SyncManager {
         tier: DurabilityTier,
         scope: &HashSet<(ObjectId, BranchName)>,
     ) {
+        tracing::trace!(
+            %client_id,
+            query_id = query_id.0,
+            ?tier,
+            scope_len = scope.len(),
+            "jazz trace emitting query settled to client"
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::QuerySettled {
@@ -866,6 +1030,28 @@ impl SyncManager {
                 through_seq: 0,
             },
         });
+    }
+
+    pub(crate) fn relay_query_settled_to_origins(
+        &mut self,
+        server_id: ServerId,
+        query_id: QueryId,
+        tier: DurabilityTier,
+    ) {
+        let Some(scope) = self
+            .remote_query_scopes
+            .get(&(server_id, query_id))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(clients) = self.query_origin.get(&query_id).cloned() else {
+            return;
+        };
+
+        for client_id in clients {
+            self.emit_query_settled(client_id, query_id, tier, &scope);
+        }
     }
 
     /// Emit a schema warning to a client.

@@ -547,22 +547,13 @@ fn rc_transactional_insert_persisted_tracks_local_batch_record_and_settlement() 
     pump_b_to_a(&mut s);
     assert_eq!(receiver.try_recv(), Ok(Some(Ok(()))));
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("accepted transactional batch record should still be present");
-    assert!(settled_record.sealed);
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 }
@@ -622,21 +613,13 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_pending_batch_from_ser
         "reconnect should reconcile the accepted transactional batch from the server"
     );
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("reconciled transactional batch record should still be present");
     assert_eq!(
-        settled_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id,
             confirmed_tier: DurabilityTier::Local,
-            visible_members: vec![crate::batch_fate::VisibleBatchMember {
-                object_id: row_id,
-                branch_name,
-                batch_id,
-            }],
         })
     );
 }
@@ -702,63 +685,39 @@ fn rc_transactional_persisted_writes_with_shared_batch_id_reconcile_as_one_batch
 
     let worker_settlement =
         s.b.storage()
-            .load_authoritative_batch_settlement(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .unwrap()
             .expect("worker should persist the shared accepted settlement");
     match worker_settlement {
-        crate::batch_fate::BatchSettlement::AcceptedTransaction {
+        crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier,
-            visible_members,
         } => {
             assert_eq!(settled_batch_id, batch_id);
             assert_eq!(confirmed_tier, DurabilityTier::Local);
-            assert_eq!(visible_members.len(), 2);
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == first_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == second_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
         }
         other => panic!("expected accepted shared settlement, got {other:?}"),
     }
 
-    let local_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("alice should keep one accepted shared batch record");
-    match local_record.latest_settlement {
-        Some(crate::batch_fate::BatchSettlement::AcceptedTransaction {
+    match s
+        .a
+        .storage()
+        .load_authoritative_batch_fate(batch_id)
+        .unwrap()
+    {
+        Some(crate::batch_fate::BatchFate::AcceptedTransaction {
             batch_id: settled_batch_id,
             confirmed_tier,
-            visible_members,
         }) => {
             assert_eq!(settled_batch_id, batch_id);
             assert_eq!(confirmed_tier, DurabilityTier::Local);
-            assert_eq!(visible_members.len(), 2);
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == first_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
-            assert!(visible_members.iter().any(|member| {
-                member.object_id == second_row_id
-                    && member.branch_name == branch_name
-                    && member.batch_id == batch_id
-            }));
         }
         other => panic!("expected accepted shared settlement locally, got {other:?}"),
     }
 }
 
 #[test]
-fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
+fn rc_missing_batch_fate_retransmits_local_transactional_rows() {
     // alice -> worker
     //   alice stages one transactional batch
     //   alice seals it
@@ -826,8 +785,8 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
 
     s.a.park_sync_message(InboxEntry {
         source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Missing { batch_id },
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
         },
     });
     s.a.batched_tick();
@@ -861,20 +820,16 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows() {
         "expected replayed outbound seal after Missing settlement, got {replay_outbox:?}"
     );
 
-    let local_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("missing settlement should still retain the local batch record");
-    assert!(local_record.sealed);
     assert_eq!(
-        local_record.latest_settlement,
-        Some(crate::batch_fate::BatchSettlement::Missing { batch_id })
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
+        Some(crate::batch_fate::BatchFate::Missing { batch_id })
     );
 }
 
 #[test]
-fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_locator_scans() {
+fn rc_missing_batch_fate_retransmits_local_transactional_rows_without_row_locator_scans() {
     let mut core = create_runtime_with_boxed_storage(
         test_schema(),
         "missing-batch-retransmit-scanless-test",
@@ -915,8 +870,8 @@ fn rc_missing_batch_settlement_retransmits_local_transactional_rows_without_row_
 
     core.park_sync_message(InboxEntry {
         source: Source::Server(server_id),
-        payload: SyncPayload::BatchSettlement {
-            settlement: crate::batch_fate::BatchSettlement::Missing { batch_id },
+        payload: SyncPayload::BatchFate {
+            fate: crate::batch_fate::BatchFate::Missing { batch_id },
         },
     });
     core.batched_tick();

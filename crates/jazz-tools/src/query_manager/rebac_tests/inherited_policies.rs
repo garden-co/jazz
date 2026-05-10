@@ -49,8 +49,6 @@ fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        doc_id,
-        &branch,
         row_batch_id_for_commit(doc_id, &branch, &commit),
     );
     assert!(
@@ -108,8 +106,6 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        doc_id,
-        &branch,
         row_batch_id_for_commit(doc_id, &branch, &commit),
     );
     assert!(
@@ -168,8 +164,6 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        doc_id,
-        &branch,
         row_batch_id_for_commit(doc_id, &branch, &commit),
     );
     assert!(
@@ -215,6 +209,7 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
         folder_id,
         &encode_folder("alice", "Dev Folder"),
         &folders_descriptor,
+        None,
     )
     .unwrap();
     seed_qm.persist_row_region_tip(&mut storage, "folders", folder_id, &branch);
@@ -259,8 +254,6 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
     let denied = client_write_was_rejected(
         &outbox,
         client_id,
-        doc_id,
-        &branch,
         row_batch_id_for_commit(doc_id, &branch, &commit),
     );
     assert!(

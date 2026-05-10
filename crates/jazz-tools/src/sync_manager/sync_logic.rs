@@ -83,7 +83,14 @@ impl SyncManager {
             // stored row (including ones authored by other users that it only
             // observed via subscription) on every reconnect, which the server
             // rejects under row-level update policies.
-            let already_upstream = match (row.confirmed_tier, my_max_tier) {
+            let effective_confirmed_tier = row.confirmed_tier.or_else(|| {
+                storage
+                    .load_authoritative_batch_fate(row.batch_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|fate| fate.confirmed_tier())
+            });
+            let already_upstream = match (effective_confirmed_tier, my_max_tier) {
                 (None, _) => false,
                 (Some(_), None) => true,
                 (Some(row_tier), Some(local_tier)) => row_tier > local_tier,
@@ -243,32 +250,25 @@ impl SyncManager {
         });
     }
 
-    pub(super) fn queue_initial_sync_to_client_with_storage<H: Storage + ?Sized>(
+    pub(super) fn queue_initial_row_to_client_with_storage<H: Storage + ?Sized>(
         &mut self,
         storage: &H,
         client_id: ClientId,
         object_id: ObjectId,
         branch_name: BranchName,
         force_resend: bool,
-    ) {
-        let Some(row_locator) = storage.load_row_locator(object_id).ok().flatten() else {
-            return;
-        };
+    ) -> Option<BatchId> {
+        let row_locator = storage.load_row_locator(object_id).ok().flatten()?;
         let metadata = metadata_from_row_locator(&row_locator);
         if let Some(row) =
             self.load_current_row_from_storage(storage, object_id, &branch_name, &row_locator)
         {
+            let batch_id = row.batch_id;
             self.queue_row_to_client(client_id, object_id, metadata, row, force_resend);
+            return Some(batch_id);
         }
 
-        if let Some(settlement) = self.load_current_batch_settlement_from_storage(
-            storage,
-            object_id,
-            &branch_name,
-            &row_locator,
-        ) {
-            self.queue_batch_settlement_to_client(client_id, settlement);
-        }
+        None
     }
 
     pub(super) fn queue_row_to_client(
@@ -278,18 +278,6 @@ impl SyncManager {
         metadata: HashMap<String, String>,
         row: StoredRowBatch,
         force_resend: bool,
-    ) {
-        self.queue_row_to_client_internal(client_id, object_id, metadata, row, force_resend, true);
-    }
-
-    fn queue_row_to_client_internal(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        row: StoredRowBatch,
-        force_resend: bool,
-        require_scope: bool,
     ) {
         let row = Self::scope_delivery_row(row);
         if metadata
@@ -317,7 +305,7 @@ impl SyncManager {
             (in_scope, include_metadata, already_sent)
         };
 
-        if require_scope && !in_scope {
+        if !in_scope {
             return;
         }
 

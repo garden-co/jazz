@@ -80,8 +80,14 @@ Replayable write state is also durable storage state now. Storage persists:
 
 - branch ord registry in `__branch_ord_registry`
 - local batch records in `__local_batch_record`
-- authoritative settlements in `__authoritative_batch_settlement`
+- authoritative batch fate in `__authoritative_batch_settlement`
 - sealed batch submissions in `__sealed_batch_submission`
+
+`__authoritative_batch_settlement` is a legacy table name and row shape. New code treats it as the
+durable `BatchFate` table: successful fate is keyed by `batch_id` and applies to the whole sealed
+batch. The legacy `visible_members` field is forward-compatible compatibility data and should not
+be required by hot visible-row loads. Additive sidecar tables or caches may be used to index
+`batch_id -> fate/tier` without changing the existing row format.
 
 The branch ord registry is one durable row that stores:
 

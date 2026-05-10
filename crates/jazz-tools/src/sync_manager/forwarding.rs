@@ -1,5 +1,5 @@
 use super::*;
-use crate::batch_fate::BatchSettlement;
+use crate::batch_fate::BatchFate;
 use crate::object::{BranchName, ObjectId};
 use crate::row_histories::{BatchId, HistoryScan, StoredRowBatch};
 use crate::storage::{RowLocator, Storage, metadata_from_row_locator};
@@ -98,15 +98,13 @@ impl SyncManager {
             .max_by_key(|row| (row.updated_at, row.batch_id()))
     }
 
-    pub(super) fn load_current_batch_settlement_from_storage<
-        H: crate::storage::Storage + ?Sized,
-    >(
+    pub(super) fn load_current_batch_fate_from_storage<H: crate::storage::Storage + ?Sized>(
         &self,
         storage: &H,
         object_id: ObjectId,
         branch_name: &BranchName,
         row_locator: &RowLocator,
-    ) -> Option<BatchSettlement> {
+    ) -> Option<BatchFate> {
         let row =
             self.load_current_row_from_storage(storage, object_id, branch_name, row_locator)?;
         if row.branch != branch_name.as_str() {
@@ -115,7 +113,7 @@ impl SyncManager {
         match row.state {
             crate::row_histories::RowState::VisibleDirect
             | crate::row_histories::RowState::VisibleTransactional => {
-                self.load_batch_settlement_by_batch_id_from_storage(storage, row.batch_id)
+                self.load_batch_fate_by_batch_id_from_storage(storage, row.batch_id)
             }
             crate::row_histories::RowState::StagingPending
             | crate::row_histories::RowState::Superseded
@@ -123,37 +121,32 @@ impl SyncManager {
         }
     }
 
-    pub(super) fn load_batch_settlement_by_batch_id_from_storage<
-        H: crate::storage::Storage + ?Sized,
-    >(
+    pub(super) fn load_batch_fate_by_batch_id_from_storage<H: crate::storage::Storage + ?Sized>(
         &self,
         storage: &H,
         batch_id: BatchId,
-    ) -> Option<BatchSettlement> {
+    ) -> Option<BatchFate> {
         storage
-            .load_local_batch_record(batch_id)
+            .load_authoritative_batch_fate(batch_id)
             .ok()
             .flatten()
-            .and_then(|record| record.latest_settlement)
-            .or_else(|| {
-                storage
-                    .load_authoritative_batch_settlement(batch_id)
-                    .ok()
-                    .flatten()
-            })
     }
 
-    pub(super) fn queue_batch_settlement_to_client(
-        &mut self,
-        client_id: ClientId,
-        settlement: BatchSettlement,
-    ) {
-        let Some(settlement) = self.batch_settlement_for_client(client_id, &settlement) else {
+    pub(super) fn queue_batch_fate_to_client(&mut self, client_id: ClientId, fate: BatchFate) {
+        let Some(fate) = self.batch_fate_for_client(client_id, &fate) else {
             return;
         };
+        self.queue_batch_fate_to_client_unfiltered(client_id, fate);
+    }
+
+    pub(super) fn queue_batch_fate_to_client_unfiltered(
+        &mut self,
+        client_id: ClientId,
+        fate: BatchFate,
+    ) {
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
-            payload: SyncPayload::BatchSettlement { settlement },
+            payload: SyncPayload::BatchFate { fate },
         });
     }
 
@@ -417,13 +410,13 @@ impl SyncManager {
                     row.clone(),
                     false,
                 );
-                if let Some(settlement) = self.load_current_batch_settlement_from_storage(
+                if let Some(settlement) = self.load_current_batch_fate_from_storage(
                     storage,
                     object_id,
                     &branch_name,
                     &row_locator,
                 ) {
-                    self.queue_batch_settlement_to_client(*client_id, settlement);
+                    self.queue_batch_fate_to_client(*client_id, settlement);
                 }
             }
         }

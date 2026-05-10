@@ -9,6 +9,7 @@ use jazz_tools::schema_manager::{AppId, Lens, SchemaManager};
 use jazz_tools::server::{ServerState, TestingServer};
 use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
+use jazz_tools::transport_protocol::encode_outbox_entry_payload;
 use jazz_tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, Value,
@@ -343,11 +344,20 @@ fn build_catalogue_runtime(
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
             tokio::spawn(async move {
-                let frame = serde_json::to_vec(&jazz_tools::sync_manager::OutboxEntry {
+                let entry = jazz_tools::sync_manager::OutboxEntry {
                     destination: Destination::Server(ServerId::default()),
                     payload,
-                })
-                .expect("serialize OutboxEntry");
+                };
+                let frame = match encode_outbox_entry_payload(&entry) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        if let Ok(mut errors) = push_errors.lock() {
+                            errors.push(format!("encode sync frame: {error}"));
+                        }
+                        in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
+                };
                 if let Err(error) = state.process_ws_client_frame(client_id, &frame).await {
                     if let Ok(mut errors) = push_errors.lock() {
                         errors.push(error);

@@ -13,15 +13,40 @@ That is enough because the interesting structure lives inside the typed sync pay
 
 ### `/apps/:app_id/ws`
 
-Clients open one WebSocket and exchange framed sync messages carrying payloads such as:
+Clients and server peers open one WebSocket and exchange framed sync messages
+carrying payloads such as:
 
 - `Connected`
 - `SyncUpdate`
+- `SyncUpdateBatch`
 - `Error`
 - `Heartbeat`
 
+Every WebSocket message uses the same outer frame shape:
+
+```text
+[4 bytes: u32 big-endian payload length][N bytes: payload]
+```
+
+The initial auth handshake payload is JSON. That keeps protocol-version and
+auth failures readable for older or mismatched peers. Once both sides confirm
+`SYNC_PROTOCOL_VERSION`, post-handshake sync transport payloads are binary
+postcard payloads:
+
+- client-to-server frames carry either a single outbox entry payload or a
+  `SyncBatchRequest`
+- server-to-client frames carry `ServerEvent` payloads, including coalesced
+  `SyncUpdateBatch` events
+
 The connection is app-scoped, so every non-health server interaction uses the same `/apps/<app_id>/...`
 prefix as the cloud server.
+
+Self-hosted edge servers use the same route when they connect upstream to a
+core server. `jazz-tools server` without an upstream URL is the core/global
+node. With `--upstream-url` or `JAZZ_UPSTREAM_URL`, it is an edge node and
+opens a Rust WebSocket transport to the upstream core. Base `http`, `https`,
+`ws`, and `wss` URLs are normalized to the app-scoped
+`/apps/<app_id>/ws` route; URLs with query strings or fragments are rejected.
 
 ## What Actually Travels
 
@@ -45,17 +70,32 @@ That matters for two reasons:
 - the server can continue reasoning about the same logical client
 - reconnect can resume with better anti-entropy instead of pretending every reconnect is a brand-new peer with no prior state
 
-The `Connected` event also carries stream bookkeeping such as the connection id and, when available, the server's current catalogue digest.
+The `Connected` event also carries stream bookkeeping such as the connection id
+and, when available, the server's current catalogue digest. Peer connections use
+that digest during reconnect and initial sync so unchanged catalogue state does
+not have to be replayed.
 
 ## Auth
 
-The current transport supports three main auth shapes:
+The current transport supports four main auth shapes:
 
 - JWT bearer auth for normal client sessions
 - backend-secret impersonation for trusted server-side callers
 - admin-secret auth for administrative or catalogue-specific flows
+- peer-secret auth for server-to-server WebSocket links
 
 The important idea is that auth is checked at the HTTP boundary, while row-level visibility still lives in the runtime's query/policy machinery.
+
+Peer auth is carried in the WebSocket auth handshake as `peer_secret`. A core
+server validates it against `AuthConfig.peer_secret`; a valid handshake is
+registered as `ClientRole::Peer`, not as `Backend` or `Admin`. Edges require a
+peer secret because they must authenticate to their upstream core. Cores only
+need a peer secret when they accept edge connections.
+
+Catalogue admin writes remain core-only. Edge servers learn schemas,
+permissions, and migrations through the sync channel from core; they reject
+local admin catalogue publishes with an error that tells callers to publish to
+the core server instead.
 
 ## Why There Is No Separate "Query Transport"
 
@@ -88,7 +128,7 @@ The in-repo server keeps a small route set:
 | File                                                | Purpose                                |
 | --------------------------------------------------- | -------------------------------------- |
 | `crates/jazz-tools/src/transport_protocol.rs`       | Shared request/event types and framing |
-| `crates/jazz-tools/src/routes.rs`                   | In-repo server routes                  |
+| `crates/jazz-tools/src/server/routes/`              | In-repo server routes                  |
 | `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling                     |
 | `crates/jazz-tools/src/transport_manager.rs`        | Rust WebSocket transport manager       |
 | `crates/jazz-tools/src/ws_stream/`                  | Concrete WebSocket stream adapters     |

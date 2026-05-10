@@ -1,7 +1,6 @@
 use super::*;
 use crate::batch_fate::{
-    BatchSettlement, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
-    VisibleBatchMember,
+    BatchFate, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
 };
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::query_manager::encoding::encode_row;
@@ -121,32 +120,19 @@ fn persist_visible_row_settlement(
         return;
     };
     let settlement = match row.state {
-        crate::row_histories::RowState::VisibleDirect => BatchSettlement::DurableDirect {
+        crate::row_histories::RowState::VisibleDirect => BatchFate::DurableDirect {
             batch_id: row.batch_id,
             confirmed_tier,
-            visible_members: vec![VisibleBatchMember {
-                object_id: row_id,
-                branch_name: BranchName::new(&row.branch),
-                batch_id: row.batch_id,
-            }],
         },
-        crate::row_histories::RowState::VisibleTransactional => {
-            BatchSettlement::AcceptedTransaction {
-                batch_id: row.batch_id,
-                confirmed_tier,
-                visible_members: vec![VisibleBatchMember {
-                    object_id: row_id,
-                    branch_name: BranchName::new(&row.branch),
-                    batch_id: row.batch_id,
-                }],
-            }
-        }
+        crate::row_histories::RowState::VisibleTransactional => BatchFate::AcceptedTransaction {
+            batch_id: row.batch_id,
+            confirmed_tier,
+        },
         crate::row_histories::RowState::StagingPending
         | crate::row_histories::RowState::Superseded
         | crate::row_histories::RowState::Rejected => return,
     };
-    io.upsert_authoritative_batch_settlement(&settlement)
-        .unwrap();
+    io.upsert_authoritative_batch_fate(&settlement).unwrap();
 }
 
 struct FailingHistoryPatchStorage {
@@ -260,9 +246,9 @@ impl Storage for FailingHistoryPatchStorage {
             .load_history_row_batch(table, branch, row_id, batch_id)
     }
 
-    fn upsert_authoritative_batch_settlement(
+    fn upsert_authoritative_batch_fate(
         &mut self,
-        settlement: &BatchSettlement,
+        settlement: &BatchFate,
     ) -> Result<(), crate::storage::StorageError> {
         if self.fail_authoritative_settlement_upsert {
             return Err(crate::storage::StorageError::IoError(format!(
@@ -270,7 +256,7 @@ impl Storage for FailingHistoryPatchStorage {
                 settlement.batch_id()
             )));
         }
-        self.inner.upsert_authoritative_batch_settlement(settlement)
+        self.inner.upsert_authoritative_batch_fate(settlement)
     }
 
     fn upsert_sealed_batch_submission(
@@ -344,6 +330,7 @@ fn push_query_subscription(
             query_id: QueryId(1),
             query: Box::new(query),
             session: payload_session,
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -368,9 +355,7 @@ mod basic;
 mod client_lifecycle;
 mod permissions;
 mod query_scope;
-mod row_batch_state;
 mod server_sync;
 mod settlements;
-mod stale_replay;
 mod subscriptions;
 mod transaction_sealing;

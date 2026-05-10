@@ -1,4 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::object::BranchName;
 
@@ -42,6 +44,26 @@ impl SchemaHash {
         hex::encode(&self.0[..6])
     }
 
+    pub fn to_hex(&self) -> String {
+        static CACHE: OnceLock<Mutex<HashMap<SchemaHash, String>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(cached) = cache
+            .lock()
+            .expect("schema hash hex cache poisoned")
+            .get(self)
+            .cloned()
+        {
+            return cached;
+        }
+
+        let encoded = hex::encode(&self.0);
+        cache
+            .lock()
+            .expect("schema hash hex cache poisoned")
+            .insert(*self, encoded.clone());
+        encoded
+    }
+
     /// Convert to an ObjectId for storage in the catalogue.
     ///
     /// Uses UUIDv5 with DNS namespace over the hash bytes.
@@ -67,6 +89,20 @@ impl SchemaHash {
 
             // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
+
+            // Hash the optional index override. Absence means historical
+            // "index every declared user column"; an explicit subset changes
+            // query-planning/index-maintenance semantics and therefore belongs
+            // to the schema identity.
+            hasher.update(&[1]);
+            if let Some(indexed_columns) = &table_schema.indexed_columns {
+                let mut columns: Vec<_> = indexed_columns.iter().map(|c| c.as_str()).collect();
+                columns.sort_unstable();
+                for column in columns {
+                    hasher.update(column.as_bytes());
+                    hasher.update(&[0]);
+                }
+            }
         }
 
         Self(*hasher.finalize().as_bytes())
@@ -75,13 +111,13 @@ impl SchemaHash {
 
 impl std::fmt::Display for SchemaHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(&self.0))
+        f.write_str(&self.to_hex())
     }
 }
 
 impl Serialize for SchemaHash {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&hex::encode(&self.0))
+        serializer.serialize_str(&self.to_hex())
     }
 }
 

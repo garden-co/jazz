@@ -10,7 +10,6 @@ All writes execute against the local database first. `insert`, `update`, and `de
 
 Jazz also allows grouping writes together using [batches and transactions](#transactions-and-batches).
 Writes made through an open transaction or batch are not individually waitable. Call `.wait({ tier })` on the returned write result instead.
-Call `rollback()` on an open transaction if you want to close that transaction handle without committing it.
 
 <Callout type="info">
 For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
@@ -165,7 +164,7 @@ db.onMutationError((error) => {
 
 ## Transactions and batches
 
-Use an explicit transaction when several writes should settle together after an authority validates the sealed batch:
+Use a transaction when several writes should settle together after an authority validates the sealed batch:
 
 ```ts
 const result = await db.transaction(async (tx) => {
@@ -180,28 +179,40 @@ console.log(result.batchId);
 The changes made as part of the transaction are scoped to it, and will only be
 globally visible once it's committed and accepted by the authority.
 
-`DbTransaction` can also read its own staged state through `all(...)` and `one(...)` before commit.
-Call `tx.rollback()` to explicitly abandon an open transaction handle without committing it:
-
-```ts
-const tx = db.beginTransaction();
-
-tx.insert(app.todos, { title: "Maybe later", done: false });
-tx.rollback();
-
-// Any later write, read, commit, or rollback call on this transaction throws.
-```
-
-Rollback prevents the same transaction handle from being committed or used again.
-
-You can also use a batch when you want to group several ordinary writes under one batch id, but still want them
-to be locally visible immediately:
+You can also use batches when you want to group several ordinary writes and commit them together:
 
 ```ts
 const result = db.batch((batch) => {
-  batch.insert(app.todos, { title: "Grouped direct write", done: false });
+  batch.insert(app.todos, { title: "Grouped write", done: false });
   batch.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
 console.log(result.batchId);
+```
+
+Transactions and batches can read its own local writes through `all(...)` and `one(...)` before commit.
+
+When using `transaction` and `batch`, changes are automatically committed once the callback finishes running and,
+if an error is thrown inside the callback, the open transaction or batch is rolled back instead of committed.
+
+Alternatively, you can use `beginTransaction` and `beginBatch` to get a transaction or batch object, respectively.
+This can be useful when making writes across multiple contexts. In this case however, you need to commit or rollback
+the transaction/batch explicitly.
+
+```ts
+let transaction: DbTransaction;
+beforeEach(() => {
+  transaction = db.beginTransaction();
+});
+
+afterEach(() => {
+  // Writes performed in tests will be rolled back at the end,
+  // preventing tests from interfering with each other
+  transaction.rollback();
+});
+
+it("tasks have a title", () => {
+  const task = transaction.insert(todos, { title: "Test task", done: false });
+  expect(task.title).toEqual("Test task");
+});
 ```

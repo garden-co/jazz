@@ -27,7 +27,7 @@ use crate::storage::{
     HistoryRowBytes, IndexMutation, MemoryStorage, OpfsBTreeStorage, OwnedHistoryRowBytes,
     OwnedVisibleRowBytes, RawTableMutation, RawTableRows, Storage, StorageError, VisibleRowBytes,
 };
-use crate::sync_manager::{InboxEntry, ServerId, Source, SyncManager, SyncPayload};
+use crate::sync_manager::{DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload};
 use crate::test_support::{
     apply_test_row_batch, create_test_row, load_test_row_metadata, load_test_row_tip_ids,
     persist_test_schema, put_test_row_metadata, seeded_memory_storage,
@@ -131,6 +131,7 @@ struct CountingCatalogueUpsertsStorage {
     catalogue_upserts: Cell<usize>,
     catalogue_loads: Cell<usize>,
     visible_query_loads: Cell<usize>,
+    visible_region_scans: Cell<usize>,
 }
 
 impl CountingCatalogueUpsertsStorage {
@@ -144,6 +145,7 @@ impl CountingCatalogueUpsertsStorage {
             catalogue_upserts: Cell::new(0),
             catalogue_loads: Cell::new(0),
             visible_query_loads: Cell::new(0),
+            visible_region_scans: Cell::new(0),
         }
     }
 
@@ -165,6 +167,14 @@ impl CountingCatalogueUpsertsStorage {
 
     fn reset_visible_query_loads(&self) {
         self.visible_query_loads.set(0);
+    }
+
+    fn visible_region_scans(&self) -> usize {
+        self.visible_region_scans.get()
+    }
+
+    fn reset_visible_region_scans(&self) {
+        self.visible_region_scans.set(0);
     }
 }
 
@@ -276,6 +286,16 @@ impl Storage for CountingCatalogueUpsertsStorage {
         self.visible_query_loads
             .set(self.visible_query_loads.get() + 1);
         self.inner.load_visible_query_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowBatch>, StorageError> {
+        self.visible_region_scans
+            .set(self.visible_region_scans.get() + 1);
+        self.inner.scan_visible_region(table, branch)
     }
 }
 
@@ -1264,6 +1284,7 @@ fn push_query_subscription(
             query_id: QueryId(query_id),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

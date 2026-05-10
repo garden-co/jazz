@@ -28,7 +28,7 @@ const schema = {
       project: s.ref("projects"),
       owner: s.ref("users").optional(),
     })
-    .index("by_done", ["done"]),
+    .indexOnly(["done"]),
 };
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
@@ -162,6 +162,11 @@ describe("typed app prototype", () => {
     expectTypeOf(row.title).toEqualTypeOf<string>();
     expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
     expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
+  });
+
+  it("emits indexOnly metadata into the runtime schema", () => {
+    expect(app.wasmSchema.todos?.indexed_columns).toEqual(["done"]);
+    expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();
   });
 
   it("serializes gather seeded from the current relation", () => {

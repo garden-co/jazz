@@ -77,8 +77,6 @@ mod tests {
     use crate::object::ObjectId;
     use crate::query_manager::types::{SchemaHash, TableName};
     use crate::schema_manager::{AppId, LensOp};
-    use crate::server::ConnectionState;
-
     use std::collections::BTreeMap;
     use std::fmt;
     use std::sync::{Arc as StdArc, Mutex};
@@ -319,7 +317,7 @@ mod tests {
             payloads: vec![p1, p2],
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = batch.encode_payload().unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -444,6 +442,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_handshake_accepts_valid_peer_secret_as_peer() {
+        let auth_config = AuthConfig {
+            peer_secret: Some("cluster-peer-secret".to_string()),
+            allow_local_first_auth: false,
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build peer auth test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig {
+                peer_secret: Some("cluster-peer-secret".to_string()),
+                ..Default::default()
+            },
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+
+        let setup = authenticate_ws_handshake(&handshake, &HeaderMap::new(), &state)
+            .await
+            .expect("peer auth should succeed");
+
+        assert!(matches!(setup, WsClientSetup::Peer));
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_rejects_wrong_peer_secret() {
+        let auth_config = AuthConfig {
+            peer_secret: Some("cluster-peer-secret".to_string()),
+            allow_local_first_auth: false,
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build peer auth test state")
+            .state;
+        let handshake = crate::transport_manager::AuthHandshake {
+            sync_protocol_version: crate::transport_manager::SYNC_PROTOCOL_VERSION,
+            client_id: ClientId::new().to_string(),
+            auth: crate::transport_manager::AuthConfig {
+                peer_secret: Some("wrong-peer-secret".to_string()),
+                ..Default::default()
+            },
+            catalogue_state_hash: None,
+            declared_schema_hash: None,
+        };
+
+        let error = authenticate_ws_handshake(&handshake, &HeaderMap::new(), &state)
+            .await
+            .expect_err("wrong peer secret should be rejected");
+
+        assert!(error.contains("Invalid peer secret"));
+    }
+
+    #[tokio::test]
     async fn ws_handshake_rejects_deceptive_localhost_cookie_origin() {
         let token = mint_test_token("test-app");
         let auth_config = AuthConfig {
@@ -544,7 +606,7 @@ mod tests {
             payloads,
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = batch.encode_payload().unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -1476,6 +1538,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edge_mode_rejects_local_admin_catalogue_publishing() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let auth_config = AuthConfig {
+            admin_secret: Some("admin-secret".to_string()),
+            peer_secret: Some("cluster-peer-secret".to_string()),
+            allow_local_first_auth: true,
+            ..Default::default()
+        };
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(schema.clone())
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build edge state")
+            .state;
+        let app = make_test_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(test_app_route("/admin/schemas"))
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "schema": schema }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let error: Value = serde_json::from_slice(&body).expect("error json");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("publish catalogue to the core server"),
+            "unexpected edge publish rejection: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn publish_migration_requires_admin_and_persists_lens() {
         let v1 = SchemaBuilder::new()
             .table(
@@ -1857,6 +1974,7 @@ mod tests {
                         query: Box::new(query),
                         session: None,
                         propagation,
+                        required_tier: None,
                         policy_context_tables: vec![],
                     },
                 })

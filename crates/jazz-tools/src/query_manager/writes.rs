@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::batch_fate::BatchMode;
+use crate::batch_fate::{BatchFate, BatchMode};
 use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
@@ -25,7 +25,8 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts_with_row_id}
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::{AuthMode, Session, WriteContext};
 use super::types::{
-    ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash, TableName, Value,
+    ColumnName, ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, Schema, SchemaHash,
+    TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -40,6 +41,7 @@ pub struct RowBranchWrite<'a> {
 struct PreparedUpdateWrite {
     new_data: Vec<u8>,
     descriptor: Arc<RowDescriptor>,
+    indexed_columns: Option<Arc<Vec<ColumnName>>>,
     row_layout: Arc<crate::row_format::CompiledRowLayout>,
 }
 
@@ -103,6 +105,7 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(table_name))?;
         let entry = Arc::new(WriteTableCacheEntry {
             descriptor: Arc::new(table_schema.columns.clone()),
+            indexed_columns: table_schema.indexed_columns.clone().map(Arc::new),
             row_layout: compiled_row_layout(&table_schema.columns),
             row_locator: RowLocator {
                 table: table_name.as_str().to_string().into(),
@@ -239,7 +242,7 @@ impl QueryManager {
                 authoring.provenance.clone(),
                 metadata,
                 authoring.row_state,
-                self.sync_manager.max_local_durability_tier(),
+                None,
             )
         } else {
             StoredRowBatch::new(
@@ -250,7 +253,7 @@ impl QueryManager {
                 authoring.provenance.clone(),
                 metadata,
                 authoring.row_state,
-                self.sync_manager.max_local_durability_tier(),
+                None,
             )
         }
     }
@@ -318,6 +321,36 @@ impl QueryManager {
         let row = update.row.clone();
         self.handle_row_update_with_origin(storage, update, true, false);
         Ok(row)
+    }
+
+    fn maybe_record_local_direct_settlement<H: Storage>(
+        &self,
+        storage: &mut H,
+        _branch_name: &BranchName,
+        _row_id: ObjectId,
+        batch_id: BatchId,
+        write_context: Option<&WriteContext>,
+        visibility_change: &Option<RowVisibilityChange>,
+    ) -> Result<(), QueryError> {
+        if visibility_change.is_none()
+            || matches!(
+                write_context.map(WriteContext::batch_mode),
+                Some(BatchMode::Transactional)
+            )
+        {
+            return Ok(());
+        }
+
+        let Some(confirmed_tier) = self.sync_manager.max_local_durability_tier() else {
+            return Ok(());
+        };
+
+        storage
+            .upsert_authoritative_batch_fate(&BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier,
+            })
+            .map_err(|err| QueryError::EncodingError(format!("persist batch settlement: {err}")))
     }
 
     fn maybe_track_local_pending_transaction_overlay(
@@ -671,7 +704,13 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
+        Self::validate_write_index_values_on_branch(
+            table,
+            branch,
+            values,
+            descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
+        )?;
 
         let new_data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
@@ -801,6 +840,7 @@ impl QueryManager {
         Ok(PreparedUpdateWrite {
             new_data,
             descriptor: table_write.descriptor.clone(),
+            indexed_columns: table_write.indexed_columns.clone(),
             row_layout: table_write.row_layout.clone(),
         })
     }
@@ -844,6 +884,14 @@ impl QueryManager {
             false,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            id,
+            batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
@@ -973,6 +1021,7 @@ impl QueryManager {
             self.current_branch().as_str(),
             values,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
         )?;
 
         // Encode to binary
@@ -1068,6 +1117,7 @@ impl QueryManager {
             object_id,
             &data,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
             &table_write.row_layout,
         );
         let row = self.authored_row_batch(
@@ -1098,6 +1148,14 @@ impl QueryManager {
             false,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            object_id,
+            row_batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         tracing::trace!(%object_id, ?row_batch_id, "apply local row insert");
         if let Some(visibility_change) = visibility_change {
@@ -1179,7 +1237,13 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
+        Self::validate_write_index_values_on_branch(
+            table,
+            branch,
+            values,
+            descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
+        )?;
 
         // Encode to binary
         let data =
@@ -1264,6 +1328,7 @@ impl QueryManager {
             object_id,
             &data,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
             &table_write.row_layout,
         );
         let row = self.authored_row_batch(
@@ -1289,6 +1354,14 @@ impl QueryManager {
             false,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            object_id,
+            row_batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
@@ -1346,7 +1419,13 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, descriptor)?;
+        Self::validate_write_index_values_on_branch(
+            table,
+            branch,
+            values,
+            descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
+        )?;
 
         let data =
             encode_row(descriptor, values).map_err(|e| QueryError::EncodingError(e.to_string()))?;
@@ -1411,6 +1490,7 @@ impl QueryManager {
             object_id,
             &data,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
             &table_write.row_layout,
         );
         let row = self.authored_row_batch(
@@ -1436,6 +1516,14 @@ impl QueryManager {
             false,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            object_id,
+            row_batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
@@ -1825,12 +1913,32 @@ impl QueryManager {
 
         match &col.column_type {
             crate::query_manager::types::ColumnType::Uuid => {
-                let candidate_ids = storage.index_lookup(
-                    source_table_name.as_str(),
-                    col.name.as_str(),
-                    branch,
-                    &Value::Uuid(target_row_id),
-                );
+                let candidate_ids = if source_schema.is_indexed_column(col.name.as_str()) {
+                    storage.index_lookup(
+                        source_table_name.as_str(),
+                        col.name.as_str(),
+                        branch,
+                        &Value::Uuid(target_row_id),
+                    )
+                } else {
+                    storage
+                        .index_scan_all(source_table_name.as_str(), "_id", branch)
+                        .into_iter()
+                        .filter(|source_row_id| {
+                            let Some(source_content) =
+                                self.load_row_content_on_branch(storage, *source_row_id, branch)
+                            else {
+                                return false;
+                            };
+                            declared_edge_references_target(
+                                &source_descriptor,
+                                &source_content,
+                                col_idx,
+                                target_row_id,
+                            )
+                        })
+                        .collect()
+                };
                 for source_row_id in candidate_ids {
                     if self.evaluate_source_row_access_for_operation(
                         storage,
@@ -1850,8 +1958,15 @@ impl QueryManager {
             crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
-                let candidate_ids =
-                    storage.index_scan_all(source_table_name.as_str(), col.name.as_str(), branch);
+                let candidate_ids = storage.index_scan_all(
+                    source_table_name.as_str(),
+                    if source_schema.is_indexed_column(col.name.as_str()) {
+                        col.name.as_str()
+                    } else {
+                        "_id"
+                    },
+                    branch,
+                );
                 for source_row_id in candidate_ids {
                     let Some(source_content) =
                         self.load_row_content_on_branch(storage, source_row_id, branch)
@@ -2060,6 +2175,7 @@ impl QueryManager {
             &old_data,
             &prepared.new_data,
             prepared.descriptor.as_ref(),
+            prepared.indexed_columns.as_deref().map(Vec::as_slice),
         );
         let batch_id = self.commit_prepared_update_write(
             storage,
@@ -2156,6 +2272,7 @@ impl QueryManager {
                 id,
                 &prepared.new_data,
                 prepared.descriptor.as_ref(),
+                prepared.indexed_columns.as_deref().map(Vec::as_slice),
             )
         } else if let Some(old_branch_data) = existing_branch_data.as_deref() {
             Self::index_mutations_for_update_on_branch(
@@ -2165,6 +2282,7 @@ impl QueryManager {
                 old_branch_data,
                 &prepared.new_data,
                 prepared.descriptor.as_ref(),
+                prepared.indexed_columns.as_deref().map(Vec::as_slice),
             )
         } else {
             Self::index_mutations_for_insert_on_branch_with_layout(
@@ -2173,6 +2291,7 @@ impl QueryManager {
                 id,
                 &prepared.new_data,
                 prepared.descriptor.as_ref(),
+                prepared.indexed_columns.as_deref().map(Vec::as_slice),
                 &prepared.row_layout,
             )
         };
@@ -2380,6 +2499,7 @@ impl QueryManager {
             id,
             &old_data,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2397,6 +2517,14 @@ impl QueryManager {
             true,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            id,
+            delete_batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         tracing::trace!(%id, ?delete_batch_id, "apply local soft delete");
         if let Some(visibility_change) = visibility_change {
@@ -2571,6 +2699,7 @@ impl QueryManager {
             id,
             old_data_for_policy,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
         );
         let branch_name = BranchName::new(branch);
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2588,6 +2717,14 @@ impl QueryManager {
             true,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            id,
+            delete_batch_id,
+            write_context,
+            &visibility_change,
+        )?;
 
         let _ = old_branch_data;
         if let Some(visibility_change) = visibility_change {
@@ -2654,7 +2791,13 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(descriptor, values)?;
-        Self::validate_write_index_values_on_branch(&table, &current_branch, values, descriptor)?;
+        Self::validate_write_index_values_on_branch(
+            &table,
+            &current_branch,
+            values,
+            descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
+        )?;
 
         // Encode new row data
         let new_data =
@@ -2685,6 +2828,7 @@ impl QueryManager {
             id,
             &new_data,
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (row_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2702,6 +2846,14 @@ impl QueryManager {
             false,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            id,
+            row_batch_id,
+            None,
+            &visibility_change,
+        )?;
 
         if let Some(visibility_change) = visibility_change {
             let _ = self.apply_local_row_batch(storage, visibility_change)?;
@@ -2777,6 +2929,7 @@ impl QueryManager {
             id,
             old_data.as_deref(),
             descriptor,
+            table_write.indexed_columns.as_deref().map(Vec::as_slice),
         );
         let branch_name = BranchName::new(branch.as_str());
         let (delete_batch_id, visibility_change) = self.apply_local_row_history_write(
@@ -2794,6 +2947,14 @@ impl QueryManager {
             true,
             &visibility_change,
         );
+        self.maybe_record_local_direct_settlement(
+            storage,
+            &branch_name,
+            id,
+            delete_batch_id,
+            None,
+            &visibility_change,
+        )?;
 
         let _ = old_data;
         if let Some(visibility_change) = visibility_change {

@@ -7,7 +7,7 @@ If [Row Histories](row_histories.md) explains what a stored row batch entry is, 
 - how batch identity works
 - how those entries are laid out in durable storage
 - which in-memory types carry batch state through the runtime
-- how direct and transactional batches move from local write to replayable settlement
+- how direct and transactional batches move from local write to replayable fate
 - which Rust and TypeScript APIs expose that model
 
 ## One Identity, Two Modes
@@ -25,12 +25,12 @@ stored row shape and the same sync identity. The difference lives in:
 
 - `RowState`
 - `BatchMode`
-- `BatchSettlement`
+- `BatchFate` (legacy storage table still uses settlement naming)
 - whether the batch requires an explicit seal/authority decision
 
 The two modes are:
 
-- `Direct`: visible immediately, explicitly sealed/frozen, settles as `DurableDirect`
+- `Direct`: staged until explicit commit/seal, then optimistically visible and settles as `DurableDirect`
 - `Transactional`: staged first, explicitly sealed, authority-decided, settles as `AcceptedTransaction`, `Rejected`, or `Missing`
 
 ## Core Invariants
@@ -39,9 +39,18 @@ The two modes are:
 - Same-row rewrites within one batch keep the frozen pre-batch parent frontier instead of self-parenting through intermediate rewrites.
 - Simple `insert` / `update` / `delete` calls are just one-member direct batches.
 - Explicit direct-batch APIs exist so multiple writes can share one `BatchId`.
-- Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable settlements, and public handles.
+- Direct batches created with `beginBatch()` do not affect global reads until `commit()` seals them.
+  `db.batch(cb)` commits only if the callback resolves; if the callback throws, the batch is
+  rolled back as one unit.
+- Transactional batches use the same `BatchId` for staging members, accepted visible members, replayable fate, and public handles.
 - Visible resolution only merges visible rows. Staged or rejected transactional batches never
   participate in visible merges.
+- A batch is one fate unit. If any member write in a batch is rejected by authority, the entire
+  batch is rejected and every member is rolled back or left non-visible. Applications that need
+  independent authorization, rollback, or durability fate must use separate batches.
+- `BatchFate` is the active durability/rejection acknowledgement for the whole batch. Row-level
+  membership and query visibility are derived from row delivery, sealed submissions, local batch
+  records, and `QuerySettled.scope`; they are not encoded in fate payloads.
 - Merge strategy is schema metadata, not batch metadata. The same stored conflicting history can
   therefore resolve differently under different schema versions.
 
@@ -202,8 +211,17 @@ batch:<batch_id_hex>
 Their payloads are:
 
 - `__local_batch_record`: one uniform `LocalBatchRecord` row format
-- `__authoritative_batch_settlement`: one uniform `BatchSettlement` row format
+- `__authoritative_batch_settlement`: one uniform legacy `BatchSettlement` row format, interpreted
+  as `BatchFate`
 - `__sealed_batch_submission`: one uniform `SealedBatchSubmission` row format
+
+`BatchFate` is the new model name for replayable whole-batch outcome. Existing persisted
+`BatchSettlement` rows remain valid. In that legacy row format, successful cases may contain a
+`visible_members` array; new readers must treat that field as deprecated compatibility data, not as
+the source of truth for whether a row in the batch is confirmed. Hot read paths should answer
+batch-tier questions from `(batch_id -> fate/tier)` only, optionally via an additive sidecar/index.
+New writers may leave `visible_members` empty once every active sync peer understands singular
+`BatchFate`.
 
 The current local batch record row stores:
 
@@ -213,7 +231,7 @@ The current local batch record row stores:
 - `sealed`
 - `members` with `(object_id, table_name, branch_name, schema_hash, row_digest)`
 - `sealed_submission`
-- `latest_settlement`
+- `latest_fate`
 
 The current sealed submission row stores:
 
@@ -288,7 +306,7 @@ column updates on top of it, and writes a new row batch parented by the whole fr
 - `sealed`
 - `members: Vec<LocalBatchMember>`
 - optional `sealed_submission`
-- optional `latest_settlement`
+- optional `latest_fate`
 
 Each `LocalBatchMember` carries:
 
@@ -310,17 +328,35 @@ batch records that predate explicit direct sealing and have members but no seale
 sealed once by synthesizing the same direct `SealedBatchSubmission` shape. Already-upgraded records
 are skipped, so later opens only pay the normal batch-record scan and field checks.
 
-### BatchSettlement
+### BatchFate
 
-`BatchSettlement` is the replayable outcome model for both write modes:
+`BatchFate` is the replayable outcome model for both write modes and the only active sync payload
+that acknowledges batch durability or rejection. The current code still names this type and payload
+`BatchSettlement`; that name is deprecated in favor of `BatchFate`.
 
 - `Missing`
 - `Rejected`
 - `DurableDirect`
 - `AcceptedTransaction`
 
-Both successful cases carry `visible_members`, so replay, reconnect, and missed live acks can
-reason about one logical batch without inventing a separate per-row completion story.
+Successful fate applies to the whole sealed batch. It does not communicate which rows a receiver
+has learned, which rows match a query, or which row-batch waiters exist locally. Those facts are
+derived from:
+
+- row delivery: `RowBatchCreated` / `RowBatchNeeded`
+- query completion: `QuerySettled.scope`
+- local write membership: `LocalBatchRecord.members`
+- authority membership: `SealedBatchSubmission.members`
+
+Legacy `BatchSettlement::{DurableDirect, AcceptedTransaction}` storage rows may still contain
+`visible_members`. That field is deprecated. Readers may use it only as compatibility
+metadata when no better local membership source exists; they must not require a per-row
+`visible_members` lookup to decide whether a known row in a successful batch is confirmed at the
+fate's tier.
+
+`Rejected` applies to the whole batch, not to one row inside it. A server that rejects any direct or
+transactional member persists one `Rejected` settlement for the shared `batch_id`; receivers mark
+all locally known rows in that batch rejected and re-run visibility from the remaining history.
 
 ### SealedBatchSubmission
 
@@ -334,14 +370,14 @@ reason about one logical batch without inventing a separate per-row completion s
 
 ### RowBatchKey
 
-`RowBatchKey` is the runtime/sync key for one concrete row batch entry:
+`RowBatchKey` is the runtime key for one concrete row batch entry:
 
 - `row_id`
 - `branch_name`
 - `batch_id`
 
-It is the handle used for row-level durability/state-change tracking such as persisted-write ack
-watchers.
+It is still useful for local waiters and query interest, but persisted write completion is resolved
+from the batch's `BatchFate` plus local row-batch knowledge, not from a row-state sync payload.
 
 ## Direct Batch Lifecycle
 
@@ -400,9 +436,13 @@ calls perform this step immediately before returning their write handle.
 Direct batches flow over sync as:
 
 - `RowBatchCreated` for newly learned entries
-- `RowBatchStateChanged` for tier/state progression
 - `SealBatch` for the frozen final member set
-- `BatchSettlement` for replayable fate
+- `BatchFate::DurableDirect` or `BatchFate::Rejected` for replayable fate
+
+The direct batch is optimistic before authority settlement, but final fate is all-or-nothing. If
+the authority rejects any member's insert/update/delete policy check, it rejects the shared
+`batch_id`; accepted members from that same batch are not allowed to remain durable or visible as
+accepted authority output.
 
 Because the batch record and settlement are durable, a missed live ack no longer strands the write.
 
@@ -448,12 +488,13 @@ After this point the transactional batch is no longer writable.
 
 ### 4a. Explicit rollback
 
-`rollback()` on a TypeScript transaction handle marks only that handle as rolled back:
+`rollback()` on a TypeScript explicit batch or transaction handle marks only that handle as rolled
+back:
 
 - the batch is not sealed
 - no `SyncPayload::SealBatch` is emitted
 - pending staged rows are not deleted or rewritten
-- later writes, reads, `commit()`, or `rollback()` calls on that same transaction handle fail
+- later writes, reads, `commit()`, or `rollback()` calls on that same handle fail
 
 ### 5. Authority decision
 
@@ -470,13 +511,16 @@ The replayable outcome becomes one of:
 - `Rejected`
 - `Missing`
 
+Rejection is batch-wide: a single failed member invalidates the whole transaction. Callers that want
+independent fate should split the writes into independent batches.
+
 ### 6. Accepted publication
 
 If accepted, the same staged `StoredRowBatch` entries become visible with:
 
 - `RowState::VisibleTransactional`
 - normal visible-row materialization on the target branch
-- one `AcceptedTransaction` settlement carrying the visible members
+- one `AcceptedTransaction` fate for the whole batch
 
 Accepted transactional rows do not get a second visible identity. They keep the same
 `(row_id, branch_name, batch_id)` identity they had while staged.
@@ -485,14 +529,18 @@ Accepted transactional rows do not get a second visible identity. They keep the 
 
 The sync layer now uses three batch-specific payload families:
 
-- row entry movement: `RowBatchCreated`, `RowBatchNeeded`, `RowBatchStateChanged`
+- row entry movement: `RowBatchCreated`, `RowBatchNeeded`
 - batch sealing: `SealBatch`
-- replayable fate: `BatchSettlement`, `BatchSettlementNeeded`
+- replayable fate: `BatchFate`, `BatchFateNeeded`
 
 That is the important separation to keep in mind:
 
 - row payloads move concrete row batch entries
 - batch payloads move replayable whole-batch truth
+- query settlement moves read-completeness truth for a query scope
+
+The sync protocol now uses `BatchFate` and `BatchFateNeeded`. Sync format is not a
+storage compatibility boundary.
 
 ## Public API Surface
 
@@ -517,17 +565,21 @@ Important APIs:
 - `tx.commit()`
 - `tx.rollback()`
 - `batch.commit()`
+- `batch.rollback()`
 - `db.beginBatch()`
 - `db.beginTransaction()`
 
 The `Db` batch handles bind lazily: the first table operation chooses the runtime client/schema,
 and later writes through the same handle must stay on that client-bound schema surface.
 
-Transactional handles also support transaction-scoped reads before commit:
+Explicit transaction and batch handles also support scoped reads before commit:
 
 - `Transaction.query(...)`
 - `DbTransaction.all(...)`
 - `DbTransaction.one(...)`
+- `DirectBatch.query(...)`
+- `DbDirectBatch.all(...)`
+- `DbDirectBatch.one(...)`
 
 Open explicit batch writes are not individually waitable:
 
@@ -535,8 +587,9 @@ Open explicit batch writes are not individually waitable:
 - `Transaction.update(...)`, `Transaction.delete(...)`, `DirectBatch.update(...)`, and
   `DirectBatch.delete(...)` return `void`
 - `Transaction.commit()` and `DirectBatch.commit()` return the waitable batch handle
-- `Transaction.rollback()` / `DbTransaction.rollback()` return `void` and close the transaction
-  handle without sealing the batch
+- `Transaction.rollback()` / `DbTransaction.rollback()` and
+  `DirectBatch.rollback()` / `DbDirectBatch.rollback()` return `void` and close the handle without
+  sealing the batch
 
 `PersistedWrite` also stays batch-shaped:
 

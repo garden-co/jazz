@@ -28,7 +28,7 @@
 //! ```
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -298,7 +298,6 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
     next_expected_server_seq: HashMap<ServerId, u64>,
     /// Highest per-server stream sequence already applied to the inbox.
     last_applied_server_seq: HashMap<ServerId, u64>,
-
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
     /// Reverse map for routing updates.
@@ -312,6 +311,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 
     /// Per-batch durability bookkeeping: ack watchers + rejection set.
     pub(crate) durability: DurabilityTracker,
+
+    acknowledged_rejected_batches: HashSet<BatchId>,
 
     /// Recently mutated local batch records. Large direct batches append one
     /// member per write, so reloading the record from storage on every insert
@@ -334,21 +335,26 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     /// Create a new RuntimeCore.
     pub fn new(mut schema_manager: SchemaManager, mut storage: S, scheduler: Sch) -> Self {
         let _ = schema_manager.ensure_current_schema_persisted(&mut storage);
-        let rejected_batch_ids: BTreeSet<BatchId> = storage
-            .scan_local_batch_records()
-            .map(|records| {
-                records
+        let rejected_batch_fates = storage
+            .scan_authoritative_batch_fates()
+            .map(|fates| {
+                fates
                     .into_iter()
-                    .filter_map(|record| {
-                        matches!(
-                            record.latest_settlement,
-                            Some(crate::batch_fate::BatchSettlement::Rejected { .. })
-                        )
-                        .then_some(record.batch_id)
-                    })
-                    .collect()
+                    .filter(|fate| matches!(fate, crate::batch_fate::BatchFate::Rejected { .. }))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let acknowledged_rejected_batches: HashSet<BatchId> = storage
+            .scan_acknowledged_rejected_batch_fates()
+            .map(|batch_ids| batch_ids.into_iter().collect())
+            .unwrap_or_default();
+        let replayable_rejected_batch_ids: BTreeSet<BatchId> = rejected_batch_fates
+            .iter()
+            .filter_map(|fate| {
+                let batch_id = fate.batch_id();
+                (!acknowledged_rejected_batches.contains(&batch_id)).then_some(batch_id)
+            })
+            .collect();
 
         let mut core = Self {
             schema_manager,
@@ -366,7 +372,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             next_subscription_handle: 0,
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
-            durability: DurabilityTracker::with_initial_rejections(rejected_batch_ids.clone()),
+            durability: DurabilityTracker::with_initial_rejections(replayable_rejected_batch_ids),
+            acknowledged_rejected_batches,
             local_batch_record_cache: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,
@@ -378,8 +385,8 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // rows would render on reload and then get retracted by the next
         // network-delivered settlement — a visible flash. Re-apply stored
         // rejections before any query can observe the visible region.
-        for batch_id in rejected_batch_ids {
-            core.mark_local_batch_rows_rejected(batch_id);
+        for fate in rejected_batch_fates {
+            core.mark_local_batch_rows_rejected(fate.batch_id());
         }
 
         core

@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::batch_fate::{BatchSettlement, SealedBatchSubmission};
+use crate::batch_fate::{BatchFate, SealedBatchSubmission};
 use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -274,20 +274,11 @@ pub enum SyncPayload {
         row: StoredRowBatch,
     },
 
-    /// System-column update for a previously sent row batch entry.
-    RowBatchStateChanged {
-        row_id: ObjectId,
-        branch_name: BranchName,
-        batch_id: BatchId,
-        state: Option<crate::row_histories::RowState>,
-        confirmed_tier: Option<DurabilityTier>,
-    },
-
     /// Replayable fate for one logical batch.
-    BatchSettlement { settlement: BatchSettlement },
+    BatchFate { fate: BatchFate },
 
     /// Request current replayable fate for specific batch ids.
-    BatchSettlementNeeded { batch_ids: Vec<BatchId> },
+    BatchFateNeeded { batch_ids: Vec<BatchId> },
 
     /// Explicitly seal a transactional batch so the authority can validate it.
     SealBatch { submission: SealedBatchSubmission },
@@ -299,6 +290,8 @@ pub enum SyncPayload {
         query: Box<Query>,
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
+        #[serde(default)]
+        required_tier: Option<DurabilityTier>,
         #[serde(default)]
         propagation: QueryPropagation,
         #[serde(default)]
@@ -312,8 +305,7 @@ pub enum SyncPayload {
     /// for the settled server result.
     ///
     /// This means the upstream server has reached a complete first frontier for the
-    /// subscription. Per-row durability remains encoded and replayed on the rows
-    /// themselves via `RowBatchStateChanged`.
+    /// subscription. Per-batch durability and visibility are replayed via `BatchFate`.
     QuerySettled {
         query_id: QueryId,
         tier: DurabilityTier,
@@ -365,13 +357,14 @@ impl ConnectionSchemaDiagnostics {
 /// postcard does not support the dynamic deserialization style it expects (deserialize_any)
 /// so we need a custom serializer/deserializer to serialize/deserialize the claims as a string.
 mod query_subscription_session_serde {
-    use super::Session;
+    use crate::query_manager::session::{AuthMode, Session};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct SessionWire {
         user_id: String,
         claims_json: String,
+        auth_mode: AuthMode,
     }
 
     pub fn serialize<S>(value: &Option<Session>, serializer: S) -> Result<S::Ok, S::Error>
@@ -390,6 +383,7 @@ mod query_subscription_session_serde {
                 Ok(SessionWire {
                     user_id: session.user_id.clone(),
                     claims_json,
+                    auth_mode: session.auth_mode,
                 })
             })
             .transpose()?;
@@ -412,7 +406,7 @@ mod query_subscription_session_serde {
             Ok(Session {
                 user_id: session_wire.user_id,
                 claims,
-                auth_mode: Default::default(),
+                auth_mode: session_wire.auth_mode,
             })
         })
         .transpose()
@@ -426,17 +420,8 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(row.row_id)
             }
-            SyncPayload::RowBatchStateChanged { row_id, .. } => Some(*row_id),
-            SyncPayload::BatchSettlement { settlement } => match settlement {
-                BatchSettlement::DurableDirect {
-                    visible_members, ..
-                }
-                | BatchSettlement::AcceptedTransaction {
-                    visible_members, ..
-                } => visible_members.first().map(|member| member.object_id),
-                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
-            },
-            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::BatchFate { .. } => None,
+            SyncPayload::BatchFateNeeded { .. } => None,
             SyncPayload::SealBatch { submission } => {
                 submission.members.first().map(|member| member.object_id)
             }
@@ -453,17 +438,8 @@ impl SyncPayload {
             SyncPayload::RowBatchCreated { row, .. } | SyncPayload::RowBatchNeeded { row, .. } => {
                 Some(BranchName::new(&row.branch))
             }
-            SyncPayload::RowBatchStateChanged { branch_name, .. } => Some(*branch_name),
-            SyncPayload::BatchSettlement { settlement } => match settlement {
-                BatchSettlement::DurableDirect {
-                    visible_members, ..
-                }
-                | BatchSettlement::AcceptedTransaction {
-                    visible_members, ..
-                } => visible_members.first().map(|member| member.branch_name),
-                BatchSettlement::Missing { .. } | BatchSettlement::Rejected { .. } => None,
-            },
-            SyncPayload::BatchSettlementNeeded { .. } => None,
+            SyncPayload::BatchFate { .. } => None,
+            SyncPayload::BatchFateNeeded { .. } => None,
             SyncPayload::SealBatch { .. } => None,
             SyncPayload::QuerySettled { scope, .. } => {
                 scope.first().map(|(_, branch_name)| *branch_name)
@@ -479,8 +455,7 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. }
                 | SyncPayload::RowBatchCreated { .. }
                 | SyncPayload::RowBatchNeeded { .. }
-                | SyncPayload::RowBatchStateChanged { .. }
-                | SyncPayload::BatchSettlement { .. }
+                | SyncPayload::BatchFate { .. }
                 | SyncPayload::SealBatch { .. }
         )
     }
@@ -519,9 +494,8 @@ impl SyncPayload {
             SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
             SyncPayload::RowBatchCreated { .. } => "RowBatchCreated",
             SyncPayload::RowBatchNeeded { .. } => "RowBatchNeeded",
-            SyncPayload::RowBatchStateChanged { .. } => "RowBatchStateChanged",
-            SyncPayload::BatchSettlement { .. } => "BatchSettlement",
-            SyncPayload::BatchSettlementNeeded { .. } => "BatchSettlementNeeded",
+            SyncPayload::BatchFate { .. } => "BatchFate",
+            SyncPayload::BatchFateNeeded { .. } => "BatchFateNeeded",
             SyncPayload::SealBatch { .. } => "SealBatch",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
@@ -568,6 +542,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub required_tier: Option<DurabilityTier>,
     pub propagation: QueryPropagation,
     pub policy_context_tables: Vec<String>,
 }
@@ -598,4 +573,33 @@ pub struct PendingPermissionCheck {
     pub new_content: Option<Vec<u8>>,
     /// Inferred operation type.
     pub operation: Operation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::session::AuthMode;
+
+    #[test]
+    fn query_subscription_postcard_roundtrip_preserves_session_auth_mode() {
+        let payload = SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(Query::new("todos")),
+            session: Some(Session::new("alice").with_auth_mode(AuthMode::LocalFirst)),
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: Vec::new(),
+        };
+
+        let bytes = payload.to_bytes().expect("encode payload");
+        let decoded = SyncPayload::from_bytes(&bytes).expect("decode payload");
+
+        match decoded {
+            SyncPayload::QuerySubscription {
+                session: Some(session),
+                ..
+            } => assert_eq!(session.auth_mode, AuthMode::LocalFirst),
+            other => panic!("expected QuerySubscription with session, got {other:?}"),
+        }
+    }
 }
