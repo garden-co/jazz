@@ -967,6 +967,9 @@ abstract class BatchHandleBase {
 
   rollback(): void {
     this.ensureActive();
+    if (this.touchedRowIds.size > 0) {
+      this.client.discardLocalBatch(this.batchId());
+    }
     this.status = "rolledBack";
   }
 
@@ -1760,6 +1763,11 @@ export class JazzClient {
   completeEmptyBatch(batchId: string): WriteHandle {
     this.completedEmptyBatchIds.add(batchId);
     return new WriteHandle(batchId, this);
+  }
+
+  discardLocalBatch(batchId: string): void {
+    this.runtime.replayBatchRejection?.(batchId, "local_rollback", "local transaction rolled back");
+    this.runtime.acknowledgeRejectedBatch?.(batchId);
   }
 
   /**
