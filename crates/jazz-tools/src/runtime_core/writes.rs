@@ -267,6 +267,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         };
         Ok(SealedBatchSubmission::new(
             record.batch_id,
+            record.mode,
             target_branch_name,
             members,
             captured_frontier,
@@ -756,7 +757,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         fate: Option<BatchFate>,
     ) -> Result<Option<LocalBatchRecord>, RuntimeError> {
         let mut record =
-            LocalBatchRecord::new(submission.batch_id, BatchMode::Direct, true, fate.clone());
+            LocalBatchRecord::new(submission.batch_id, submission.mode, true, fate.clone());
         record.sealed_submission = Some(submission.clone());
 
         for sealed_member in submission.members {

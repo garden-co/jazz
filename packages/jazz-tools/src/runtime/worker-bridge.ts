@@ -74,6 +74,7 @@ interface WorkerBridgeState {
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
 const SHUTDOWN_ACK_TIMEOUT_MS = 5_000;
+const LOCAL_SYNC_ACK_TIMEOUT_MS = 2_000;
 
 function createDeferredPromise(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -324,7 +325,7 @@ export class WorkerBridge {
   async waitForLocalSyncFlush(batchId?: string): Promise<void> {
     if (this.isDisposedLike()) return;
     await this.state.initPromise;
-    const deadline = Date.now() + 2_000;
+    const deadline = Date.now() + LOCAL_SYNC_ACK_TIMEOUT_MS;
 
     while (true) {
       this.runtime.batchedTick?.();
@@ -344,7 +345,15 @@ export class WorkerBridge {
         ackId,
         ackBatchId: batchId,
       });
-      const ack = await ackPromise;
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const ack = await Promise.race([
+        ackPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), remainingMs)),
+      ]);
+      this.state.pendingSyncAcks.delete(ackId);
+      if (ack === null || this.isDisposedLike()) {
+        return;
+      }
       if (!batchId || ack.batchReconciled === true || Date.now() >= deadline) {
         return;
       }

@@ -2965,6 +2965,7 @@ mod tests {
         });
         let submission = SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Direct,
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id,

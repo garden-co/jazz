@@ -1122,6 +1122,7 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
         .unwrap()
         .expect("sealed rejected batches should remain replayable");
     assert_eq!(record.batch_id, batch_id);
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Direct);
     assert!(record.sealed);
     assert!(matches!(
         record.latest_fate,
@@ -1130,6 +1131,62 @@ fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
     assert_eq!(record.members.len(), 1);
     assert_eq!(record.members[0].object_id, row_id);
     assert!(record.sealed_submission.is_some());
+}
+
+#[test]
+fn rc_transactional_rejected_replay_record_keeps_sealed_submission_mode() {
+    let mut core = create_runtime_with_schema(
+        test_schema(),
+        "transactional-reject-replay-record-mode-test",
+    );
+
+    let write_context = WriteContext::from_session(Session::new("alice"))
+        .with_batch_mode(crate::batch_fate::BatchMode::Transactional);
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            Some(&write_context),
+            DurabilityTier::Local,
+        )
+        .unwrap();
+
+    let history_rows = core
+        .storage()
+        .scan_history_row_batches("users", row_id)
+        .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    let batch_id = history_rows[0].batch_id;
+    core.seal_batch(batch_id).unwrap();
+
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+        .unwrap();
+
+    let record = core
+        .local_batch_record_for_rejection_replay(batch_id)
+        .unwrap()
+        .expect("sealed rejected transactional batches should remain replayable");
+    assert_eq!(record.batch_id, batch_id);
+    assert_eq!(record.mode, crate::batch_fate::BatchMode::Transactional);
+    assert!(record.sealed);
+    assert_eq!(record.members.len(), 1);
+    assert_eq!(record.members[0].object_id, row_id);
+    assert_eq!(
+        record
+            .sealed_submission
+            .as_ref()
+            .expect("replay should retain the sealed submission")
+            .mode,
+        crate::batch_fate::BatchMode::Transactional
+    );
 }
 
 #[test]
@@ -1367,6 +1424,7 @@ fn rc_persisting_invalid_multibranch_sealed_batch_submission_fails() {
         .storage_mut()
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Direct,
             crate::object::BranchName::new("main"),
             vec![
                 SealedBatchMember {
@@ -1512,6 +1570,7 @@ fn rc_restart_rejects_stale_family_frontier_sealed_batch_from_storage() {
         .storage_mut()
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Transactional,
             target_branch,
             vec![SealedBatchMember {
                 object_id: staged_row_id,
