@@ -273,7 +273,7 @@ fn serialize_batch_mode(mode: BatchMode) -> &'static str {
     }
 }
 
-fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
+pub fn serialize_batch_fate(settlement: &BatchFate) -> JsonValue {
     match settlement {
         BatchFate::Rejected {
             batch_id,

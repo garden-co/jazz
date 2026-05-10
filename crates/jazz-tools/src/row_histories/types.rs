@@ -85,7 +85,11 @@ impl Serialize for BatchId {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        if serializer.is_human_readable() {
+            self.to_string().serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
     }
 }
 
@@ -94,8 +98,12 @@ impl<'de> Deserialize<'de> for BatchId {
     where
         D: Deserializer<'de>,
     {
-        let raw = String::deserialize(deserializer)?;
-        raw.parse().map_err(serde::de::Error::custom)
+        if deserializer.is_human_readable() {
+            let raw = String::deserialize(deserializer)?;
+            raw.parse().map_err(serde::de::Error::custom)
+        } else {
+            <[u8; 16]>::deserialize(deserializer).map(Self)
+        }
     }
 }
 

@@ -9,7 +9,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
+import type { Schema, WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
@@ -107,6 +107,17 @@ const noDeletePermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.never(),
 ]);
+
+const nullableSchema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+  }),
+};
+
+type NullableSchema = s.Schema<typeof nullableSchema>;
+const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
 
 interface WorkerMessageDebugEvent {
   atMs: number;
@@ -1362,62 +1373,44 @@ describe("Worker Bridge with OPFS", () => {
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("replays onMutationError after restart when the rejection was not previously delivered", async () => {
+  it("replays onMutationError when the rejection was not previously delivered", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
-      "sync-on-mutation-error-restart",
+      "sync-on-mutation-error-deferred-listener",
       readOnlyPermissions,
     );
 
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbName = uniqueDbName("sync-on-mutation-error-restart");
-    const dbBeforeRestart = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: { type: "persistent", dbName },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
+    const db = await createSyncedDb(
+      ctx,
+      "sync-on-mutation-error-deferred-listener",
+      sharedLocalAuthToken,
+      syncServer,
     );
 
-    const insertResult = dbBeforeRestart.insert(todos, {
-      title: "Rejected on restart",
+    const insertResult = db.insert(todos, {
+      title: "Rejected before listener",
       done: false,
     });
-    // Wait for the insert to be persisted locally before restarting
-    await insertResult.wait({ tier: "local" });
 
-    // Ensure the insert is not rejected before restarting
-    const clientBeforeRestart = (dbBeforeRestart as any).getClient(app.wasmSchema);
-    expect(
-      clientBeforeRestart.localBatchRecord(insertResult.batchId)?.latestSettlement,
-    ).not.toMatchObject({
-      kind: "rejected",
-    });
-
-    await dbBeforeRestart.shutdown();
-    untrack(dbBeforeRestart);
-
-    const dbAfterRestart = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: { type: "persistent", dbName },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
+    await waitForCondition(
+      async () => {
+        const client = (db as any).getClient(app.wasmSchema);
+        return client.localBatchRecord(insertResult.batchId)?.latestSettlement?.kind === "rejected";
+      },
+      5000,
+      "insert should be rejected before listener is registered",
     );
 
     const mutationErrorSpy = vi.fn();
-    dbAfterRestart.onMutationError(mutationErrorSpy);
+    db.onMutationError(mutationErrorSpy);
 
-    // Run a query to ensure both the in-memory and worker clients are initialized
-    // Also checks the insert was reverted
-    const todosAfterRestart = await dbAfterRestart.all(allTodos, { tier: "local" });
-    expect(todosAfterRestart.length).toBe(0);
+    const todosAfterRejection = await db.all(allTodos, { tier: "local" });
+    expect(todosAfterRejection.length).toBe(0);
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
       5000,
-      "onMutationError handler should receive rejection after restart",
+      "onMutationError handler should receive queued rejection",
     );
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
@@ -1434,6 +1427,64 @@ describe("Worker Bridge with OPFS", () => {
         },
       },
     });
+  });
+
+  it("does not replay acknowledged rejected worker batches after restart", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-on-mutation-error-restart",
+      readOnlyPermissions,
+    );
+
+    const sharedLocalAuthToken = generateAuthSecret();
+    const dbName = uniqueDbName("sync-on-mutation-error-restart");
+    const createPersistentDb = () =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl: syncServer.serverUrl,
+        secret: sharedLocalAuthToken,
+      });
+
+    const dbBeforeRestart = track(await createPersistentDb());
+    const mutationErrorSpy = vi.fn();
+    dbBeforeRestart.onMutationError(mutationErrorSpy);
+
+    const insertResult = dbBeforeRestart.insert(todos, {
+      title: "Rejected across restart",
+      done: false,
+    });
+
+    await waitForCondition(
+      async () => mutationErrorSpy.mock.calls.length > 0,
+      5000,
+      "onMutationError handler should receive rejection before restart",
+    );
+    expect(mutationErrorSpy).toHaveBeenCalledWith({
+      code: "permission_denied",
+      reason: "Insert denied by policy on table todos",
+      batch: {
+        batchId: insertResult.batchId,
+        mode: "direct",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId: insertResult.batchId,
+          code: "permission_denied",
+          reason: "Insert denied by policy on table todos",
+        },
+      },
+    });
+    await sleep(250);
+
+    await dbBeforeRestart.shutdown();
+    untrack(dbBeforeRestart);
+
+    const dbAfterAcknowledgement = track(await createPersistentDb());
+    const replayAfterAckSpy = vi.fn();
+    dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
+    await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
+    await sleep(500);
+    expect(replayAfterAckSpy).not.toHaveBeenCalled();
   });
 
   describe("optimistic writes are reverted on server rejection", () => {
@@ -2030,6 +2081,41 @@ describe("Worker Bridge with OPFS", () => {
       "Reopened tab and current leader should converge after re-election",
     );
   });
+
+  it("can update an optional row field to null", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "null-update-repro",
+      undefined,
+      nullableApp.wasmSchema,
+    );
+    const sharedLocalAuthToken = generateAuthSecret();
+    const db = await createSyncedDb(
+      ctx,
+      "sync-null-update-repro",
+      sharedLocalAuthToken,
+      syncServer,
+    );
+
+    const inserted = db.insert(nullableApp.todos, {
+      title: "nullable-description-repro",
+      done: false,
+      description: "server-original",
+    });
+    const insertedTodo = inserted.value;
+    await inserted.wait({ tier: "local" });
+
+    const updateResult = db.update(nullableApp.todos, insertedTodo.id, {
+      description: null,
+    });
+    await updateResult.wait({ tier: "local" });
+
+    const rowAfterNullUpdate = await db.one(nullableApp.todos.where({ id: insertedTodo.id }), {
+      tier: "local",
+      localUpdates: "immediate",
+    });
+    expect(rowAfterNullUpdate).not.toBeNull();
+    expect(rowAfterNullUpdate?.description ?? null).toBeNull();
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------
@@ -2049,13 +2135,14 @@ async function waitForTodos(
 async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
+  schema?: Schema,
 ): Promise<TestingServerInfo> {
   const testingServer = await getTestingServerInfo(uniqueDbName(`worker-bridge-${scope}`));
   const { appId, serverUrl, adminSecret } = testingServer;
   const { hash: schemaHash } = await publishStoredSchema(serverUrl, {
     appId,
     adminSecret,
-    schema: app.wasmSchema,
+    schema: schema ?? app.wasmSchema,
   });
   const { head } = await fetchPermissionsHead(serverUrl, { appId, adminSecret });
   const permissionsToPublish = permissions ?? {

@@ -74,9 +74,8 @@ fn rc_direct_insert_persisted_reconnect_reconciles_rejected_batch_from_server() 
     );
     assert_eq!(
         core.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
@@ -276,10 +275,17 @@ fn rc_worker_peer_retains_replayable_batch_record_for_downstream_direct_write() 
 
     pump_a_to_b(&mut s);
 
-    let record = s.b.storage().load_local_batch_record(batch_id).unwrap();
     assert!(
-        record.is_some(),
-        "worker peers should retain a replayable local batch record for downstream direct writes"
+        s.b.storage()
+            .load_sealed_batch_submission(batch_id)
+            .unwrap()
+            .is_some()
+            || s.b
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap()
+                .is_some(),
+        "worker peers should retain sealed/fate state for downstream direct writes"
     );
 }
 
@@ -330,13 +336,10 @@ fn rc_transactional_insert_persisted_reconnect_reconciles_rejected_batch_from_se
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    let settled_record =
-        s.a.storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .expect("rejected transactional batch record should still be present");
     assert_eq!(
-        settled_record.latest_fate,
+        s.a.storage()
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id,
             code: "permission_denied".to_string(),
@@ -454,9 +457,8 @@ fn rc_direct_insert_persisted_is_rejected_by_authority_permission_check() {
     assert!(matches!(
         alice
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
@@ -572,9 +574,8 @@ fn rc_direct_insert_persisted_is_rejected_without_permissions_head() {
     assert!(matches!(
         alice
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected {
             batch_id: settled_batch_id,
             code,
@@ -687,13 +688,8 @@ fn rc_transactional_insert_is_rejected_by_authority_permission_check() {
                 && reason.contains("denied")
     ));
 
-    let alice_record = alice
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("alice should keep the rejected batch record");
     assert!(matches!(
-        alice_record.latest_fate,
+        alice.storage().load_authoritative_batch_fate(batch_id).unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, code, reason })
             if settled_batch_id == batch_id
                 && code == "permission_denied"
@@ -895,12 +891,14 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     alice.batched_tick();
 
     assert!(
-        alice
-            .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .is_some(),
-        "rejected batch should be replayably persisted before acknowledgement"
+        matches!(
+            alice
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected { .. })
+        ),
+        "rejected batch fate should be persisted before acknowledgement"
     );
 
     assert!(
@@ -909,8 +907,24 @@ fn rc_acknowledge_rejected_batch_prunes_local_batch_record() {
     );
     assert_eq!(
         alice.storage().load_local_batch_record(batch_id).unwrap(),
-        None,
-        "acknowledged rejected batch should no longer remain in local batch storage"
+        None
+    );
+    assert!(
+        matches!(
+            alice
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected { .. })
+        ),
+        "acknowledgement should leave the authoritative rejected fate intact"
+    );
+    assert!(
+        alice
+            .storage()
+            .is_rejected_batch_fate_acknowledged(batch_id)
+            .unwrap(),
+        "acknowledgement should persist a replay tombstone"
     );
     assert!(
         !alice.acknowledge_rejected_batch(batch_id).unwrap(),
@@ -933,7 +947,7 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     // alice -> worker
     //   alice receives a replayable transactional rejection
     //   restart preserves that rejected batch record
-    //   acknowledgement after restart prunes only the local batch record
+    //   acknowledgement after restart prunes the replayable records
     let schema = test_schema();
     let mut alice = create_runtime_with_schema(schema.clone(), "transactional-restart-reject-test");
     let mut worker = create_runtime_with_schema_and_sync_manager(
@@ -995,14 +1009,13 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
 
     let storage = alice.into_storage();
     let mut restarted =
-        create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+        create_runtime_with_storage(schema.clone(), "transactional-restart-reject-test", storage);
 
     assert!(matches!(
         restarted
             .storage()
-            .load_local_batch_record(batch_id)
-            .unwrap()
-            .and_then(|record| record.latest_fate),
+            .load_authoritative_batch_fate(batch_id)
+            .unwrap(),
         Some(crate::batch_fate::BatchFate::Rejected { batch_id: settled_batch_id, .. })
             if settled_batch_id == batch_id
     ));
@@ -1027,8 +1040,36 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
             .unwrap(),
         None
     );
+    assert!(
+        matches!(
+            restarted
+                .storage()
+                .load_authoritative_batch_fate(batch_id)
+                .unwrap(),
+            Some(crate::batch_fate::BatchFate::Rejected {
+                batch_id: settled_batch_id,
+                ..
+            }) if settled_batch_id == batch_id
+        ),
+        "acknowledgement should preserve the authoritative rejected fate"
+    );
+    assert!(
+        restarted
+            .storage()
+            .is_rejected_batch_fate_acknowledged(batch_id)
+            .unwrap(),
+        "acknowledgement should persist a replay tombstone"
+    );
 
-    let restarted_history_rows = restarted
+    let storage = restarted.into_storage();
+    let mut restarted_again =
+        create_runtime_with_storage(schema, "transactional-restart-reject-test", storage);
+    assert!(
+        restarted_again.drain_rejected_batch_ids().is_empty(),
+        "acknowledged rejected batches must not replay after another restart"
+    );
+
+    let restarted_history_rows = restarted_again
         .storage()
         .scan_history_row_batches("users", row_id)
         .unwrap();
@@ -1036,6 +1077,180 @@ fn rc_rejected_batch_survives_restart_until_acknowledged() {
     assert_eq!(
         restarted_history_rows[0].state,
         crate::row_histories::RowState::Rejected
+    );
+}
+
+#[test]
+fn rc_rejected_replay_record_can_be_synthesized_from_sealed_submission() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-reject-replay-record-test",
+    );
+
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    let branch_name = core.schema_manager().branch_name();
+    let batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "writer lacks publish rights".to_string(),
+        })
+        .unwrap();
+    core.replay_batch_rejection(batch_id, "permission_denied", "writer lacks publish rights")
+        .unwrap();
+
+    assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
+    let record = core
+        .local_batch_record_for_rejection_replay(batch_id)
+        .unwrap()
+        .expect("sealed rejected batches should remain replayable");
+    assert_eq!(record.batch_id, batch_id);
+    assert!(record.sealed);
+    assert!(matches!(
+        record.latest_fate,
+        Some(crate::batch_fate::BatchFate::Rejected { .. })
+    ));
+    assert_eq!(record.members.len(), 1);
+    assert_eq!(record.members[0].object_id, row_id);
+    assert!(record.sealed_submission.is_some());
+}
+
+#[test]
+fn rc_worker_sync_records_include_sealed_batches_pending_edge_reconciliation() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-pending-worker-sync-record-test",
+    );
+
+    let ((row_id, _row_values), _receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Local,
+        )
+        .unwrap();
+    let branch_name = core.schema_manager().branch_name();
+    let batch_id = core
+        .storage()
+        .load_visible_region_row("users", branch_name.as_str(), row_id)
+        .unwrap()
+        .expect("persisted direct insert should materialize a visible row")
+        .batch_id;
+
+    core.storage_mut()
+        .delete_local_batch_record(batch_id)
+        .unwrap();
+
+    assert_eq!(core.local_batch_record(batch_id).unwrap(), None);
+    let records = core.local_batch_records_for_worker_sync().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].batch_id, batch_id);
+    assert!(matches!(
+        records[0].latest_fate,
+        Some(crate::batch_fate::BatchFate::DurableDirect {
+            confirmed_tier: DurabilityTier::Local,
+            ..
+        })
+    ));
+    assert_eq!(records[0].members.len(), 1);
+    assert_eq!(records[0].members[0].object_id, row_id);
+}
+
+#[test]
+fn rc_worker_sync_records_include_local_only_fates_as_pending_markers() {
+    let mut core = create_runtime_with_schema(
+        users_delete_denied_authorization_schema(),
+        "direct-pending-fate-worker-sync-record-test",
+    );
+    let batch_id = BatchId::new();
+
+    core.storage_mut()
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::DurableDirect {
+            batch_id,
+            confirmed_tier: DurabilityTier::Local,
+        })
+        .unwrap();
+
+    let records = core.local_batch_records_for_worker_sync().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].batch_id, batch_id);
+    assert!(records[0].members.is_empty());
+    assert!(matches!(
+        records[0].latest_fate,
+        Some(crate::batch_fate::BatchFate::DurableDirect {
+            confirmed_tier: DurabilityTier::Local,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rc_worker_accepts_local_batch_replay_payloads_from_peer() {
+    let schema = test_schema();
+    let mut main = create_runtime_with_schema(schema.clone(), "worker-local-replay-test");
+    let mut worker = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "worker-local-replay-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Local),
+    );
+
+    let client_id = ClientId::new();
+    worker.add_client(client_id, None);
+    worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Peer);
+
+    let ((row_id, _row_values), batch_id) = main
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    let payloads = main.local_batch_replay_payloads(batch_id);
+    assert_eq!(payloads.len(), 2);
+
+    for payload in payloads {
+        worker.park_sync_message(InboxEntry {
+            source: Source::Client(client_id),
+            payload,
+        });
+    }
+    worker.batched_tick();
+    worker.immediate_tick();
+
+    let records = worker.local_batch_records_for_worker_sync().unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.batch_id == batch_id && record.members.len() == 1),
+        "worker should retain memberful batch record after local replay; records={records:?}"
+    );
+    assert!(
+        worker
+            .storage()
+            .scan_history_row_batches("users", row_id)
+            .unwrap()
+            .iter()
+            .any(|row| row.batch_id == batch_id),
+        "worker should persist replayed row history"
     );
 }
 
@@ -1069,19 +1284,13 @@ fn rc_restart_retracts_visible_rows_with_stored_rejected_settlement() {
         .expect("insert_persisted should create one visible row");
     let batch_id = visible_row_before.batch_id;
 
-    let mut record = alice
-        .storage()
-        .load_local_batch_record(batch_id)
-        .unwrap()
-        .expect("insert_persisted should create a local batch record");
-    record.latest_fate = Some(crate::batch_fate::BatchFate::Rejected {
-        batch_id,
-        code: "permission_denied".to_string(),
-        reason: "simulated post-insert rejection".to_string(),
-    });
     alice
         .storage_mut()
-        .upsert_local_batch_record(&record)
+        .upsert_authoritative_batch_fate(&crate::batch_fate::BatchFate::Rejected {
+            batch_id,
+            code: "permission_denied".to_string(),
+            reason: "simulated post-insert rejection".to_string(),
+        })
         .unwrap();
 
     let storage = alice.into_storage();

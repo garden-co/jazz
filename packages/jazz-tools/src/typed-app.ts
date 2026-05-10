@@ -21,47 +21,30 @@ import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
 
-export interface TableIndex<TColumns extends TableDefinition = TableDefinition> {
-  readonly name: string;
-  readonly columns: readonly Extract<keyof TColumns, string>[];
-}
-
-// Wrap table columns so we can hang chained modifiers like .index(...) off tables
+// Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
 export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   public readonly __jazzTableDefinition = true as const;
 
   constructor(
     public readonly columns: TColumns,
-    public readonly indexes: readonly TableIndex[] = [],
+    public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
   ) {}
 
-  index<
-    const TName extends string,
+  indexOnly<
     const TColumnsForIndex extends readonly [
       Extract<keyof TColumns, string>,
       ...Extract<keyof TColumns, string>[],
     ],
-  >(name: TName, columns: TColumnsForIndex): DefinedTable<TColumns> {
-    const normalizedName = name.trim();
-    if (!normalizedName) {
-      throw new Error("table.index(...) requires a non-empty index name.");
-    }
-
+  >(columns: TColumnsForIndex): DefinedTable<TColumns> {
     const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
     for (const column of normalizedColumns) {
       if (!(column in this.columns)) {
-        throw new Error(`table.index(...) references unknown column "${column}".`);
+        throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
       }
     }
 
-    return new DefinedTable(this.columns, [
-      ...this.indexes,
-      {
-        name: normalizedName,
-        columns: normalizedColumns,
-      },
-    ]);
+    return new DefinedTable(this.columns, normalizedColumns);
   }
 }
 
@@ -86,9 +69,7 @@ export function defineTable<const TColumns extends TableDefinition>(
   return new DefinedTable(columns);
 }
 
-type TableSource<TColumns extends TableDefinition = TableDefinition> =
-  | TColumns
-  | DefinedTable<TColumns>;
+type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;
 
 type NormalizeTableDefinition<TTable extends TableSource> =
   TTable extends DefinedTable<infer TColumns>
@@ -97,7 +78,7 @@ type NormalizeTableDefinition<TTable extends TableSource> =
       ? Simplify<TTable>
       : never;
 
-export type SchemaDefinition = Record<string, TableSource<TableDefinition>>;
+export type SchemaDefinition = Record<string, TableSource>;
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
@@ -1225,6 +1206,26 @@ export function unwrapTableDefinition<const TColumns extends TableDefinition>(
   return definition;
 }
 
+function tableIndexedColumns(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): string[] | undefined {
+  if (definition instanceof DefinedTable) {
+    return definition.indexedColumns ? [...definition.indexedColumns] : undefined;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      indexedColumns?: readonly string[];
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.indexedColumns ? [...maybeDefinedTable.indexedColumns] : undefined;
+    }
+  }
+
+  return undefined;
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1256,10 +1257,14 @@ function columnTransformsForTable(
 
 function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
   return {
-    tables: Object.entries(definition).map(([tableName, tableDefinition]) => ({
-      name: tableName,
-      columns: definitionToColumns(tableDefinition),
-    })),
+    tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
+      const indexedColumns = tableIndexedColumns(tableDefinition);
+      return {
+        name: tableName,
+        columns: definitionToColumns(tableDefinition),
+        ...(indexedColumns ? { indexedColumns } : {}),
+      };
+    }),
   };
 }
 

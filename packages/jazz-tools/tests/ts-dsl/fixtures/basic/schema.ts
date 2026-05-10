@@ -27,7 +27,7 @@ export const schema = {
       ownerId: s.ref("users").optional(),
       assigneesIds: s.array(s.ref("users")).default([]),
     })
-    .index("by_done", ["done"]),
+    .indexOnly(["done"]),
   table_with_defaults: s.table({
     integer: s.int().default(1),
     float: s.float().default(1),

@@ -154,6 +154,12 @@ jobs:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
 
+      - name: Mount Turbo sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: turbo-cache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: ${{ github.workspace }}/.turbo/cache
+
       - run: pnpm build:ci
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@v1

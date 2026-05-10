@@ -6,7 +6,13 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import type {
+  InsertValues,
+  Value,
+  RowDelta,
+  SubscriptionWireDelta,
+  WasmSchema,
+} from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   applyUserAuthHeaders,
@@ -81,10 +87,18 @@ export interface Runtime {
     tier: string,
   ): PersistedMutationResult;
   loadLocalBatchRecord?(batch_id: string): LocalBatchRecord | null;
+  loadLocalBatchRecordStorageRow?(batch_id: string): Uint8Array | null;
+  hydrateLocalBatchRecordStorageRow?(bytes: Uint8Array): void;
   loadLocalBatchRecords?(): LocalBatchRecord[];
+  loadBatchFate?(batch_id: string): BatchFate | null;
+  replayBatchRejection?(batch_id: string, code: string, reason: string): void;
   drainRejectedBatchIds?(): string[];
   acknowledgeRejectedBatch?(batch_id: string): boolean;
+  discardLocalBatch?(batch_id: string): boolean;
   sealBatch?(batch_id: string): void;
+  retransmitLocalBatch?(batch_id: string): void;
+  replayLocalBatchPayloads?(batch_id: string): Uint8Array[];
+  reconcileLocalBatchWithServer?(batch_id: string): void;
   query(
     query_json: string,
     session_json?: string | null,
@@ -112,6 +126,7 @@ export interface Runtime {
   batchedTick?(): void;
   addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
+  reconcileLocalBatchWithServer?(batch_id: string): void;
   addClient(): string;
   /**
    * When true, runtime row outputs are already aligned to the declared schema order.
@@ -197,6 +212,7 @@ type TransactionQueryOverlay = {
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
   transactionOverlay?: TransactionQueryOverlay;
+  runtimeSettledTier?: DurabilityTier | null;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -243,6 +259,7 @@ export interface LocalBatchRecord {
   mode: BatchMode;
   sealed: boolean;
   latestSettlement: BatchFate | null;
+  encodedRecord?: Uint8Array;
 }
 
 export interface CreateOptions extends TimestampOverrideOptions {
@@ -303,11 +320,12 @@ interface PersistedMutationResult {
 /**
  * Subscription callback type.
  */
-export type SubscriptionCallback = (delta: RowDelta) => void;
+export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 
 export interface ConnectSyncRuntimeOptions {
   useBinaryEncoding?: boolean;
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   onRejectedBatchAcknowledged?: (batchId: string) => void;
 }
 
@@ -575,13 +593,15 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   return raw;
 }
 
-function normalizeSubscriptionCallbackArgs(args: unknown[]): RowDelta | string | undefined {
+function normalizeSubscriptionCallbackArgs(
+  args: unknown[],
+): SubscriptionWireDelta | string | undefined {
   if (args.length === 1) {
-    return args[0] as RowDelta | string;
+    return args[0] as SubscriptionWireDelta | string;
   }
 
   if (args.length === 2 && args[0] == null) {
-    return args[1] as RowDelta | string | undefined;
+    return args[1] as SubscriptionWireDelta | string | undefined;
   }
 
   console.error("Invalid subscription callback arguments", args);
@@ -830,7 +850,7 @@ type RunInBatchResult<TResult> =
     ? Promise<WriteResult<Awaited<TResult>>>
     : WriteResult<TResult>;
 
-type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
+export type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
 
 function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
   return new Proxy(batchOrTx, {
@@ -855,16 +875,16 @@ function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Sco
   }) as Scoped<TBatchOrTx>;
 }
 
-function rollbackIfAvailable(batchOrTx: { rollback?: () => void }): void {
+function rollback(batchOrTx: { rollback: () => void }): void {
   try {
-    batchOrTx.rollback?.();
+    batchOrTx.rollback();
   } catch {
     // Preserve the original callback error.
   }
 }
 
 export function runInBatch<
-  TBatchOrTx extends { commit(): WriteHandle; rollback?: () => void },
+  TBatchOrTx extends { commit(): WriteHandle; rollback: () => void },
   TResult,
 >(
   batchOrTx: TBatchOrTx,
@@ -876,7 +896,7 @@ export function runInBatch<
     const scope = createBatchScope(batchOrTx);
     value = callback(scope);
   } catch (error) {
-    rollbackIfAvailable(batchOrTx);
+    rollback(batchOrTx);
     throw error;
   }
   const resultClient = typeof client === "function" ? client : () => client;
@@ -891,7 +911,7 @@ export function runInBatch<
         );
       },
       (error) => {
-        rollbackIfAvailable(batchOrTx);
+        rollback(batchOrTx);
         throw error;
       },
     ) as RunInBatchResult<TResult>;
@@ -900,11 +920,15 @@ export function runInBatch<
   return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
-export class Transaction {
-  private transactionStatus: "active" | "committed" | "rolledBack" = "active";
+type BatchHandleStatus = "active" | "committed" | "rolledBack";
+type BatchHandleKind = "Transaction" | "Direct batch";
+
+abstract class BatchHandleBase {
+  private status: BatchHandleStatus = "active";
   private readonly touchedRowIds = new Set<string>();
 
   constructor(
+    private readonly kind: BatchHandleKind,
     private readonly client: JazzClient,
     private readonly batchContext: BatchWriteContext,
     private readonly session?: Session,
@@ -912,11 +936,11 @@ export class Transaction {
   ) {}
 
   private ensureActive(): void {
-    if (this.transactionStatus === "committed") {
-      throw new Error(`Transaction ${this.batchContext.batchId} is already committed`);
+    if (this.status === "committed") {
+      throw new Error(`${this.kind} ${this.batchContext.batchId} is already committed`);
     }
-    if (this.transactionStatus === "rolledBack") {
-      throw new Error(`Transaction ${this.batchContext.batchId} has already been rolled back`);
+    if (this.status === "rolledBack") {
+      throw new Error(`${this.kind} ${this.batchContext.batchId} has already been rolled back`);
     }
   }
 
@@ -942,14 +966,20 @@ export class Transaction {
 
   commit(): WriteHandle {
     this.ensureActive();
-    const handle = this.client.sealBatch(this.batchId());
-    this.transactionStatus = "committed";
+    const handle =
+      this.touchedRowIds.size === 0
+        ? this.client.completeEmptyBatch(this.batchId())
+        : this.client.sealBatch(this.batchId());
+    this.status = "committed";
     return handle;
   }
 
   rollback(): void {
     this.ensureActive();
-    this.transactionStatus = "rolledBack";
+    if (this.touchedRowIds.size > 0) {
+      this.client.discardLocalBatch(this.batchId());
+    }
+    this.status = "rolledBack";
   }
 
   create(table: string, values: InsertValues, options?: CreateOptions): Row {
@@ -1017,90 +1047,38 @@ export class Transaction {
 }
 
 /**
+ * Transactions group a set of writes that should settle together after an authority validates them.
+ *
+ * Data read and written through this transaction is scoped to it, and will only be
+ * globally visible once it's committed and accepted by the authority.
+ */
+export class Transaction extends BatchHandleBase {
+  constructor(
+    client: JazzClient,
+    batchContext: BatchWriteContext,
+    session?: Session,
+    attribution?: string,
+  ) {
+    super("Transaction", client, batchContext, session, attribution);
+  }
+}
+
+/**
  * Transaction object available inside {@link JazzClient.transaction}'s callback.
  */
 export type TransactionScope = Scoped<Transaction>;
 
-export class DirectBatch {
-  private committedHandle: WriteHandle | null = null;
-
+/**
+ * Direct batches group a set of writes under one batch id and publish them when committed.
+ */
+export class DirectBatch extends BatchHandleBase {
   constructor(
-    private readonly client: JazzClient,
-    private readonly batchContext: BatchWriteContext,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-  ) {}
-
-  batchId(): string {
-    return this.batchContext.batchId;
-  }
-
-  private ensureActive(): void {
-    if (this.committedHandle) {
-      throw new Error(`Direct batch ${this.batchContext.batchId} is already committed`);
-    }
-  }
-
-  commit(): WriteHandle {
-    if (this.committedHandle) {
-      return this.committedHandle;
-    }
-    const handle = this.client.sealBatch(this.batchId());
-    this.committedHandle = handle;
-    return handle;
-  }
-
-  create(table: string, values: InsertValues, options?: CreateOptions): Row {
-    this.ensureActive();
-    return this.client.createInternal(
-      table,
-      values,
-      this.session,
-      this.attribution,
-      options,
-      this.batchContext,
-    );
-  }
-
-  upsert(table: string, values: InsertValues, options: UpsertOptions): void {
-    this.ensureActive();
-    this.client.upsertInternal(
-      table,
-      values,
-      options.id,
-      this.session,
-      this.attribution,
-      options.updatedAt,
-      this.batchContext,
-    );
-  }
-
-  update(objectId: string, updates: Record<string, Value>): void {
-    this.ensureActive();
-    this.client.updateInternal(
-      objectId,
-      updates,
-      this.session,
-      this.attribution,
-      this.batchContext,
-    );
-  }
-
-  delete(objectId: string): void {
-    this.ensureActive();
-    this.client.deleteInternal(objectId, this.session, this.attribution, this.batchContext);
-  }
-
-  localBatchRecord(batchId = this.batchId()): LocalBatchRecord | null {
-    return this.client.localBatchRecord(batchId);
-  }
-
-  localBatchRecords(): LocalBatchRecord[] {
-    return this.client.localBatchRecords();
-  }
-
-  acknowledgeRejectedBatch(batchId = this.batchId()): boolean {
-    return this.client.acknowledgeRejectedBatch(batchId);
+    client: JazzClient,
+    batchContext: BatchWriteContext,
+    session?: Session,
+    attribution?: string,
+  ) {
+    super("Direct batch", client, batchContext, session, attribution);
   }
 }
 
@@ -1317,9 +1295,12 @@ export class JazzClient {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly acknowledgedRejectedBatchErrors = new Map<string, PersistedWriteRejectedError>();
   private readonly replayedRejectedBatchRecords = new Map<string, LocalBatchRecord>();
+  private readonly rejectedBatchRollbackRecords = new Map<string, LocalBatchRecord>();
   private readonly hydratedWorkerBatchIds = new Set<string>();
+  private readonly completedEmptyBatchIds = new Set<string>();
   private readonly pendingReplayedRejectedBatchIds = new Set<string>();
   private readonly onRejectedBatchAcknowledged?: (batchId: string) => void;
+  private readonly onBeforeLocalBatchWait?: (batchId: string) => Promise<void>;
   private pendingBatchWaitPollTimer: ReturnType<typeof setTimeout> | null = null;
   private settlementPollTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
@@ -1369,6 +1350,7 @@ export class JazzClient {
     this.defaultDurabilityTier = defaultDurabilityTier;
     this.resolvedSession = this.resolveSessionFromContext();
     this.onRejectedBatchAcknowledged = runtimeOptions?.onRejectedBatchAcknowledged;
+    this.onBeforeLocalBatchWait = runtimeOptions?.onBeforeLocalBatchWait;
 
     if (runtimeOptions?.onAuthFailure) {
       const handler = runtimeOptions.onAuthFailure;
@@ -1613,13 +1595,29 @@ export class JazzClient {
     return [...records.values()].sort((left, right) => left.batchId.localeCompare(right.batchId));
   }
 
+  batchFate(batchId: string): BatchFate | null {
+    const runtimeFate = this.runtime.loadBatchFate
+      ? this.runtime.loadBatchFate(batchId)
+      : (this.localBatchRecord(batchId)?.latestSettlement ?? null);
+    const replayedFate = this.replayedRejectedBatchRecords.get(batchId)?.latestSettlement ?? null;
+    if (replayedFate?.kind === "rejected" && runtimeFate?.kind !== "rejected") {
+      return replayedFate;
+    }
+    return runtimeFate ?? replayedFate;
+  }
+
+  private batchRecordForFate(fate: BatchFate): LocalBatchRecord {
+    return {
+      batchId: fate.batchId,
+      mode: fate.kind === "acceptedTransaction" ? "transactional" : "direct",
+      sealed: true,
+      latestSettlement: fate,
+    };
+  }
+
   hasPendingHydratedBatchReconciliation(tier: DurabilityTier): boolean {
     for (const batchId of this.hydratedWorkerBatchIds) {
-      const record = this.localBatchRecord(batchId);
-      if (!record) {
-        continue;
-      }
-      const settlement = record.latestSettlement;
+      const settlement = this.batchFate(batchId);
       if (rejectionFromSettlement(settlement)) {
         continue;
       }
@@ -1628,6 +1626,20 @@ export class JazzClient {
       }
     }
     return false;
+  }
+
+  pendingHydratedBatchReconciliationIds(tier: DurabilityTier): string[] {
+    const pending: string[] = [];
+    for (const batchId of this.hydratedWorkerBatchIds) {
+      const settlement = this.batchFate(batchId);
+      if (rejectionFromSettlement(settlement)) {
+        continue;
+      }
+      if (!settlementSatisfiesTier(settlement, tier)) {
+        pending.push(batchId);
+      }
+    }
+    return pending;
   }
 
   hasHydratedWorkerBatch(batchId: string): boolean {
@@ -1647,7 +1659,7 @@ export class JazzClient {
   }
 
   private acknowledgeRejectedBatchInternal(batchId: string): boolean {
-    const rejection = rejectionFromSettlement(this.localBatchRecord(batchId)?.latestSettlement);
+    const rejection = rejectionFromSettlement(this.batchFate(batchId));
     const acknowledgedInRuntime = this.requireBatchRecordMethod("acknowledgeRejectedBatch")(
       batchId,
     );
@@ -1666,31 +1678,72 @@ export class JazzClient {
   hydrateLocalBatchRecords(records: LocalBatchRecord[]): void {
     const loadLocalBatchRecord = this.requireBatchRecordMethod("loadLocalBatchRecord");
     for (const record of records) {
+      const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
       this.hydratedWorkerBatchIds.add(record.batchId);
+      this.replayRejectedBatchRows(publicRecord);
       const runtimeRecord = loadLocalBatchRecord(record.batchId);
       if (
         runtimeRecord &&
         !(
-          record.latestSettlement?.kind === "rejected" &&
+          publicRecord.latestSettlement?.kind === "rejected" &&
           runtimeRecord.latestSettlement?.kind !== "rejected"
         )
       ) {
         continue;
       }
-      this.replayedRejectedBatchRecords.set(record.batchId, record);
-      if (record.latestSettlement?.kind === "rejected") {
+      this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
+      if (publicRecord.latestSettlement?.kind === "rejected") {
+        this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
         this.pendingReplayedRejectedBatchIds.add(record.batchId);
       }
     }
   }
 
   replayRejectedBatchRecord(record: LocalBatchRecord): void {
+    const publicRecord = this.hydrateEncodedLocalBatchRecord(record);
     this.hydratedWorkerBatchIds.add(record.batchId);
-    if (record.latestSettlement?.kind !== "rejected") {
+    if (publicRecord.latestSettlement?.kind !== "rejected") {
       return;
     }
-    this.replayedRejectedBatchRecords.set(record.batchId, record);
+    this.replayRejectedBatchRows(publicRecord);
+    this.replayedRejectedBatchRecords.set(record.batchId, publicRecord);
+    this.rejectedBatchRollbackRecords.set(record.batchId, publicRecord);
     this.pendingReplayedRejectedBatchIds.add(record.batchId);
+  }
+
+  private hydrateEncodedLocalBatchRecord(record: LocalBatchRecord): LocalBatchRecord {
+    if (record.encodedRecord) {
+      this.runtime.hydrateLocalBatchRecordStorageRow?.(record.encodedRecord);
+    }
+    const { encodedRecord: _encodedRecord, ...publicRecord } = record;
+    return publicRecord;
+  }
+
+  private replayRejectedBatchRows(record: LocalBatchRecord): void {
+    const settlement = record.latestSettlement;
+    if (settlement?.kind !== "rejected") {
+      return;
+    }
+    this.runtime.replayBatchRejection?.(record.batchId, settlement.code, settlement.reason);
+  }
+
+  private replayRejectedBatchRowsById(batchId: string): boolean {
+    const fate = this.batchFate(batchId);
+    if (fate?.kind !== "rejected") {
+      return false;
+    }
+    const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(fate);
+    this.replayRejectedBatchRows(batch);
+    return true;
+  }
+
+  private replayRejectedBatchRollbacks(): void {
+    for (const record of this.rejectedBatchRollbackRecords.values()) {
+      this.replayRejectedBatchRows(record);
+    }
+    for (const batchId of this.hydratedWorkerBatchIds) {
+      this.replayRejectedBatchRowsById(batchId);
+    }
   }
 
   markReplayedRejectedBatchDelivered(batchId: string): void {
@@ -1703,9 +1756,26 @@ export class JazzClient {
     return acknowledged;
   }
 
+  hasAcknowledgedRejectedBatch(batchId: string): boolean {
+    return this.acknowledgedRejectedBatchErrors.has(batchId);
+  }
+
+  hasPendingBatchWaiter(batchId: string): boolean {
+    return (this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0;
+  }
+
   sealBatch(batchId: string): WriteHandle {
     this.requireBatchRecordMethod("sealBatch")(batchId);
     return new WriteHandle(batchId, this);
+  }
+
+  completeEmptyBatch(batchId: string): WriteHandle {
+    this.completedEmptyBatchIds.add(batchId);
+    return new WriteHandle(batchId, this);
+  }
+
+  discardLocalBatch(batchId: string): void {
+    this.runtime.discardLocalBatch?.(batchId);
   }
 
   /**
@@ -1812,7 +1882,11 @@ export class JazzClient {
   private requireBatchRecordMethod<
     T extends keyof Pick<
       Runtime,
-      "loadLocalBatchRecord" | "loadLocalBatchRecords" | "acknowledgeRejectedBatch" | "sealBatch"
+      | "loadLocalBatchRecord"
+      | "loadLocalBatchRecords"
+      | "loadBatchFate"
+      | "acknowledgeRejectedBatch"
+      | "sealBatch"
     >,
   >(method: T): NonNullable<Runtime[T]> {
     const runtimeMethod = this.runtime[method];
@@ -1979,9 +2053,9 @@ export class JazzClient {
 
   private alignSubscriptionDeltaToDeclaredSchema(
     queryJson: string,
-    delta: RowDelta,
+    delta: SubscriptionWireDelta,
     runtimeSchema?: WasmSchema,
-  ): RowDelta {
+  ): SubscriptionWireDelta {
     if (this.returnsDeclaredSchemaRows()) {
       return delta;
     }
@@ -2195,10 +2269,13 @@ export class JazzClient {
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const effectiveRuntimeSchema =
       runtimeSchema ?? (this.returnsDeclaredSchemaRows() ? undefined : this.getSchema());
+    this.replayRejectedBatchRollbacks();
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
-      normalizedOptions.tier,
+      options?.runtimeSettledTier === null
+        ? undefined
+        : (options?.runtimeSettledTier ?? normalizedOptions.tier),
       optionsJson,
     );
     return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], effectiveRuntimeSchema);
@@ -2365,7 +2442,7 @@ export class JazzClient {
           return;
         }
 
-        const delta: RowDelta =
+        const delta: SubscriptionWireDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(
           this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, effectiveRuntimeSchema),
@@ -2512,7 +2589,11 @@ export class JazzClient {
       return { settled: true, error: acknowledgedRejection };
     }
 
-    const settlement = this.localBatchRecord(batchId)?.latestSettlement;
+    if (this.completedEmptyBatchIds.has(batchId)) {
+      return { settled: true, error: null };
+    }
+
+    const settlement = this.batchFate(batchId);
     const rejection = rejectionFromSettlement(settlement);
     if (rejection) {
       return { settled: true, error: rejection };
@@ -2539,6 +2620,7 @@ export class JazzClient {
           continue;
         }
         if (outcome.error) {
+          this.replayRejectedBatchRowsById(batchId);
           waiter.reject(outcome.error);
           rejectedBatchIdsHandledByWaiters.add(batchId);
         } else {
@@ -2627,25 +2709,23 @@ export class JazzClient {
     batchesHandledByLiveWaiters: ReadonlySet<string> = new Set<string>(),
   ): void {
     for (const batchId of rejectedBatchIds) {
-      const record = this.localBatchRecord(batchId);
-      if (!record) {
-        continue;
-      }
-      const settlement = record.latestSettlement;
+      const settlement = this.batchFate(batchId);
       if (!settlement || settlement.kind !== "rejected") {
         continue;
       }
-      if (batchesHandledByLiveWaiters.has(record.batchId)) {
+      this.replayRejectedBatchRowsById(batchId);
+      if (batchesHandledByLiveWaiters.has(batchId)) {
         continue;
       }
-      if ((this.pendingBatchWaiters.get(record.batchId)?.length ?? 0) > 0) {
+      if ((this.pendingBatchWaiters.get(batchId)?.length ?? 0) > 0) {
         continue;
       }
 
+      const batch = this.localBatchRecord(batchId) ?? this.batchRecordForFate(settlement);
       const event: MutationErrorEvent = {
         code: settlement.code,
         reason: settlement.reason,
-        batch: record,
+        batch,
       };
 
       if (this.mutationErrorListeners.size === 0) {
@@ -2657,7 +2737,7 @@ export class JazzClient {
         }
       }
 
-      this.acknowledgeRejectedBatchInternal(record.batchId);
+      this.acknowledgeRejectedBatchInternal(batchId);
     }
   }
 
@@ -2669,10 +2749,20 @@ export class JazzClient {
     return [...new Set([...runtimeBatchIds, ...replayedBatchIds])].sort();
   }
 
-  waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+  async waitForPersistedBatch(batchId: string, tier: DurabilityTier): Promise<void> {
+    if (tier === "local" && this.onBeforeLocalBatchWait) {
+      await this.onBeforeLocalBatchWait(batchId);
+    }
+
     const outcome = this.batchWaitOutcome(batchId, tier);
     if (outcome.settled) {
-      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve();
+      if (outcome.error) {
+        this.replayRejectedBatchRowsById(batchId);
+      }
+      if (outcome.error) {
+        throw outcome.error;
+      }
+      return;
     }
 
     return new Promise<void>((resolve, reject) => {

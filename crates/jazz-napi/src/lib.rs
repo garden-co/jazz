@@ -44,8 +44,8 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_runtime_schema_input, parse_session_input, parse_write_context_input,
-    query_rows_can_be_schema_aligned, serialize_local_batch_record, serialize_local_batch_records,
-    subscription_delta_to_json,
+    query_rows_can_be_schema_aligned, serialize_batch_fate, serialize_local_batch_record,
+    serialize_local_batch_records, subscription_delta_to_json,
 };
 use jazz_tools::identity;
 use jazz_tools::middleware::AuthConfig;
@@ -807,6 +807,23 @@ impl NapiRuntime {
         Ok(serialize_local_batch_records(&records))
     }
 
+    #[napi(js_name = "loadBatchFate", ts_return_type = "any | null")]
+    pub fn load_batch_fate(&self, batch_id: String) -> napi::Result<serde_json::Value> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let fate = core
+            .batch_fate(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Load batch fate failed: {e}")))?;
+
+        Ok(match fate {
+            Some(fate) => serialize_batch_fate(&fate),
+            None => serde_json::Value::Null,
+        })
+    }
+
     #[napi(js_name = "drainRejectedBatchIds", ts_return_type = "string[]")]
     pub fn drain_rejected_batch_ids(&self) -> napi::Result<Vec<String>> {
         let mut core = self
@@ -830,6 +847,17 @@ impl NapiRuntime {
         core.acknowledge_rejected_batch(batch_id).map_err(|e| {
             napi::Error::from_reason(format!("Acknowledge rejected batch failed: {e}"))
         })
+    }
+
+    #[napi(js_name = "discardLocalBatch")]
+    pub fn discard_local_batch(&self, batch_id: String) -> napi::Result<bool> {
+        let batch_id = parse_batch_id_input(&batch_id).map_err(napi::Error::from_reason)?;
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.discard_local_batch(batch_id)
+            .map_err(|e| napi::Error::from_reason(format!("Discard local batch failed: {e}")))
     }
 
     #[napi(js_name = "sealBatch")]

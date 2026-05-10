@@ -221,6 +221,34 @@ impl QueryGraph {
         }
     }
 
+    /// Mark multiple row IDs as updated, dirtying each materializer once.
+    pub fn mark_rows_updated(&mut self, ids: &AHashSet<ObjectId>) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let materialize_node_ids: Vec<NodeId> = self
+            .nodes
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, compact)| {
+                if let GraphNode::Materialize(mat_node) = &mut compact.node {
+                    for id in ids {
+                        mat_node.mark_updated(*id);
+                    }
+                    Some(NodeId(idx as u64))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for node_id in materialize_node_ids {
+            self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
+    }
+
     /// Mark a row ID as deleted for removal delta emission.
     /// This tells MaterializeNodes to emit a removal delta for this row.
     pub fn mark_row_deleted(&mut self, id: ObjectId) {
@@ -240,6 +268,34 @@ impl QueryGraph {
             .collect();
 
         // Second pass: mark dirty and propagate downstream
+        for node_id in materialize_node_ids {
+            self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
+    }
+
+    /// Mark multiple row IDs as deleted, dirtying each materializer once.
+    pub fn mark_rows_deleted(&mut self, ids: &AHashSet<ObjectId>) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let materialize_node_ids: Vec<NodeId> = self
+            .nodes
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, compact)| {
+                if let GraphNode::Materialize(mat_node) = &mut compact.node {
+                    for id in ids {
+                        mat_node.mark_deleted(*id);
+                    }
+                    Some(NodeId(idx as u64))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         for node_id in materialize_node_ids {
             self.mark_dirty(node_id);
             self.mark_downstream_dirty(node_id);

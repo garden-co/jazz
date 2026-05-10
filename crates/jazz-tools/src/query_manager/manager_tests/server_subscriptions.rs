@@ -64,6 +64,7 @@ fn server_builds_query_graph_on_subscription() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -93,6 +94,298 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn initial_query_settled_is_not_queued_behind_later_query_scope_rows() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let bob = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
+        .unwrap();
+    let _charlie = server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut server_qm, &storage, client_id);
+    server_qm.sync_manager_mut().take_outbox();
+
+    let small_query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(90))
+        .build();
+    let broad_query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(0))
+        .build();
+
+    for (query_id, query) in [(QueryId(1), small_query), (QueryId(2), broad_query)] {
+        server_qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id,
+                query: Box::new(query),
+                session: None,
+                required_tier: None,
+                propagation: crate::sync_manager::QueryPropagation::Full,
+                policy_context_tables: vec![],
+            },
+        });
+    }
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let first_settled_idx = outbox
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                crate::sync_manager::OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::QuerySettled { query_id: QueryId(1), .. },
+                } if *id == client_id
+            )
+        })
+        .expect("first query should settle");
+    let second_query_only_row_idx = outbox
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                crate::sync_manager::OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::RowBatchNeeded { row, .. },
+                } if *id == client_id && row.row_id == bob.row_id
+            )
+        })
+        .expect("second query should queue its additional rows");
+
+    assert!(
+        first_settled_idx < second_query_only_row_idx,
+        "query 1 settlement should follow query 1 rows ({}) before query 2 rows ({}); outbox={outbox:?}",
+        alice.row_id,
+        bob.row_id
+    );
+}
+
+#[test]
+fn server_subscription_does_not_repeat_same_scope_same_tier_settlement() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    server_qm.process(&mut storage);
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            crate::sync_manager::OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled { query_id: QueryId(1), .. },
+            } if *id == client_id
+        )),
+        "initial settlement should still be emitted"
+    );
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(10)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().all(|entry| !matches!(
+            entry,
+            crate::sync_manager::OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled { query_id: QueryId(1), .. },
+            } if *id == client_id
+        )),
+        "dirty graph passes with unchanged scope and unchanged tier should not resend QuerySettled"
+    );
+}
+
+#[test]
+fn duplicate_server_subscription_does_not_replay_same_scope_same_tier_settlement() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    for _ in 0..2 {
+        server_qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id: QueryId(1),
+                query: Box::new(query.clone()),
+                session: None,
+                required_tier: None,
+                propagation: crate::sync_manager::QueryPropagation::Full,
+                policy_context_tables: vec![],
+            },
+        });
+
+        server_qm.process(&mut storage);
+    }
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let settled_count = outbox
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                crate::sync_manager::OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::QuerySettled { query_id: QueryId(1), .. },
+                } if *id == client_id
+            )
+        })
+        .count();
+
+    assert_eq!(
+        settled_count, 1,
+        "re-registering an equivalent active subscription should not replay an unchanged settlement"
+    );
+}
+
+#[test]
+fn pending_duplicate_server_subscription_is_compiled_once() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    server_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    server_qm.process(&mut storage);
+
+    let client_id = ClientId::new();
+    connect_client(&mut server_qm, &storage, client_id);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    for _ in 0..2 {
+        server_qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id: QueryId(1),
+                query: Box::new(query.clone()),
+                session: None,
+                required_tier: None,
+                propagation: crate::sync_manager::QueryPropagation::Full,
+                policy_context_tables: vec![],
+            },
+        });
+    }
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let settled_count = outbox
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                crate::sync_manager::OutboxEntry {
+                    destination: Destination::Client(id),
+                    payload: SyncPayload::QuerySettled { query_id: QueryId(1), .. },
+                } if *id == client_id
+            )
+        })
+        .count();
+
+    assert_eq!(
+        settled_count, 1,
+        "duplicate pending registrations for the same client/query should compile and settle once"
+    );
 }
 
 #[test]
@@ -128,6 +421,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -191,6 +485,7 @@ fn server_authorizes_subscription_sync_scope_without_rechecking_output_scope() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: Some(Session::new("alice")),
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -296,6 +591,7 @@ fn server_sends_error_for_uncompilable_query_subscription() {
             query_id: QueryId(42),
             query: Box::new(invalid_query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -356,6 +652,7 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
             query_id: QueryId(7),
             query: Box::new(valid_query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -463,6 +760,7 @@ fn server_pushes_new_matches() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -563,6 +861,7 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
                 query_id,
                 query: Box::new(query),
                 session: None,
+                required_tier: None,
                 propagation,
                 policy_context_tables: vec![],
             },
@@ -627,6 +926,7 @@ fn server_does_not_push_non_matching() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

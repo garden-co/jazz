@@ -1,7 +1,8 @@
 use super::*;
-use crate::batch_fate::LocalBatchMember;
+use crate::batch_fate::{LocalBatchMember, SealedBatchMember, SealedBatchSubmission};
 use crate::row_histories::{RowState, patch_row_batch_state};
 use crate::storage::metadata_from_row_locator;
+use crate::sync_manager::{RowMetadata, SyncPayload};
 
 impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
     fn local_batch_row_was_insert(
@@ -9,17 +10,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         table: &str,
         row: &crate::row_histories::StoredRowBatch,
     ) -> bool {
+        if !row.parents.is_empty() {
+            return false;
+        }
+
         let Ok(history_rows) = self.storage.scan_history_row_batches(table, row.row_id) else {
-            return row.parents.is_empty();
+            return true;
         };
         !history_rows.iter().any(|candidate| {
             candidate.branch == row.branch
                 && candidate.batch_id != row.batch_id
-                && candidate.state.is_visible()
+                && !matches!(candidate.state, RowState::Rejected)
         })
     }
 
-    fn local_batch_rows(
+    pub(crate) fn local_batch_rows(
         &self,
         batch_id: crate::row_histories::BatchId,
     ) -> Vec<(
@@ -27,31 +32,139 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         crate::storage::RowLocator,
         crate::row_histories::StoredRowBatch,
     )> {
-        let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id) else {
-            return Vec::new();
-        };
-
         let mut rows = Vec::new();
-        for member in record.members {
-            let row_locator = self
-                .storage
-                .load_row_locator(member.object_id)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| crate::storage::RowLocator {
-                    table: member.table_name.clone().into(),
-                    origin_schema_hash: None,
-                });
-            let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
-                member.table_name.as_str(),
-                member.schema_hash,
-                member.branch_name.as_str(),
-                member.object_id,
-                batch_id,
-            ) else {
-                continue;
-            };
-            rows.push((member, row_locator, row));
+        if let Ok(Some(submission)) = self.storage.load_sealed_batch_submission(batch_id) {
+            for sealed_member in submission.members {
+                let Ok(Some(row_locator)) = self.storage.load_row_locator(sealed_member.object_id)
+                else {
+                    continue;
+                };
+                let Some(row) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), sealed_member.object_id)
+                    .ok()
+                    .and_then(|rows| {
+                        rows.into_iter().find(|row| {
+                            row.batch_id == batch_id
+                                && row.branch.as_str() == submission.target_branch_name.as_str()
+                                && row.content_digest() == sealed_member.row_digest
+                        })
+                    })
+                else {
+                    continue;
+                };
+                let Ok(schema_hash) = self.local_batch_member_schema_hash(
+                    submission.target_branch_name,
+                    sealed_member.object_id,
+                    batch_id,
+                ) else {
+                    continue;
+                };
+                let member = LocalBatchMember {
+                    object_id: sealed_member.object_id,
+                    table_name: row_locator.table.to_string(),
+                    branch_name: submission.target_branch_name,
+                    schema_hash,
+                    row_digest: sealed_member.row_digest,
+                };
+                rows.push((member, row_locator, row));
+            }
+        }
+
+        if rows.is_empty()
+            && let Some(record) = self.local_batch_record_cache.get(&batch_id)
+        {
+            for member in record.members.clone() {
+                let row_locator = self
+                    .storage
+                    .load_row_locator(member.object_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| crate::storage::RowLocator {
+                        table: member.table_name.clone().into(),
+                        origin_schema_hash: None,
+                    });
+                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
+                    batch_id,
+                ) else {
+                    let Some(row) = self
+                        .storage
+                        .scan_history_row_batches(member.table_name.as_str(), member.object_id)
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter().find(|row| {
+                                row.batch_id == batch_id
+                                    && row.branch.as_str() == member.branch_name.as_str()
+                            })
+                        })
+                    else {
+                        continue;
+                    };
+                    rows.push((member, row_locator, row));
+                    continue;
+                };
+                rows.push((member, row_locator, row));
+            }
+        }
+        if rows.is_empty()
+            && let Ok(Some(record)) = self.storage.load_local_batch_record(batch_id)
+        {
+            for member in record.members {
+                let row_locator = self
+                    .storage
+                    .load_row_locator(member.object_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| crate::storage::RowLocator {
+                        table: member.table_name.clone().into(),
+                        origin_schema_hash: None,
+                    });
+                let Ok(Some(row)) = self.storage.load_history_row_batch_for_schema_hash(
+                    member.table_name.as_str(),
+                    member.schema_hash,
+                    member.branch_name.as_str(),
+                    member.object_id,
+                    batch_id,
+                ) else {
+                    continue;
+                };
+                rows.push((member, row_locator, row));
+            }
+        }
+        if rows.is_empty()
+            && let Ok(row_locators) = self.storage.scan_row_locators()
+        {
+            for (object_id, row_locator) in row_locators {
+                let Ok(history_rows) = self
+                    .storage
+                    .scan_history_row_batches(row_locator.table.as_str(), object_id)
+                else {
+                    continue;
+                };
+                for row in history_rows
+                    .into_iter()
+                    .filter(|row| row.batch_id == batch_id)
+                {
+                    let branch_name = BranchName::new(row.branch.as_str());
+                    let Ok(schema_hash) =
+                        self.local_batch_member_schema_hash(branch_name, object_id, batch_id)
+                    else {
+                        continue;
+                    };
+                    let member = LocalBatchMember {
+                        object_id,
+                        table_name: row_locator.table.to_string(),
+                        branch_name,
+                        schema_hash,
+                        row_digest: row.content_digest(),
+                    };
+                    rows.push((member, row_locator.clone(), row));
+                }
+            }
         }
 
         rows.sort_by(
@@ -80,22 +193,52 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         rows
     }
 
+    pub(crate) fn direct_sealed_submission_from_local_batch_rows(
+        batch_id: crate::row_histories::BatchId,
+        rows: &[(
+            LocalBatchMember,
+            crate::storage::RowLocator,
+            crate::row_histories::StoredRowBatch,
+        )],
+    ) -> Option<SealedBatchSubmission> {
+        let first_branch = rows.first()?.0.branch_name;
+        if rows
+            .iter()
+            .any(|(member, _, _)| member.branch_name != first_branch)
+        {
+            return None;
+        }
+        Some(SealedBatchSubmission::new(
+            batch_id,
+            first_branch,
+            rows.iter()
+                .map(|(member, _, _)| SealedBatchMember {
+                    object_id: member.object_id,
+                    row_digest: member.row_digest,
+                })
+                .collect(),
+            Vec::new(),
+        ))
+    }
+
     fn apply_received_batch_fate(&mut self, fate: crate::batch_fate::BatchFate) {
         let batch_id = fate.batch_id();
-        if let Ok(Some(mut record)) = self.storage.load_local_batch_record(batch_id) {
-            record.apply_fate(fate.clone());
-            if let Err(error) = self.storage.upsert_local_batch_record(&record) {
-                tracing::warn!(
-                    ?batch_id,
-                    %error,
-                    "failed to persist local batch fate"
-                );
-            }
+        if let Err(error) = self.storage.upsert_authoritative_batch_fate(&fate) {
+            tracing::warn!(
+                ?batch_id,
+                %error,
+                "failed to persist batch fate"
+            );
         }
 
         if let crate::batch_fate::BatchFate::Rejected { code, reason, .. } = &fate {
             self.mark_local_batch_rows_rejected(batch_id);
-            self.durability.record_rejection(batch_id, code, reason);
+            let acknowledged = self
+                .is_rejected_batch_acknowledged(batch_id)
+                .unwrap_or(false);
+            if !acknowledged {
+                self.durability.record_rejection(batch_id, code, reason);
+            }
         } else if matches!(fate, crate::batch_fate::BatchFate::Missing { .. }) {
             self.retransmit_local_batch_to_servers(batch_id);
         } else if matches!(
@@ -123,7 +266,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(super) fn mark_local_batch_rows_rejected(
+    pub(crate) fn mark_local_batch_rows_rejected(
         &mut self,
         batch_id: crate::row_histories::BatchId,
     ) {
@@ -131,10 +274,21 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         let mut batch_patch_succeeded_by_table = std::collections::HashMap::new();
 
         for (member, row_locator, row) in self.local_batch_rows(batch_id) {
-            if !matches!(
-                row.state,
-                RowState::VisibleDirect | RowState::StagingPending | RowState::Superseded
-            ) {
+            let was_visible = matches!(row.state, RowState::VisibleDirect)
+                || (matches!(row.state, RowState::Rejected)
+                    && self
+                        .storage
+                        .load_visible_region_row(
+                            row_locator.table.as_str(),
+                            row.branch.as_str(),
+                            member.object_id,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some_and(|visible_row| visible_row.batch_id() == row.batch_id()));
+
+            if !was_visible && !matches!(row.state, RowState::StagingPending | RowState::Superseded)
+            {
                 continue;
             }
 
@@ -145,7 +299,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 member.object_id,
                 row.batch_id(),
                 row.data.to_vec(),
-                matches!(row.state, RowState::VisibleDirect),
+                was_visible,
                 row.delete_kind.is_some(),
                 self.local_batch_row_was_insert(row_locator.table.as_str(), &row),
             ));
@@ -258,28 +412,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
-    pub(super) fn retransmit_local_batch_to_servers(
-        &mut self,
-        batch_id: crate::row_histories::BatchId,
-    ) {
+    pub fn retransmit_local_batch_to_servers(&mut self, batch_id: crate::row_histories::BatchId) {
         let sealed_submission = self
             .storage
-            .load_local_batch_record(batch_id)
+            .load_sealed_batch_submission(batch_id)
             .ok()
-            .flatten()
-            .and_then(|record| record.sealed.then_some(record.sealed_submission).flatten());
+            .flatten();
 
-        let rows_to_retransmit = self
-            .local_batch_rows(batch_id)
-            .into_iter()
+        let local_rows = self.local_batch_rows(batch_id);
+        let rows_to_retransmit = local_rows
+            .iter()
             .map(|(member, row_locator, row)| {
                 (
                     member.object_id,
-                    metadata_from_row_locator(&row_locator),
-                    row,
+                    metadata_from_row_locator(row_locator),
+                    row.clone(),
                 )
             })
             .collect::<Vec<_>>();
+        let sealed_submission = sealed_submission.or_else(|| {
+            Self::direct_sealed_submission_from_local_batch_rows(batch_id, &local_rows)
+        });
 
         let sync_manager = self.schema_manager.query_manager_mut().sync_manager_mut();
         for (row_id, metadata, row) in rows_to_retransmit {
@@ -341,8 +494,25 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         >= pending_settled.through_seq
                 });
                 if is_ready {
+                    tracing::trace!(
+                        server_id = ?pending_settled.server_id,
+                        query_id = pending_settled.query_id.0,
+                        tier = ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        "jazz trace query settled ready for query manager"
+                    );
                     ready.push(pending_settled);
                 } else {
+                    tracing::trace!(
+                        server_id = ?pending_settled.server_id,
+                        query_id = pending_settled.query_id.0,
+                        tier = ?pending_settled.tier,
+                        through_seq = pending_settled.through_seq,
+                        last_applied = pending_settled.server_id.and_then(|server_id| {
+                            self.last_applied_server_seq.get(&server_id).copied()
+                        }),
+                        "jazz trace query settled blocked on stream sequence"
+                    );
                     blocked.push(pending_settled);
                 }
             }
@@ -361,6 +531,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             {
                 let query_manager = self.schema_manager.query_manager_mut();
                 for pending_settled in ready_query_settled {
+                    if let Some(server_id) = pending_settled.server_id {
+                        query_manager
+                            .sync_manager_mut()
+                            .relay_query_settled_to_origins(
+                                server_id,
+                                pending_settled.query_id,
+                                pending_settled.tier,
+                            );
+                    }
                     query_manager
                         .apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 }
@@ -500,8 +679,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         self.handle_transport_messages();
 
+        if !self.has_outbound()
+            && self
+                .schema_manager
+                .query_manager()
+                .sync_manager()
+                .has_pending_query_subscriptions()
+        {
+            self.immediate_tick();
+        }
+
         // 1. Send all outgoing sync messages
         self.flush_runtime_outbox("flushing outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // 2. Process parked sync messages
         self.handle_sync_messages();
@@ -510,6 +708,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // The scheduler's debounce prevents immediate_tick() from scheduling
         // another batched_tick while we're inside one, so we must flush here.
         self.flush_runtime_outbox("flushing post-process outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {
@@ -595,6 +802,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         self.park_sync_message(*entry);
                     }
                 }
+                crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                    self.park_sync_message_batch(entries);
+                }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
                 }
@@ -640,6 +850,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .keys()
             .copied()
             .collect();
+        let mut applied_since_last_tick = applied_messages > 0;
         for server_id in server_ids {
             let mut next_expected = *self.next_expected_server_seq.get(&server_id).unwrap_or(&1);
             let mut ready_messages = Vec::new();
@@ -665,6 +876,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
+                applied_since_last_tick = true;
                 last_applied = sequence;
             }
             self.next_expected_server_seq
@@ -677,7 +889,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if applied_messages > 0 {
             debug!(count = applied_messages, "applied parked sync messages");
-            self.immediate_tick();
+            if applied_since_last_tick {
+                self.immediate_tick();
+            }
         }
     }
 
@@ -733,6 +947,58 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    fn park_sync_message_batch(
+        &mut self,
+        entries: Vec<crate::transport_manager::SequencedInboxEntry>,
+    ) {
+        let mut parked_any = false;
+        for crate::transport_manager::SequencedInboxEntry { entry, sequence } in entries {
+            if let Some(sequence) = sequence {
+                match entry.source {
+                    crate::sync_manager::Source::Server(server_id) => {
+                        let next_expected = self
+                            .next_expected_server_seq
+                            .entry(server_id)
+                            .or_insert(sequence);
+                        if sequence < *next_expected {
+                            trace!(
+                                ?server_id,
+                                sequence,
+                                next_expected = *next_expected,
+                                "dropping already-applied sequenced sync message"
+                            );
+                            continue;
+                        }
+
+                        if let Some((ref tracer, ref name)) = self.sync_tracer {
+                            tracer.record_incoming(&entry.source, name, &entry.payload);
+                        }
+
+                        self.parked_sync_messages_by_server_seq
+                            .entry(server_id)
+                            .or_default()
+                            .insert(sequence, entry);
+                        parked_any = true;
+                    }
+                    _ => {
+                        self.parked_sync_messages.push(entry);
+                        parked_any = true;
+                    }
+                }
+            } else {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_incoming(&entry.source, name, &entry.payload);
+                }
+                self.parked_sync_messages.push(entry);
+                parked_any = true;
+            }
+        }
+
+        if parked_any {
+            self.scheduler.schedule_batched_tick();
+        }
+    }
+
     /// Set the next expected sequenced message for a server stream.
     pub fn set_next_expected_server_sequence(&mut self, server_id: ServerId, next_sequence: u64) {
         let next_sequence = next_sequence.max(1);
@@ -781,6 +1047,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     self.park_sync_message(*entry);
                 }
             }
+            crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                self.park_sync_message_batch(entries);
+            }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
                 released_server_hold = true;
@@ -805,5 +1074,30 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         if released_server_hold {
             self.immediate_tick();
         }
+    }
+
+    pub fn local_batch_replay_payloads(
+        &self,
+        batch_id: crate::row_histories::BatchId,
+    ) -> Vec<SyncPayload> {
+        let local_rows = self.local_batch_rows(batch_id);
+        let mut payloads = local_rows
+            .iter()
+            .map(|(member, row_locator, row)| SyncPayload::RowBatchCreated {
+                metadata: Some(RowMetadata {
+                    id: member.object_id,
+                    metadata: metadata_from_row_locator(row_locator),
+                }),
+                row: row.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(submission) =
+            Self::direct_sealed_submission_from_local_batch_rows(batch_id, &local_rows)
+        {
+            payloads.push(SyncPayload::SealBatch { submission });
+        }
+
+        payloads
     }
 }

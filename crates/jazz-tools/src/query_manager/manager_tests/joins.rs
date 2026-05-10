@@ -1333,6 +1333,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: Some(session),
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -1421,6 +1422,7 @@ fn sync_backed_joined_exists_rel_session_subscription_keeps_local_rows_when_serv
         TableName::new("teams"),
         TableSchema {
             columns: RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            indexed_columns: None,
             policies: TablePolicies::new().with_select(PolicyExpr::ExistsRel {
                 rel: RelExpr::Filter {
                     input: Box::new(RelExpr::Join {

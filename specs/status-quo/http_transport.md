@@ -18,8 +18,25 @@ carrying payloads such as:
 
 - `Connected`
 - `SyncUpdate`
+- `SyncUpdateBatch`
 - `Error`
 - `Heartbeat`
+
+Every WebSocket message uses the same outer frame shape:
+
+```text
+[4 bytes: u32 big-endian payload length][N bytes: payload]
+```
+
+The initial auth handshake payload is JSON. That keeps protocol-version and
+auth failures readable for older or mismatched peers. Once both sides confirm
+`SYNC_PROTOCOL_VERSION`, post-handshake sync transport payloads are binary
+postcard payloads:
+
+- client-to-server frames carry either a single outbox entry payload or a
+  `SyncBatchRequest`
+- server-to-client frames carry `ServerEvent` payloads, including coalesced
+  `SyncUpdateBatch` events
 
 The connection is app-scoped, so every non-health server interaction uses the same `/apps/<app_id>/...`
 prefix as the cloud server.
@@ -111,7 +128,7 @@ The in-repo server keeps a small route set:
 | File                                                | Purpose                                |
 | --------------------------------------------------- | -------------------------------------- |
 | `crates/jazz-tools/src/transport_protocol.rs`       | Shared request/event types and framing |
-| `crates/jazz-tools/src/routes.rs`                   | In-repo server routes                  |
+| `crates/jazz-tools/src/server/routes/`              | In-repo server routes                  |
 | `crates/jazz-tools/src/middleware/auth.rs`          | HTTP auth handling                     |
 | `crates/jazz-tools/src/transport_manager.rs`        | Rust WebSocket transport manager       |
 | `crates/jazz-tools/src/ws_stream/`                  | Concrete WebSocket stream adapters     |

@@ -15,6 +15,7 @@ fn send_query_subscription_includes_session() {
         QueryId(7),
         query.clone(),
         Some(session.clone()),
+        None,
         QueryPropagation::Full,
         vec![],
     );
@@ -46,6 +47,35 @@ fn send_query_subscription_includes_session() {
         }
         other => panic!("expected QuerySubscription to server, got {other:?}"),
     }
+}
+
+#[test]
+fn send_query_subscription_targets_pending_server() {
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_pending_server(server_id);
+
+    let query = QueryBuilder::new("users").branch("main").build();
+    sm.send_query_subscription_to_servers(
+        QueryId(7),
+        query,
+        None,
+        None,
+        QueryPropagation::Full,
+        vec![],
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::QuerySubscription { query_id, .. },
+            } if *id == server_id && *query_id == QueryId(7)
+        )),
+        "query subscriptions must be queued for pending upstream transports"
+    );
 }
 
 #[test]
@@ -86,6 +116,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             query_id: QueryId(1),
             query: query.clone(),
             session: None,
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         });
@@ -95,6 +126,7 @@ fn remove_client_cleans_pending_query_subscriptions() {
             query_id: QueryId(2),
             query,
             session: None,
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         });
