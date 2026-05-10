@@ -1373,62 +1373,44 @@ describe("Worker Bridge with OPFS", () => {
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("replays onMutationError after restart when the rejection was not previously delivered", async () => {
+  it("replays onMutationError when the rejection was not previously delivered", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
-      "sync-on-mutation-error-restart",
+      "sync-on-mutation-error-deferred-listener",
       readOnlyPermissions,
     );
 
     const sharedLocalAuthToken = generateAuthSecret();
-    const dbName = uniqueDbName("sync-on-mutation-error-restart");
-    const dbBeforeRestart = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: { type: "persistent", dbName },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
+    const db = await createSyncedDb(
+      ctx,
+      "sync-on-mutation-error-deferred-listener",
+      sharedLocalAuthToken,
+      syncServer,
     );
 
-    const insertResult = dbBeforeRestart.insert(todos, {
-      title: "Rejected on restart",
+    const insertResult = db.insert(todos, {
+      title: "Rejected before listener",
       done: false,
     });
-    // Wait for the insert to be persisted locally before restarting
-    await insertResult.wait({ tier: "local" });
 
-    // Ensure the insert is not rejected before restarting
-    const clientBeforeRestart = (dbBeforeRestart as any).getClient(app.wasmSchema);
-    expect(
-      clientBeforeRestart.localBatchRecord(insertResult.batchId)?.latestSettlement,
-    ).not.toMatchObject({
-      kind: "rejected",
-    });
-
-    await dbBeforeRestart.shutdown();
-    untrack(dbBeforeRestart);
-
-    const dbAfterRestart = track(
-      await createDb({
-        appId: syncServer.appId,
-        driver: { type: "persistent", dbName },
-        serverUrl: syncServer.serverUrl,
-        secret: sharedLocalAuthToken,
-      }),
+    await waitForCondition(
+      async () => {
+        const client = (db as any).getClient(app.wasmSchema);
+        return client.localBatchRecord(insertResult.batchId)?.latestSettlement?.kind === "rejected";
+      },
+      5000,
+      "insert should be rejected before listener is registered",
     );
 
     const mutationErrorSpy = vi.fn();
-    dbAfterRestart.onMutationError(mutationErrorSpy);
+    db.onMutationError(mutationErrorSpy);
 
-    // Run a query to ensure both the in-memory and worker clients are initialized
-    // Also checks the insert was reverted
-    const todosAfterRestart = await dbAfterRestart.all(allTodos, { tier: "local" });
-    expect(todosAfterRestart.length).toBe(0);
+    const todosAfterRejection = await db.all(allTodos, { tier: "local" });
+    expect(todosAfterRejection.length).toBe(0);
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
       5000,
-      "onMutationError handler should receive rejection after restart",
+      "onMutationError handler should receive queued rejection",
     );
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",

@@ -988,7 +988,7 @@ export class Db {
    * {@link Db.mutationErrorListeners} are notified.
    */
   private attachMutationErrorHandler(client: JazzClient): void {
-    if (this.mutationErrorListeners.size === 0) {
+    if (this.mutationErrorListeners.size === 0 && !this.worker) {
       return;
     }
     if (this.clientMutationErrorUnsubscribers.has(client)) {
@@ -997,6 +997,10 @@ export class Db {
     this.clientMutationErrorUnsubscribers.set(
       client,
       client.onMutationError((event) => {
+        if (this.mutationErrorListeners.size === 0) {
+          this.pendingWorkerMutationErrorEvents.push(event);
+          return;
+        }
         for (const listener of this.mutationErrorListeners) {
           listener(event);
         }
