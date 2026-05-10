@@ -127,10 +127,24 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         server_id: ServerId,
         remote_catalogue_state_hash: Option<&str>,
     ) {
+        self.add_server_with_catalogue_state_hash_and_permission(
+            server_id,
+            remote_catalogue_state_hash,
+            true,
+        );
+    }
+
+    pub fn add_server_with_catalogue_state_hash_and_permission(
+        &mut self,
+        server_id: ServerId,
+        remote_catalogue_state_hash: Option<&str>,
+        can_publish_catalogue: bool,
+    ) {
         info!(%server_id, "adding server");
         let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
-        let skip_catalogue_sync = remote_catalogue_state_hash
-            .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
+        let skip_catalogue_sync = !can_publish_catalogue
+            || remote_catalogue_state_hash
+                .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
         self.schema_manager
             .query_manager_mut()
             .add_server_with_storage(&self.storage, server_id, skip_catalogue_sync);

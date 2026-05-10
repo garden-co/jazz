@@ -785,9 +785,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                     if let Some(next_sync_seq) = next_sync_seq {
                         self.set_next_expected_server_sequence(server_id, next_sync_seq);
                     }
-                    self.add_server_with_catalogue_state_hash(
+                    let can_publish_catalogue = self
+                        .transport
+                        .as_ref()
+                        .is_some_and(|handle| handle.can_publish_catalogue());
+                    self.add_server_with_catalogue_state_hash_and_permission(
                         server_id,
                         catalogue_state_hash.as_deref(),
+                        can_publish_catalogue,
                     );
                 }
                 crate::transport_manager::TransportInbound::Sync { entry, sequence } => {
@@ -1022,9 +1027,14 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 next_sync_seq,
             } => {
                 self.remove_server(server_id);
-                self.add_server_with_catalogue_state_hash(
+                let can_publish_catalogue = self
+                    .transport
+                    .as_ref()
+                    .is_some_and(|handle| handle.can_publish_catalogue());
+                self.add_server_with_catalogue_state_hash_and_permission(
                     server_id,
                     catalogue_state_hash.as_deref(),
+                    can_publish_catalogue,
                 );
                 if let Some(seq) = next_sync_seq {
                     self.set_next_expected_server_sequence(server_id, seq);
