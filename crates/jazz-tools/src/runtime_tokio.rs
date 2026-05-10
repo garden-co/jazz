@@ -571,6 +571,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Push multiple sync messages to the inbox under a single core lock.
+    pub fn push_sync_inbox_batch(&self, entries: Vec<InboxEntry>) -> Result<(), RuntimeError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        for entry in entries {
+            core.park_sync_message(entry);
+        }
+        Ok(())
+    }
+
     /// Push a sync message with an explicit stream sequence (from network).
     pub fn push_sync_inbox_with_sequence(
         &self,

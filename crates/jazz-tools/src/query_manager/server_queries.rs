@@ -22,6 +22,8 @@ use super::types::{
     Value,
 };
 
+const MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS: usize = 32;
+
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
     PendingSchema,
@@ -791,7 +793,7 @@ impl QueryManager {
         let mut deferred = Vec::new();
         let mut schema_warning_notifications = Vec::new();
 
-        for key in pending_keys {
+        for (key_index, key) in pending_keys.iter().copied().enumerate() {
             let Some(sub) = pending_by_key.remove(&key) else {
                 continue;
             };
@@ -1074,6 +1076,15 @@ impl QueryManager {
                     reported_schema_warnings,
                 },
             );
+
+            if self.sync_manager.outbox().len() >= MAX_INITIAL_QUERY_REPLAY_OUTBOX_PER_PASS {
+                for remaining_key in pending_keys.iter().skip(key_index + 1) {
+                    if let Some(sub) = pending_by_key.remove(remaining_key) {
+                        deferred.push(sub);
+                    }
+                }
+                break;
+            }
         }
 
         for (client_id, warning) in schema_warning_notifications {

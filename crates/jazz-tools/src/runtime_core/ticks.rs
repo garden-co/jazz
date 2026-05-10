@@ -679,8 +679,27 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         self.handle_transport_messages();
 
+        if !self.has_outbound()
+            && self
+                .schema_manager
+                .query_manager()
+                .sync_manager()
+                .has_pending_query_subscriptions()
+        {
+            self.immediate_tick();
+        }
+
         // 1. Send all outgoing sync messages
         self.flush_runtime_outbox("flushing outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // 2. Process parked sync messages
         self.handle_sync_messages();
@@ -689,6 +708,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         // The scheduler's debounce prevents immediate_tick() from scheduling
         // another batched_tick while we're inside one, so we must flush here.
         self.flush_runtime_outbox("flushing post-process outbox");
+        if self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .has_pending_query_subscriptions()
+        {
+            self.scheduler.schedule_batched_tick();
+            return;
+        }
 
         // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         if self.storage_write_pending_flush {
@@ -769,6 +797,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                         self.park_sync_message(*entry);
                     }
                 }
+                crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                    self.park_sync_message_batch(entries);
+                }
                 crate::transport_manager::TransportInbound::Disconnected => {
                     self.remove_server(server_id);
                 }
@@ -814,6 +845,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
             .keys()
             .copied()
             .collect();
+        let mut applied_since_last_tick = applied_messages > 0;
         for server_id in server_ids {
             let mut next_expected = *self.next_expected_server_seq.get(&server_id).unwrap_or(&1);
             let mut ready_messages = Vec::new();
@@ -834,12 +866,29 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 .copied()
                 .unwrap_or(next_expected.saturating_sub(1));
             for (sequence, msg) in ready_messages {
+                let is_query_settled = matches!(
+                    &msg.payload,
+                    crate::sync_manager::SyncPayload::QuerySettled { .. }
+                );
                 if msg.payload.writes_storage() {
                     self.mark_storage_write_pending_flush();
                 }
                 self.push_sync_inbox(msg);
                 applied_messages += 1;
+                applied_since_last_tick = true;
                 last_applied = sequence;
+
+                // QuerySettled is an ordered stream barrier for first-callback
+                // delivery. If we queue many later rows before ticking, an
+                // early settled query waits behind unrelated replay work that
+                // merely arrived in the same transport drain.
+                if is_query_settled {
+                    self.next_expected_server_seq
+                        .insert(server_id, sequence.saturating_add(1));
+                    self.last_applied_server_seq.insert(server_id, last_applied);
+                    self.immediate_tick();
+                    applied_since_last_tick = false;
+                }
             }
             self.next_expected_server_seq
                 .insert(server_id, next_expected);
@@ -851,7 +900,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
 
         if applied_messages > 0 {
             debug!(count = applied_messages, "applied parked sync messages");
-            self.immediate_tick();
+            if applied_since_last_tick {
+                self.immediate_tick();
+            }
         }
     }
 
@@ -907,6 +958,58 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
     }
 
+    fn park_sync_message_batch(
+        &mut self,
+        entries: Vec<crate::transport_manager::SequencedInboxEntry>,
+    ) {
+        let mut parked_any = false;
+        for crate::transport_manager::SequencedInboxEntry { entry, sequence } in entries {
+            if let Some(sequence) = sequence {
+                match entry.source {
+                    crate::sync_manager::Source::Server(server_id) => {
+                        let next_expected = self
+                            .next_expected_server_seq
+                            .entry(server_id)
+                            .or_insert(sequence);
+                        if sequence < *next_expected {
+                            trace!(
+                                ?server_id,
+                                sequence,
+                                next_expected = *next_expected,
+                                "dropping already-applied sequenced sync message"
+                            );
+                            continue;
+                        }
+
+                        if let Some((ref tracer, ref name)) = self.sync_tracer {
+                            tracer.record_incoming(&entry.source, name, &entry.payload);
+                        }
+
+                        self.parked_sync_messages_by_server_seq
+                            .entry(server_id)
+                            .or_default()
+                            .insert(sequence, entry);
+                        parked_any = true;
+                    }
+                    _ => {
+                        self.parked_sync_messages.push(entry);
+                        parked_any = true;
+                    }
+                }
+            } else {
+                if let Some((ref tracer, ref name)) = self.sync_tracer {
+                    tracer.record_incoming(&entry.source, name, &entry.payload);
+                }
+                self.parked_sync_messages.push(entry);
+                parked_any = true;
+            }
+        }
+
+        if parked_any {
+            self.scheduler.schedule_batched_tick();
+        }
+    }
+
     /// Set the next expected sequenced message for a server stream.
     pub fn set_next_expected_server_sequence(&mut self, server_id: ServerId, next_sequence: u64) {
         let next_sequence = next_sequence.max(1);
@@ -949,6 +1052,9 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
                 } else {
                     self.park_sync_message(*entry);
                 }
+            }
+            crate::transport_manager::TransportInbound::SyncBatch { entries } => {
+                self.park_sync_message_batch(entries);
             }
             crate::transport_manager::TransportInbound::Disconnected => {
                 self.remove_server(server_id);
