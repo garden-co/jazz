@@ -210,6 +210,7 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         }
         Some(SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Direct,
             first_branch,
             rows.iter()
                 .map(|(member, _, _)| SealedBatchMember {

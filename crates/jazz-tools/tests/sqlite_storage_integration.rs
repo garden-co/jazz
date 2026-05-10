@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use jazz_tools::batch_fate::{
-    BatchFate, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
+    BatchFate, BatchMode, CapturedFrontierMember, SealedBatchMember, SealedBatchSubmission,
 };
 use jazz_tools::catalogue::CatalogueEntry;
 use jazz_tools::metadata::{MetadataKey, ObjectType, RowProvenance};
@@ -122,6 +122,7 @@ fn seed_sqlite_sealed_batch_acceptance(
     storage
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
+            BatchMode::Direct,
             BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id: row_id,
@@ -214,6 +215,7 @@ fn seed_sqlite_sealed_batch_frontier_conflict(
     storage
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
+            BatchMode::Transactional,
             BranchName::new(target_branch.clone()),
             vec![SealedBatchMember {
                 object_id: staged_row_id,

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WorkerBridge, type PeerSyncBatch } from "./worker-bridge.js";
 import type { Runtime } from "./client.js";
@@ -426,6 +426,33 @@ describe("WorkerBridge", () => {
 
     bridge.applyIncomingServerPayload(enc("from-peer-leader"));
     expect(runtimeMock.receivedFromWorker).toEqual([enc("from-peer-leader")]);
+  });
+
+  it("does not hang forever when a local sync flush ack is dropped", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new MockWorker();
+      const runtimeMock = createRuntimeMock();
+      const bridge = new WorkerBridge(worker as unknown as Worker, runtimeMock.runtime);
+
+      const waitPromise = bridge.waitForLocalSyncFlush("batch-dropped-ack");
+      await Promise.resolve();
+
+      expect(worker.posted).toContainEqual({
+        type: "sync",
+        payload: [],
+        ackId: 1,
+        ackBatchId: "batch-dropped-ack",
+      });
+      expect((bridge as any).state.pendingSyncAcks.size).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(2_001);
+
+      await expect(waitPromise).resolves.toBeUndefined();
+      expect((bridge as any).state.pendingSyncAcks.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards lifecycle hints to worker", () => {

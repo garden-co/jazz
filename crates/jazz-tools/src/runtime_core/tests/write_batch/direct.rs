@@ -421,6 +421,7 @@ fn rc_restart_recovers_completed_sealed_batch_from_storage() {
         .storage_mut()
         .upsert_sealed_batch_submission(&SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Direct,
             crate::object::BranchName::new("main"),
             vec![SealedBatchMember {
                 object_id: row_id,

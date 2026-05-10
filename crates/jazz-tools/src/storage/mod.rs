@@ -1626,6 +1626,7 @@ fn exact_visible_row_table_locator_for_delete<H: Storage + ?Sized>(
 fn sealed_batch_submission_storage_descriptor_with_branch_ords() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("batch_id", ColumnType::BatchId),
+        ColumnDescriptor::new("mode", ColumnType::Text),
         ColumnDescriptor::new("target_branch_ord", ColumnType::Integer),
         ColumnDescriptor::new("batch_digest", ColumnType::Bytea),
         ColumnDescriptor::new(
@@ -2471,6 +2472,7 @@ fn encode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         &sealed_batch_submission_storage_descriptor_with_branch_ords(),
         &[
             Value::BatchId(*submission.batch_id.as_bytes()),
+            Value::Text(encode_batch_mode(submission.mode).to_string()),
             Value::Integer(target_branch_ord),
             Value::Bytea(submission.batch_digest.0.to_vec()),
             Value::Array(member_values),
@@ -2491,6 +2493,7 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     .map_err(|err| StorageError::IoError(format!("decode sealed batch submission: {err}")))?;
     let [
         batch_id,
+        mode,
         target_branch_ord,
         batch_digest,
         members,
@@ -2503,6 +2506,14 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
     };
 
     let batch_id = decode_storage_batch_id_value(batch_id, "decode sealed batch id")?;
+    let mode = match mode {
+        Value::Text(raw) => decode_batch_mode(raw)?,
+        other => {
+            return Err(StorageError::IoError(format!(
+                "expected sealed batch mode text, got {other:?}"
+            )));
+        }
+    };
     let target_branch_ord = match target_branch_ord {
         Value::Integer(raw) => *raw,
         other => {
@@ -2650,8 +2661,13 @@ fn decode_sealed_batch_submission_with_branch_ords<H: Storage + ?Sized>(
         }
     };
 
-    let submission =
-        SealedBatchSubmission::new(batch_id, target_branch_name, members, captured_frontier);
+    let submission = SealedBatchSubmission::new(
+        batch_id,
+        mode,
+        target_branch_name,
+        members,
+        captured_frontier,
+    );
     if submission.batch_digest != batch_digest {
         return Err(StorageError::IoError(format!(
             "sealed batch digest mismatch: expected {batch_digest:?}, computed {:?}",
