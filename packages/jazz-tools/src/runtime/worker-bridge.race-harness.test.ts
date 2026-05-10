@@ -157,13 +157,19 @@ class FakeWorker {
 function createRuntimeHarness() {
   let outboundHandler: ((...args: unknown[]) => void) | null = null;
   const receivedFromWorker: Uint8Array[] = [];
+  const receivedSequences: Array<number | null | undefined> = [];
+  let batchedTickCount = 0;
 
   const runtime = {
     onSyncMessageToSend(handler: (...args: unknown[]) => void) {
       outboundHandler = handler;
     },
-    onSyncMessageReceived(payload: Uint8Array) {
+    onSyncMessageReceived(payload: Uint8Array, sequence?: number | null) {
       receivedFromWorker.push(payload);
+      receivedSequences.push(sequence);
+    },
+    batchedTick() {
+      batchedTickCount += 1;
     },
     addServer() {},
     removeServer() {},
@@ -172,6 +178,8 @@ function createRuntimeHarness() {
   return {
     runtime,
     receivedFromWorker,
+    receivedSequences,
+    getBatchedTickCount: () => batchedTickCount,
     emitServerPayload(payload: unknown) {
       if (!outboundHandler) {
         throw new Error("Runtime sync handler is not installed");
@@ -271,6 +279,25 @@ describe("WorkerBridge race harness", () => {
 
     worker.script.completeInit("worker-client-3");
     await initPromise;
+  });
+
+  it("WB-U04a wakes the main runtime after worker->main sync batches", () => {
+    const worker = new FakeWorker();
+    const { runtime, receivedFromWorker, receivedSequences, getBatchedTickCount } =
+      createRuntimeHarness();
+    new WorkerBridge(worker as unknown as Worker, runtime);
+
+    const first = enc({ kind: "from-worker", seq: 1 });
+    const second = enc({ kind: "from-worker", seq: 2 });
+
+    worker.emitToMain({
+      type: "sync",
+      payload: [first, { payload: second, sequence: 7 }],
+    });
+
+    expect(receivedFromWorker).toEqual([first, second]);
+    expect(receivedSequences).toEqual([undefined, 7]);
+    expect(getBatchedTickCount()).toBe(1);
   });
 
   it("WB-U04b waits for a direct upstream connection before resolving edge readiness", async () => {

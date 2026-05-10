@@ -76,6 +76,7 @@ fn memory_size_separates_sync_state_buckets() {
             query_id: QueryId(8),
             query: query.clone(),
             session: Some(session.clone()),
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         });

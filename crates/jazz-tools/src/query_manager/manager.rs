@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -300,6 +301,20 @@ pub(super) struct ServerQuerySubscription {
     /// Extra tables whose rows must be synced so downstream clients can
     /// reproduce bundled policy context locally.
     pub(super) policy_context_tables: Vec<String>,
+    /// Durability tier requested by the downstream subscriber. `None` means the
+    /// subscriber did not request frontier gating.
+    pub(super) required_tier: Option<DurabilityTier>,
+    /// Lower-tier settlements are useful as an initial remote scope snapshot,
+    /// but repeated below-required settlements should not churn downstream
+    /// subscribers that are still waiting for their requested tier.
+    pub(super) sent_below_required_settled: bool,
+    /// Highest query settlement tier that has actually been emitted downstream.
+    ///
+    /// Dirty graph passes can leave a server subscription's scope unchanged. In
+    /// that case a repeated QuerySettled at the same tier carries no new
+    /// information, but large scopes are expensive for clients to decode and
+    /// apply.
+    pub(super) last_emitted_settled_tier: Option<DurabilityTier>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -434,6 +449,20 @@ pub struct QueryManager {
     /// reached yet.
     pub(super) pending_local_row_batches: HashMap<ObjectId, RowBatchKey>,
 
+    /// Visible rows observed through normal row visibility processing, keyed by
+    /// batch. Batch fate processing uses this to mark affected query rows
+    /// without rescanning and decoding every subscribed visible region.
+    pub(super) visible_rows_by_batch: HashMap<BatchId, Vec<(String, ObjectId)>>,
+
+    /// Currently queued SyncManager batch fates whose query effects have
+    /// already been applied by this manager.
+    ///
+    /// RuntimeCore owns draining the pending fate queue so write waiters and
+    /// persisted fate state still see the same events. QueryManager may process
+    /// multiple times before that drain happens, so it must only apply the
+    /// subscription dirtiness effects for the newly appended suffix.
+    pub(super) applied_pending_batch_fates: Vec<BatchFate>,
+
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
@@ -536,6 +565,8 @@ impl QueryManager {
             branch_schema_map: HashMap::new(),
             pending_row_visibility_changes: Vec::new(),
             pending_local_row_batches: HashMap::new(),
+            visible_rows_by_batch: HashMap::new(),
+            applied_pending_batch_fates: Vec::new(),
             known_schemas: Arc::new(HashMap::new()),
             pending_catalogue_schema_hashes: HashSet::new(),
             catalogued_storage_namespaces: HashSet::new(),
@@ -1044,11 +1075,24 @@ impl QueryManager {
         let sub_id = QuerySubscriptionId(query_id.0);
         if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
             let was_unsatisfied = !Self::subscription_query_frontier_satisfied(sub);
+            let before = sub.query_frontier_settled_tier;
+            let required_tier = sub.durability_tier;
             sub.query_frontier_settled_tier = Some(
                 sub.query_frontier_settled_tier
                     .map_or(tier, |current| current.max(tier)),
             );
-            if was_unsatisfied && Self::subscription_query_frontier_satisfied(sub) {
+            let now_satisfied = Self::subscription_query_frontier_satisfied(sub);
+            tracing::trace!(
+                query_id = query_id.0,
+                tier = ?tier,
+                required_tier = ?required_tier,
+                before = ?before,
+                after = ?sub.query_frontier_settled_tier,
+                was_unsatisfied,
+                now_satisfied,
+                "jazz trace query settled applied"
+            );
+            if was_unsatisfied && now_satisfied {
                 sub.needs_visibility_recompute = true;
             }
         }
@@ -1067,7 +1111,7 @@ impl QueryManager {
         for subscription in self.subscriptions.values_mut() {
             if subscription
                 .graph
-                .current_output_tuples()
+                .current_output_tuples_ref()
                 .iter()
                 .any(|tuple| tuple.batch_provenance().contains(&batch_id))
             {
@@ -1076,61 +1120,69 @@ impl QueryManager {
         }
     }
 
-    fn mark_visible_rows_updated_for_batch<H: Storage>(&mut self, storage: &H, batch_id: BatchId) {
-        let mut rows = Vec::new();
-        let mut subscription_tables = Vec::new();
-        subscription_tables.extend(self.subscriptions.values().map(|subscription| {
-            (
-                subscription.graph.table.as_str().to_string(),
-                subscription.branches.clone(),
-            )
-        }));
-        subscription_tables.extend(self.server_subscriptions.values().map(|subscription| {
-            (
-                subscription.graph.table.as_str().to_string(),
-                subscription.branches.clone(),
-            )
-        }));
-        subscription_tables.sort();
-        subscription_tables.dedup();
-
-        for (table, branches) in subscription_tables {
-            for branch in &branches {
-                let Ok(visible_rows) = storage.scan_visible_region(&table, branch.as_str()) else {
-                    continue;
-                };
-                rows.extend(
-                    visible_rows
-                        .into_iter()
-                        .filter(|row| row.batch_id == batch_id)
-                        .map(|row| (table.clone(), row.row_id)),
-                );
-            }
-        }
-        rows.sort();
-        rows.dedup();
-        for (table, row_id) in rows {
-            self.mark_local_row_updated_in_subscriptions(&table, row_id);
-        }
-    }
-
     fn apply_pending_batch_fate_effects<H: Storage>(&mut self, storage: &H) {
-        let batch_fates = self.sync_manager.pending_batch_fates().to_vec();
-        for settlement in &batch_fates {
-            if let Some(confirmed_tier) = settlement.confirmed_tier() {
-                self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
-            }
-            self.mark_subscriptions_visibility_recompute_for_batch(settlement.batch_id());
-            self.mark_visible_rows_updated_for_batch(storage, settlement.batch_id());
-            if let Ok(Some(record)) = storage.load_local_batch_record(settlement.batch_id()) {
+        let pending_batch_fates = self.sync_manager.pending_batch_fates();
+        let already_applied_count =
+            if pending_batch_fates.starts_with(&self.applied_pending_batch_fates) {
+                self.applied_pending_batch_fates.len()
+            } else {
+                // RuntimeCore may have drained the queue and SyncManager may have
+                // appended new fates before QueryManager gets another process pass.
+                // In that case, the current queue is a new sequence, not a suffix
+                // of the old one.
+                0
+            };
+
+        let batch_fates = pending_batch_fates[already_applied_count..].to_vec();
+        self.applied_pending_batch_fates = pending_batch_fates.to_vec();
+        let fate_count = batch_fates.len();
+        if fate_count == 0 {
+            return;
+        }
+
+        let max_confirmed_tier = batch_fates
+            .iter()
+            .filter_map(BatchFate::confirmed_tier)
+            .max();
+        if let Some(confirmed_tier) = max_confirmed_tier {
+            self.mark_subscriptions_visibility_recompute_for_tier(confirmed_tier);
+        }
+
+        let mut batch_ids = batch_fates
+            .iter()
+            .map(BatchFate::batch_id)
+            .collect::<Vec<_>>();
+        batch_ids.sort();
+        batch_ids.dedup();
+
+        let unique_batch_count = batch_ids.len();
+        let mut marked_row_count = 0usize;
+        for batch_id in batch_ids {
+            self.mark_subscriptions_visibility_recompute_for_batch(batch_id);
+            let mut rows = self
+                .visible_rows_by_batch
+                .get(&batch_id)
+                .cloned()
+                .unwrap_or_default();
+            if let Ok(Some(record)) = storage.load_local_batch_record(batch_id) {
                 for member in record.members {
-                    self.mark_local_row_updated_in_subscriptions(
-                        member.table_name.as_str(),
-                        member.object_id,
-                    );
+                    rows.push((member.table_name, member.object_id));
                 }
             }
+            rows.sort();
+            rows.dedup();
+            marked_row_count += rows.len();
+            for (table_name, object_id) in rows {
+                self.mark_local_row_updated_in_subscriptions(table_name.as_str(), object_id);
+            }
         }
+        tracing::trace!(
+            fate_count,
+            unique_batch_count,
+            marked_row_count,
+            max_confirmed_tier = ?max_confirmed_tier,
+            "jazz trace batch fate effects applied"
+        );
     }
 
     pub(crate) fn mark_subscriptions_visibility_recompute_for_tier(
@@ -1143,7 +1195,6 @@ impl QueryManager {
                 .is_some_and(|required_tier| confirmed_tier >= required_tier)
             {
                 subscription.needs_visibility_recompute = true;
-                subscription.graph.mark_all_dirty();
             }
         }
     }
@@ -1194,7 +1245,6 @@ impl QueryManager {
                 sub.needs_visibility_recompute = true;
             }
         }
-        self.apply_pending_batch_fate_effects(storage);
         self.pending_catalogue_updates.extend(
             self.sync_manager
                 .take_pending_catalogue_updates()
@@ -1258,6 +1308,13 @@ impl QueryManager {
             let mut blocked = Vec::new();
             for pending_settled in pending_query_settled {
                 if pending_settled.through_seq == 0 {
+                    if let Some(server_id) = pending_settled.server_id {
+                        self.sync_manager.relay_query_settled_to_origins(
+                            server_id,
+                            pending_settled.query_id,
+                            pending_settled.tier,
+                        );
+                    }
                     self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
                 } else {
                     blocked.push(pending_settled);
@@ -1315,6 +1372,14 @@ impl QueryManager {
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
+            let local_durability_satisfies_subscription = subscription
+                .durability_tier
+                .is_some_and(|tier| self.sync_manager.has_local_durability_at_least(tier));
+            let remote_scope_satisfies_subscription =
+                subscription.durability_tier.is_none_or(|tier| {
+                    self.sync_manager
+                        .has_remote_query_scope_snapshot_at_least(QueryId(sub_id.0), tier)
+                });
 
             let delta = {
                 let schema_context = &self.schema_context;
@@ -1323,9 +1388,7 @@ impl QueryManager {
                     |id: ObjectId, table_hint: Option<TableName>| -> Option<LoadedRow> {
                         let lacks_authoritative_remote_scope = subscription.sync_backed
                             && subscription.local_updates == LocalUpdates::Immediate
-                            && !self
-                                .sync_manager
-                                .has_remote_query_scope_snapshot(QueryId(sub_id.0));
+                            && !remote_scope_satisfies_subscription;
                         let durability_tier = if lacks_authoritative_remote_scope
                             || (subscription.local_updates == LocalUpdates::Immediate
                                 && subscription.pending_local_row_ids.contains(&id))
@@ -1389,6 +1452,18 @@ impl QueryManager {
                 // initial upstream frontier has been replayed — or until every
                 // still-pending server has exceeded PENDING_SERVER_TIMEOUT,
                 // which means nothing upstream is going to replay.
+                tracing::trace!(
+                    sub_id = sub_id.0,
+                    table = %table,
+                    required_tier = ?subscription.durability_tier,
+                    settled_tier = ?subscription.query_frontier_settled_tier,
+                    dirty = subscription.graph.has_dirty_nodes(),
+                    needs_recompile = subscription.needs_recompile,
+                    needs_visibility_recompute = subscription.needs_visibility_recompute,
+                    pending_local_updates = subscription.has_pending_local_updates,
+                    has_servers_or_pending_servers = self.sync_manager.has_servers_or_pending_servers(),
+                    "jazz trace subscription waiting for initial frontier"
+                );
                 self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
@@ -1396,30 +1471,32 @@ impl QueryManager {
             let mut visible_tuples = if subscription.uses_explicit_authorization_filtering {
                 let auth_schema_context = self.schema_context.clone();
                 let auth_branch_schema_map = self.branch_schema_map.clone();
-                self.authorized_tuples_from_graph(
+                Cow::Owned(self.authorized_tuples_from_graph(
                     storage_ref,
                     &subscription.graph,
                     &auth_schema_context,
                     &auth_branch_schema_map,
                     subscription.session.as_ref(),
-                )
+                ))
             } else {
-                subscription.graph.current_output_tuples()
+                Cow::Borrowed(subscription.graph.current_output_tuples_ref())
             };
 
             if subscription.sync_backed
                 && Self::subscription_query_frontier_satisfied(&subscription)
+                && (!local_durability_satisfies_subscription || remote_scope_satisfies_subscription)
                 && self
                     .sync_manager
                     .has_remote_query_scope_snapshot(QueryId(sub_id.0))
                 && (subscription.propagation == QueryPropagation::Full
                     || !self.sync_manager.has_durability_identity())
             {
-                visible_tuples = self.filter_synced_query_scope_tuples(
+                visible_tuples = Cow::Owned(self.filter_synced_query_scope_tuples(
                     QueryId(sub_id.0),
+                    subscription.durability_tier,
                     &subscription.pending_local_row_ids,
-                    visible_tuples,
-                );
+                    visible_tuples.into_owned(),
+                ));
             }
 
             visible_tuples = self.filter_transaction_visible_tuples(
@@ -1428,7 +1505,7 @@ impl QueryManager {
                 visible_tuples,
             );
 
-            let visible_rows = Self::rows_from_tuples(&subscription.graph, &visible_tuples);
+            let visible_rows = Self::rows_from_tuples(&subscription.graph, visible_tuples.as_ref());
             let visible_rows_by_id: HashMap<_, _> = visible_rows
                 .iter()
                 .cloned()
@@ -1442,6 +1519,18 @@ impl QueryManager {
             let ordered_ids_after: Vec<ObjectId> = visible_rows.iter().map(|row| row.id).collect();
 
             if !subscription.settled_once {
+                tracing::trace!(
+                    sub_id = sub_id.0,
+                    table = %table,
+                    rows = visible_rows.len(),
+                    added = visible_delta.added.len(),
+                    removed = visible_delta.removed.len(),
+                    updated = visible_delta.updated.len(),
+                    moved = visible_delta.moved.len(),
+                    settled_tier = ?subscription.query_frontier_settled_tier,
+                    required_tier = ?subscription.durability_tier,
+                    "jazz trace subscription first delivery"
+                );
                 subscription.settled_once = true;
                 let ordered = build_ordered_delta_with_post_ids(
                     &subscription.current_ordered_ids,
@@ -1586,6 +1675,28 @@ impl QueryManager {
         let old_row = update.previous_row.as_ref();
         let current_batch_id = update.row.batch_id;
         let current_row_key = RowBatchKey::from_row(&update.row);
+
+        if let Some(previous_row) = old_row
+            && previous_row.state.is_visible()
+            && let Some(rows) = self.visible_rows_by_batch.get_mut(&previous_row.batch_id)
+        {
+            rows.retain(|(table, row_id)| {
+                table.as_str() != logical_table.as_str() || *row_id != update.object_id
+            });
+            if rows.is_empty() {
+                self.visible_rows_by_batch.remove(&previous_row.batch_id);
+            }
+        }
+        if update.row.state.is_visible() {
+            let rows = self
+                .visible_rows_by_batch
+                .entry(current_batch_id)
+                .or_default();
+            let member = (logical_table.clone(), update.object_id);
+            if !rows.contains(&member) {
+                rows.push(member);
+            }
+        }
 
         if local_update {
             self.pending_local_row_batches
@@ -2515,10 +2626,16 @@ impl QueryManager {
     fn filter_synced_query_scope_tuples(
         &self,
         query_id: QueryId,
+        durability_tier: Option<DurabilityTier>,
         pending_local_row_ids: &HashSet<ObjectId>,
         tuples: Vec<Tuple>,
     ) -> Vec<Tuple> {
-        let remote_scope = self.sync_manager.remote_query_scope(query_id);
+        let remote_scope = match durability_tier {
+            Some(tier) => self
+                .sync_manager
+                .remote_query_scope_at_least(query_id, tier),
+            None => self.sync_manager.remote_query_scope(query_id),
+        };
         tuples
             .into_iter()
             .filter(|tuple| {
@@ -2561,36 +2678,59 @@ impl QueryManager {
             || query_scope.is_subset(local_scope)
     }
 
-    fn filter_transaction_visible_tuples(
+    fn filter_transaction_visible_tuples<'a>(
         &self,
         storage: &dyn Storage,
         query_id: QueryId,
-        tuples: Vec<Tuple>,
-    ) -> Vec<Tuple> {
+        tuples: Cow<'a, [Tuple]>,
+    ) -> Cow<'a, [Tuple]> {
         if tuples.is_empty() {
             return tuples;
         }
 
-        let local_scope = Self::scope_from_tuples(&tuples);
+        let local_scope = Self::scope_from_tuples(tuples.as_ref());
         let mut query_scope = local_scope.clone();
         query_scope.extend(self.sync_manager.remote_query_scope(query_id));
 
         let mut settlement_cache: HashMap<BatchId, Option<BatchFate>> = HashMap::new();
+        let mut first_hidden = None;
 
-        tuples
-            .into_iter()
-            .filter(|tuple| {
-                tuple.batch_provenance().iter().copied().all(|batch_id| {
-                    Self::transactional_batch_complete_for_query_scope(
-                        storage,
-                        &mut settlement_cache,
-                        batch_id,
-                        &local_scope,
-                        &query_scope,
-                    )
-                })
-            })
-            .collect()
+        for (index, tuple) in tuples.as_ref().iter().enumerate() {
+            let is_visible = tuple.batch_provenance().iter().copied().all(|batch_id| {
+                Self::transactional_batch_complete_for_query_scope(
+                    storage,
+                    &mut settlement_cache,
+                    batch_id,
+                    &local_scope,
+                    &query_scope,
+                )
+            });
+            if !is_visible {
+                first_hidden = Some(index);
+                break;
+            }
+        }
+
+        let Some(first_hidden) = first_hidden else {
+            return tuples;
+        };
+
+        let mut filtered = Vec::with_capacity(tuples.len().saturating_sub(1));
+        filtered.extend_from_slice(&tuples.as_ref()[..first_hidden]);
+        for tuple in &tuples.as_ref()[first_hidden + 1..] {
+            if tuple.batch_provenance().iter().copied().all(|batch_id| {
+                Self::transactional_batch_complete_for_query_scope(
+                    storage,
+                    &mut settlement_cache,
+                    batch_id,
+                    &local_scope,
+                    &query_scope,
+                )
+            }) {
+                filtered.push(tuple.clone());
+            }
+        }
+        Cow::Owned(filtered)
     }
     // ========================================================================
     // No-op storage driver (for tests)

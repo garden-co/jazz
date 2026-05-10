@@ -1,5 +1,7 @@
 use ahash::AHashSet;
+use std::collections::{HashMap, HashSet};
 
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::types::{
     Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
@@ -34,6 +36,11 @@ pub struct OutputNode {
     current_tuples: AHashSet<Tuple>,
     /// Ordered tuples for deterministic output (preserves sort order).
     ordered_tuples: Vec<Tuple>,
+    /// Current sync scope derived from output tuple provenance.
+    sync_scope: HashSet<(ObjectId, BranchName)>,
+    /// Reference counts for scope entries, since several output tuples can
+    /// depend on the same source object.
+    sync_scope_counts: HashMap<(ObjectId, BranchName), usize>,
     /// Pending tuple deltas to deliver.
     pending_tuple_deltas: Vec<TupleDelta>,
     /// True if subscriber has received initial snapshot.
@@ -54,6 +61,8 @@ impl OutputNode {
             mode,
             current_tuples: AHashSet::new(),
             ordered_tuples: Vec::new(),
+            sync_scope: HashSet::new(),
+            sync_scope_counts: HashMap::new(),
             pending_tuple_deltas: Vec::new(),
             subscriber_initialized: false,
             dirty: true,
@@ -98,10 +107,51 @@ impl OutputNode {
         &self.ordered_tuples
     }
 
+    /// Current sync scope derived incrementally from output tuple provenance.
+    pub fn sync_scope(&self) -> &HashSet<(ObjectId, BranchName)> {
+        &self.sync_scope
+    }
+
+    fn add_tuple_to_scope(&mut self, tuple: &Tuple) {
+        for scoped_object in tuple.provenance().iter().copied() {
+            let count = self.sync_scope_counts.entry(scoped_object).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                self.sync_scope.insert(scoped_object);
+            }
+        }
+    }
+
+    fn remove_tuple_from_scope(&mut self, tuple: &Tuple) {
+        for scoped_object in tuple.provenance() {
+            if let Some(count) = self.sync_scope_counts.get_mut(scoped_object) {
+                *count -= 1;
+                if *count == 0 {
+                    self.sync_scope_counts.remove(scoped_object);
+                    self.sync_scope.remove(scoped_object);
+                }
+            }
+        }
+    }
+
+    fn apply_delta_to_scope(&mut self, delta: &TupleDelta) {
+        for tuple in &delta.removed {
+            self.remove_tuple_from_scope(tuple);
+        }
+        for (old_tuple, new_tuple) in &delta.updated {
+            self.remove_tuple_from_scope(old_tuple);
+            self.add_tuple_to_scope(new_tuple);
+        }
+        for tuple in &delta.added {
+            self.add_tuple_to_scope(tuple);
+        }
+    }
+
     /// Rebuild ordered output from a full ordered upstream input.
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
         let delta = compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
 
+        self.apply_delta_to_scope(&delta);
         self.ordered_tuples = ordered_tuples.to_vec();
         self.current_tuples = self.ordered_tuples.iter().cloned().collect();
         self.dirty = false;
@@ -161,6 +211,8 @@ impl RowNode for OutputNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        self.apply_delta_to_scope(&input);
+
         // Apply changes to current_tuples and ordered_tuples
         for tuple in &input.removed {
             self.current_tuples.remove(tuple);
@@ -381,6 +433,60 @@ mod tests {
         let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
+    }
+
+    #[test]
+    fn sync_scope_is_maintained_incrementally_with_shared_provenance() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let branch = BranchName::new("main");
+        let shared_id = ObjectId::new();
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+
+        let tuple1 = Tuple::new_with_provenance(
+            vec![TupleElement::Id(id1)],
+            [(shared_id, branch), (id1, branch)].into_iter().collect(),
+        );
+        let tuple2 = Tuple::new_with_provenance(
+            vec![TupleElement::Id(id2)],
+            [(shared_id, branch), (id2, branch)].into_iter().collect(),
+        );
+
+        node.process(TupleDelta {
+            added: vec![tuple1.clone(), tuple2.clone()],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+        assert_eq!(node.sync_scope().len(), 3);
+        assert!(node.sync_scope().contains(&(shared_id, branch)));
+        assert!(node.sync_scope().contains(&(id1, branch)));
+        assert!(node.sync_scope().contains(&(id2, branch)));
+
+        node.process(TupleDelta {
+            added: vec![],
+            removed: vec![tuple1],
+            moved: vec![],
+            updated: vec![],
+        });
+        assert_eq!(node.sync_scope().len(), 2);
+        assert!(node.sync_scope().contains(&(shared_id, branch)));
+        assert!(!node.sync_scope().contains(&(id1, branch)));
+        assert!(node.sync_scope().contains(&(id2, branch)));
+
+        let tuple2_without_shared = Tuple::new_with_provenance(
+            vec![TupleElement::Id(id2)],
+            [(id2, branch)].into_iter().collect(),
+        );
+        node.process(TupleDelta {
+            added: vec![],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![(tuple2, tuple2_without_shared)],
+        });
+        assert_eq!(node.sync_scope().len(), 1);
+        assert!(!node.sync_scope().contains(&(shared_id, branch)));
+        assert!(node.sync_scope().contains(&(id2, branch)));
     }
 
     #[test]

@@ -1333,6 +1333,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
             query_id: QueryId(1),
             query: Box::new(query),
             session: Some(session),
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

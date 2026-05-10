@@ -291,6 +291,8 @@ pub enum SyncPayload {
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
+        required_tier: Option<DurabilityTier>,
+        #[serde(default)]
         propagation: QueryPropagation,
         #[serde(default)]
         policy_context_tables: Vec<String>,
@@ -540,6 +542,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub required_tier: Option<DurabilityTier>,
     pub propagation: QueryPropagation,
     pub policy_context_tables: Vec<String>,
 }
@@ -583,6 +586,7 @@ mod tests {
             query_id: QueryId(7),
             query: Box::new(Query::new("todos")),
             session: Some(Session::new("alice").with_auth_mode(AuthMode::LocalFirst)),
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: Vec::new(),
         };

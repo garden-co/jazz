@@ -197,7 +197,7 @@ impl SyncManager {
         storage
             .upsert_authoritative_batch_fate(fate)
             .map_err(|error| {
-                tracing::warn!(
+                tracing::trace!(
                     batch_id = ?fate.batch_id(),
                     %error,
                     "failed to persist authoritative batch fate"
@@ -214,7 +214,7 @@ impl SyncManager {
         storage
             .upsert_sealed_batch_submission(submission)
             .map_err(|error| {
-                tracing::warn!(
+                tracing::trace!(
                     batch_id = ?submission.batch_id,
                     %error,
                     "failed to persist sealed batch submission"
@@ -1083,9 +1083,15 @@ impl SyncManager {
                     .remote_query_scopes
                     .get(&(server_id, query_id))
                     .is_none_or(|previous_scope| previous_scope != &scope_set);
+                let tier_changed = self
+                    .remote_query_scope_tiers
+                    .get(&(server_id, query_id))
+                    .is_none_or(|previous_tier| *previous_tier != tier);
                 self.remote_query_scopes
                     .insert((server_id, query_id), scope_set);
-                if scope_changed {
+                self.remote_query_scope_tiers
+                    .insert((server_id, query_id), tier);
+                if scope_changed || tier_changed {
                     self.remote_query_scope_dirty.insert(query_id);
                 }
 
@@ -1098,20 +1104,8 @@ impl SyncManager {
                     through_seq,
                 });
 
-                // Relay to interested clients
-                if let Some(clients) = self.query_origin.get(&query_id) {
-                    for &cid in clients {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(cid),
-                            payload: SyncPayload::QuerySettled {
-                                query_id,
-                                tier,
-                                scope: scope.clone(),
-                                through_seq,
-                            },
-                        });
-                    }
-                }
+                // RuntimeCore relays this to interested clients once the
+                // upstream stream watermark proves the scope's rows are local.
             }
             SyncPayload::SchemaWarning(warning) => {
                 super::log_schema_warning(&warning, Some("server"), None);
@@ -1349,6 +1343,7 @@ impl SyncManager {
                 query_id,
                 query,
                 session,
+                required_tier,
                 propagation,
                 policy_context_tables,
             } => {
@@ -1397,12 +1392,20 @@ impl SyncManager {
                     .entry(*query_id)
                     .or_default()
                     .insert(client_id);
+                tracing::trace!(
+                    %client_id,
+                    query_id = query_id.0,
+                    table = %query.table,
+                    ?propagation,
+                    "jazz trace received query subscription from client"
+                );
                 self.pending_query_subscriptions
                     .push(PendingQuerySubscription {
                         client_id,
                         query_id: *query_id,
                         query: query.as_ref().clone(),
                         session: effective_session,
+                        required_tier: *required_tier,
                         propagation: *propagation,
                         policy_context_tables: policy_context_tables.clone(),
                     });
@@ -1410,6 +1413,11 @@ impl SyncManager {
             // Handle query unsubscription
             // Queue for QueryManager to process (remove server-side QueryGraph, forward upstream)
             SyncPayload::QueryUnsubscription { query_id } => {
+                tracing::trace!(
+                    %client_id,
+                    query_id = query_id.0,
+                    "jazz trace received query unsubscription from client"
+                );
                 // Clean up query origin
                 if let Some(clients) = self.query_origin.get_mut(query_id) {
                     clients.remove(&client_id);

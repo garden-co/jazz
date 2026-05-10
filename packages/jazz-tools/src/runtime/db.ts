@@ -51,7 +51,11 @@ import {
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
 import type { WorkerLifecycleEvent } from "../worker/worker-protocol.js";
-import { normalizeBuiltQuery, type BuiltRelation } from "./query-builder-shape.js";
+import {
+  normalizeBuiltQuery,
+  type BuiltRelation,
+  type NormalizedBuiltQuery,
+} from "./query-builder-shape.js";
 import {
   appendWorkerRuntimeWasmUrl,
   resolveRuntimeConfigSyncInitInput,
@@ -196,6 +200,10 @@ export type QueryOptions = QueryExecutionOptions;
 
 function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
   return { localUpdates: "deferred", ...options };
+}
+
+function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
+  return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -1080,10 +1088,12 @@ export class Db {
       }
       const existingRecord = client.localBatchRecord(batch.batchId);
       const replayableFromWorker = client.hasHydratedWorkerBatch(batch.batchId);
-      client.replayRejectedBatchRecord(batch);
       if (client.hasPendingBatchWaiter(batch.batchId)) {
+        client.replayRejectedBatchRecord(batch);
+        client.markReplayedRejectedBatchDelivered(batch.batchId);
         return;
       }
+      client.replayRejectedBatchRecord(batch);
       if (existingRecord && !replayableFromWorker) {
         return;
       }
@@ -1882,7 +1892,7 @@ export class Db {
     await this.ensureQueryReady(queryOptions, client);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const rows =
-      builtQuery.hops.length > 0 &&
+      queryUsesRelationTraversal(builtQuery) &&
       "queryInternal" in client &&
       typeof client.queryInternal === "function"
         ? await client.queryInternal(
@@ -2368,7 +2378,9 @@ class ClientBackedDb extends Db {
     const rows = await this.runtimeClient.queryInternal(
       translateQuery(builderJson, planningSchema),
       this.session,
-      builtQuery.hops.length > 0 ? { ...queryOptions, runtimeSettledTier: null } : queryOptions,
+      queryUsesRelationTraversal(builtQuery)
+        ? { ...queryOptions, runtimeSettledTier: null }
+        : queryOptions,
       runtimeSchema.peek(),
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
