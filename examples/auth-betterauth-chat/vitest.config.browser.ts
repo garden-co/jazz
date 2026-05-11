@@ -4,14 +4,12 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { createTestKeySet } from "./tests/browser/jwt.js";
 import {
   TEST_ANNOUNCEMENTS_CHAT_ID,
   TEST_APP_ID,
   TEST_CHAT_ID,
 } from "./tests/browser/test-constants.js";
-
-const KID = "auth-betterauth-chat-test-key";
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -31,26 +29,15 @@ export default defineConfig(async () => {
   process.env.NEXT_PUBLIC_CHAT_ID = TEST_CHAT_ID;
   process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID = TEST_ANNOUNCEMENTS_CHAT_ID;
 
-  const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });
-  const publicJwk = { ...(await exportJWK(publicKey)), kid: KID, use: "sig", alg: "ES256" };
-
-  // The Jazz permission only checks `authMode: "external"`, which is satisfied
-  // by any verified JWT. Better Auth's role/identity claims aren't read by the
-  // policy, so a minimal JWT with just `sub` is enough to exercise the rules.
-  async function mintJwt(sub: string): Promise<string> {
-    return new SignJWT({})
-      .setProtectedHeader({ alg: "ES256", kid: KID })
-      .setSubject(sub)
-      .setIssuedAt()
-      .setExpirationTime("1h")
-      .sign(privateKey);
-  }
-
+  const { publicJwk, mintJwt } = await createTestKeySet();
   const userJwt = await mintJwt("test-user");
 
   const jwksPort = await findFreePort();
   const jazzPort = await findFreePort();
 
+  // Vitest doesn't pass state from config to global-setup directly; the only
+  // channel is process.env. global-setup.ts reads these via requireEnv() to
+  // boot the JWKS server and the Jazz TestingServer.
   process.env.JAZZ_TEST_JWKS_PUBLIC_KEY = JSON.stringify(publicJwk);
   process.env.JAZZ_TEST_JWKS_PORT = String(jwksPort);
   process.env.JAZZ_TEST_JAZZ_PORT = String(jazzPort);
