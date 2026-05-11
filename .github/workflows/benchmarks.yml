@@ -63,6 +63,17 @@ jobs:
         with:
           toolchain: 1.93.1
 
+      - name: Install LLVM/Clang for bindgen
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "18.1.8"
+
+      - name: Configure bindgen clang resource dir
+        run: |
+          set -euo pipefail
+          resource_dir="$(clang -print-resource-dir)"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-resource-dir=${resource_dir}" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: .nvmrc
@@ -228,6 +239,17 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Install LLVM/Clang for bindgen
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "18.1.8"
+
+      - name: Configure bindgen clang resource dir
+        run: |
+          set -euo pipefail
+          resource_dir="$(clang -print-resource-dir)"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-resource-dir=${resource_dir}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
