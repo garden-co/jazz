@@ -366,7 +366,17 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     //    process on the next microtask via batched_tick.
     drain_pending_messages();
 
-    // 10. Post init-ok last so main can rely on Ready being persistent by
+    // 10. If a buffered `Shutdown` was drained, `handle_shutdown` already
+    //     posted `ShutdownOk`, called `global.close()`, and cleared `HOST`.
+    //     Don't post `InitOk` to a worker that is already closing — main
+    //     has defenses (it clears `worker.onmessage` after `ShutdownOk` and
+    //     `transition_init_ok` gates on `state == Initializing`), but the
+    //     cleanest fix is to bail at the source.
+    if HOST.with(|c| c.borrow().is_none()) {
+        return Ok(());
+    }
+
+    // 11. Post init-ok last so main can rely on Ready being persistent by
     //     the time it dispatches subsequent traffic.
     post_to_main(&WorkerToMainWire::InitOk {
         client_id: main_client_id.clone(),
