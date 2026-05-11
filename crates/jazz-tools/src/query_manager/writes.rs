@@ -6,8 +6,8 @@ use crate::metadata::{DeleteKind, RowProvenance, SYSTEM_PRINCIPAL_ID, row_proven
 use crate::object::{BranchName, ObjectId};
 use crate::row_format::compiled_row_layout;
 use crate::row_histories::{
-    ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError, RowState,
-    RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
+    ApplyRowBatchResult, ApplyRowBatchWithContext, BatchId, QueryRowBatch, RowHistoryError,
+    RowState, RowVisibilityChange, StoredRowBatch, apply_row_batch, apply_row_batch_with_context,
 };
 use crate::schema_manager::{SchemaContext, resolve_current_table_name};
 use crate::storage::{
@@ -415,16 +415,19 @@ impl QueryManager {
 
         let forwarded_row = row.clone();
         let applied = apply_row_batch(storage, row_id, branch_name, row, index_mutations)
-            .map_err(|error| match error {
-                RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
-                RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
-                    "missing row-history parent {parent:?} while applying local write for {row_id:?}"
-                )),
-                RowHistoryError::StorageError(error) => {
-                    QueryError::EncodingError(format!("apply row batch: {error}"))
-                }
-            })?;
+            .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
 
+        self.finish_local_row_history_write(storage, table, row_id, forwarded_row, applied)
+    }
+
+    fn finish_local_row_history_write<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        row_id: ObjectId,
+        forwarded_row: StoredRowBatch,
+        applied: ApplyRowBatchResult,
+    ) -> Result<(BatchId, Option<RowVisibilityChange>), QueryError> {
         self.sync_manager.forward_row_batch_to_servers_with_storage(
             storage,
             table,
@@ -435,6 +438,21 @@ impl QueryManager {
 
         let batch_id = applied.batch_id;
         Ok((batch_id, applied.visibility_change))
+    }
+
+    fn query_error_for_local_row_history_write(
+        row_id: ObjectId,
+        error: RowHistoryError,
+    ) -> QueryError {
+        match error {
+            RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
+            RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
+                "missing row-history parent {parent:?} while applying local write for {row_id:?}"
+            )),
+            RowHistoryError::StorageError(error) => {
+                QueryError::EncodingError(format!("apply row batch: {error}"))
+            }
+        }
     }
 
     fn apply_local_row_history_write_with_prepared_context<H: Storage>(
@@ -479,26 +497,9 @@ impl QueryManager {
                 is_known_new_object: true,
             },
         )
-        .map_err(|error| match error {
-            RowHistoryError::ObjectNotFound(id) => QueryError::ObjectNotFound(id),
-            RowHistoryError::ParentNotFound(parent) => QueryError::EncodingError(format!(
-                "missing row-history parent {parent:?} while applying local write for {row_id:?}"
-            )),
-            RowHistoryError::StorageError(error) => {
-                QueryError::EncodingError(format!("apply row batch: {error}"))
-            }
-        })?;
+        .map_err(|error| Self::query_error_for_local_row_history_write(row_id, error))?;
 
-        self.sync_manager.forward_row_batch_to_servers_with_storage(
-            storage,
-            table,
-            row_id,
-            metadata_from_row_locator(&applied.row_locator),
-            forwarded_row,
-        );
-
-        let batch_id = applied.batch_id;
-        Ok((batch_id, applied.visibility_change))
+        self.finish_local_row_history_write(storage, table, row_id, forwarded_row, applied)
     }
 
     fn origin_schema_hash_for_branch(&self, branch: &str) -> Option<SchemaHash> {
