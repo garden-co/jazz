@@ -26,7 +26,6 @@ import type {
   SchemaDefinition as TypedSchemaDefinition,
   SliceableApp as TypedSliceableApp,
   TableDefinition as TypedTableDefinition,
-  TableIndex as TypedTableIndex,
   TableMetaOf as TypedTableMetaOf,
   WhereOf as TypedWhereOf,
 } from "./typed-app.js";
@@ -122,7 +121,6 @@ export type {
   Simplify,
   CompactSchema,
   DefinedSchema,
-  TableIndex,
   DefinedTable,
   TableRow,
   TableInit,
@@ -184,8 +182,6 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
 export namespace schema {
   export type TableDefinition = TypedTableDefinition;
   export type SchemaDefinition = TypedSchemaDefinition;
-  export type TableIndex<TColumns extends TypedTableDefinition = TypedTableDefinition> =
-    TypedTableIndex<TColumns>;
   /**
    * Normalized type for a schema definition.
    */

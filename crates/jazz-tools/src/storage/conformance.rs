@@ -942,6 +942,7 @@ pub fn test_local_batch_record_round_trip(factory: &dyn Fn() -> Box<dyn Storage>
     });
     record.sealed_submission = Some(SealedBatchSubmission::new(
         batch_id,
+        crate::batch_fate::BatchMode::Direct,
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(92)),
@@ -1047,6 +1048,7 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
     let bob = ObjectId::from_uuid(uuid::Uuid::from_u128(302));
     let submission = SealedBatchSubmission::new(
         batch_id,
+        crate::batch_fate::BatchMode::Transactional,
         crate::object::BranchName::new("main"),
         vec![
             SealedBatchMember {
@@ -1075,6 +1077,7 @@ pub fn test_sealed_batch_submission_round_trip(factory: &dyn Fn() -> Box<dyn Sto
         storage.load_sealed_batch_submission(batch_id).unwrap(),
         Some(SealedBatchSubmission::new(
             batch_id,
+            crate::batch_fate::BatchMode::Transactional,
             crate::object::BranchName::new("main"),
             vec![
                 SealedBatchMember {
@@ -1113,6 +1116,7 @@ pub fn test_sealed_batch_submission_delete_removes_record(factory: &dyn Fn() -> 
     let batch_id = crate::row_histories::BatchId::new();
     let submission = SealedBatchSubmission::new(
         batch_id,
+        crate::batch_fate::BatchMode::Direct,
         crate::object::BranchName::new("main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(401)),
@@ -1218,6 +1222,7 @@ pub fn test_local_batch_record_survives_close_reopen(factory: &PersistentStorage
     );
     record.sealed_submission = Some(SealedBatchSubmission::new(
         batch_id,
+        crate::batch_fate::BatchMode::Direct,
         crate::object::BranchName::new("dev-aaaaaaaaaaaa-main"),
         vec![SealedBatchMember {
             object_id: ObjectId::from_uuid(uuid::Uuid::from_u128(112)),
@@ -1292,6 +1297,7 @@ pub fn test_sealed_batch_submission_survives_close_reopen(factory: &PersistentSt
     let batch_id = crate::row_histories::BatchId::new();
     let submission = SealedBatchSubmission::new(
         batch_id,
+        crate::batch_fate::BatchMode::Direct,
         crate::object::BranchName::new("main"),
         vec![
             SealedBatchMember {

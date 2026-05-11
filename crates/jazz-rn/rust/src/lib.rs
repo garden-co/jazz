@@ -19,7 +19,8 @@ use jazz_tools::binding_support::{
     generate_id as generate_binding_id, parse_batch_id_input,
     parse_durability_tier as parse_binding_tier, parse_external_object_id, parse_query_input,
     parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
-    serialize_local_batch_record, serialize_local_batch_records, subscription_delta_to_json,
+    serialize_local_batch_record, serialize_local_batch_records, serialize_mutation_error_event,
+    subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
@@ -259,6 +260,12 @@ pub trait AuthFailureCallback: Send + Sync {
     fn on_failure(&self, reason: String);
 }
 
+#[uniffi::export(callback_interface)]
+pub trait MutationErrorCallback: Send + Sync {
+    /// Invoked when a rejected local mutation was not handled by wait_for_batch.
+    fn on_error(&self, event_json: String);
+}
+
 // ============================================================================
 // RnScheduler
 // ============================================================================
@@ -312,12 +319,48 @@ impl Scheduler for RnScheduler {
 
 type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler>;
 
+fn emit_pending_mutation_errors(
+    core: &Mutex<RnCoreType>,
+    mutation_error_callback: &Mutex<Option<Box<dyn MutationErrorCallback>>>,
+) -> Result<(), JazzRnError> {
+    let callback_guard = mutation_error_callback
+        .lock()
+        .map_err(|_| JazzRnError::Internal {
+            message: "lock poisoned".into(),
+        })?;
+    let Some(callback) = callback_guard.as_ref() else {
+        return Ok(());
+    };
+
+    let events = {
+        let mut core = core.lock().map_err(|_| JazzRnError::Internal {
+            message: "lock poisoned".into(),
+        })?;
+        core.drain_mutation_error_events()
+    };
+
+    for event in events {
+        let event_json =
+            serde_json::to_string(&serialize_mutation_error_event(&event)).map_err(|error| {
+                JazzRnError::Internal {
+                    message: format!("mutation error serialization failed: {error}"),
+                }
+            })?;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback.on_error(event_json);
+        }));
+    }
+
+    Ok(())
+}
+
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
     core: Mutex<RnCoreType>,
     upstream_server_id: Mutex<Option<ServerId>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
+    mutation_error_callback: Mutex<Option<Box<dyn MutationErrorCallback>>>,
 }
 
 #[uniffi::export]
@@ -394,6 +437,7 @@ impl RnRuntime {
                 upstream_server_id: Mutex::new(None),
                 declared_schema,
                 subscription_queries: Mutex::new(HashMap::new()),
+                mutation_error_callback: Mutex::new(None),
             }))
         })
     }
@@ -415,11 +459,14 @@ impl RnRuntime {
     /// Run a batched tick. JS should call this when asked via `on_batched_tick_needed`.
     pub fn batched_tick(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("batched_tick", || {
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            core.scheduler_mut().clear_scheduled();
-            core.batched_tick();
+            {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                core.scheduler_mut().clear_scheduled();
+                core.batched_tick();
+            }
+            emit_pending_mutation_errors(&self.core, &self.mutation_error_callback)?;
             Ok(())
         })
     }
@@ -589,6 +636,35 @@ impl RnRuntime {
                 message: format!("delete serialization failed: {e}"),
             })
         })
+    }
+
+    /// Wait for a local batch to settle at the requested durability tier.
+    pub async fn wait_for_batch(&self, batch_id: String, tier: String) -> Result<(), JazzRnError> {
+        with_async_panic_boundary("wait_for_batch", || async move {
+            let batch_id = parse_batch_id_input(&batch_id)
+                .map_err(|message| JazzRnError::InvalidUuid { message })?;
+            let tier = parse_tier(&tier)?;
+            let receiver = {
+                let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                    message: "lock poisoned".into(),
+                })?;
+                core.wait_for_batch(batch_id, tier).map_err(runtime_err)?
+            };
+
+            match receiver.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(rejection)) => Err(JazzRnError::Runtime {
+                    message: format!(
+                        "Persisted batch {} was rejected ({}): {}",
+                        rejection.batch_id, rejection.code, rejection.reason
+                    ),
+                }),
+                Err(_) => Err(JazzRnError::Runtime {
+                    message: "Wait for batch cancelled".into(),
+                }),
+            }
+        })
+        .await
     }
 
     // =========================================================================
@@ -973,19 +1049,6 @@ impl RnRuntime {
         })
     }
 
-    pub fn drain_rejected_batch_ids(&self) -> Result<Vec<String>, JazzRnError> {
-        with_panic_boundary("drain_rejected_batch_ids", || {
-            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
-                message: "lock poisoned".into(),
-            })?;
-            Ok(core
-                .drain_rejected_batch_ids()
-                .into_iter()
-                .map(|batch_id| batch_id.to_string())
-                .collect())
-        })
-    }
-
     pub fn acknowledge_rejected_batch(&self, batch_id: String) -> Result<bool, JazzRnError> {
         with_panic_boundary("acknowledge_rejected_batch", || {
             let batch_id = parse_batch_id_input(&batch_id)
@@ -995,6 +1058,24 @@ impl RnRuntime {
             })?;
             core.acknowledge_rejected_batch(batch_id)
                 .map_err(runtime_err)
+        })
+    }
+
+    pub fn on_mutation_error(
+        &self,
+        callback: Box<dyn MutationErrorCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("on_mutation_error", || {
+            {
+                let mut slot =
+                    self.mutation_error_callback
+                        .lock()
+                        .map_err(|_| JazzRnError::Internal {
+                            message: "lock poisoned".into(),
+                        })?;
+                *slot = Some(callback);
+            }
+            emit_pending_mutation_errors(&self.core, &self.mutation_error_callback)
         })
     }
 

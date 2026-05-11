@@ -153,7 +153,9 @@ async fn ws_send_sync_payload(ws: &mut WsStream, payload: SyncPayload) -> Result
         client_id: ClientId::new(),
         payloads: vec![payload],
     };
-    let bytes = serde_json::to_vec(&batch).expect("serialize SyncBatchRequest");
+    let bytes = batch
+        .encode_payload()
+        .expect("encode SyncBatchRequest payload");
     ws.send(Message::Binary(frame_encode(&bytes).into()))
         .await
         .map_err(|e| format!("ws send sync payload failed: {e}"))
@@ -171,7 +173,8 @@ async fn ws_recv_server_event(
     match message {
         Some(Ok(Message::Binary(bytes))) => {
             let inner = frame_decode(&bytes).ok_or("malformed response frame")?;
-            serde_json::from_slice(inner).map_err(|e| format!("invalid server event: {e}"))
+            jazz_tools::transport_protocol::ServerEvent::decode_payload(inner)
+                .map_err(|e| format!("invalid server event: {e}"))
         }
         Some(Ok(Message::Close(_))) | None => Err("server closed connection".to_string()),
         Some(Ok(other)) => Err(format!("unexpected WS message: {other:?}")),

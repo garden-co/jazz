@@ -85,7 +85,7 @@ class FakeDb implements FileStorageDb {
     const row = this.store(table, data, false);
     this.#insertsByBatchId.set(batchId, this.inserts.length - 1);
     const client = {
-      waitForPersistedBatch: async (persistedBatchId: string, tier: string) => {
+      waitForBatch: async (persistedBatchId: string, tier: string) => {
         const insertIndex = this.#insertsByBatchId.get(persistedBatchId);
         if (insertIndex === undefined) {
           throw new Error(`unknown batch ${persistedBatchId}`);

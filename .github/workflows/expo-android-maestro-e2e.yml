@@ -4,18 +4,13 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - changeset-release/*
   pull_request:
     branches: [main]
     paths:
-      - crates/**
-      - packages/jazz-tools/**
-      - examples/todo-client-localfirst-expo/**
-      - Cargo.toml
-      - Cargo.lock
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - turbo.json
+      - crates/jazz-rn/**
+      - packages/jazz-tools/src/react-native/**
       - .github/workflows/expo-android-maestro-e2e.yml
 
 concurrency:
@@ -28,7 +23,6 @@ permissions:
 jobs:
   build-rn:
     name: Build jazz-rn (Android) artifacts
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     uses: ./.github/workflows/rn-build-reusable.yml
     with:
       concurrency: e2e-rn-test
@@ -36,30 +30,24 @@ jobs:
       disableIOS: true
 
   build-jazz-tools-sandbox:
-    name: Build jazz-tools sandbox binary (${{ matrix.target }})
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
+    name: Build jazz-tools sandbox binary (x86_64-unknown-linux-musl)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
     env:
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
+      JAZZ_TOOLS_SANDBOX_TARGET: x86_64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: ${{ matrix.target }}
+          targets: ${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.14.0
-          cache-key: ${{ matrix.target }}
+          cache-key: ${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
       - uses: taiki-e/install-action@v2
         with:
@@ -72,19 +60,18 @@ jobs:
       - name: Build sandbox binary
         run: |
           mkdir -p .artifacts/jazz-tools
-          cargo zigbuild --release -p jazz-tools --bin jazz-tools --features cli --target "${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/jazz-tools" ".artifacts/jazz-tools/jazz-tools-${{ matrix.target }}"
+          cargo zigbuild --release -p jazz-tools --bin jazz-tools --features cli --target "${JAZZ_TOOLS_SANDBOX_TARGET}"
+          cp "target/${JAZZ_TOOLS_SANDBOX_TARGET}/release/jazz-tools" ".artifacts/jazz-tools/jazz-tools-${JAZZ_TOOLS_SANDBOX_TARGET}"
 
       - name: Upload sandbox binary
         uses: actions/upload-artifact@v4
         with:
-          name: jazz-tools-sandbox-${{ matrix.target }}
+          name: jazz-tools-sandbox-${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
           if-no-files-found: error
-          path: .artifacts/jazz-tools/jazz-tools-${{ matrix.target }}
+          path: .artifacts/jazz-tools/jazz-tools-${{ env.JAZZ_TOOLS_SANDBOX_TARGET }}
 
   expo-android-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'changeset-release/') }}
     needs:
       - build-rn
       - build-jazz-tools-sandbox
@@ -110,9 +97,8 @@ jobs:
       - name: Download jazz-tools sandbox binaries
         uses: actions/download-artifact@v5
         with:
-          pattern: jazz-tools-sandbox-*
+          name: jazz-tools-sandbox-x86_64-unknown-linux-musl
           path: .artifacts/jazz-tools
-          merge-multiple: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -232,9 +218,13 @@ jobs:
           echo "SERVER_PUBLIC_URL=$SERVER_PUBLIC_URL" >> "$GITHUB_ENV"
 
           ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
+          echo "Sandbox architecture: $ARCH"
           case "$ARCH" in
             x86_64|amd64) BINARY=".artifacts/jazz-tools/jazz-tools-x86_64-unknown-linux-musl" ;;
-            aarch64|arm64) BINARY=".artifacts/jazz-tools/jazz-tools-aarch64-unknown-linux-musl" ;;
+            aarch64|arm64)
+              echo "::error::Sandbox architecture $ARCH needs an aarch64 binary, but this workflow only builds x86_64 to avoid building unused targets."
+              exit 1
+              ;;
             *) echo "::error::Unsupported sandbox arch: $ARCH"; exit 1 ;;
           esac
           if [ ! -f "$BINARY" ]; then

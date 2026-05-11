@@ -596,6 +596,25 @@ fn make_test_jwt(user_id: &str) -> String {
     encode(&header, &claims, &key).unwrap()
 }
 
+async fn publish_test_schema(base_url: &str, app_id: AppId) {
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/apps/{app_id}/admin/schemas"))
+        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
+        .json(&serde_json::json!({
+            "schema": test_schema(),
+            "permissions": null,
+        }))
+        .send()
+        .await
+        .expect("publish test schema request");
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::CREATED,
+        "publish test schema"
+    );
+}
+
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
@@ -756,6 +775,7 @@ async fn test_server_resync() {
         };
         let client = JazzClient::connect(context).await.unwrap();
         let permissions_schema = test_schema();
+        publish_test_schema(&server.base_url(), test_app_id).await;
         permissions_support::publish_allow_all_permissions(
             &server.base_url(),
             test_app_id,

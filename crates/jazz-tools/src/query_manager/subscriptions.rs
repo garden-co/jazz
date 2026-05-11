@@ -6,8 +6,8 @@ use std::{
 use crate::object::ObjectId;
 use crate::row_histories::RowVisibilityChange;
 use crate::storage::Storage;
-use crate::sync_manager::QueryPropagation;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
+use crate::sync_manager::{OutgoingQuerySubscription, QueryPropagation};
 
 #[cfg(test)]
 use super::encoding::decode_row;
@@ -26,6 +26,7 @@ type ReplayableQuerySubscription = (
     QueryId,
     Query,
     Option<Session>,
+    Option<DurabilityTier>,
     QueryPropagation,
     Vec<String>,
 );
@@ -157,6 +158,8 @@ impl QueryManager {
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
         let query_frontier_settled_tier = (durability_tier.is_none()
+            || durability_tier
+                .is_some_and(|tier| self.sync_manager.has_local_durability_at_least(tier))
             || !self.should_send_local_subscription_upstream(propagation)
             || !self.sync_manager.has_servers_or_pending_servers())
         .then_some(DurabilityTier::GlobalServer);
@@ -403,6 +406,7 @@ impl QueryManager {
                 query_id,
                 sync_query,
                 session,
+                durability_tier,
                 propagation,
                 policy_context_tables,
             );
@@ -465,21 +469,33 @@ impl QueryManager {
                     QueryId(sub_id.0),
                     self.sync_query_payload_for_upstream(&sub.query),
                     sub.session.clone(),
+                    sub.durability_tier,
                     sub.propagation,
                     sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation, policy_context_tables) in local_subs {
+        for (query_id, query, session, required_tier, propagation, policy_context_tables) in
+            local_subs
+        {
+            if self
+                .sync_manager
+                .consume_pending_query_subscription_marker(server_id, query_id)
+            {
+                continue;
+            }
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
-                    query_id,
-                    query,
-                    session,
-                    propagation,
-                    policy_context_tables,
+                    OutgoingQuerySubscription {
+                        query_id,
+                        query,
+                        session,
+                        required_tier,
+                        propagation,
+                        policy_context_tables,
+                    },
                 );
             }
         }
@@ -493,20 +509,32 @@ impl QueryManager {
                     *query_id,
                     sub.query.clone(),
                     sub.session.clone(),
+                    sub.required_tier,
                     sub.propagation,
                     sub.policy_context_tables.clone(),
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation, policy_context_tables) in downstream_subs {
+        for (query_id, query, session, required_tier, propagation, policy_context_tables) in
+            downstream_subs
+        {
+            if self
+                .sync_manager
+                .consume_pending_query_subscription_marker(server_id, query_id)
+            {
+                continue;
+            }
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
-                query_id,
-                query,
-                session,
-                propagation,
-                policy_context_tables,
+                OutgoingQuerySubscription {
+                    query_id,
+                    query,
+                    session,
+                    required_tier,
+                    propagation,
+                    policy_context_tables,
+                },
             );
         }
     }

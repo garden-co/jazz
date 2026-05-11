@@ -317,7 +317,7 @@ mod tests {
             payloads: vec![p1, p2],
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = batch.encode_payload().unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -606,7 +606,7 @@ mod tests {
             payloads,
             client_id,
         };
-        let frame_payload = serde_json::to_vec(&batch).unwrap();
+        let frame_payload = batch.encode_payload().unwrap();
         let result = state
             .process_ws_client_frame(client_id, &frame_payload)
             .await;
@@ -1974,6 +1974,7 @@ mod tests {
                         query: Box::new(query),
                         session: None,
                         propagation,
+                        required_tier: None,
                         policy_context_tables: vec![],
                     },
                 })

@@ -15,7 +15,7 @@ class TestDb extends Db {
 
 function makeHandleClient(): JazzClient {
   return {
-    waitForPersistedBatch: vi.fn(async () => undefined),
+    waitForBatch: vi.fn(async () => undefined),
   } as unknown as JazzClient;
 }
 
@@ -164,6 +164,7 @@ describe("Db runtime schema order", () => {
       ]),
       getSchema: vi.fn(() => new Map()),
       getSchemaHash: vi.fn(() => "runtime-schema-hash"),
+      onMutationError: vi.fn(),
       onSyncMessageReceived: vi.fn(),
       createSubscription: vi.fn(),
       executeSubscription: vi.fn(),

@@ -47,6 +47,8 @@ export const runtimeBatchRecordStubs = {
   loadLocalBatchRecord: () => null,
   loadLocalBatchRecords: () => [],
   sealBatch: () => {},
+  waitForBatch: async () => {},
+  onMutationError: () => {},
 };
 
 export function makeClient() {

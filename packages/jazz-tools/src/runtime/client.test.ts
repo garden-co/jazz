@@ -5,17 +5,28 @@ import {
   resolveDefaultDurabilityTier,
   type MutationErrorEvent,
   type Runtime,
+  type LocalBatchRecord,
   WriteHandle,
+  PersistedWriteRejectedError,
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
+  let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   const runtime = {
     updateAuth: vi.fn<(auth_json: string) => void>(),
     onAuthFailure: vi.fn<(callback: (reason: string) => void) => void>(),
     // Runtime interface stubs
     insert: vi.fn(),
+    insertWithSession: vi.fn((table: string, values: any, writeContextJson?: string | null) => {
+      const writeContext = writeContextJson ? JSON.parse(writeContextJson) : {};
+      return {
+        id: "todo-batch-query",
+        values: [],
+        batchId: writeContext.batch_id ?? "batch-query",
+      };
+    }),
     update: vi.fn(),
     delete: vi.fn(),
     query:
@@ -54,9 +65,15 @@ function makeFakeRuntime() {
     loadLocalBatchRecords: vi.fn<() => ReturnType<NonNullable<Runtime["loadLocalBatchRecords"]>>>(
       () => [],
     ),
-    drainRejectedBatchIds: vi.fn<() => string[]>(() => []),
+    loadBatchFate: vi.fn<(batch_id: string) => ReturnType<NonNullable<Runtime["loadBatchFate"]>>>(
+      () => null,
+    ),
     acknowledgeRejectedBatch: vi.fn<(batch_id: string) => boolean>(() => false),
+    onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
+      mutationErrorCallback = callback;
+    }),
     sealBatch: vi.fn<(batch_id: string) => void>(),
+    waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
     onSyncMessageReceived: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
@@ -67,7 +84,11 @@ function makeFakeRuntime() {
     close: vi.fn(),
   } satisfies Runtime;
 
-  return runtime;
+  return Object.assign(runtime, {
+    emitMutationError(event: MutationErrorEvent) {
+      mutationErrorCallback?.(event);
+    },
+  });
 }
 
 function makeContext(): AppContext {
@@ -294,20 +315,16 @@ describe("JazzClient runtime schema caching", () => {
 });
 
 describe("JazzClient transactions", () => {
-  it("returns a write handle from commit so callers can wait on the batch", async () => {
+  it("returns a completed write handle when committing an empty transaction", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
 
     const committed = client.beginTransaction().commit();
 
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
   it("rolls back an open transaction without sealing the batch", () => {
@@ -342,49 +359,88 @@ describe("JazzClient transactions", () => {
     expect(() => tx.commit()).toThrow(/committed/i);
   });
 
-  it("returns a write handle from batch commit so callers can wait on the batch", async () => {
+  it("returns a completed write handle when committing an empty batch", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
 
     const committed = client.beginBatch().commit();
 
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(committed).toBeInstanceOf(WriteHandle);
     expect(committed.batchId).toBeDefined();
     await expect(committed.wait({ tier: "edge" })).resolves.toBeUndefined();
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(committed.batchId, "edge");
   });
 
-  it("commits a sync callback transaction and returns the callback result handle", async () => {
+  it("rolls back an open batch without sealing the batch", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
+    const batch = client.beginBatch();
+
+    batch.rollback();
+
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
+    expect(() => batch.commit()).toThrow(/rolled back/i);
+    expect(() => batch.rollback()).toThrow(/rolled back/i);
+    expect(() =>
+      batch.create("todos", {
+        title: { type: "Text", value: "Nope" },
+      }),
+    ).toThrow(/rolled back/i);
+  });
+
+  it("rejects rollback after a batch has been committed", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.commit();
+
+    expect(() => batch.rollback()).toThrow(/committed/i);
+  });
+
+  it("supports raw reads scoped to the open batch", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([{ id: "todo-batch-query", values: [] }]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batch = client.beginBatch();
+
+    batch.create("todos", {});
+
+    await expect(
+      batch.query({ _build: () => JSON.stringify({ table: "todos" }) }),
+    ).resolves.toEqual([{ id: "todo-batch-query", values: [] }]);
+
+    expect(runtime.query).toHaveBeenCalledTimes(1);
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      local_updates: "deferred",
+      transaction_overlay: {
+        batch_id: batch.batchId(),
+        row_ids: ["todo-batch-query"],
+      },
+    });
+  });
+
+  it("completes an empty sync callback transaction and returns the callback result handle", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
     const handle = client.transaction(() => {
       return { title: "Callback transaction" };
     });
 
     expect(handle).not.toBeInstanceOf(Promise);
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Callback transaction" });
     await expect(handle.wait({ tier: "global" })).resolves.toEqual({
       title: "Callback transaction",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
-  it("commits an async callback transaction after the callback resolves", async () => {
+  it("completes an empty async callback transaction after the callback resolves", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
 
     const handlePromise = client.transaction(async () => {
       expect(runtime.sealBatch).not.toHaveBeenCalled();
@@ -393,42 +449,34 @@ describe("JazzClient transactions", () => {
 
     expect(handlePromise).toBeInstanceOf(Promise);
     const handle = await handlePromise;
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Async callback transaction" });
     await expect(handle.wait({ tier: "global" })).resolves.toEqual({
       title: "Async callback transaction",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "global");
   });
 
-  it("commits a sync callback batch and returns the callback result handle", async () => {
+  it("completes an empty sync callback batch and returns the callback result handle", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
 
     const handle = client.batch(() => {
       return { title: "Callback batch" };
     });
 
     expect(handle).not.toBeInstanceOf(Promise);
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Callback batch" });
     await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
       title: "Callback batch",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
   });
 
-  it("commits an async callback batch after the callback resolves", async () => {
+  it("completes an empty async callback batch after the callback resolves", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const waitForPersistedBatch = vi
-      .spyOn(client, "waitForPersistedBatch")
-      .mockResolvedValue(undefined);
 
     const handlePromise = client.batch(async () => {
       expect(runtime.sealBatch).not.toHaveBeenCalled();
@@ -437,13 +485,12 @@ describe("JazzClient transactions", () => {
 
     expect(handlePromise).toBeInstanceOf(Promise);
     const handle = await handlePromise;
-    expect(runtime.sealBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.sealBatch).not.toHaveBeenCalled();
     expect(handle).toBeInstanceOf(WriteResult);
     expect(handle.value).toEqual({ title: "Async callback batch" });
     await expect(handle.wait({ tier: "edge" })).resolves.toEqual({
       title: "Async callback batch",
     });
-    expect(waitForPersistedBatch).toHaveBeenCalledWith(handle.batchId, "edge");
   });
 
   it("does not commit a callback batch when the callback throws", () => {
@@ -471,6 +518,77 @@ describe("JazzClient transactions", () => {
   });
 });
 
+describe("JazzClient runtime batch waits", () => {
+  function makePendingBatchRecord(batchId: string): LocalBatchRecord {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: null,
+    };
+  }
+
+  function makeRejectedBatchRecord(batchId: string): LocalBatchRecord {
+    return {
+      batchId,
+      mode: "direct" as const,
+      sealed: true,
+      latestSettlement: {
+        kind: "rejected" as const,
+        batchId,
+        code: "permission_denied",
+        reason: "write rejected by policy",
+      },
+    };
+  }
+
+  it("delegates unsettled waits to the runtime", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makePendingBatchRecord(batchId));
+    runtime.waitForBatch = vi.fn(async () => undefined);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await expect(client.waitForBatch("batch-runtime", "edge")).resolves.toBeUndefined();
+
+    expect(runtime.waitForBatch).toHaveBeenCalledWith("batch-runtime", "edge");
+  });
+
+  it("lets a runtime wait handle rejection without replaying onMutationError", async () => {
+    const runtime = makeFakeRuntime();
+    const batchId = "batch-runtime-rejected";
+    let record = makePendingBatchRecord(batchId);
+    let rejectWait!: (error: unknown) => void;
+    runtime.loadLocalBatchRecord = vi.fn(() => record);
+    runtime.waitForBatch = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectWait = reject;
+        }),
+    );
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const seen: MutationErrorEvent[] = [];
+    client.onMutationError((event) => {
+      seen.push(event);
+    });
+
+    const waitPromise = client.waitForBatch(batchId, "edge");
+    await Promise.resolve();
+    record = makeRejectedBatchRecord(batchId);
+
+    rejectWait({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "write rejected by policy",
+    });
+
+    await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith(batchId);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("JazzClient mutation error handling", () => {
   function makeRejectedBatchRecord(batchId: string) {
     return {
@@ -486,9 +604,8 @@ describe("JazzClient mutation error handling", () => {
     };
   }
 
-  it("replays queued rejected batches to new listeners without scanning all batch records", () => {
+  it("receives pushed runtime mutation errors without scanning all batch records", async () => {
     const runtime = makeFakeRuntime();
-    runtime.drainRejectedBatchIds = vi.fn(() => ["batch-rejected"]);
     runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
     runtime.loadLocalBatchRecords = vi.fn(() => {
       throw new Error("should not scan all local batch records");
@@ -505,8 +622,13 @@ describe("JazzClient mutation error handling", () => {
       seen.push(event);
     });
 
-    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(1);
-    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
+    runtime.emitMutationError({
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      batch: makeRejectedBatchRecord("batch-rejected"),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
     expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
     expect(seen).toEqual([
@@ -518,38 +640,53 @@ describe("JazzClient mutation error handling", () => {
     ]);
   });
 
-  it("checks only runtime-reported rejected batch ids after sync", () => {
+  it("logs and acknowledges pushed runtime mutation errors when no listener is registered", async () => {
     const runtime = makeFakeRuntime();
-    runtime.drainRejectedBatchIds = vi
-      .fn<() => string[]>(() => [])
-      .mockReturnValueOnce([])
-      .mockReturnValueOnce(["batch-rejected"]);
-    runtime.loadLocalBatchRecord = vi.fn((batchId: string) => makeRejectedBatchRecord(batchId));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     runtime.loadLocalBatchRecords = vi.fn(() => {
       throw new Error("should not scan all local batch records");
     });
     runtime.acknowledgeRejectedBatch = vi.fn(() => true);
-    const client = JazzClient.connectWithRuntime(runtime as any, {
+    JazzClient.connectWithRuntime(runtime as any, {
       appId: "sync-rejection-app",
       schema: {},
     });
 
-    const seen: MutationErrorEvent[] = [];
-    client.onMutationError((event) => {
-      seen.push(event);
-    });
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      batch: makeRejectedBatchRecord("batch-rejected"),
+    };
+    runtime.emitMutationError(event);
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    client.getRuntime().onSyncMessageReceived("sync-payload");
-
-    expect(runtime.drainRejectedBatchIds).toHaveBeenCalledTimes(2);
-    expect(runtime.loadLocalBatchRecord).toHaveBeenCalledWith("batch-rejected");
     expect(runtime.loadLocalBatchRecords).not.toHaveBeenCalled();
-    expect(seen).toEqual([
-      {
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+
+    consoleError.mockRestore();
+  });
+
+  it("flushes pending runtime mutation errors during callback registration", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.onMutationError = vi.fn((callback) => {
+      callback({
         code: "permission_denied",
         reason: "write rejected by policy",
         batch: makeRejectedBatchRecord("batch-rejected"),
-      },
-    ]);
+      });
+    });
+    runtime.acknowledgeRejectedBatch = vi.fn(() => true);
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    JazzClient.connectWithRuntime(runtime as any, {
+      appId: "startup-rejection-app",
+      schema: {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(runtime.acknowledgeRejectedBatch).toHaveBeenCalledWith("batch-rejected");
+    consoleError.mockRestore();
   });
 });

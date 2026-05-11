@@ -1,6 +1,6 @@
 ---
 "jazz-tools": minor
-"jazz-napi": minor
+"jazz-napi": patch
 ---
 
 Add edge upstream sync support for self-hosted Jazz servers.

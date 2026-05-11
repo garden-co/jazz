@@ -279,8 +279,14 @@ fn sealed_submission(
     members: Vec<SealedBatchMember>,
     captured_frontier: Vec<CapturedFrontierMember>,
 ) -> SealedBatchSubmission {
+    let mode = if captured_frontier.is_empty() {
+        crate::batch_fate::BatchMode::Direct
+    } else {
+        crate::batch_fate::BatchMode::Transactional
+    };
     SealedBatchSubmission::new(
         batch_id,
+        mode,
         BranchName::new(target_branch_name),
         members,
         captured_frontier,
@@ -330,6 +336,7 @@ fn push_query_subscription(
             query_id: QueryId(1),
             query: Box::new(query),
             session: payload_session,
+            required_tier: None,
             propagation: QueryPropagation::Full,
             policy_context_tables: vec![],
         },

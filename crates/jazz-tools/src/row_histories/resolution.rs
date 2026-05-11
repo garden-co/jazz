@@ -301,14 +301,9 @@ pub(super) fn build_computed_visible_preview(
         .collect::<HashMap<_, _>>();
     let ancestor = latest_common_ancestor(&frontier, &row_by_batch_id);
 
-    let ancestor_values = match ancestor {
-        Some(row) => flat_user_values(user_descriptor, &row.data)?,
-        None => user_descriptor
-            .columns
-            .iter()
-            .map(|_| Value::Null)
-            .collect(),
-    };
+    let ancestor_values = ancestor
+        .map(|row| flat_user_values(user_descriptor, &row.data))
+        .transpose()?;
     let frontier_values = frontier
         .iter()
         .map(|row| flat_user_values(user_descriptor, &row.data))
@@ -317,25 +312,39 @@ pub(super) fn build_computed_visible_preview(
     let mut merged_values = Vec::with_capacity(user_descriptor.columns.len());
     let mut contributing_rows: Vec<&StoredRowBatch> = Vec::new();
     let mut winner_batch_ids = Vec::with_capacity(user_descriptor.columns.len());
+    let null_ancestor = Value::Null;
 
     for column_index in 0..user_descriptor.columns.len() {
-        let ancestor_value = ancestor_values[column_index].clone();
+        let column = &user_descriptor.columns[column_index];
+        let ancestor_value = ancestor_values
+            .as_ref()
+            .map(|values| &values[column_index])
+            .unwrap_or(&null_ancestor);
         let changed_contenders = frontier
             .iter()
             .zip(frontier_values.iter())
             .filter_map(|(row, row_values)| {
                 let candidate_value = &row_values[column_index];
-                (candidate_value != &ancestor_value).then_some(ColumnContender {
+                let changed_from_ancestor = ancestor_values
+                    .as_ref()
+                    .map(|values| candidate_value != &values[column_index])
+                    .unwrap_or_else(|| {
+                        // With no common ancestor, Null is an explicit value, not "unchanged from absence".
+                        // The only exception is counters: for counter merge logic, we don’t want a
+                        // missing/no-ancestor snapshot to look like a counter update of “null”.
+                        !matches!(
+                            (column.merge_strategy, candidate_value),
+                            (Some(ColumnMergeStrategy::Counter), Value::Null)
+                        )
+                    });
+                changed_from_ancestor.then_some(ColumnContender {
                     row,
                     value: candidate_value,
                 })
             })
             .collect::<Vec<_>>();
-        let (best_value, best_changed) = merge_column_with_strategy(
-            &user_descriptor.columns[column_index],
-            &ancestor_value,
-            &changed_contenders,
-        )?;
+        let (best_value, best_changed) =
+            merge_column_with_strategy(column, ancestor_value, &changed_contenders)?;
 
         merged_values.push(best_value);
         let winner_row = best_changed.or(ancestor).unwrap_or(latest_tip);

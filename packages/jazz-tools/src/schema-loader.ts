@@ -149,6 +149,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
   return {
     name,
     columns: table.columns.map(wasmColumnToAst),
+    indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
     policies: table.policies as TablePolicies | undefined,
   };
 }
@@ -171,11 +172,6 @@ function isTypedAppLike(value: Record<string, unknown>): value is { wasmSchema: 
 }
 
 function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null {
-  const collected = getCollectedSchema();
-  if (collected.tables.length > 0) {
-    return collected;
-  }
-
   const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
     (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null,
@@ -191,6 +187,11 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null 
     } catch {
       // Try the next supported export shape.
     }
+  }
+
+  const collected = getCollectedSchema();
+  if (collected.tables.length > 0) {
+    return collected;
   }
 
   return null;

@@ -34,6 +34,66 @@ fn subscription_updates_after_insert_and_process() {
 }
 
 #[test]
+fn unindexed_where_predicate_falls_back_to_id_scan() {
+    let sync_manager = SyncManager::new();
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        TableSchema::builder("users")
+            .column("name", ColumnType::Text)
+            .column("score", ColumnType::Integer)
+            .index_only(["score"])
+            .build(),
+    );
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+    qm.take_updates();
+
+    assert!(
+        storage
+            .index_lookup(
+                "users",
+                "name",
+                qm.current_branch().as_str(),
+                &Value::Text("Alice".into())
+            )
+            .is_empty(),
+        "indexOnly should avoid maintaining an index for omitted columns"
+    );
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let updates = qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(updates[0].delta.added.len(), 1);
+    let values = decode_row(
+        &qm.schema[&TableName::new("users")].columns,
+        &updates[0].delta.added[0].data,
+    )
+    .unwrap();
+    assert_eq!(values[0], Value::Text("Alice".into()));
+}
+
+#[test]
 fn settled_clean_subscription_does_not_request_visibility_recompute_on_idle_process() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -62,6 +122,45 @@ fn settled_clean_subscription_does_not_request_visibility_recompute_on_idle_proc
 
     assert!(qm.take_updates().is_empty());
     assert!(!qm.subscriptions[&sub_id].needs_visibility_recompute);
+}
+
+#[test]
+fn batch_fate_processing_does_not_scan_visible_regions_to_find_members() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema, "dev", "main");
+    let mut storage = CountingCatalogueUpsertsStorage::with_inner(seeded_memory_storage(
+        &qm.schema_context().current_schema,
+    ));
+
+    let query = qm.query("users").build();
+    qm.subscribe(query).unwrap();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+    qm.take_updates();
+    storage.reset_visible_region_scans();
+
+    qm.sync_manager_mut()
+        .push_pending_batch_fate(crate::batch_fate::BatchFate::DurableDirect {
+            batch_id: handle.batch_id,
+            confirmed_tier: DurabilityTier::GlobalServer,
+        });
+
+    qm.process(&mut storage);
+
+    assert_eq!(
+        storage.visible_region_scans(),
+        0,
+        "batch fate processing should use batch records and subscription provenance, not scan/decode every visible row"
+    );
 }
 
 #[test]
@@ -1101,6 +1200,61 @@ fn subscribe_with_sync_local_only_on_persistence_tier_does_not_send_upstream() {
 }
 
 #[test]
+fn local_durability_tier_subscription_ignores_stale_upstream_scope() {
+    use crate::sync_manager::{DurabilityTier, InboxEntry, QueryId, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let schema = test_schema();
+    let (mut edge_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let row_id = edge_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap()
+        .row_id;
+    edge_qm.process(&mut storage);
+    let _ = edge_qm.take_updates();
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut edge_qm, &storage, upstream_id);
+    let _ = edge_qm.sync_manager_mut().take_outbox();
+
+    let query = edge_qm.query("users").build();
+    let sub_id = edge_qm
+        .subscribe_with_sync(query, None, Some(DurabilityTier::EdgeServer))
+        .unwrap();
+
+    edge_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(upstream_id),
+        payload: SyncPayload::QuerySettled {
+            query_id: QueryId(sub_id.0),
+            tier: DurabilityTier::Local,
+            scope: vec![],
+            through_seq: 0,
+        },
+    });
+    edge_qm.process(&mut storage);
+
+    let updates = edge_qm.take_updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].subscription_id, sub_id);
+    assert_eq!(
+        updates[0]
+            .delta
+            .added
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![row_id],
+        "edge-tier reads on an edge runtime are satisfied locally and must not be clipped by a stale upstream scope snapshot"
+    );
+}
+
+#[test]
 fn add_server_replays_existing_local_query_subscriptions() {
     use crate::sync_manager::{Destination, QueryId, ServerId, SyncPayload};
     use uuid::Uuid;
@@ -1259,12 +1413,20 @@ fn mid_tier_forwards_query_subscription_upstream() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
     });
 
     // Process the subscription
+    mid_tier
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
     mid_tier.process(&mut storage);
 
     // Check that QuerySubscription was forwarded to upstream server
@@ -1280,6 +1442,137 @@ fn mid_tier_forwards_query_subscription_upstream() {
         forwarded.len(),
         1,
         "Mid-tier should forward QuerySubscription to upstream server"
+    );
+}
+
+#[test]
+fn mid_tier_suppresses_repeated_local_query_settled_for_global_downstream_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
+        SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut mid_tier, &storage, upstream_id);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut mid_tier, &storage, client_id);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier.query("users").build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query: Box::new(query),
+            session: None,
+            required_tier: Some(DurabilityTier::GlobalServer),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    mid_tier.process(&mut storage);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::QuerySubscription { query_id, required_tier: None, .. },
+            } if *id == upstream_id
+                && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "mid-tier should forward the subscription upstream without imposing the downstream-local tier gate on the upstream server"
+    );
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "the first lower-tier settled signal is preserved as the initial remote scope snapshot"
+    );
+
+    mid_tier.process(&mut storage);
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "after the initial scope snapshot, below-required settled signals should be suppressed"
+    );
+}
+
+#[test]
+fn mid_tier_keeps_local_query_settled_for_legacy_downstream_subscription() {
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, OutboxEntry, ServerId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_server(&mut mid_tier, &storage, upstream_id);
+
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    connect_client(&mut mid_tier, &storage, client_id);
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier.query("users").build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query: Box::new(query),
+            session: None,
+            required_tier: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+            policy_context_tables: vec![],
+        },
+    });
+
+    mid_tier.process(&mut storage);
+
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: crate::sync_manager::DurabilityTier::Local,
+                    ..
+                },
+            } if *id == client_id && *query_id == crate::sync_manager::QueryId(42)
+        )),
+        "subscriptions without an explicit required tier should retain the legacy local settled signal"
     );
 }
 
@@ -1310,6 +1603,7 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
             policy_context_tables: vec![],
         },
@@ -1353,6 +1647,7 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
             query_id: crate::sync_manager::QueryId(77),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
             policy_context_tables: vec![],
         },
@@ -1407,6 +1702,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             query_id,
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },
@@ -1483,6 +1779,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
             session: None,
+            required_tier: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
             policy_context_tables: vec![],
         },

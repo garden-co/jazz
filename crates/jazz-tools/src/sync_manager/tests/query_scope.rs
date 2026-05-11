@@ -66,7 +66,7 @@ fn query_settled_from_server_stores_scope_for_query() {
 }
 
 #[test]
-fn query_settled_from_server_relays_scope_to_interested_clients() {
+fn query_settled_from_server_can_be_relayed_to_interested_clients_after_ready() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
     let client_id = ClientId::new();
@@ -91,6 +91,12 @@ fn query_settled_from_server_relays_scope_to_interested_clients() {
             through_seq: 0,
         },
     );
+
+    assert!(
+        sm.take_outbox().is_empty(),
+        "server QuerySettled should wait for RuntimeCore's stream watermark before relay"
+    );
+    sm.relay_query_settled_to_origins(server_id, query_id, DurabilityTier::Local);
 
     assert!(sm.take_outbox().into_iter().any(|entry| matches!(
         entry,

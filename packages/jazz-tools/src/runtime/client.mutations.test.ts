@@ -62,6 +62,8 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return { batchId: "delete-with-session-batch-id" };
     },
     query: async () => [],
+    waitForBatch: async () => {},
+    onMutationError: () => {},
     subscribe: () => 0,
     createSubscription: () => 0,
     executeSubscription: () => {},
