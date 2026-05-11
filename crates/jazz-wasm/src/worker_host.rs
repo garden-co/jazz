@@ -570,13 +570,12 @@ fn handle_shutdown(runtime: &Rc<WasmRuntime>, simulate_crash: bool, from_js_obje
         }
     });
 
-    // simulate_crash leaves the WAL with unflushed outbox work — only the WAL
-    // buffer is forced to OPFS; the batched tick (which drains scheduled work
-    // + processes the outbox) is skipped so WAL-replay tests have unfinished
-    // state to recover.
-    if !simulate_crash {
-        runtime.batched_tick();
-    }
+    // Drain any pending sync work into storage before persisting. `simulate_crash`
+    // historically skipped this tick to leave WAL recovery state for testing,
+    // but opfs-btree has no separate WAL — `flush_wal` is the checkpoint, so we
+    // still need batched_tick to land queued writes into the tree before the
+    // checkpoint can durably persist them.
+    runtime.batched_tick();
     runtime.flush_wal();
     runtime.install_noop_sync_sender();
 
