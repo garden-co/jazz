@@ -360,6 +360,65 @@ async fn shutdown_resolves_on_ack() {
 }
 
 #[wasm_bindgen_test]
+async fn shutdown_during_init_blocks_stale_init_ok_from_worker() {
+    // Worker-host race: if `Shutdown` is buffered while the host is still
+    // `Initializing`, `drain_pending_messages` runs `handle_shutdown` before
+    // `run_init` would post `InitOk`. The worker host now bails before that
+    // stale post (see worker_host.rs:367 — `HOST.is_none()` guard), but the
+    // main-side bridge must remain defensive against the same race so a
+    // regression on either side can't flip the bridge back to `Ready` on a
+    // worker that has already closed.
+    //
+    // Defense being tested: after `ShutdownOk`, the bridge clears
+    // `worker.onmessage` so any late binary post from a not-yet-bailed
+    // worker is dropped at the slot. State guards in `transition_init_ok`
+    // (`state == Initializing`) provide a second layer.
+    let fw = FakeWorker::new();
+    let runtime = fresh_runtime();
+    let bridge = jazz_wasm::WasmWorkerBridge::attach(fw.worker(), &runtime, build_options(None))
+        .expect("attach");
+
+    // init() registers init_resolver and posts the init JS object. We do not
+    // await its Promise — calling shutdown() in the same task simulates a
+    // caller tearing down before init completed (e.g. test cleanup, unmount,
+    // restart).
+    let _init_promise = bridge.init();
+
+    // shutdown() synchronously transitions state Initializing -> ShuttingDown
+    // and posts `Shutdown` to the worker.
+    let shutdown_promise = bridge.shutdown();
+
+    // Worker acks. dispatch_wire fires shutdown_resolver; the future then
+    // calls `worker.set_onmessage(None)` and transitions to Disposed.
+    fw.emit_wire(&WorkerToMainWire::ShutdownOk);
+    JsFuture::from(shutdown_promise)
+        .await
+        .expect("shutdown ack");
+
+    // Primary defense: worker.onmessage is cleared. The FakeWorker mirrors
+    // a real Worker — set_onmessage(None) clears the property. Any stale
+    // `InitOk` the worker happened to post would land on a non-callable
+    // slot and be dropped. (wasm-bindgen represents the cleared slot as
+    // either `null` or `undefined`; both are "not a Function".)
+    let onmessage_after = Reflect::get(&fw.obj, &"onmessage".into()).unwrap();
+    assert!(
+        onmessage_after.is_null() || onmessage_after.is_undefined(),
+        "bridge.shutdown() must clear worker.onmessage to suppress stale messages, got {onmessage_after:?}"
+    );
+
+    // Defense in depth: disposed state silently drops main-originated control
+    // messages — no fresh posts after shutdown completed.
+    let posts_before = fw.posted.borrow().len();
+    bridge.update_auth(Some("ignored".into()));
+    bridge.send_lifecycle_hint("visibility-hidden");
+    assert_eq!(
+        fw.posted.borrow().len(),
+        posts_before,
+        "Disposed bridge must not post new messages"
+    );
+}
+
+#[wasm_bindgen_test]
 fn lifecycle_hint_emits_postcard_binary() {
     let fw = FakeWorker::new();
     let runtime = fresh_runtime();
