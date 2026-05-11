@@ -12,6 +12,9 @@ const hybridStarterPath = path.join(repoRoot, "starters/next-hybrid");
 const sveltekitBetterauthStarterPath = path.join(repoRoot, "starters/sveltekit-betterauth");
 const sveltekitLocalfirstStarterPath = path.join(repoRoot, "starters/sveltekit-localfirst");
 const sveltekitHybridStarterPath = path.join(repoRoot, "starters/sveltekit-hybrid");
+const tsBetterauthStarterPath = path.join(repoRoot, "starters/ts-betterauth");
+const tsLocalfirstStarterPath = path.join(repoRoot, "starters/ts-localfirst");
+const tsHybridStarterPath = path.join(repoRoot, "starters/ts-hybrid");
 
 // CI runners have no global git identity configured, so inject fallbacks
 // via the env vars git honours. Production code still fails loudly when a
@@ -409,6 +412,124 @@ describe("scaffold() — sveltekit-hybrid e2e via JAZZ_STARTER_PATH", () => {
       expect(value).not.toMatch(/^workspace:/);
       expect(value).not.toMatch(/^catalog:/);
     }
+  });
+});
+
+describe("scaffold() — ts-localfirst e2e via JAZZ_STARTER_PATH", () => {
+  withLocalStarter(tsLocalfirstStarterPath);
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("scaffolds a complete ts-localfirst project", { timeout: 30_000 }, async () => {
+    tmpDir = path.join(os.tmpdir(), `scaffold-ts-localfirst-${Date.now()}`);
+
+    await scaffold({
+      appName: "alice-ts-localfirst",
+      targetDir: tmpDir,
+      pm: null,
+      starter: "ts-localfirst",
+    });
+
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
+      name?: string;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(pkgJson.name).toBe("alice-ts-localfirst");
+    expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "src/main.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "src/todo-widget.ts"))).toBe(true);
+    // No React in the dep tree.
+    const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+    expect(allDeps).not.toHaveProperty("react");
+    expect(allDeps).not.toHaveProperty("@vitejs/plugin-react");
+
+    const allDepValues = [
+      ...Object.values(pkgJson.dependencies ?? {}),
+      ...Object.values(pkgJson.devDependencies ?? {}),
+    ];
+    for (const value of allDepValues) {
+      expect(value).not.toMatch(/^workspace:/);
+      expect(value).not.toMatch(/^catalog:/);
+    }
+  });
+});
+
+describe("scaffold() — ts-hybrid e2e via JAZZ_STARTER_PATH", () => {
+  withLocalStarter(tsHybridStarterPath);
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("scaffolds a complete ts-hybrid project", { timeout: 30_000 }, async () => {
+    tmpDir = path.join(os.tmpdir(), `scaffold-ts-hybrid-${Date.now()}`);
+
+    await scaffold({
+      appName: "alice-ts-hybrid",
+      targetDir: tmpDir,
+      pm: null,
+      starter: "ts-hybrid",
+    });
+
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
+      name?: string;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(pkgJson.name).toBe("alice-ts-hybrid");
+    expect(fs.existsSync(path.join(tmpDir, "server/auth.ts"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "src/sign-up-form.ts"))).toBe(true);
+    expect(pkgJson.dependencies).toHaveProperty("better-auth");
+    expect(pkgJson.dependencies).toHaveProperty("hono");
+    const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+    expect(allDeps).not.toHaveProperty("react");
+  });
+});
+
+describe("scaffold() — ts-betterauth e2e via JAZZ_STARTER_PATH", () => {
+  withLocalStarter(tsBetterauthStarterPath);
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("scaffolds a complete ts-betterauth project", { timeout: 30_000 }, async () => {
+    tmpDir = path.join(os.tmpdir(), `scaffold-ts-betterauth-${Date.now()}`);
+
+    await scaffold({
+      appName: "alice-ts-betterauth",
+      targetDir: tmpDir,
+      pm: null,
+      starter: "ts-betterauth",
+    });
+
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(tmpDir, "package.json"), "utf-8")) as {
+      name?: string;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(pkgJson.name).toBe("alice-ts-betterauth");
+    expect(fs.existsSync(path.join(tmpDir, "server/auth.ts"))).toBe(true);
+    // No sign-up-form.ts — the combined form lives in sign-in-form.ts.
+    expect(fs.existsSync(path.join(tmpDir, "src/sign-up-form.ts"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "src/sign-in-form.ts"))).toBe(true);
+    const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+    expect(allDeps).not.toHaveProperty("react");
   });
 });
 

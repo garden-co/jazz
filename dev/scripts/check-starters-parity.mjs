@@ -14,7 +14,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..");
+const repoRoot = resolve(here, "..", "..");
 
 const STARTERS = {
   next: ["starters/next-betterauth", "starters/next-localfirst", "starters/next-hybrid"],
@@ -24,6 +24,7 @@ const STARTERS = {
     "starters/sveltekit-hybrid",
   ],
   react: ["starters/react-betterauth", "starters/react-localfirst", "starters/react-hybrid"],
+  ts: ["starters/ts-betterauth", "starters/ts-localfirst", "starters/ts-hybrid"],
 };
 
 // File → the relative path within each starter, keyed by framework.
@@ -33,23 +34,49 @@ const HORIZONTAL_FILES = {
   next: ["schema.ts", "permissions.ts", "components/todo-widget.tsx"],
   sveltekit: ["src/lib/schema.ts", "src/lib/permissions.ts", "src/lib/TodoWidget.svelte"],
   react: ["schema.ts", "permissions.ts", "src/todo-widget.tsx"],
+  ts: ["schema.ts", "permissions.ts", "src/todo-widget.ts"],
 };
 
-// Files that must be byte-identical across all nine starters regardless of
+// Files that must be byte-identical across all starters regardless of
 // framework or auth variant.
 const ALL_STARTERS_FILES = ["AGENTS.md"];
 
-// Files that should be byte-identical across both frameworks (a "vertical"
+// Files that should be byte-identical across every framework (a "vertical"
 // parity rule on top of the horizontal one). We resolve them per framework
 // via HORIZONTAL_FILES — the logical name is the dict key.
 const CROSS_FRAMEWORK_FILES = [
-  { logical: "schema", next: "schema.ts", sveltekit: "src/lib/schema.ts", react: "schema.ts" },
+  {
+    logical: "schema",
+    next: "schema.ts",
+    sveltekit: "src/lib/schema.ts",
+    react: "schema.ts",
+    ts: "schema.ts",
+  },
   {
     logical: "permissions",
     next: "permissions.ts",
     sveltekit: "src/lib/permissions.ts",
     react: "permissions.ts",
+    ts: "permissions.ts",
   },
+];
+
+// Starter pairs that both run a Hono + BetterAuth dev server on port 3001.
+// The server-side files in each pair must be byte-identical so an auth
+// or server change can't drift across them.
+const HONO_SERVER_PAIRS = [
+  ["starters/react-hybrid", "starters/ts-hybrid"],
+  ["starters/react-betterauth", "starters/ts-betterauth"],
+];
+const HONO_SERVER_FILES = [
+  "server/app.ts",
+  "server/auth.ts",
+  "server/auth.test.ts",
+  "server/index.ts",
+  "server/jwt-payload.ts",
+  "tsconfig.server.json",
+  "vitest.config.ts",
+  "scripts/ensure-env.js",
 ];
 
 // README sections required in every starter, in this order. Per-mode
@@ -111,17 +138,50 @@ function checkHorizontalParity() {
 }
 
 function checkCrossFrameworkParity() {
-  for (const { logical, next, sveltekit } of CROSS_FRAMEWORK_FILES) {
-    // Both frameworks already passed horizontal parity if we got this far,
-    // so one exemplar per framework is enough.
-    const nextContent = read(`${STARTERS.next[0]}/${next}`);
-    const svelteContent = read(`${STARTERS.sveltekit[0]}/${sveltekit}`);
-    if (nextContent === null || svelteContent === null) continue;
-    if (hash(nextContent) !== hash(svelteContent)) {
-      errors.push(
-        `Cross-framework drift in ${logical}: ` +
-          `${STARTERS.next[0]}/${next} vs ${STARTERS.sveltekit[0]}/${sveltekit}`,
-      );
+  for (const entry of CROSS_FRAMEWORK_FILES) {
+    // Each framework already passed horizontal parity if we got this far,
+    // so one exemplar per framework is enough. Pick the first starter in
+    // each framework and hash the entry's per-framework path; any mismatch
+    // is a cross-framework drift.
+    const hashes = new Map();
+    for (const framework of Object.keys(STARTERS)) {
+      const rel = entry[framework];
+      if (!rel) continue;
+      const content = read(`${STARTERS[framework][0]}/${rel}`);
+      if (content === null) continue;
+      const h = hash(content);
+      if (!hashes.has(h)) hashes.set(h, []);
+      hashes.get(h).push(`${STARTERS[framework][0]}/${rel}`);
+    }
+    if (hashes.size > 1) {
+      const groups = [...hashes.entries()]
+        .map(([h, files]) => `  ${h.slice(0, 12)}  ${files.join(", ")}`)
+        .join("\n");
+      errors.push(`Cross-framework drift in ${entry.logical}:\n${groups}`);
+    }
+  }
+}
+
+function checkHonoServerPairs() {
+  for (const [a, b] of HONO_SERVER_PAIRS) {
+    for (const rel of HONO_SERVER_FILES) {
+      const aContent = read(`${a}/${rel}`);
+      const bContent = read(`${b}/${rel}`);
+      if (aContent === null && bContent === null) continue;
+      if (aContent === null) {
+        errors.push(`Missing file in Hono-server pair: ${a}/${rel} (present in ${b})`);
+        continue;
+      }
+      if (bContent === null) {
+        errors.push(`Missing file in Hono-server pair: ${b}/${rel} (present in ${a})`);
+        continue;
+      }
+      if (hash(aContent) !== hash(bContent)) {
+        errors.push(
+          `Hono-server drift: ${rel} disagrees between ${a} (${hash(aContent).slice(0, 12)}) ` +
+            `and ${b} (${hash(bContent).slice(0, 12)})`,
+        );
+      }
     }
   }
 }
@@ -143,7 +203,7 @@ function extractSectionBody(content, heading) {
 }
 
 function checkReadmeStructure() {
-  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit];
+  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts];
   for (const dir of allDirs) {
     const content = read(`${dir}/README.md`);
     if (content === null) {
@@ -167,7 +227,7 @@ function checkReadmeStructure() {
   }
 }
 function checkSharedReadmeBlocks() {
-  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit];
+  const allDirs = [...STARTERS.next, ...STARTERS.sveltekit, ...STARTERS.ts];
   for (const heading of SHARED_README_SECTIONS) {
     const hashes = new Map();
     for (const dir of allDirs) {
@@ -216,6 +276,7 @@ function checkAllStartersParity() {
 checkHorizontalParity();
 checkCrossFrameworkParity();
 checkAllStartersParity();
+checkHonoServerPairs();
 checkReadmeStructure();
 checkSharedReadmeBlocks();
 
