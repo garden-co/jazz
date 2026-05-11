@@ -6,6 +6,7 @@
 
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
+use crate::query_manager::session::Session;
 use crate::query_manager::types::{RowDescriptor, Schema, Value};
 use crate::schema_manager::SchemaContext;
 
@@ -330,11 +331,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::query_manager::encoding::decode_row;
     use crate::query_manager::graph::GraphNode;
+    use crate::query_manager::manager::QueryManager;
+    use crate::query_manager::policy::PolicyExpr;
     use crate::query_manager::query::QueryBuilder;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName, TablePolicies};
     use crate::query_manager::types::{ComposedBranchName, SchemaBuilder, SchemaHash, TableSchema};
     use crate::schema_manager::{Lens, LensOp, LensTransform};
+    use crate::sync_manager::SyncManager;
+    use crate::test_support::seeded_memory_storage;
 
     fn test_schema() -> Schema {
         let mut schema = HashMap::new();
@@ -390,6 +396,74 @@ mod tests {
 
         let instance = instance.unwrap();
         assert_eq!(instance.correlation_value, Value::Integer(42));
+    }
+
+    #[test]
+    fn array_subgraph_inherits_parent_session_for_permission_magic_columns() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("user_id", ColumnType::Text)
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchema::builder("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_update(
+                                Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                                PolicyExpr::True,
+                            ),
+                    ),
+            )
+            .build();
+        let mut qm = QueryManager::new(SyncManager::new());
+        qm.set_current_schema(schema, "dev", "main");
+        let mut storage = seeded_memory_storage(&qm.schema_context().current_schema);
+
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Text("alice".into()), Value::Text("Alice".into())],
+        )
+        .expect("insert user");
+        qm.insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("alice".into()), Value::Text("Draft".into())],
+        )
+        .expect("insert document");
+
+        let query = qm
+            .query("users")
+            .with_array("documents", |sub| {
+                sub.from("documents")
+                    .correlate("owner_id", "users.user_id")
+                    .select(&["title", "$canEdit"])
+            })
+            .build();
+        let sub_id = qm
+            .subscribe_with_session(query, Some(Session::new("alice")), None)
+            .expect("subscribe with session");
+
+        qm.process(&mut storage);
+
+        let update = qm
+            .take_updates()
+            .into_iter()
+            .find(|update| update.subscription_id == sub_id)
+            .expect("subscription should produce initial update");
+        let values = decode_row(&update.descriptor, &update.delta.added[0].data)
+            .expect("decode subscription row");
+        let documents = values[2].as_array().expect("documents should be an array");
+        let document = documents[0].as_row().expect("document should be a row");
+
+        assert_eq!(document[0], Value::Text("Draft".into()));
+        assert_eq!(document[1], Value::Boolean(true));
     }
 
     #[test]
