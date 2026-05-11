@@ -291,6 +291,8 @@ pub enum SyncPayload {
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
+        required_tier: Option<DurabilityTier>,
+        #[serde(default)]
         propagation: QueryPropagation,
         #[serde(default)]
         policy_context_tables: Vec<String>,
@@ -355,13 +357,14 @@ impl ConnectionSchemaDiagnostics {
 /// postcard does not support the dynamic deserialization style it expects (deserialize_any)
 /// so we need a custom serializer/deserializer to serialize/deserialize the claims as a string.
 mod query_subscription_session_serde {
-    use super::Session;
+    use crate::query_manager::session::{AuthMode, Session};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct SessionWire {
         user_id: String,
         claims_json: String,
+        auth_mode: AuthMode,
     }
 
     pub fn serialize<S>(value: &Option<Session>, serializer: S) -> Result<S::Ok, S::Error>
@@ -380,6 +383,7 @@ mod query_subscription_session_serde {
                 Ok(SessionWire {
                     user_id: session.user_id.clone(),
                     claims_json,
+                    auth_mode: session.auth_mode,
                 })
             })
             .transpose()?;
@@ -402,7 +406,7 @@ mod query_subscription_session_serde {
             Ok(Session {
                 user_id: session_wire.user_id,
                 claims,
-                auth_mode: Default::default(),
+                auth_mode: session_wire.auth_mode,
             })
         })
         .transpose()
@@ -538,6 +542,7 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    pub required_tier: Option<DurabilityTier>,
     pub propagation: QueryPropagation,
     pub policy_context_tables: Vec<String>,
 }
@@ -568,4 +573,33 @@ pub struct PendingPermissionCheck {
     pub new_content: Option<Vec<u8>>,
     /// Inferred operation type.
     pub operation: Operation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::session::AuthMode;
+
+    #[test]
+    fn query_subscription_postcard_roundtrip_preserves_session_auth_mode() {
+        let payload = SyncPayload::QuerySubscription {
+            query_id: QueryId(7),
+            query: Box::new(Query::new("todos")),
+            session: Some(Session::new("alice").with_auth_mode(AuthMode::LocalFirst)),
+            required_tier: None,
+            propagation: QueryPropagation::Full,
+            policy_context_tables: Vec::new(),
+        };
+
+        let bytes = payload.to_bytes().expect("encode payload");
+        let decoded = SyncPayload::from_bytes(&bytes).expect("decode payload");
+
+        match decoded {
+            SyncPayload::QuerySubscription {
+                session: Some(session),
+                ..
+            } => assert_eq!(session.auth_mode, AuthMode::LocalFirst),
+            other => panic!("expected QuerySubscription with session, got {other:?}"),
+        }
+    }
 }

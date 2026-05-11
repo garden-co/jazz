@@ -100,7 +100,6 @@ struct WorkerHost {
     current_auth_jwt: Option<String>,
     current_admin_secret: Option<String>,
     current_ws_url: Option<String>,
-    rejected_replay_queued: bool,
 }
 
 impl WorkerHost {
@@ -112,7 +111,6 @@ impl WorkerHost {
             current_auth_jwt: None,
             current_admin_secret: None,
             current_ws_url: None,
-            rejected_replay_queued: false,
         }
     }
 }
@@ -278,23 +276,27 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
     });
 
     // 4. Construct the outbox sender, configure for worker-side routing
-    //    (main client id + peer table + rejected-batch replay trigger), and
-    //    install on the runtime core. Binary encoding is required (the bridge
-    //    decodes via `parse_worker_to_main`).
+    //    (main client id + peer table), and install on the runtime core.
+    //    Binary encoding is required (the bridge decodes via `parse_worker_to_main`).
     let sender = RustOutboxSender::new(true);
     let global: JsValue = global_worker_scope().into();
     let peer_lookup = make_peer_routing_lookup();
-    let on_main_flushed = make_on_main_sync_flushed();
     sender.attach_target(
         global,
         Some(main_client_id.clone()),
         Some(peer_lookup),
-        Some(on_main_flushed),
+        None,
     );
     runtime_rc
         .core
         .borrow_mut()
         .set_sync_sender(Box::new(sender.clone()));
+
+    // 4b. Register the mutation-error callback. The runtime emits per-event
+    //     after each `batched_tick` (and immediately on registration if any
+    //     events were buffered from persistent storage replay). Each event
+    //     is serialised to JSON and posted to main as `MutationErrorReplay`.
+    register_mutation_error_callback(&runtime_rc);
 
     // 5. Bootstrap catalogue (addServer/removeServer dance forwards catalogue
     //    state to main via the outbox sender's bootstrap-forwarding flag).
@@ -345,9 +347,11 @@ async fn run_init(init: InitPayload) -> Result<(), String> {
         perform_upstream_connect(&runtime_rc, &ws_url, &auth_json);
     }
 
-    // 7. Sync retained local batch records and queue rejected-batch replay.
+    // 7. Sync retained local batch records to main. Rejected-batch replay
+    //    is driven by the runtime's `on_mutation_error` callback (registered
+    //    in step 4b), which fires for any events that were buffered from
+    //    persistent storage replay.
     sync_retained_local_batch_records(&runtime_rc);
-    queue_rejected_batch_replay();
 
     // 8. Flip state to Ready before draining (so message handlers process
     //    directly via the dispatch path rather than re-buffering).
@@ -452,14 +456,6 @@ fn make_peer_routing_lookup() -> Function {
     .unchecked_into()
 }
 
-fn make_on_main_sync_flushed() -> Function {
-    Closure::<dyn Fn()>::new(|| {
-        queue_rejected_batch_replay();
-    })
-    .into_js_value()
-    .unchecked_into()
-}
-
 // =============================================================================
 // Mutation-error replay
 // =============================================================================
@@ -475,74 +471,96 @@ fn sync_retained_local_batch_records(runtime: &Rc<WasmRuntime>) {
     }
 }
 
-fn queue_rejected_batch_replay() {
-    let already_queued = HOST.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let Some(host) = guard.as_mut() else {
-            return true;
-        };
-        if host.rejected_replay_queued {
-            return true;
+/// Register an `on_mutation_error` callback on the runtime that posts each
+/// emitted `MutationErrorEvent` to main as `MutationErrorReplay { event_json }`.
+///
+/// The runtime emits events after each `batched_tick`. Registering also drains
+/// any events that were buffered before the callback was installed — e.g. from
+/// persistent storage replay on startup — so we don't need an explicit
+/// initial-replay pass.
+fn register_mutation_error_callback(runtime: &Rc<WasmRuntime>) {
+    let callback: Function = Closure::<dyn FnMut(JsValue)>::new(|event: JsValue| {
+        if event.is_null() || event.is_undefined() {
+            return;
         }
-        host.rejected_replay_queued = true;
-        false
-    });
-    if already_queued {
-        return;
-    }
-    wasm_bindgen_futures::spawn_local(async {
-        HOST.with(|cell| {
-            if let Some(h) = cell.borrow_mut().as_mut() {
-                h.rejected_replay_queued = false;
-            }
+        post_to_main(&WorkerToMainWire::MutationErrorReplay {
+            event_json: js_value_to_json(&event),
         });
-        let runtime = RUNTIME.with(|cell| cell.borrow().clone());
-        let Some(runtime) = runtime else {
-            return;
-        };
-        let batch_ids = match runtime.drain_rejected_batch_ids() {
-            Ok(ids) => ids,
-            Err(err) => {
-                tracing::warn!("drainRejectedBatchIds failed: {err:?}");
-                return;
-            }
-        };
-        let Ok(arr): Result<Array, _> = batch_ids.dyn_into() else {
-            return;
-        };
-        for entry in arr.iter() {
-            let Some(batch_id) = entry.as_string() else {
-                continue;
-            };
-            match runtime.load_local_batch_record(&batch_id) {
-                Ok(batch) => {
-                    if batch.is_null() || batch.is_undefined() {
-                        continue;
-                    }
-                    if !is_rejected_settlement(&batch) {
-                        continue;
-                    }
-                    post_to_main(&WorkerToMainWire::MutationErrorReplay {
-                        batch_json: js_value_to_json(&batch),
-                    });
-                }
-                Err(err) => tracing::warn!("loadLocalBatchRecord {batch_id}: {err:?}"),
-            }
-        }
-    });
+    })
+    .into_js_value()
+    .unchecked_into();
+    runtime.on_mutation_error(callback);
 }
 
-fn is_rejected_settlement(batch: &JsValue) -> bool {
-    let Ok(settlement) = Reflect::get(batch, &"latestSettlement".into()) else {
-        return false;
+/// Drive a local-batch reconciliation pass when a `Sync` envelope with
+/// `ack_batch_id` arrives. Mirrors the JS-side worker's flow from main: feed
+/// the seal payload back to the worker, advance the upstream sync edge, and
+/// inspect the resulting batch fate to decide whether main can stop waiting.
+fn reconcile_local_batch_for_ack(
+    runtime: &Rc<WasmRuntime>,
+    main_client_id: &str,
+    ack_batch_id: Option<&str>,
+) -> (bool, bool) {
+    let Some(batch_id) = ack_batch_id else {
+        return (false, false);
     };
-    if settlement.is_null() || settlement.is_undefined() {
+
+    let mut has_batch_record = false;
+    if let Ok(replay_payloads) = runtime.replay_local_batch_payloads(batch_id) {
+        let len = replay_payloads.length();
+        has_batch_record = len > 1;
+        if has_batch_record {
+            if let Some(seal) = replay_payloads.get(len - 1).dyn_ref::<Uint8Array>() {
+                if let Err(err) = runtime
+                    .on_sync_message_received_from_client(main_client_id, seal.clone().into())
+                {
+                    tracing::warn!("reconcile seal replay: {err:?}");
+                } else {
+                    runtime.batched_tick();
+                }
+            }
+            let _ = runtime.add_server(None, None);
+            if let Err(err) = runtime.reconcile_local_batch_with_server(batch_id) {
+                tracing::warn!("reconcileLocalBatchWithServer: {err:?}");
+            }
+            runtime.batched_tick();
+        }
+    }
+
+    let batch_reconciled = match runtime.load_batch_fate(batch_id) {
+        Ok(fate) => fate_is_reconciled(&fate),
+        Err(err) => {
+            tracing::warn!("loadBatchFate: {err:?}");
+            false
+        }
+    };
+
+    (has_batch_record, batch_reconciled)
+}
+
+/// `BatchFate` shapes that satisfy `wait_for_local_sync_flush`: the rejection
+/// path is terminal, the transactional accept is terminal, and a direct-durable
+/// confirmation at any tier above `local` is what callers really wait for.
+fn fate_is_reconciled(fate: &JsValue) -> bool {
+    if fate.is_null() || fate.is_undefined() {
         return false;
     }
-    let Ok(kind) = Reflect::get(&settlement, &"kind".into()) else {
+    let Ok(kind) = Reflect::get(fate, &"kind".into()) else {
         return false;
     };
-    kind.as_string().as_deref() == Some("rejected")
+    let Some(kind) = kind.as_string() else {
+        return false;
+    };
+    match kind.as_str() {
+        "rejected" | "acceptedTransaction" => true,
+        "durableDirect" => {
+            let confirmed = Reflect::get(fate, &"confirmedTier".into())
+                .ok()
+                .and_then(|v| v.as_string());
+            confirmed.as_deref() != Some("local")
+        }
+        _ => false,
+    }
 }
 
 // =============================================================================
@@ -594,7 +612,11 @@ fn process_main_message(msg: MainToWorkerMessage) {
     };
 
     match wire {
-        MainToWorkerWire::Sync { payloads } => {
+        MainToWorkerWire::Sync {
+            payloads,
+            ack_id,
+            ack_batch_id,
+        } => {
             let Some(rt) = runtime.as_ref() else { return };
             let Some(main_client_id) = get_main_client_id() else {
                 return;
@@ -606,6 +628,17 @@ fn process_main_message(msg: MainToWorkerMessage) {
                 {
                     tracing::warn!("onSyncMessageReceivedFromClient main: {err:?}");
                 }
+            }
+            rt.batched_tick();
+            if let Some(ack_id) = ack_id {
+                rt.flush_wal();
+                let (has_batch_record, batch_reconciled) =
+                    reconcile_local_batch_for_ack(rt, &main_client_id, ack_batch_id.as_deref());
+                post_to_main(&WorkerToMainWire::SyncAck {
+                    ack_id,
+                    has_batch_record,
+                    batch_reconciled,
+                });
             }
         }
         MainToWorkerWire::PeerOpen { peer_id } => {

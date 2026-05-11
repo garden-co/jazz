@@ -235,6 +235,10 @@ jobs:
 
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.x"
       - run: pnpm --filter jazz-napi build
       - run: pnpm exec playwright install chromium
 

@@ -380,6 +380,13 @@ impl RowDescriptor {
 pub struct TableSchema {
     /// Row structure definition.
     pub columns: RowDescriptor,
+    /// User columns that should have secondary indexes.
+    ///
+    /// `None` preserves historical behavior and indexes every declared user
+    /// column. `Some(columns)` opts into indexing only that explicit subset.
+    /// Internal `_id` and `_id_deleted` indexes are always maintained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_columns: Option<Vec<ColumnName>>,
     /// Access control policies.
     #[serde(default, skip_serializing_if = "table_policies_are_default")]
     pub policies: TablePolicies,
@@ -396,18 +403,36 @@ impl TableSchema {
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,
+            indexed_columns: None,
             policies: TablePolicies::default(),
         }
     }
 
     /// Create a table schema with policies.
     pub fn with_policies(columns: RowDescriptor, policies: TablePolicies) -> Self {
-        Self { columns, policies }
+        Self {
+            columns,
+            indexed_columns: None,
+            policies,
+        }
     }
 
     /// Start building a new table schema.
     pub fn builder(name: &str) -> TableSchemaBuilder {
         TableSchemaBuilder::new(name)
+    }
+
+    /// Return true when the given user column has a maintained secondary index.
+    ///
+    /// The implicit object-id indexes are always available and are handled here
+    /// too so query planning can use one predicate path.
+    pub fn is_indexed_column(&self, column: &str) -> bool {
+        if column == "_id" || column == "_id_deleted" {
+            return true;
+        }
+        self.indexed_columns
+            .as_ref()
+            .is_none_or(|columns| columns.iter().any(|name| name.as_str() == column))
     }
 }
 
@@ -422,6 +447,7 @@ impl From<RowDescriptor> for TableSchema {
 pub struct TableSchemaBuilder {
     name: String,
     columns: Vec<ColumnDescriptor>,
+    indexed_columns: Option<Vec<ColumnName>>,
     policies: TablePolicies,
 }
 
@@ -431,6 +457,7 @@ impl TableSchemaBuilder {
         Self {
             name: name.to_string(),
             columns: Vec::new(),
+            indexed_columns: None,
             policies: TablePolicies::default(),
         }
     }
@@ -483,6 +510,18 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Index only this explicit user-column subset.
+    ///
+    /// Internal `_id` and `_id_deleted` indexes are always maintained.
+    pub fn index_only<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<ColumnName>,
+    {
+        self.indexed_columns = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -492,6 +531,7 @@ impl TableSchemaBuilder {
     pub fn build(self) -> TableSchema {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
+            indexed_columns: self.indexed_columns,
             policies: self.policies,
         }
     }
@@ -501,6 +541,7 @@ impl TableSchemaBuilder {
         let name = TableName::new(&self.name);
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
+            indexed_columns: self.indexed_columns,
             policies: self.policies,
         };
         (name, schema)

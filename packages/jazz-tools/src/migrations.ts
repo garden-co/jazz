@@ -18,13 +18,12 @@ import type {
 } from "./schema.js";
 import type {
   CompactSchema,
-  DefinedTable,
   Schema as AppSchema,
   SchemaDefinition,
   Simplify,
   TableDefinition,
 } from "./typed-app.js";
-import { unwrapTableDefinition } from "./typed-app.js";
+import { DefinedTable, unwrapTableDefinition } from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -527,22 +526,27 @@ function tableDefinitionToAst(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): SchemaAstTable {
   const columnsDefinition = unwrapTableDefinition(definition);
+  const indexedColumns =
+    definition instanceof DefinedTable && definition.indexedColumns
+      ? [...definition.indexedColumns]
+      : undefined;
   return {
     name: tableName,
     columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
       assertUserColumnNameAllowed(columnName);
       return builder._build(columnName);
     }),
+    ...(indexedColumns ? { indexedColumns } : {}),
   };
 }
 
 function normalizeSchemaDefinition(
   definition: SchemaDefinition | AppSchema<any>,
-): Record<string, TableDefinition> {
+): Record<string, TableDefinition | DefinedTable<TableDefinition>> {
   return Object.fromEntries(
     Object.entries(definition as SchemaDefinition).map(([tableName, tableDefinition]) => [
       tableName,
-      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
+      tableDefinition as TableDefinition | DefinedTable<TableDefinition>,
     ]),
   );
 }
@@ -738,6 +742,17 @@ function tableMatchesAfterApplyingColumnOperations(
   return true;
 }
 
+function unwrapSchemaTables<TSchema extends SchemaLike>(
+  definition: NormalizedSchema<TSchema>,
+): Record<string, Record<string, AnyTypedColumnBuilder>> {
+  return Object.fromEntries(
+    Object.entries(definition).map(([tableName, tableDefinition]) => [
+      tableName,
+      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
+    ]),
+  );
+}
+
 function buildForwardLenses<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
@@ -789,8 +804,8 @@ function buildForwardLenses<
       ...Object.keys(migrate ?? {}),
     ]),
   ];
-  const sourceTables = fromDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
-  const targetTables = toDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
+  const sourceTables = unwrapSchemaTables(fromDefinition);
+  const targetTables = unwrapSchemaTables(toDefinition);
 
   for (const tableName of orderedTableNames) {
     const added = addedTableSet.has(tableName) ? true : undefined;

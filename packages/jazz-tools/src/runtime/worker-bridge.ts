@@ -11,7 +11,7 @@
  * `init()`.
  */
 
-import type { LocalBatchRecord, Runtime } from "./client.js";
+import type { LocalBatchRecord, MutationErrorEvent, Runtime } from "./client.js";
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { AuthFailureReason } from "./sync-transport.js";
 
@@ -58,6 +58,7 @@ interface WasmBridgeHandle {
   ): void;
   applyIncomingServerPayload(payload: Uint8Array): void;
   waitForUpstreamServerConnection(): Promise<void>;
+  waitForLocalSyncFlush(batchId?: string | null): Promise<void>;
   replayServerConnection(): void;
   disconnectUpstream(): void;
   reconnectUpstream(): void;
@@ -76,7 +77,7 @@ interface ListenerSlots {
   onPeerSync?: (batch: PeerSyncBatch) => void;
   onAuthFailure?: (reason: AuthFailureReason) => void;
   onLocalBatchRecordsSync?: (batches: LocalBatchRecord[]) => void;
-  onMutationErrorReplay?: (batch: LocalBatchRecord) => void;
+  onMutationErrorReplay?: (event: MutationErrorEvent) => void;
 }
 
 type ServerPayloadForwarder = (payload: Uint8Array) => void;
@@ -184,6 +185,11 @@ export class WorkerBridge {
     await this.bridge.waitForUpstreamServerConnection();
   }
 
+  async waitForLocalSyncFlush(batchId?: string): Promise<void> {
+    if (this.disposed || !this.bridge) return;
+    await this.bridge.waitForLocalSyncFlush(batchId ?? null);
+  }
+
   applyIncomingServerPayload(payload: Uint8Array): void {
     this.bridge?.applyIncomingServerPayload(payload);
   }
@@ -198,6 +204,10 @@ export class WorkerBridge {
 
   reconnectUpstream(): void {
     this.bridge?.reconnectUpstream();
+  }
+
+  replayWorkerUpstreamConnection(): void {
+    this.reconnectUpstream();
   }
 
   acknowledgeRejectedBatch(batchId: string): void {
@@ -227,7 +237,7 @@ export class WorkerBridge {
     this.bridge?.setListeners(this.listeners);
   }
 
-  onMutationErrorReplay(listener: (batch: LocalBatchRecord) => void): void {
+  onMutationErrorReplay(listener: (event: MutationErrorEvent) => void): void {
     this.listeners.onMutationErrorReplay = listener;
     this.bridge?.setListeners(this.listeners);
   }

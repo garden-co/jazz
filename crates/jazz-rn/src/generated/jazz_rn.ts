@@ -34,6 +34,7 @@ import nativeModule, {
   type UniffiForeignFutureCompleteVoid,
   type UniffiVTableCallbackInterfaceAuthFailureCallback,
   type UniffiVTableCallbackInterfaceBatchedTickCallback,
+  type UniffiVTableCallbackInterfaceMutationErrorCallback,
   type UniffiVTableCallbackInterfaceSubscriptionCallback,
 } from './jazz_rn-ffi';
 import {
@@ -45,7 +46,6 @@ import {
   type UniffiReferenceHolder,
   type UniffiRustCallStatus,
   AbstractFfiConverterByteArray,
-  FfiConverterArray,
   FfiConverterBool,
   FfiConverterCallback,
   FfiConverterInt32,
@@ -268,6 +268,59 @@ const uniffiCallbackInterfaceBatchedTickCallback: {
 // FfiConverter protocol for callback interfaces
 const FfiConverterTypeBatchedTickCallback =
   new FfiConverterCallback<BatchedTickCallback>();
+
+export interface MutationErrorCallback {
+  /**
+   * Invoked when a rejected local mutation was not handled by wait_for_batch.
+   */
+  onError(eventJson: string): void;
+}
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+const uniffiCallbackInterfaceMutationErrorCallback: {
+  vtable: UniffiVTableCallbackInterfaceMutationErrorCallback;
+  register: () => void;
+} = {
+  // Create the VTable using a series of closures.
+  // ts automatically converts these into C callback functions.
+  vtable: {
+    onError: (uniffiHandle: bigint, eventJson: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback =
+          FfiConverterTypeMutationErrorCallback.lift(uniffiHandle);
+        return jsCallback.onError(FfiConverterString.lift(eventJson));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower
+      );
+      return uniffiResult;
+    },
+    uniffiFree: (uniffiHandle: UniffiHandle): void => {
+      // MutationErrorCallback: this will throw a stale handle error if the handle isn't found.
+      FfiConverterTypeMutationErrorCallback.drop(uniffiHandle);
+    },
+    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
+      return FfiConverterTypeMutationErrorCallback.clone(uniffiHandle);
+    },
+  },
+  register: () => {
+    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_mutationerrorcallback(
+      uniffiCallbackInterfaceMutationErrorCallback.vtable
+    );
+  },
+};
+
+// FfiConverter protocol for callback interfaces
+const FfiConverterTypeMutationErrorCallback =
+  new FfiConverterCallback<MutationErrorCallback>();
 
 export interface SubscriptionCallback {
   /**
@@ -748,7 +801,6 @@ export interface RnRuntimeInterface {
    * Disconnect from the Jazz server and drop the transport handle.
    */
   disconnect(): void;
-  drainRejectedBatchIds() /*throws*/ : Array<string>;
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -782,6 +834,7 @@ export interface RnRuntimeInterface {
   onBatchedTickNeeded(
     callback: BatchedTickCallback | undefined
   ) /*throws*/ : void;
+  onMutationError(callback: MutationErrorCallback) /*throws*/ : void;
   onSyncMessageReceived(messageJson: string) /*throws*/ : void;
   onSyncMessageReceivedFromClient(
     clientId: string,
@@ -823,6 +876,14 @@ export interface RnRuntimeInterface {
     valuesJson: string,
     writeContextJson: string | undefined
   ) /*throws*/ : string;
+  /**
+   * Wait for a local batch to settle at the requested durability tier.
+   */
+  waitForBatch(
+    batchId: string,
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ) /*throws*/ : Promise<void>;
 }
 
 export class RnRuntime
@@ -1054,23 +1115,6 @@ export class RnRuntime
     );
   }
 
-  drainRejectedBatchIds(): Array<string> /*throws*/ {
-    return FfiConverterArrayString.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_drain_rejected_batch_ids(
-            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -1245,6 +1289,22 @@ export class RnRuntime
         nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterOptionalTypeBatchedTickCallback.lower(callback),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  onMutationError(callback: MutationErrorCallback): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_mutation_error(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterTypeMutationErrorCallback.lower(callback),
           callStatus
         );
       },
@@ -1492,6 +1552,45 @@ export class RnRuntime
   }
 
   /**
+   * Wait for a local batch to settle at the requested durability tier.
+   */
+  async waitForBatch(
+    batchId: string,
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_wait_for_batch(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(batchId),
+            FfiConverterString.lower(tier)
+          );
+        },
+        /*pollFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_poll_void,
+        /*cancelFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_cancel_void,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_complete_void,
+        /*freeFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_free_void,
+        /*liftFunc:*/ (_v) => {},
+        /*liftString:*/ FfiConverterString.lift,
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        )
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
+  }
+
+  /**
    * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
    */
   uniffiDestroy(): void {
@@ -1585,9 +1684,6 @@ const FfiConverterOptionalTypeBatchedTickCallback = new FfiConverterOptional(
 
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
-
-// FfiConverter for Array<string>
-const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
 
 /**
  * This should be called before anything else.
@@ -1723,14 +1819,6 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids() !==
-    62045
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnruntime_drain_rejected_batch_ids'
-    );
-  }
-  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_execute_subscription() !==
     22451
   ) {
@@ -1800,6 +1888,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnruntime_on_batched_tick_needed'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error() !==
+    53591
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_on_mutation_error'
     );
   }
   if (
@@ -1891,6 +1987,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch() !==
+    15795
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnruntime_wait_for_batch'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_constructor_rnruntime_new() !==
     5640
   ) {
@@ -1915,6 +2019,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error() !==
+    57109
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_error'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_subscriptioncallback_on_update() !==
     5131
   ) {
@@ -1925,6 +2037,7 @@ function uniffiEnsureInitialized() {
 
   uniffiCallbackInterfaceAuthFailureCallback.register();
   uniffiCallbackInterfaceBatchedTickCallback.register();
+  uniffiCallbackInterfaceMutationErrorCallback.register();
   uniffiCallbackInterfaceSubscriptionCallback.register();
 }
 

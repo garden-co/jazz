@@ -1,5 +1,5 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
 import { insertProject, insertUser, uniqueDbName } from "./factories";
 
@@ -98,6 +98,8 @@ describe("TS Insert API", () => {
   it("support schema defaults for all data types", async () => {
     const { value: rowWithDefaults } = db.insert(app.table_with_defaults, {});
 
+    expectTypeOf(rowWithDefaults.timestampDate).toEqualTypeOf<Date>();
+    expectTypeOf(rowWithDefaults.timestampNumber).toEqualTypeOf<Date>();
     expect(rowWithDefaults).toEqual({
       id: expect.any(String),
       integer: 1,

@@ -101,7 +101,9 @@ async fn create_note_with_backend_attribution(
         payloads,
         client_id,
     };
-    let frame_payload = serde_json::to_vec(&batch).expect("serialize SyncBatchRequest");
+    let frame_payload = batch
+        .encode_payload()
+        .expect("encode SyncBatchRequest payload");
     let state = server.server_state();
     // Ensure the client is registered as a backend client before processing.
     state

@@ -94,6 +94,78 @@ fn initial_query_sync_prefers_authoritative_settlement_over_retained_client_loca
 }
 
 #[test]
+fn server_replay_does_not_send_local_durability_ack_upstream() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Local);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row = row_with_batch_state(
+        visible_row(ObjectId::new(), "main", Vec::new(), 1_000, b"alice"),
+        BatchId::new(),
+        crate::row_histories::RowState::VisibleDirect,
+        None,
+    );
+
+    seed_users_schema(&mut io);
+    add_server(&mut sm, &io, server_id);
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowBatchCreated {
+            metadata: Some(RowMetadata {
+                id: row.row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    assert!(
+        sm.take_outbox().into_iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::BatchFate { .. },
+            } if id == server_id
+        )),
+        "lower-tier nodes must not turn server replay into upstream durability acknowledgements"
+    );
+}
+
+#[test]
+fn client_durability_ack_is_not_authoritative() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let batch_id = BatchId::new();
+
+    add_client(&mut sm, &io, client_id);
+    sm.take_outbox();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::BatchFate {
+            fate: BatchFate::DurableDirect {
+                batch_id,
+                confirmed_tier: DurabilityTier::Local,
+            },
+        },
+    );
+
+    assert_eq!(
+        io.load_authoritative_batch_fate(batch_id).unwrap(),
+        None,
+        "clients must not be able to create authoritative durability settlements"
+    );
+    assert!(
+        sm.take_pending_batch_fates().is_empty(),
+        "ignored client acknowledgements must not be replayed through RuntimeCore"
+    );
+}
+
+#[test]
 fn initial_query_sync_sends_only_current_row_for_deep_history() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
